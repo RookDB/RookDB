@@ -129,16 +129,16 @@ pub struct Page {
 1. Load Catalog
 2. Save Catalog
 3. Create Table
-0. Init Table
-1. Init Page
-2. Page Count
-3. Create Page
-4. Read Page
-5. Write Page
-6. Page Free Space
+4. Init Table
+5. Init Page
+6. Page Count
+7. Create Page
+8. Read Page
+9. Write Page
+10. Page Free Space
 
 ## Ongoing API's
-1. Add Tuple/Add Data to Page
+1. Add Tuple to Page
 2. Read Item/Get Tuple
 3. Delete Item
 4. Compact Page
@@ -205,8 +205,37 @@ pub fn save_catalog(catalog: &Catalog)
 **Test Case:**
 1. Modify the in-memory Catalog instance by adding a new table.
 2. Call save_catalog(&catalog) and verify that the number of tables has increased by one compared to the count before saving.
+---
 
-### 0. **init_table** API
+### 3. **create_table** API
+**Description:**  
+* Creates a new table entry in the in-memory Catalog with the provided table name and column definitions.
+* If the table does not already exist, it is added to the catalog and the updated catalog is written to disk in JSON format.
+
+**Function:**  
+```rust
+pub fn create_table(catalog: &mut Catalog, table_name: &str, columns: Vec<Column>) 
+```
+
+**Input:**
+* catalog: A mutable reference to the in-memory Catalog structure that holds metadata for all tables.
+* table_name: A string slice representing the name of the new table to be created.
+* columns: A vector of Column structs, where each struct contains the column name and data type for the new table.
+
+**Ouput:**
+* Updates the in-memory Catalog by inserting the new table.
+* Persists the updated catalog to disk by writing to the CATALOG_FILE in JSON format using **save_catalog** API.
+
+**Implementation:**
+* Checks if a table with the given name already exists in the catalog.
+* If not, creates a new Table struct using the provided columns.
+* Inserts the table into the catalog.tables HashMap.
+* Calls save_catalog(catalog) to serialize and write the updated catalog to disk.
+* Creates a new data file for the table in {TABLE_DIR}/{table_name}.dat.
+* Initializes the table file header by writing TABLE_HEADER_SIZE bytes of zeros using init_table().
+---
+
+### 4. **init_table** API
 **Description:**
 
 * Initializes the **Table Header** by writing the **first page** (8192 bytes) into the table file with 0's. The first 4 bytes represent the **Page Count** (0).
@@ -232,7 +261,7 @@ Table header (first page) initialized with page_count = 0 in the first 4 bytes a
 3. Verified that the file size obtained from **metadata().len()** equals **TABLE_HEADER_SIZE** (8192 bytes), confirming that the entire header page was written successfully.
 ---
 
-### 1. `init_page` API
+### 5. **init_page** API
 **Description:**
 
 * Initializes the **Page Header** with two offset values for **In Memory Page**:
@@ -259,7 +288,7 @@ Page header updated with lower and upper offsets.
 3. Checked whether the first 4 bytes were **PAGE_HEADER_SIZE** and the next 4 bytes were **PAGE_SIZE**.
 ---
 
-### 2.`page_count` API
+### 6.**page_count** API
 **Description:**
 To get total number of pages in a file
 
@@ -284,7 +313,7 @@ Total number of pages present in the file.
 3. Call `page_count()` to verify it correctly reads 0.
 ---
 
-### 3. `create_page` API
+### 7. **create_page** API
 **Description:**  
 Create a page in disk for a file.
 
@@ -309,7 +338,7 @@ pub fn create_page(file: &mut File)
 1. Verified using `File Size`, `Page Count` and `Page Headers` before and after creating the page using file metadata.
 ---
 
-### 4. `read_page` API
+### 8. **read_page** API
 **Description:**  
 Reads a page from a disk/file into memory.
 
@@ -336,7 +365,7 @@ Populates the given memory page with data read from the file.
 * Verified **read_page** API correctly reads one full page — file size equals PAGE_SIZE and data matches the original written content.
 ---
 
-### 5.`write_page` API
+### 9.**write_page** API
 **Description:**  
 Write a page from memory to disk/file.
 
@@ -361,7 +390,7 @@ Writes the contents of the given memory page to the file at the specified page o
 
 ---
 
-### 6. `page_free_space` API
+### 10. **page_free_space** API
 **Description:**  
 To calculate the total amount of free space left in the page.
 
@@ -387,9 +416,8 @@ Total amount of freespace left in the page.
 ---
 
 ## Ongoing APIs and Implementations
-### 0. `create_table` API
 
-### 1. `page_add_data` API
+### . `add_tuple` API
 **Description:**
 Adds raw data to the file.
 

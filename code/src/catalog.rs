@@ -9,6 +9,8 @@ pub const CATALOG_FILE: &str = "database/global/catalog.json";
 pub const TABLE_DIR: &str = "database/base";
 pub const TABLE_FILE_TEMPLATE: &str = "database/base/{table}.dat";
 
+use crate::table::{init_table};
+use crate::page::{page_count};
 
 
 #[derive(Serialize, Deserialize)]
@@ -92,3 +94,61 @@ pub fn save_catalog(catalog: &Catalog) {
     println!("Catalog File updated with In Memory Data {}", catalog_path.display());
 }
 
+/// Creates a new table and updates the catalog on disk.
+/// If a table with the same name already exists, it will not be overwritten.
+pub fn create_table(catalog: &mut Catalog, table_name: &str, columns: Vec<Column>) {
+    // Check if table already exists
+    if catalog.tables.contains_key(table_name) {
+        println!("Table '{}' already exists in the catalog. Skipping creation.", table_name);
+        return;
+    }
+
+    // Create a new table
+    let new_table = Table { columns };
+
+    // Insert into catalog
+    catalog.tables.insert(table_name.to_string(), new_table);
+
+    // Save catalog to disk
+    save_catalog(catalog);
+
+    // Define table file path (replace {table} with actual table name)
+    let table_file_path = format!("{}/{}.dat", TABLE_DIR, table_name);
+
+    // Create and initialize the table file
+    if !Path::new(&table_file_path).exists() {
+        match fs::File::create(&table_file_path) {
+            Ok(mut file) => {
+                println!("Table data file created at '{}'.", table_file_path);
+
+                // Initialize the table file with headers (zeroed out bytes)
+                if let Err(e) = init_table(&mut file) {
+                    eprintln!("Failed to initialize table '{}': {}", table_name, e);
+                } else {
+                    println!("Table '{}' initialized successfully.", table_name);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to create table data file '{}': {}", table_file_path, e);
+                return;
+            }
+        }
+
+        // ✅ Reopen file in read mode before calling page_count
+        match fs::File::open(&table_file_path) {
+            Ok(mut file) => {
+                match page_count(&mut file) {
+                    Ok(count) => println!("Table '{}' has {} pages.", table_name, count),
+                    Err(e) => eprintln!("Failed to read page count for '{}': {}", table_name, e),
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to reopen '{}' for reading: {}", table_file_path, e);
+            }
+        }
+    } else {
+        println!("Table data file '{}' already exists.", table_file_path);
+    }
+
+    println!("Table '{}' created successfully and saved to catalog.", table_name);
+}
