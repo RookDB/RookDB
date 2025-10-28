@@ -1,17 +1,27 @@
 <h2 align="center">
-Storage Manager Design Doc - Version 0
+RookDB - Storage Manager Design Doc
 </h2>
 
 ### Catalog Layout
-![Catalog Layout](./assets/Design-Doc/Catalog-Layout.png)
+```bash
+database/
+  ├── global/
+  │   └── catalog.json
+  └── base/
+      ├── db1/
+      │   └── {table}.dat
+      ├── db2/
+      │   └── {table}.dat
+```
 
 ### Storage Paths
 ```rust
-pub const DATA_DIR: &str = "database";
-pub const CATALOG_DIR: &str = "database/global";
-pub const CATALOG_FILE: &str = "database/global/catalog.json";
-pub const TABLE_DIR: &str = "database/base";
-pub const TABLE_FILE_TEMPLATE: &str = "database/base/{table}.dat";
+pub const DATA_DIR: &str = "database"; // Root directory for all storage
+pub const CATALOG_DIR: &str = "database/global"; // Catalog metadata directory
+pub const CATALOG_FILE: &str = "database/global/catalog.json"; // Global catalog file
+pub const DATABASE_DIR: &str = "database/base"; // Root directory for all databases
+pub const TABLE_DIR_TEMPLATE: &str = "database/base/{database}"; // Directory for specific database
+pub const TABLE_FILE_TEMPLATE: &str = "database/base/{database}/{table}.dat"; // File path for specific table
 ```
 
 ### Catalog Data Structures
@@ -28,30 +38,48 @@ pub struct Table {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Catalog {
+pub struct Database {
     pub tables: HashMap<String, Table>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Catalog {
+    pub databases: HashMap<String, Database>,
 }
 ```
 
 ### Example Catalog File
 ```json
 {
-  "tables": {
-    "users": {
-      "columns": [
-        {
-          "name": "id",
-          "data_type": "INT"
+  "databases": {
+    "main": {
+      "tables": {
+        "users": {
+          "columns": [
+            { "name": "id", "data_type": "INT" },
+            { "name": "username", "data_type": "TEXT" },
+            { "name": "email", "data_type": "TEXT" }
+          ]
         },
-        {
-          "name": "username",
-          "data_type": "TEXT"
-        },
-        {
-          "name": "email",
-          "data_type": "TEXT"
+        "orders": {
+          "columns": [
+            { "name": "order_id", "data_type": "INT" },
+            { "name": "user_id", "data_type": "INT" },
+            { "name": "amount", "data_type": "FLOAT" }
+          ]
         }
-      ]
+      }
+    },
+    "analytics": {
+      "tables": {
+        "events": {
+          "columns": [
+            { "name": "event_id", "data_type": "INT" },
+            { "name": "timestamp", "data_type": "TIMESTAMP" },
+            { "name": "type", "data_type": "TEXT" }
+          ]
+        }
+      }
     }
   }
 }
@@ -60,8 +88,6 @@ pub struct Catalog {
 ### File and Page Layout
 ![File/Table Layout](./assets/Design-Doc/File-layout.jpeg)
 ![Initial Page Layout](./assets/Design-Doc/Initial-page-layout.jpeg)
-
-
 
 ### Table - Physical Layout
 ```rust
@@ -127,6 +153,7 @@ pub struct Page {
 ## Currently Implemented API's
 0. Init Catalog
 1. Load Catalog
+2. Create Database
 2. Save Catalog
 3. Create Table
 4. Init Table
@@ -136,13 +163,16 @@ pub struct Page {
 8. Read Page
 9. Write Page
 10. Page Free Space
+11. Add Tuple to Page
 
 ## Ongoing API's
-1. Add Tuple to Page
+
 2. Read Item/Get Tuple
 3. Delete Item
 4. Compact Page
 5. Search in Table for Tuple
+6. Drop Table
+7. Lookup Table
 
 ---
 ## Completed APIs with Test Cases
@@ -182,6 +212,26 @@ pub fn load_catalog() -> Catalog
 **Test Case:**
 * Call load_catalog() API and verify it returns a valid Catalog instance without errors.
 
+### 2. **create_database** API
+
+**Description:**  
+* Creates a new database in the catalog.
+
+**Function:**  
+```rust
+pub fn create_database(catalog: &mut Catalog, db_name: &str) -> Result<(), StorageError>
+```
+**Input:**
+* **catalog:**	 in-memory catalog metadata.
+* **db_name:**	Name of the new database to be created.
+
+**Ouput:**
+*  Returns Ok on success or an error if creation fails.
+
+**Implementation:**
+1. Check if the database already exists; if not, insert a new empty entry into catalog.databases.
+2. Serialize the updated Catalog and write it to database/global/catalog.json.
+3. Create a new directory at database/base/{db_name} for the database’s physical storage.
 
 ### 2. **save_catalog** API
 
@@ -415,9 +465,7 @@ Total amount of freespace left in the page.
 * Confirmed that the page header offsets (lower = PAGE_HEADER_SIZE, upper = PAGE_SIZE) and total page count are consistent and accurate.
 ---
 
-## Ongoing APIs and Implementations
-
-### . `add_tuple` API
+### 11. **add_tuple** API
 **Description:**
 Adds raw data to the file.
 
@@ -447,10 +495,15 @@ Data inserted in the file.
     f. Write the updated page back to disk using [`write_page`](#3write_page-api) API.
 5. If the last page does not have enough free space:
     a. [TODO]
----
+
+<!-- ## Ongoing APIs and Implementations -->
 
 
 * [Code - Github](https://github.com/hemanth-sunkireddy/Storage-Manager)
 * [Code Documentation](https://hemanth-sunkireddy.github.io/Storage-Manager/storage_manager/all.html)
 * **Reference 1**: API Formats – [Storage Manager Course Assignment Link](http://www.cs.iit.edu/~glavic/cs525/2023-spring/project/assignment-1/)
 * **Reference 2**: [Postgres Internals – Page Layouts & Data](https://www.postgresql.org/docs/current/storage-page-layout.html)
+
+
+* Support for Different page Sizes( Ex for high loads)
+* Why we need a new Storage Manager? Question of this project.

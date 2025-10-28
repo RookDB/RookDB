@@ -1,60 +1,20 @@
 {
-  "tables": {
-    "a": {
-      "columns": [
-        {
-          "name": "a",
-          "data_type": "int"
-        }
-      ]
-    },
-    "c": {
-      "columns": [
-        {
-          "name": "id",
-          "data_type": "INT"
-        }
-      ]
-    },
-    "b": {
-      "columns": [
-        {
-          "name": "a",
-          "data_type": "int"
-        }
-      ]
-    },
-    "u": {
-      "columns": [
-        {
-          "name": "i",
-          "data_type": "int"
-        }
-      ]
-    },
+  "databases": {
     "users": {
-      "columns": [
-        {
-          "name": "id",
-          "data_type": "INT"
-        },
-        {
-          "name": "username",
-          "data_type": "TEXT"
-        },
-        {
-          "name": "email",
-          "data_type": "TEXT"
+      "tables": {
+        "students": {
+          "columns": [
+            {
+              "name": "id",
+              "data_type": "INT"
+            },
+            {
+              "name": "name",
+              "data_type": "TEXT"
+            }
+          ]
         }
-      ]
-    },
-    "department": {
-      "columns": [
-        {
-          "name": "id",
-          "data_type": "INT"
-        }
-      ]
+      }
     }
   }
 }

@@ -3,14 +3,14 @@ use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::Path;
 
-pub const DATA_DIR: &str = "database";
-pub const CATALOG_DIR: &str = "database/global";
-pub const CATALOG_FILE: &str = "database/global/catalog.json";
-pub const TABLE_DIR: &str = "database/base";
-pub const TABLE_FILE_TEMPLATE: &str = "database/base/{table}.dat";
+pub const DATA_DIR: &str = "database"; // Root directory for all storage
+pub const CATALOG_DIR: &str = "database/global"; // Catalog metadata directory
+pub const CATALOG_FILE: &str = "database/global/catalog.json"; // Global catalog file
+pub const DATABASE_DIR: &str = "database/base"; // Root directory for all databases
+pub const TABLE_DIR_TEMPLATE: &str = "database/base/{database}"; // Directory for specific database
+pub const TABLE_FILE_TEMPLATE: &str = "database/base/{database}/{table}.dat"; // File path for specific table
 
 use crate::table::{init_table};
-use crate::page::{page_count};
 
 
 #[derive(Serialize, Deserialize)]
@@ -25,60 +25,81 @@ pub struct Table {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Catalog {
+pub struct Database {
     pub tables: HashMap<String, Table>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Catalog {
+    pub databases: HashMap<String, Database>,
 }
 
 pub fn init_catalog() {
     let catalog_path = Path::new(CATALOG_FILE);
 
-    // Step 1: Create directories if not exist
+    // Step 1: Create necessary directories if not exist
     if let Some(parent) = catalog_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).expect("Failed to create catalog directory");
         }
     }
 
+    let base_dir = Path::new(DATABASE_DIR);
+    if !base_dir.exists() {
+        fs::create_dir_all(base_dir).expect("Failed to create base data directory");
+    }
+
     // Step 2: Create catalog.json if not exist
     if !catalog_path.exists() {
-        let empty_catalog = Catalog { tables: HashMap::new() };
-        let json = serde_json::to_string_pretty(&empty_catalog).expect("Failed to serialize empty catalog");
+        let empty_catalog = Catalog {
+            databases: HashMap::new(),
+        };
+        let json = serde_json::to_string_pretty(&empty_catalog)
+            .expect("Failed to serialize empty catalog");
         fs::write(catalog_path, json).expect("Failed to write catalog file");
-        println!("Catalog File Not exist. Created new catalog file at {}", catalog_path.display());
+        println!(
+            "Catalog file not found. Created new catalog file at {}",
+            catalog_path.display()
+        );
     } else {
-        println!("Catalog file already exists at {}", catalog_path.display());
+        println!(
+            "Catalog file already exists at {}",
+            catalog_path.display()
+        );
     }
 }
 
 pub fn load_catalog() -> Catalog {
     let catalog_path = Path::new(CATALOG_FILE);
 
-    // Check if catalog file exists
+    // Step 1: Check if catalog file exists
     if !catalog_path.exists() {
         eprintln!("Catalog file does not exist at {}.", catalog_path.display());
-        return Catalog { tables: HashMap::new() };
+        return Catalog { databases: HashMap::new() };
     }
 
-    // Read the catalog file
+    // Step 2: Read the catalog file
     let data = fs::read_to_string(catalog_path);
     let data = match data {
         Ok(content) => content,
         Err(err) => {
             eprintln!("Failed to read catalog file: {}", err);
-            return Catalog { tables: HashMap::new() };
+            return Catalog { databases: HashMap::new() };
         }
     };
 
-    // Deserialize JSON into Catalog struct
+    // Step 3: Deserialize JSON into Catalog struct
     match serde_json::from_str::<Catalog>(&data) {
-        Ok(catalog) => catalog,
+        Ok(catalog) => {
+            println!("Catalog loaded successfully from {}", catalog_path.display());
+            catalog
+        }
         Err(err) => {
             eprintln!("Failed to parse catalog JSON: {}", err);
-            Catalog { tables: HashMap::new() }
+            Catalog { databases: HashMap::new() }
         }
     }
 }
-
 
 pub fn save_catalog(catalog: &Catalog) {
     let catalog_path = Path::new(CATALOG_FILE);
@@ -94,34 +115,99 @@ pub fn save_catalog(catalog: &Catalog) {
     println!("Catalog File updated with In Memory Data {}", catalog_path.display());
 }
 
-/// Creates a new table and updates the catalog on disk.
-/// If a table with the same name already exists, it will not be overwritten.
-pub fn create_table(catalog: &mut Catalog, table_name: &str, columns: Vec<Column>) {
-    // Check if table already exists
-    if catalog.tables.contains_key(table_name) {
-        println!("Table '{}' already exists in the catalog. Skipping creation.", table_name);
+pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
+    // Step 1: Validate input
+    if db_name.is_empty() {
+        println!("Database name cannot be empty");
+        return false;
+    }
+
+    if catalog.databases.contains_key(db_name) {
+        println!("Database '{}' already exists", db_name);
+        return false;
+    }
+
+    // Step 2: Insert new database into in-memory catalog
+    catalog
+        .databases
+        .insert(db_name.to_string(), Database { tables: HashMap::new() });
+
+    // Step 3: Persist updated catalog to disk
+    let json = match serde_json::to_string_pretty(&catalog) {
+        Ok(j) => j,
+        Err(e) => {
+            println!("Failed to serialize catalog: {}", e);
+            return false;
+        }
+    };
+
+    if let Err(e) = fs::write(CATALOG_FILE, json) {
+        println!("Failed to write catalog file: {}", e);
+        return false;
+    }
+
+    // Step 4: Create the physical database directory
+    let db_path_str = TABLE_DIR_TEMPLATE.replace("{database}", db_name);
+    let db_path = Path::new(&db_path_str);
+
+    if !db_path.exists() {
+        if let Err(e) = fs::create_dir_all(db_path) {
+            println!("Failed to create database directory: {}", e);
+            return false;
+        }
+        println!("Created new database directory at {}", db_path.display());
+    } else {
+        println!("Database directory already exists at {}", db_path.display());
+    }
+
+    println!("Database '{}' created successfully", db_name);
+    true
+}
+
+/// Creates a new table under the specified database and updates the catalog on disk.
+/// If the table already exists, it will not be overwritten.
+pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, columns: Vec<Column>) {
+    // Step 1: Validate database existence
+    if !catalog.databases.contains_key(db_name) {
+        println!(
+            "Database '{}' does not exist. Cannot create table '{}'.",
+            db_name, table_name
+        );
         return;
     }
 
-    // Create a new table
+    // Step 2: Get mutable reference to the database
+    let database = catalog.databases.get_mut(db_name).unwrap();
+
+    // Step 3: Check if the table already exists
+    if database.tables.contains_key(table_name) {
+        println!(
+            "Table '{}' already exists in database '{}'. Skipping creation.",
+            table_name, db_name
+        );
+        return;
+    }
+
+    // Step 4: Create and insert the new table into catalog
     let new_table = Table { columns };
+    database.tables.insert(table_name.to_string(), new_table);
 
-    // Insert into catalog
-    catalog.tables.insert(table_name.to_string(), new_table);
-
-    // Save catalog to disk
+    // Step 5: Save updated catalog using your existing save_catalog() helper
     save_catalog(catalog);
 
-    // Define table file path (replace {table} with actual table name)
-    let table_file_path = format!("{}/{}.dat", TABLE_DIR, table_name);
+    // Step 6: Define the table file path (multi-database layout)
+    let table_file_path = TABLE_FILE_TEMPLATE
+        .replace("{database}", db_name)
+        .replace("{table}", table_name);
 
-    // Create and initialize the table file
-    if !Path::new(&table_file_path).exists() {
+    // Step 7: Create and initialize the table file
+    let table_path = Path::new(&table_file_path);
+    if !table_path.exists() {
         match fs::File::create(&table_file_path) {
             Ok(mut file) => {
                 println!("Table data file created at '{}'.", table_file_path);
 
-                // Initialize the table file with headers (zeroed out bytes)
+                // Initialize using your own init_table() helper
                 if let Err(e) = init_table(&mut file) {
                     eprintln!("Failed to initialize table '{}': {}", table_name, e);
                 } else {
@@ -129,26 +215,19 @@ pub fn create_table(catalog: &mut Catalog, table_name: &str, columns: Vec<Column
                 }
             }
             Err(e) => {
-                eprintln!("Failed to create table data file '{}': {}", table_file_path, e);
+                eprintln!(
+                    "Failed to create table data file '{}': {}",
+                    table_file_path, e
+                );
                 return;
-            }
-        }
-
-        // ✅ Reopen file in read mode before calling page_count
-        match fs::File::open(&table_file_path) {
-            Ok(mut file) => {
-                match page_count(&mut file) {
-                    Ok(count) => println!("Table '{}' has {} pages.", table_name, count),
-                    Err(e) => eprintln!("Failed to read page count for '{}': {}", table_name, e),
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to reopen '{}' for reading: {}", table_file_path, e);
             }
         }
     } else {
         println!("Table data file '{}' already exists.", table_file_path);
     }
 
-    println!("Table '{}' created successfully and saved to catalog.", table_name);
+    println!(
+        "Table '{}' created successfully in database '{}' and saved to catalog.",
+        table_name, db_name
+    );
 }

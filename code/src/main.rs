@@ -5,83 +5,143 @@ use std::io::{self, Write};
 // use storage_manager::disk::{create_page, read_page};
 // use storage_manager::disk::create_page;
 // use storage_manager::page::{page_add_data, Page};
-use storage_manager::catalog::{Column, init_catalog, load_catalog, create_table};
+use storage_manager::catalog::{Column, init_catalog, load_catalog, create_table, create_database};
 // use storage_manager::table::init_table;
 
 fn main() -> io::Result<()> {
-    println!("----");
-    println!("Welcome to Storage Manager\n");
+   println!("--------------------------------------");
+    println!("Welcome to RookDB");
+    println!("--------------------------------------\n");
 
-    // Initialising Catalog File
-    println!("Initialising Catalog File\n");
+    // Initialize catalog if missing
+    println!("Initializing Catalog File...\n");
     init_catalog();
 
-    // Load Catalog File
+    // Load catalog from disk
     println!("Loading Catalog...\n");
     let mut catalog = load_catalog();
 
-    if catalog.tables.len() == 0 {
-        println!("No tables found in catalog.\n");
-    } else {
-        println!("Loaded tables from catalog:\n");
-        for (table_name, table) in &catalog.tables {
-            println!("Table: {}", table_name);
-            for column in &table.columns {
-                println!("  Column: {} ({})", column.name, column.data_type);
-            }
-            println!();
-        }
-    }
-
-    println!("--------------------------");
-    println!("Create a Table");
-    println!("--------------------------\n");
-
-    let mut table_name = String::new();
-    print!("Enter new table name: ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut table_name)?;
-    let table_name = table_name.trim().to_string();
-
-    println!("\nEnter columns in the format: column_name:data_type");
-    println!("(Press Enter on an empty line to finish)\n");
-
-    let mut columns: Vec<Column> = Vec::new();
-
     loop {
-        let mut input = String::new();
-        print!("Enter column (name:type): ");
+        println!("\n=============================");
+        println!("Choose an option:");
+        println!("1. Create Database");
+        println!("2. Create Table");
+        println!("3. Exit");
+        println!("=============================");
+
+        print!("Enter your choice: ");
         io::stdout().flush()?;
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
 
-        if input.is_empty() {
-            break;
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim();
+
+        match choice {
+            // -----------------------
+            // Option 1: Create Database
+            // -----------------------
+            "1" => {
+                let mut db_name = String::new();
+                print!("\nEnter new database name: ");
+                io::stdout().flush()?;
+                io::stdin().read_line(&mut db_name)?;
+                let db_name = db_name.trim();
+
+                if db_name.is_empty() {
+                    println!("Database name cannot be empty.");
+                } else if create_database(&mut catalog, db_name) {
+                    println!("Database '{}' created successfully.", db_name);
+                } else {
+                    println!("Failed to create database '{}'.", db_name);
+                }
+            }
+
+            // -----------------------
+            // Option 2: Create Table
+            // -----------------------
+            "2" => {
+                if catalog.databases.is_empty() {
+                    println!("No databases found. Please create a database first.");
+                    continue;
+                }
+
+                println!("\nAvailable Databases:");
+                for db in catalog.databases.keys() {
+                    println!("- {}", db);
+                }
+
+                let mut db_name = String::new();
+                print!("\nEnter database name to create table in: ");
+                io::stdout().flush()?;
+                io::stdin().read_line(&mut db_name)?;
+                let db_name = db_name.trim();
+
+                if !catalog.databases.contains_key(db_name) {
+                    println!("Database '{}' does not exist.", db_name);
+                    continue;
+                }
+
+                let mut table_name = String::new();
+                print!("Enter new table name: ");
+                io::stdout().flush()?;
+                io::stdin().read_line(&mut table_name)?;
+                let table_name = table_name.trim().to_string();
+
+                println!("\nEnter columns in the format: column_name:data_type");
+                println!("(Press Enter on an empty line to finish)\n");
+
+                let mut columns: Vec<Column> = Vec::new();
+
+                loop {
+                    let mut input = String::new();
+                    print!("Enter column (name:type): ");
+                    io::stdout().flush()?;
+                    io::stdin().read_line(&mut input)?;
+                    let input = input.trim();
+
+                    if input.is_empty() {
+                        break;
+                    }
+
+                    let parts: Vec<&str> = input.split(':').collect();
+                    if parts.len() != 2 {
+                        println!("Invalid format. Please use name:type (e.g. id:INT)");
+                        continue;
+                    }
+
+                    let column_name = parts[0].trim().to_string();
+                    let column_type = parts[1].trim().to_string();
+
+                    columns.push(Column {
+                        name: column_name,
+                        data_type: column_type,
+                    });
+                }
+
+                if columns.is_empty() {
+                    println!("No columns provided. Table not created.");
+                    continue;
+                }
+
+                create_table(&mut catalog, db_name, &table_name, columns);
+            }
+
+            // -----------------------
+            // Option 3: Exit
+            // -----------------------
+            "3" => {
+                println!("\nExiting Storage Manager. Goodbye!");
+                break;
+            }
+
+            // -----------------------
+            // Invalid Option
+            // -----------------------
+            _ => {
+                println!("Invalid choice. Please select 1, 2, or 3.");
+            }
         }
-
-        let parts: Vec<&str> = input.split(':').collect();
-        if parts.len() != 2 {
-            println!("Invalid format. Please use name:type format (e.g. id:INT)");
-            continue;
-        }
-
-        let column_name = parts[0].trim().to_string();
-        let column_type = parts[1].trim().to_string();
-
-        columns.push(Column {
-            name: column_name,
-            data_type: column_type,
-        });
     }
-
-    if columns.is_empty() {
-        println!("No columns provided. Table not created.");
-        return Ok(());
-    }
-
-    // Pass collected input to the create_table function
-    create_table(&mut catalog, &table_name, columns);
-
 
     // Create File Pointer
     // let mut file_pointer = OpenOptions::new()
