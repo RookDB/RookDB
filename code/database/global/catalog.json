@@ -1,5 +1,17 @@
 {
   "databases": {
+    "test": {
+      "tables": {
+        "test1": {
+          "columns": [
+            {
+              "name": "id",
+              "data_type": "INT"
+            }
+          ]
+        }
+      }
+    },
     "users": {
       "tables": {
         "students": {

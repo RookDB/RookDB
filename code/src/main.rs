@@ -5,11 +5,13 @@ use std::io::{self, Write};
 // use storage_manager::disk::{create_page, read_page};
 // use storage_manager::disk::create_page;
 // use storage_manager::page::{page_add_data, Page};
-use storage_manager::catalog::{Column, init_catalog, load_catalog, create_table, create_database};
+use storage_manager::catalog::{
+    Column, create_database, create_table, init_catalog, load_catalog, show_databases,
+};
 // use storage_manager::table::init_table;
 
 fn main() -> io::Result<()> {
-   println!("--------------------------------------");
+    println!("--------------------------------------");
     println!("Welcome to RookDB");
     println!("--------------------------------------\n");
 
@@ -21,13 +23,24 @@ fn main() -> io::Result<()> {
     println!("Loading Catalog...\n");
     let mut catalog = load_catalog();
 
+    // Keep track of the currently selected database
+    let mut current_db: Option<String> = None;
+
     loop {
         println!("\n=============================");
         println!("Choose an option:");
-        println!("1. Create Database");
-        println!("2. Create Table");
-        println!("3. Exit");
+        println!("1. Show Databases");
+        println!("2. Create Database");
+        println!("3. Select Database");
+        println!("4. Create Table");
+        println!("5. Exit");
         println!("=============================");
+
+        // if let Some(ref db) = current_db {
+        //     println!("Current database: '{}'", db);
+        // } else {
+        //     println!("No database selected.");
+        // }
 
         print!("Enter your choice: ");
         io::stdout().flush()?;
@@ -37,10 +50,13 @@ fn main() -> io::Result<()> {
         let choice = choice.trim();
 
         match choice {
+            "1" => {
+                show_databases(&catalog);
+            }
             // -----------------------
             // Option 1: Create Database
             // -----------------------
-            "1" => {
+            "2" => {
                 let mut db_name = String::new();
                 print!("\nEnter new database name: ");
                 io::stdout().flush()?;
@@ -57,11 +73,11 @@ fn main() -> io::Result<()> {
             }
 
             // -----------------------
-            // Option 2: Create Table
+            // Option 3: Select Database
             // -----------------------
-            "2" => {
+            "3" => {
                 if catalog.databases.is_empty() {
-                    println!("No databases found. Please create a database first.");
+                    println!("No databases found. Please create one first.");
                     continue;
                 }
 
@@ -71,18 +87,34 @@ fn main() -> io::Result<()> {
                 }
 
                 let mut db_name = String::new();
-                print!("\nEnter database name to create table in: ");
+                print!("\nEnter database name to select: ");
                 io::stdout().flush()?;
                 io::stdin().read_line(&mut db_name)?;
-                let db_name = db_name.trim();
+                let db_name = db_name.trim().to_string();
 
-                if !catalog.databases.contains_key(db_name) {
+                if catalog.databases.contains_key(&db_name) {
+                    current_db = Some(db_name.clone());
+                    println!("Database '{}' selected successfully.", db_name);
+                } else {
                     println!("Database '{}' does not exist.", db_name);
-                    continue;
                 }
+            }
+
+            // -----------------------
+            // Option 4: Create Table
+            // -----------------------
+            "4" => {
+                // Check if a database is currently selected
+                let db_name = match &current_db {
+                    Some(name) => name.clone(),
+                    None => {
+                        println!("No database selected. Please select a database first.");
+                        continue;
+                    }
+                };
 
                 let mut table_name = String::new();
-                print!("Enter new table name: ");
+                print!("\nEnter new table name: ");
                 io::stdout().flush()?;
                 io::stdin().read_line(&mut table_name)?;
                 let table_name = table_name.trim().to_string();
@@ -123,13 +155,13 @@ fn main() -> io::Result<()> {
                     continue;
                 }
 
-                create_table(&mut catalog, db_name, &table_name, columns);
+                create_table(&mut catalog, &db_name, &table_name, columns);
             }
 
             // -----------------------
-            // Option 3: Exit
+            // Option 5: Exit
             // -----------------------
-            "3" => {
+            "5" => {
                 println!("\nExiting Storage Manager. Goodbye!");
                 break;
             }

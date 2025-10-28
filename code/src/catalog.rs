@@ -115,6 +115,25 @@ pub fn save_catalog(catalog: &Catalog) {
     println!("Catalog File updated with In Memory Data {}", catalog_path.display());
 }
 
+/// Displays all databases available in the catalog.
+/// If no databases exist, it prints an appropriate message.
+pub fn show_databases(catalog: &Catalog) {
+    println!("--------------------------");
+    println!("Databases in Catalog");
+    println!("--------------------------");
+
+    if catalog.databases.is_empty() {
+        println!("No databases found.\n");
+        return;
+    }
+
+    for db_name in catalog.databases.keys() {
+        println!("- {}", db_name);
+    }
+
+    println!();
+}
+
 pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
     // Step 1: Validate input
     if db_name.is_empty() {
