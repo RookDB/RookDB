@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Read, ErrorKind, Error, Write};
 
 use crate::page::{Page, PAGE_SIZE, init_page, page_count};
+// use crate::table::{TABLE_HEADER_SIZE};
 
 // Create Page 
 pub fn create_page(file: &mut File) -> io::Result<u32> {
@@ -41,14 +42,17 @@ pub fn create_page(file: &mut File) -> io::Result<u32> {
 
 // Read page from disk
 pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {   // Page Number or Page Id - as offset. (For Contiguous - PageNum * offset is ok but pageId requires more)
+    
     // calculating the offset
-    let offset: u64 = (page_num as u64) * (PAGE_SIZE as u64);   // as is required because not compiling - pageNum is 4 byte but offset requries 8 bytes.
+    let offset = (page_num - 1) * PAGE_SIZE as u32;
+
 
     // get file size
     let file_size = file.metadata()?.len();
     println!("File Size: {}", file_size);
+    println!("OFFSET: {}", offset);
 
-    if offset > file_size {
+    if offset > file_size as u32 {
         // Return an error if the page doesn't exist
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
@@ -57,11 +61,11 @@ pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<
     }
 
     // move the file cursor
-    file.seek(SeekFrom::Start(offset))?;
+    file.seek(SeekFrom::Start(offset as u64))?;
 
     // read the page data
     file.read_exact(&mut page.data)?;
-
+    println!("READING PAGE OK");
     Ok(())
 }
 

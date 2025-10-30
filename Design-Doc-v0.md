@@ -154,16 +154,19 @@ pub struct Page {
 0. Init Catalog
 1. Load Catalog
 2. Create Database
-2. Save Catalog
-3. Create Table
-4. Init Table
-5. Init Page
-6. Page Count
-7. Create Page
-8. Read Page
-9. Write Page
-10. Page Free Space
-11. Add Tuple to Page
+3. Show Databases
+4. Select Database
+5. Show Tables
+6. Save Catalog
+7. Create Table
+8. Init Table
+9. Init Page
+10. Page Count
+11. Create Page
+12. Read Page
+13. Write Page
+14. Page Free Space
+15. Add Tuple to Page
 
 ## Ongoing API's
 
@@ -304,7 +307,7 @@ Table header (first page) initialized with page_count = 0 in the first 4 bytes a
 1. Move the file cursor to the beginning of the file.
 2. Allocate a buffer of 8192 bytes (**TABLE_HEADER_SIZE**) initialized to zero.
 3. Write the entire 8192-byte buffer (including the page count) to disk, marking the creation of the first table page.
-
+4. Write another 8192-byte buffer to disk to initialize the first data page along with page headers using `create_page` API (Page 1), which will store table tuples.
 **Test Case:**
 1. Created a new file to simulate a fresh table.
 2. Initialized the table header using **init_table** API, setting the page count to 0.

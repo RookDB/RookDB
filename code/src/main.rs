@@ -1,13 +1,13 @@
-// use std::fs::OpenOptions;
+use std::fs::OpenOptions;
 // use std::io::{self, Read, Seek, SeekFrom};
 use std::io::{self, Write};
 
 // use storage_manager::disk::{create_page, read_page};
 // use storage_manager::disk::create_page;
-// use storage_manager::page::{page_add_data, Page};
 use storage_manager::catalog::{
-    Column, create_database, create_table, init_catalog, load_catalog, show_databases,
+    Column, create_database, create_table, init_catalog, load_catalog, show_databases, show_tables,
 };
+use storage_manager::page::insert_tuple;
 // use storage_manager::table::init_table;
 
 fn main() -> io::Result<()> {
@@ -32,8 +32,10 @@ fn main() -> io::Result<()> {
         println!("1. Show Databases");
         println!("2. Create Database");
         println!("3. Select Database");
-        println!("4. Create Table");
-        println!("5. Exit");
+        println!("4. Show Tables");
+        println!("5. Create Table");
+        println!("6. Insert Tuple");
+        println!("7. Exit");
         println!("=============================");
 
         // if let Some(ref db) = current_db {
@@ -100,10 +102,23 @@ fn main() -> io::Result<()> {
                 }
             }
 
+            // Option 4: Show Tables
+            "4" => {
+                let db_name = match &current_db {
+                    Some(name) => name.clone(),
+                    None => {
+                        println!("No database selected. Please select a database first.");
+                        continue;
+                    }
+                };
+
+                show_tables(&catalog, &db_name);
+            }
+
             // -----------------------
             // Option 4: Create Table
             // -----------------------
-            "4" => {
+            "5" => {
                 // Check if a database is currently selected
                 let db_name = match &current_db {
                     Some(name) => name.clone(),
@@ -159,9 +174,56 @@ fn main() -> io::Result<()> {
             }
 
             // -----------------------
+            // 6. Insert Tuple (JSON input)
+            // -----------------------
+            "6" => {
+                let db_name = match &current_db {
+                    Some(name) => name.clone(),
+                    None => {
+                        println!("No database selected. Please select a database first.");
+                        continue;
+                    }
+                };
+
+                println!("\nEnter table name to insert into: ");
+                let mut table_name = String::new();
+                io::stdout().flush()?;
+                io::stdin().read_line(&mut table_name)?;
+                let table_name = table_name.trim().to_string();
+
+                // Example JSON input
+                println!();
+                println!("\nEnter tuple in JSON format (e.g. {{\"id\":1,\"name\":\"Alice\"}}): ");
+                let mut json_input = String::new();
+                io::stdout().flush()?;
+                io::stdin().read_line(&mut json_input)?;
+                let json_input = json_input.trim();
+
+                if json_input.is_empty() {
+                    println!("Tuple cannot be empty.");
+                    continue;
+                }
+
+                // Correct file path as per your structure
+                let file_path = format!("database/base/{}/{}.dat", db_name, table_name);
+
+                // Try opening the table file
+                let mut file = match OpenOptions::new().read(true).write(true).open(&file_path) {
+                    Ok(f) => f,
+                    Err(_) => {
+                        println!("Table file not found: {}", file_path);
+                        continue;
+                    }
+                };
+
+                // Insert tuple
+                insert_tuple(&mut file, json_input)?;
+            }
+
+            // -----------------------
             // Option 5: Exit
             // -----------------------
-            "5" => {
+            "7" => {
                 println!("\nExiting Storage Manager. Goodbye!");
                 break;
             }
@@ -174,81 +236,5 @@ fn main() -> io::Result<()> {
             }
         }
     }
-
-    // Create File Pointer
-    // let mut file_pointer = OpenOptions::new()
-    //     .read(true)
-    //     .write(true)
-    //     .create(true)
-    //     .open(CATALOG_FILE)?;
-
-    // println!("Initialising Table...");
-
-    // Init Table
-    // init_table(&mut file_pointer)?;
-
-    // Move cursor to start
-    // file_pointer.seek(SeekFrom::Start(0))?;
-
-    // Read entire file
-    // let mut buffer = Vec::new();
-    // file_pointer.read_to_end(&mut buffer)?;
-
-    // Table File Data
-    // println!("Table Initialised with Table Header. Table Content: {:?}\n", buffer);
-
-    // println!("Creating Page in File...");
-    /*
-    Create a Page in file
-    */
-    // create_page(&mut file_pointer)?;
-    // println!("Page created successfully.");
-
-    // Read entire file to verify create page
-    // file_pointer.seek(SeekFrom::Start(0))?;
-    // let mut buffer = Vec::new();
-    // file_pointer.read_to_end(&mut buffer)?;
-
-    // Table File Data
-    // println!("File Data after page creation: \n{:?}\n", buffer);
-
-    // Create a Page in Memory
-    // let mut page: Page = Page::new();
-
-    // let content = b"Hello, Storage Manager!";
-    // page.data[..content.len()].copy_from_slice(content);
-
-    // let page_num: u32 = 0;
-
-    // Write page to file
-    // write_page(&mut file_pointer, &mut page, page_num)?;
-    // println!("Updated Page with content Successfully.");
-
-    /*
-    Reading a Page from Disk file to Memory Page
-    File: Catalog
-    Page: page
-    PageNum: 0
-    */
-    // read_page(&mut file_pointer, &mut page, page_num)?;
-    // let page_text = String::from_utf8_lossy(&page.data);
-    // println!("Page Header Bytes in Little Endian: {:?}", &page.data[..8]);
-
-    // Adding Data to the File
-    // let data_to_add = b"This is some raw data to add to the file.";
-    // page_add_data(&mut file_pointer, data_to_add)?;
-    // println!("Data added to file.");
-
-    // Read the page again to check data insertion status
-    // Read page 0
-    // let mut page: Page = Page::new();
-    // read_page(&mut file_pointer, &mut page, 0)?;
-
-    // Convert the full page buffer to a UTF-8 string (lossy-safe)
-    // let page_text = String::from_utf8_lossy(&page.data);
-
-    // Print the page in human-readable form
-    // println!("Complete Page 0 (human-readable):");
-    // println!("{}", page_text);
     Ok(())
 }

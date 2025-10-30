@@ -1,17 +1,5 @@
 {
   "databases": {
-    "test": {
-      "tables": {
-        "test1": {
-          "columns": [
-            {
-              "name": "id",
-              "data_type": "INT"
-            }
-          ]
-        }
-      }
-    },
     "users": {
       "tables": {
         "students": {
@@ -19,10 +7,6 @@
             {
               "name": "id",
               "data_type": "INT"
-            },
-            {
-              "name": "name",
-              "data_type": "TEXT"
             }
           ]
         }

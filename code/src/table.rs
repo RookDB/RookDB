@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 
+use crate::disk::create_page;
 pub const TABLE_HEADER_SIZE: u32 = 8192;
 
 pub struct Table {
@@ -28,9 +29,21 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
     // Move cursor to the beginning of the file
     file.seek(SeekFrom::Start(0))?;
 
-    // Write 8192 bytes of zeros to the file
-    let zero_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
+    // Allocate 8192 (TABLE_HEADER_SIZE) + 8192 (PAGE_SIZE) bytes = 16KB
+    let mut zero_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
+
+    //  Write "1" into the first 4 bytes (little-endian u32)
+    // This can represent the total number of pages, e.g. 1
+    zero_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+
+    // Write the full buffer (header) to the file
     file.write_all(&zero_buf)?;
+
+    // Optionally, flush to ensure write is committed
+    file.flush()?;
+    file.sync_all()?;
+
+    create_page(file)?;
 
     Ok(())
 }
