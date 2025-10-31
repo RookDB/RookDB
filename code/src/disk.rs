@@ -44,7 +44,7 @@ pub fn create_page(file: &mut File) -> io::Result<u32> {
 pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {   // Page Number or Page Id - as offset. (For Contiguous - PageNum * offset is ok but pageId requires more)
     
     // calculating the offset
-    let offset = (page_num - 1) * PAGE_SIZE as u32;
+    let offset = (page_num) * PAGE_SIZE as u32;
 
 
     // get file size
@@ -72,7 +72,7 @@ pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<
 // Write Page into Disk
 pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {   // Page Number or Page Id - as offset. (For Contiguous - PageNum * offset is ok but pageId requires more)
     // calculating the offset
-    let offset: u64 = (page_num as u64) * (PAGE_SIZE as u64);   // as is required because not compiling - pageNum is 4 byte but offset requries 8 bytes.
+    let offset = (page_num) as u64 * PAGE_SIZE as u64;  // as is required because not compiling - pageNum is 4 byte but offset requries 8 bytes.
 
     // get file size
     let file_size = file.metadata()?.len();

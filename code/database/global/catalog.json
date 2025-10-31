@@ -7,6 +7,10 @@
             {
               "name": "id",
               "data_type": "INT"
+            },
+            {
+              "name": "name",
+              "data_type": "TEXT"
             }
           ]
         }

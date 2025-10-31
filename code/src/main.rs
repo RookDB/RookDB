@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use storage_manager::catalog::{
     Column, create_database, create_table, init_catalog, load_catalog, show_databases, show_tables,
 };
-use storage_manager::page::insert_tuple;
+use storage_manager::page::{load_csv_and_insert};
 // use storage_manager::table::init_table;
 
 fn main() -> io::Result<()> {
@@ -34,7 +34,7 @@ fn main() -> io::Result<()> {
         println!("3. Select Database");
         println!("4. Show Tables");
         println!("5. Create Table");
-        println!("6. Insert Tuple");
+        println!("6. Load CSV");
         println!("7. Exit");
         println!("=============================");
 
@@ -185,39 +185,24 @@ fn main() -> io::Result<()> {
                     }
                 };
 
-                println!("\nEnter table name to insert into: ");
+                println!("Enter table name: ");
                 let mut table_name = String::new();
-                io::stdout().flush()?;
                 io::stdin().read_line(&mut table_name)?;
-                let table_name = table_name.trim().to_string();
+                let table_name = table_name.trim();
 
-                // Example JSON input
-                println!();
-                println!("\nEnter tuple in JSON format (e.g. {{\"id\":1,\"name\":\"Alice\"}}): ");
-                let mut json_input = String::new();
-                io::stdout().flush()?;
-                io::stdin().read_line(&mut json_input)?;
-                let json_input = json_input.trim();
+                println!("Enter CSV file path: ");
+                let mut csv_path = String::new();
+                io::stdin().read_line(&mut csv_path)?;
+                let csv_path = csv_path.trim();
 
-                if json_input.is_empty() {
-                    println!("Tuple cannot be empty.");
-                    continue;
-                }
+                let table_path = format!("database/base/{}/{}.dat", db_name, table_name);
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&table_path)?;
 
-                // Correct file path as per your structure
-                let file_path = format!("database/base/{}/{}.dat", db_name, table_name);
-
-                // Try opening the table file
-                let mut file = match OpenOptions::new().read(true).write(true).open(&file_path) {
-                    Ok(f) => f,
-                    Err(_) => {
-                        println!("Table file not found: {}", file_path);
-                        continue;
-                    }
-                };
-
-                // Insert tuple
-                insert_tuple(&mut file, json_input)?;
+                let catalog = load_catalog();
+                load_csv_and_insert(&catalog, &db_name, table_name, &mut file, csv_path)?;
             }
 
             // -----------------------
@@ -232,7 +217,7 @@ fn main() -> io::Result<()> {
             // Invalid Option
             // -----------------------
             _ => {
-                println!("Invalid choice. Please select 1, 2, or 3.");
+                println!("Invalid choice. Please select 1, 2,3 ... numbers only");
             }
         }
     }

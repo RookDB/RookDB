@@ -1,6 +1,6 @@
 use std::fs::{File};
-use std::io::{self, Read, Seek, SeekFrom};
-use serde_json::Value;
+use std::io::{self, Read, Seek, SeekFrom, BufRead, BufReader};
+use crate::catalog::Catalog;
 
 pub const PAGE_SIZE: usize = 8192; // Page size - storing as 8 bytes and as usize only because most pointers(file pointers and otheres requires it to be 8 bytes)
 pub const PAGE_HEADER_SIZE: u32 = 8;
@@ -66,71 +66,159 @@ pub fn page_free_space(page: &Page) -> io::Result<u32> {
     Ok(upper - lower)
 }
 
-pub fn insert_tuple(file: &mut File, json_str: &str) -> io::Result<()> {
-    // Parse the input JSON string
-    let parsed: Value = match serde_json::from_str(json_str) {
-        Ok(val) => val,
-        Err(_) => {
-            println!("Invalid JSON format. Example: {{\"id\": 1, \"name\": \"John\"}}");
-            return Ok(());
-        }
-    };
-
-    // Convert the JSON into a compact string for storage
-    let json_compact = serde_json::to_string(&parsed).unwrap();
-    let data = json_compact.as_bytes();
-
-    // Get total pages
+pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
+    // Get total number of pages in the file
     let total_pages: u32 = page_count(file)?;
-    println!("Total Pages: {}", total_pages);
-    let last_page_num: u32 = total_pages;
+    let last_page_num: u32 = total_pages - 1;
+    println!("Inserting into page {}", last_page_num);
 
-    println!("Last Page Number: {}", last_page_num - 1);
-
-    // Read last page
+    // Read last page into memory
     let mut last_page: Page = Page::new();
     read_page(file, &mut last_page, last_page_num)?;
 
-    // Check free space
+    // Calculate free space in the page
     let free_space: u32 = page_free_space(&last_page)?;
-    println!("Free Space in Last Page: {}", free_space);
+    println!("Free space in last page: {} bytes", free_space);
 
-    // Total space needed = data + item ID entry
+    // Total bytes required = tuple data + item header (offset + length)
     let total_required = data.len() as u32 + ITEM_ID_SIZE;
 
     if total_required <= free_space {
-        // Current upper and lower
-        let mut upper = u32::from_le_bytes(last_page.data[4..8].try_into().unwrap());
+        // Get current header offsets
         let mut lower = u32::from_le_bytes(last_page.data[0..4].try_into().unwrap());
+        let mut upper = u32::from_le_bytes(last_page.data[4..8].try_into().unwrap());
 
-        // Compute start of data region
+        // Compute where to place data
         let start = upper - data.len() as u32;
 
-        // Write JSON data into page bytes (store as characters)
+        // Copy tuple data into the page
         last_page.data[start as usize..upper as usize].copy_from_slice(data);
 
         // Update upper pointer
         upper = start;
         last_page.data[4..8].copy_from_slice(&upper.to_le_bytes());
 
-        // Update lower pointer
+        // Write ItemId entry (offset + length)
         let item_id_pos = lower as usize;
-        lower += ITEM_ID_SIZE;
-        last_page.data[0..4].copy_from_slice(&lower.to_le_bytes());
-
-        // Write Item ID: [offset][length]
         last_page.data[item_id_pos..item_id_pos + 4].copy_from_slice(&start.to_le_bytes());
         last_page.data[item_id_pos + 4..item_id_pos + 8]
             .copy_from_slice(&(data.len() as u32).to_le_bytes());
 
-        // Write updated page to disk
-        write_page(file, &mut last_page, last_page_num)?;
+        // Update lower pointer
+        lower += ITEM_ID_SIZE;
+        last_page.data[0..4].copy_from_slice(&lower.to_le_bytes());
 
-        println!(" Tuple inserted successfully on page {}", last_page_num);
-        println!("Stored JSON: {}", json_compact);
+        // Write page back to disk
+        write_page(file, &mut last_page, last_page_num)?;
+        println!("Tuple inserted successfully ({} bytes).", data.len());
     } else {
-        println!(" Not enough free space in last page. Need a new page.");
+        println!("Not enough free space in last page. Consider creating a new page.");
     }
 
+    Ok(())
+}
+
+
+pub fn load_csv_and_insert(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    file: &mut File,
+    csv_path: &str,
+) -> io::Result<()> {
+    // --- 1. Fetch table schema from catalog ---
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name)))?;
+
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name)))?;
+
+    let columns = &table.columns;
+    if columns.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Table has no columns"));
+    }
+
+    println!(
+        "Loading CSV '{}' into table '{}.{}' ({} columns)",
+        csv_path,
+        db_name,
+        table_name,
+        columns.len()
+    );
+
+    // --- 2. Open and read the CSV file ---
+    let csv_file = File::open(csv_path)?;
+    let reader = BufReader::new(csv_file);
+
+    let mut lines = reader.lines();
+
+    // Skip header line
+    if let Some(Ok(header)) = lines.next() {
+        println!("Header: {}", header);
+    }
+
+    // --- 3. Iterate through rows ---
+    let mut inserted = 0;
+    for (i, line) in lines.enumerate() {
+        let row = line?;
+        if row.trim().is_empty() {
+            continue;
+        }
+
+        // Split CSV fields by comma
+        let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
+
+        // Validate number of columns
+        if values.len() != columns.len() {
+            println!(
+                "Skipping row {}: expected {} columns, found {}",
+                i + 1,
+                columns.len(),
+                values.len()
+            );
+            continue;
+        }
+
+        // --- 4. Serialize row based on schema ---
+        let mut tuple_bytes: Vec<u8> = Vec::new();
+
+        for (val, col) in values.iter().zip(columns.iter()) {
+            match col.data_type.as_str() {
+                "INT" => {
+                    let num: i32 = val.parse().unwrap_or_default();
+                    tuple_bytes.extend_from_slice(&num.to_le_bytes());
+                }
+                "TEXT" => {
+                    let mut text_bytes = val.as_bytes().to_vec();
+                    if text_bytes.len() > 10 {
+                        text_bytes.truncate(10);
+                    } else if text_bytes.len() < 10 {
+                        text_bytes.extend(vec![b' '; 10 - text_bytes.len()]);
+                    }
+                    tuple_bytes.extend_from_slice(&text_bytes);
+                }
+                _ => {
+                    println!(
+                        "Unsupported column type '{}' in column '{}'",
+                        col.data_type, col.name
+                    );
+                    continue;
+                }
+            }
+        }
+
+        // --- 5. Insert tuple into page system ---
+        if let Err(e) = insert_tuple(file, &tuple_bytes) {
+            println!("Failed to insert row {}: {}", i + 1, e);
+        } else {
+            inserted += 1;
+        }
+    }
+
+    println!("Successfully inserted {} rows into '{}.{}'", inserted, db_name, table_name);
     Ok(())
 }
