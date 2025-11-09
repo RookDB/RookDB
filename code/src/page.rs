@@ -6,7 +6,7 @@ pub const PAGE_SIZE: usize = 8192; // Page size - storing as 8 bytes and as usiz
 pub const PAGE_HEADER_SIZE: u32 = 8;
 pub const ITEM_ID_SIZE: u32  = 8;
 
-use crate::disk::{read_page, write_page};
+use crate::disk::{create_page, read_page, write_page};
 
 // pub struct PageHeader {
 //     pub lower: u32, // Offset to start of free space - 4 bytes
@@ -68,8 +68,8 @@ pub fn page_free_space(page: &Page) -> io::Result<u32> {
 
 pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     // Get total number of pages in the file
-    let total_pages: u32 = page_count(file)?;
-    let last_page_num: u32 = total_pages - 1;
+    let mut total_pages: u32 = page_count(file)?;
+    let mut last_page_num: u32 = total_pages - 1;
     println!("Inserting into page {}", last_page_num);
 
     // Read last page into memory
@@ -83,40 +83,51 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     // Total bytes required = tuple data + item header (offset + length)
     let total_required = data.len() as u32 + ITEM_ID_SIZE;
 
-    if total_required <= free_space {
-        // Get current header offsets
-        let mut lower = u32::from_le_bytes(last_page.data[0..4].try_into().unwrap());
-        let mut upper = u32::from_le_bytes(last_page.data[4..8].try_into().unwrap());
+    if total_required > free_space {
+        // Not enough space — create a new page
+        println!("Not enough free space in last page. Creating a new page...");
+        create_page(file)?;
+        total_pages += 1;
+        last_page_num = total_pages - 1;
 
-        // Compute where to place data
-        let start = upper - data.len() as u32;
-
-        // Copy tuple data into the page
-        last_page.data[start as usize..upper as usize].copy_from_slice(data);
-
-        // Update upper pointer
-        upper = start;
-        last_page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-
-        // Write ItemId entry (offset + length)
-        let item_id_pos = lower as usize;
-        last_page.data[item_id_pos..item_id_pos + 4].copy_from_slice(&start.to_le_bytes());
-        last_page.data[item_id_pos + 4..item_id_pos + 8]
-            .copy_from_slice(&(data.len() as u32).to_le_bytes());
-
-        // Update lower pointer
-        lower += ITEM_ID_SIZE;
-        last_page.data[0..4].copy_from_slice(&lower.to_le_bytes());
-
-        // Write page back to disk
-        write_page(file, &mut last_page, last_page_num)?;
-        println!("Tuple inserted successfully ({} bytes).", data.len());
-    } else {
-        println!("Not enough free space in last page. Consider creating a new page.");
+        // Read the newly created page (it should be empty)
+        read_page(file, &mut last_page, last_page_num)?;
+        println!("Inserting into newly created page {}", last_page_num);
     }
+
+    // === Insert into last_page (either old or new) ===
+
+    // Get current header offsets
+    let mut lower = u32::from_le_bytes(last_page.data[0..4].try_into().unwrap());
+    let mut upper = u32::from_le_bytes(last_page.data[4..8].try_into().unwrap());
+
+    // Compute where to place data
+    let start = upper - data.len() as u32;
+
+    // Copy tuple data into the page
+    last_page.data[start as usize..upper as usize].copy_from_slice(data);
+
+    // Update upper pointer
+    upper = start;
+    last_page.data[4..8].copy_from_slice(&upper.to_le_bytes());
+
+    // Write ItemId entry (offset + length)
+    let item_id_pos = lower as usize;
+    last_page.data[item_id_pos..item_id_pos + 4].copy_from_slice(&start.to_le_bytes());
+    last_page.data[item_id_pos + 4..item_id_pos + 8]
+        .copy_from_slice(&(data.len() as u32).to_le_bytes());
+
+    // Update lower pointer
+    lower += ITEM_ID_SIZE;
+    last_page.data[0..4].copy_from_slice(&lower.to_le_bytes());
+
+    // Write page back to disk
+    write_page(file, &mut last_page, last_page_num)?;
+    println!("Tuple inserted successfully ({} bytes).", data.len());
 
     Ok(())
 }
+
 
 
 pub fn load_csv_and_insert(
@@ -220,5 +231,88 @@ pub fn load_csv_and_insert(
     }
 
     println!("Successfully inserted {} rows into '{}.{}'", inserted, db_name, table_name);
+    Ok(())
+}
+
+
+
+pub fn show_tuples(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    file: &mut File,
+) -> io::Result<()> {
+    // 1. Get schema from catalog
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name)))?;
+
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name)))?;
+
+    let columns = &table.columns;
+
+    // 2. Read total number of pages
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = [0u8; 4];
+    file.read_exact(&mut buf)?;
+    let total_pages = u32::from_le_bytes(buf);
+
+    println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
+    println!("Total pages: {}", total_pages);
+
+    // 3. Loop through each page
+    for page_num in 0..total_pages {
+        let mut page = Page::new();
+        read_page(file, &mut page, page_num)?;
+        println!("\n-- Page {} --", page_num);
+
+        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+        let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+
+        println!("Lower: {}, Upper: {}, Tuples: {}", lower, upper, num_items);
+
+        // 4. For each tuple
+        for i in 0..num_items {
+            let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
+            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
+            let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
+            let tuple_data = &page.data[offset as usize..(offset + length) as usize];
+
+            print!("Tuple {}: ", i + 1);
+
+            // 5. Decode each column
+            let mut cursor = 0usize;
+            for col in columns {
+                match col.data_type.as_str() {
+                    "INT" => {
+                        if cursor + 4 <= tuple_data.len() {
+                            let val = i32::from_le_bytes(tuple_data[cursor..cursor + 4].try_into().unwrap());
+                            print!("{}={} ", col.name, val);
+                            cursor += 4;
+                        }
+                    }
+                    "TEXT" => {
+                        if cursor + 10 <= tuple_data.len() {
+                            let text_bytes = &tuple_data[cursor..cursor + 10];
+                            let text = String::from_utf8_lossy(text_bytes).trim().to_string();
+                            print!("{}='{}' ", col.name, text);
+                            cursor += 10;
+                        }
+                    }
+                    _ => {
+                        print!("{}=<unsupported> ", col.name);
+                    }
+                }
+            }
+            println!();
+        }
+    }
+
+    println!("\n=== End of tuples ===\n");
     Ok(())
 }

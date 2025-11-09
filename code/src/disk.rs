@@ -65,7 +65,7 @@ pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<
 
     // read the page data
     file.read_exact(&mut page.data)?;
-    println!("READING PAGE OK");
+    // println!("READING PAGE OK");
     Ok(())
 }
 

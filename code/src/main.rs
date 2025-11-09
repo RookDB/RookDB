@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use storage_manager::catalog::{
     Column, create_database, create_table, init_catalog, load_catalog, show_databases, show_tables,
 };
-use storage_manager::page::{load_csv_and_insert};
+use storage_manager::page::{load_csv_and_insert, show_tuples};
 // use storage_manager::table::init_table;
 
 fn main() -> io::Result<()> {
@@ -35,7 +35,8 @@ fn main() -> io::Result<()> {
         println!("4. Show Tables");
         println!("5. Create Table");
         println!("6. Load CSV");
-        println!("7. Exit");
+        println!("7. Show Tuples");
+        println!("8. Exit");
         println!("=============================");
 
         // if let Some(ref db) = current_db {
@@ -116,7 +117,7 @@ fn main() -> io::Result<()> {
             }
 
             // -----------------------
-            // Option 4: Create Table
+            // Option 5: Create Table
             // -----------------------
             "5" => {
                 // Check if a database is currently selected
@@ -206,9 +207,36 @@ fn main() -> io::Result<()> {
             }
 
             // -----------------------
-            // Option 5: Exit
+            // Option 7: Show Tuples
             // -----------------------
             "7" => {
+                let db_name = match &current_db {
+                    Some(name) => name.clone(),
+                    None => {
+                        println!("No database selected. Please select a database first.");
+                        continue;
+                    }
+                };
+
+                println!("Enter table name: ");
+                let mut table_name = String::new();
+                io::stdin().read_line(&mut table_name)?;
+                let table_name = table_name.trim();
+
+                let table_path = format!("database/base/{}/{}.dat", db_name, table_name);
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&table_path)?;
+
+                let catalog = load_catalog();
+                show_tuples(&catalog, &db_name, table_name, &mut file)?;
+            }
+
+            // -----------------------
+            // Exit
+            // -----------------------
+            "8" => {
                 println!("\nExiting Storage Manager. Goodbye!");
                 break;
             }

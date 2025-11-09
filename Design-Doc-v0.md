@@ -501,6 +501,10 @@ Data inserted in the file.
 
 <!-- ## Ongoing APIs and Implementations -->
 
+### Evaluation
+* Without Buffer Manager loading data into the disk.
+
+
 
 * [Code - Github](https://github.com/hemanth-sunkireddy/Storage-Manager)
 * [Code Documentation](https://hemanth-sunkireddy.github.io/Storage-Manager/storage_manager/all.html)
