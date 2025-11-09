@@ -183,7 +183,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
             println!("Failed to create database directory: {}", e);
             return false;
         }
-        println!("Created new database directory at {}", db_path.display());
+        // println!("Created new database directory at {}", db_path.display());
     } else {
         println!("Database directory already exists at {}", db_path.display());
     }

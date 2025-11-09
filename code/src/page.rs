@@ -60,8 +60,8 @@ pub fn page_free_space(page: &Page) -> io::Result<u32> {
     // Get Lower and Upper of page
     let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
     let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-    println!("UPPER: {}", upper);
-    println!("LOWER: {}", lower);
+    // println!("UPPER: {}", upper);
+    // println!("LOWER: {}", lower);
     // Freespace is equal to upper - lower
     Ok(upper - lower)
 }
@@ -70,7 +70,7 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     // Get total number of pages in the file
     let mut total_pages: u32 = page_count(file)?;
     let mut last_page_num: u32 = total_pages - 1;
-    println!("Inserting into page {}", last_page_num);
+    // println!("Inserting into page {}", last_page_num);
 
     // Read last page into memory
     let mut last_page: Page = Page::new();
@@ -78,21 +78,21 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
 
     // Calculate free space in the page
     let free_space: u32 = page_free_space(&last_page)?;
-    println!("Free space in last page: {} bytes", free_space);
+    // println!("Free space in last page: {} bytes", free_space);
 
     // Total bytes required = tuple data + item header (offset + length)
     let total_required = data.len() as u32 + ITEM_ID_SIZE;
 
     if total_required > free_space {
         // Not enough space — create a new page
-        println!("Not enough free space in last page. Creating a new page...");
+        // println!("Not enough free space in last page. Creating a new page...");
         create_page(file)?;
         total_pages += 1;
         last_page_num = total_pages - 1;
 
         // Read the newly created page (it should be empty)
         read_page(file, &mut last_page, last_page_num)?;
-        println!("Inserting into newly created page {}", last_page_num);
+        // println!("Inserting into newly created page {}", last_page_num);
     }
 
     // === Insert into last_page (either old or new) ===
@@ -123,7 +123,7 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
 
     // Write page back to disk
     write_page(file, &mut last_page, last_page_num)?;
-    println!("Tuple inserted successfully ({} bytes).", data.len());
+    // println!("Tuple inserted successfully ({} bytes).", data.len());
 
     Ok(())
 }
@@ -153,13 +153,13 @@ pub fn load_csv_and_insert(
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Table has no columns"));
     }
 
-    println!(
-        "Loading CSV '{}' into table '{}.{}' ({} columns)",
-        csv_path,
-        db_name,
-        table_name,
-        columns.len()
-    );
+    // println!(
+    //     "Loading CSV '{}' into table '{}.{}' ({} columns)",
+    //     csv_path,
+    //     db_name,
+    //     table_name,
+    //     columns.len()
+    // );
 
     // --- 2. Open and read the CSV file ---
     let csv_file = File::open(csv_path)?;
@@ -169,7 +169,7 @@ pub fn load_csv_and_insert(
 
     // Skip header line
     if let Some(Ok(header)) = lines.next() {
-        println!("Header: {}", header);
+        // println!("Header: {}", header);
     }
 
     // --- 3. Iterate through rows ---

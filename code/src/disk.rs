@@ -8,17 +8,17 @@ use crate::page::{Page, PAGE_SIZE, init_page, page_count};
 pub fn create_page(file: &mut File) -> io::Result<u32> {
     // Create an empty page (all zeros) - In Memory
     let mut page = Page::new();
-    println!("Initializing a In Memory Page with Page Headers...");
+    // println!("Initializing a In Memory Page with Page Headers...");
     // Initialise Page Header
     init_page(&mut page);
 
     // Print the first 8 bytes (page header: lower + upper offsets)
-    println!("Created Page. Page Data: {:?}", &page.data[0..8]);
+    // println!("Created Page. Page Data: {:?}", &page.data[0..8]);
 
     // --- Step 1: Read existing page_count from File Header (first 4 bytes)
     let mut page_count =  page_count(file)?; // total pages currently in file
 
-    println!("Page count: {}", page_count);
+    // println!("Page count: {}", page_count);
     
     // --- Step 2: The new page number = current page_count
     let page_num = page_count;
@@ -32,10 +32,10 @@ pub fn create_page(file: &mut File) -> io::Result<u32> {
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&page_count.to_le_bytes())?;
 
-    println!(
-        "Created new Page with Id: {} (total pages = {})",
-        page_num, page_count
-    );
+    // println!(
+    //     "Created new Page with Id: {} (total pages = {})",
+    //     page_num, page_count
+    // );
 
     Ok(page_num)
 }
@@ -49,8 +49,8 @@ pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<
 
     // get file size
     let file_size = file.metadata()?.len();
-    println!("File Size: {}", file_size);
-    println!("OFFSET: {}", offset);
+    // println!("File Size: {}", file_size);
+    // println!("OFFSET: {}", offset);
 
     if offset > file_size as u32 {
         // Return an error if the page doesn't exist
@@ -76,7 +76,7 @@ pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result
 
     // get file size
     let file_size = file.metadata()?.len();
-    println!("File Size: {}", file_size);
+    // println!("File Size: {}", file_size);
 
     if offset > file_size {
         // Return an error if the page doesn't exist

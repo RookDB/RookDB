@@ -203,7 +203,21 @@ fn main() -> io::Result<()> {
                     .open(&table_path)?;
 
                 let catalog = load_catalog();
+
+                // Start the timer ⏱️
+                use std::time::Instant;
+                let start = Instant::now();
                 load_csv_and_insert(&catalog, &db_name, table_name, &mut file, csv_path)?;
+
+                // Stop the timer
+                let duration = start.elapsed();
+
+                // Print the result
+                println!(
+                    "\n✅ CSV loaded successfully into '{}' in {:.3} seconds.",
+                    table_name,
+                    duration.as_secs_f64()
+                );
             }
 
             // -----------------------
