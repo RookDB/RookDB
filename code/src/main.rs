@@ -4,6 +4,7 @@ use std::io::{self, Write};
 
 // use storage_manager::disk::{create_page, read_page};
 // use storage_manager::disk::create_page;
+use storage_manager::buffer::BufferManager;
 use storage_manager::catalog::{
     Column, create_database, create_table, init_catalog, load_catalog, show_databases, show_tables,
 };
@@ -22,6 +23,8 @@ fn main() -> io::Result<()> {
     // Load catalog from disk
     println!("Loading Catalog...\n");
     let mut catalog = load_catalog();
+
+    let mut buffer_manager = BufferManager::new();
 
     // Keep track of the currently selected database
     let mut current_db: Option<String> = None;
@@ -172,6 +175,7 @@ fn main() -> io::Result<()> {
                 }
 
                 create_table(&mut catalog, &db_name, &table_name, columns);
+                buffer_manager.load_table_on_create(&db_name, &table_name)?;
             }
 
             // -----------------------
@@ -207,14 +211,16 @@ fn main() -> io::Result<()> {
                 // Start the timer ⏱️
                 use std::time::Instant;
                 let start = Instant::now();
-                load_csv_and_insert(&catalog, &db_name, table_name, &mut file, csv_path)?;
+                // load_csv_and_insert(&catalog, &db_name, table_name, &mut file, csv_path)?;
+                // Single call: load CSV, update header, flush to disk
+                buffer_manager.load_csv_to_buffer(&catalog, &db_name, &table_name, csv_path)?;
 
                 // Stop the timer
                 let duration = start.elapsed();
 
                 // Print the result
                 println!(
-                    "\n✅ CSV loaded successfully into '{}' in {:.3} seconds.",
+                    "\n CSV loaded successfully into '{}' in {:.3} seconds.",
                     table_name,
                     duration.as_secs_f64()
                 );

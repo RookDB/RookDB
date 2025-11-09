@@ -231,6 +231,15 @@ pub fn load_csv_and_insert(
     }
 
     println!("Successfully inserted {} rows into '{}.{}'", inserted, db_name, table_name);
+     // --- 6️⃣. Inspect first page (for verification) ---
+    // let mut page = Page::new();
+
+    // Move to the first data page (page number 1)
+    // read_page(file, &mut page, 1)?;
+
+    // println!("\n--- First Data Page [1] Snapshot ---");
+    // println!("First 32 bytes: {:?}", &page.data[0..32]);
+    // println!("------------------------------------\n");
     Ok(())
 }
 
@@ -259,11 +268,11 @@ pub fn show_tuples(
     file.seek(SeekFrom::Start(0))?;
     let mut buf = [0u8; 4];
     file.read_exact(&mut buf)?;
-    let total_pages = u32::from_le_bytes(buf);
+    let mut total_pages = u32::from_le_bytes(buf);
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
-
+    total_pages = total_pages - 1;
     // 3. Loop through each page
     for page_num in 0..total_pages {
         let mut page = Page::new();
