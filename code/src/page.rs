@@ -272,15 +272,16 @@ pub fn show_tuples(
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
-    total_pages = total_pages - 1;
+    total_pages = total_pages;
     // 3. Loop through each page
-    for page_num in 0..total_pages {
+    for page_num in 1..total_pages {
         let mut page = Page::new();
         read_page(file, &mut page, page_num)?;
         println!("\n-- Page {} --", page_num);
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+        println!("Lower: {}, Upper: {}", lower, upper);
         let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
 
         println!("Lower: {}, Upper: {}, Tuples: {}", lower, upper, num_items);
@@ -320,6 +321,7 @@ pub fn show_tuples(
             }
             println!();
         }
+        // break;
     }
 
     println!("\n=== End of tuples ===\n");

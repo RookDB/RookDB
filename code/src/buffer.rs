@@ -227,7 +227,7 @@ impl BufferManager {
                 break;
             }
         }
-
+        used_pages = used_pages - 1;
         // --- 6️⃣ Update header ---
         self.update_header_page_count(used_pages as u32);
 
@@ -286,31 +286,31 @@ impl BufferManager {
         // Step 1️⃣: Load CSV → returns total pages used (including header)
         let used_pages = self.load_csv_into_pages(catalog, db_name, table_name, csv_path)?;
 
-        // Step 2️⃣: Print first 10 in-memory pages (for debugging/inspection)
-        println!("\n========== In-Memory Page Snapshot (first 10 pages) ==========");
-        for (i, page) in self.pages.iter().enumerate().take(10) {
-            let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-            let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-            let free = upper.saturating_sub(lower);
+        // // Step 2️⃣: Print first 10 in-memory pages (for debugging/inspection)
+        // println!("\n========== In-Memory Page Snapshot (first 10 pages) ==========");
+        // for (i, page) in self.pages.iter().enumerate().take(10) {
+        //     let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        //     let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+        //     let free = upper.saturating_sub(lower);
 
-            if i == 0 {
-                // Header Page
-                let total_pages_in_header = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-                println!("Page [0] (Header Page):");
-                println!(
-                    "  Total Pages (stored in header): {}",
-                    total_pages_in_header
-                );
-                println!("  First 32 bytes: {:?}", &page.data[0..32]);
-            } else {
-                println!(
-                    "Page [{}]: lower={}, upper={}, free={} bytes",
-                    i, lower, upper, free
-                );
-                println!("  First 32 bytes of data region: {:?}", &page.data[8..40]);
-            }
-            println!("---------------------------------------------------------------");
-        }
+        //     if i == 0 {
+        //         // Header Page
+        //         let total_pages_in_header = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        //         println!("Page [0] (Header Page):");
+        //         println!(
+        //             "  Total Pages (stored in header): {}",
+        //             total_pages_in_header
+        //         );
+        //         println!("  First 32 bytes: {:?}", &page.data[0..32]);
+        //     } else {
+        //         println!(
+        //             "Page [{}]: lower={}, upper={}, free={} bytes",
+        //             i, lower, upper, free
+        //         );
+        //         println!("  First 32 bytes of data region: {:?}", &page.data[8..40]);
+        //     }
+        //     println!("---------------------------------------------------------------");
+        // }
 
         // Step 3️⃣: Flush only used pages to disk
         self.flush_to_disk(db_name, table_name, used_pages)?;

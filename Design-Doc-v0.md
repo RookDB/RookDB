@@ -1,6 +1,4 @@
-<h2 align="center">
-RookDB - Storage Manager Design Doc
-</h2>
+# RookDB - Storage Manager Design Doc
 
 ### Catalog Layout
 ```bash
@@ -497,12 +495,12 @@ Data inserted in the file.
     e. Update the **lower pointer** in the page header to account for the newly added ItemId (`lower += ITEM_ID_SIZE`).
     f. Write the updated page back to disk using [`write_page`](#3write_page-api) API.
 5. If the last page does not have enough free space:
-    a. [TODO]
+    a. Create a new page in the file and add the tuple in the new page.
 
-<!-- ## Ongoing APIs and Implementations -->
 
 ### Evaluation
-* Without Buffer Manager loading data into the disk.
+* Without Buffer Manager loading csv file with 1 lakh tuples took 0.92 sec
+* With Buffer Manager loading csv file with 1 lakh tuples took 0.54 sec.
 
 
 
@@ -510,7 +508,3 @@ Data inserted in the file.
 * [Code Documentation](https://hemanth-sunkireddy.github.io/Storage-Manager/storage_manager/all.html)
 * **Reference 1**: API Formats – [Storage Manager Course Assignment Link](http://www.cs.iit.edu/~glavic/cs525/2023-spring/project/assignment-1/)
 * **Reference 2**: [Postgres Internals – Page Layouts & Data](https://www.postgresql.org/docs/current/storage-page-layout.html)
-
-
-* Support for Different page Sizes( Ex for high loads)
-* Why we need a new Storage Manager? Question of this project.

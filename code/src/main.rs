@@ -211,9 +211,9 @@ fn main() -> io::Result<()> {
                 // Start the timer ⏱️
                 use std::time::Instant;
                 let start = Instant::now();
-                // load_csv_and_insert(&catalog, &db_name, table_name, &mut file, csv_path)?;
+                load_csv_and_insert(&catalog, &db_name, table_name, &mut file, csv_path)?;
                 // Single call: load CSV, update header, flush to disk
-                buffer_manager.load_csv_to_buffer(&catalog, &db_name, &table_name, csv_path)?;
+                // buffer_manager.load_csv_to_buffer(&catalog, &db_name, &table_name, csv_path)?;
 
                 // Stop the timer
                 let duration = start.elapsed();
@@ -252,6 +252,8 @@ fn main() -> io::Result<()> {
                 let catalog = load_catalog();
                 show_tuples(&catalog, &db_name, table_name, &mut file)?;
             }
+
+            
 
             // -----------------------
             // Exit
