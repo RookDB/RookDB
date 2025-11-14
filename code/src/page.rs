@@ -2,7 +2,7 @@ use std::fs::{File};
 use std::io::{self, Read, Seek, SeekFrom, BufRead, BufReader};
 use crate::catalog::Catalog;
 
-pub const PAGE_SIZE: usize = 4196; // Page size - storing as 8 bytes and as usize only because most pointers(file pointers and otheres requires it to be 8 bytes)
+pub const PAGE_SIZE: usize = 8192; // Page size - storing as 8 bytes and as usize only because most pointers(file pointers and otheres requires it to be 8 bytes)
 pub const PAGE_HEADER_SIZE: u32 = 8;
 pub const ITEM_ID_SIZE: u32  = 8;
 
