@@ -2,7 +2,7 @@ use std::fs::{File};
 use std::io::{self, Read, Seek, SeekFrom, BufRead, BufReader};
 use crate::catalog::Catalog;
 
-pub const PAGE_SIZE: usize = 8192; // Page size - storing as 8 bytes and as usize only because most pointers(file pointers and otheres requires it to be 8 bytes)
+pub const PAGE_SIZE: usize = 4196; // Page size - storing as 8 bytes and as usize only because most pointers(file pointers and otheres requires it to be 8 bytes)
 pub const PAGE_HEADER_SIZE: u32 = 8;
 pub const ITEM_ID_SIZE: u32  = 8;
 
@@ -230,7 +230,7 @@ pub fn load_csv_and_insert(
         }
     }
 
-    println!("Successfully inserted {} rows into '{}.{}'", inserted, db_name, table_name);
+    
      // --- 6️⃣. Inspect first page (for verification) ---
     // let mut page = Page::new();
 

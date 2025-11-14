@@ -8,7 +8,7 @@ use storage_manager::buffer::BufferManager;
 use storage_manager::catalog::{
     Column, create_database, create_table, init_catalog, load_catalog, show_databases, show_tables,
 };
-use storage_manager::page::{load_csv_and_insert, show_tuples};
+use storage_manager::page::{load_csv_and_insert, page_count, show_tuples};
 // use storage_manager::table::init_table;
 
 fn main() -> io::Result<()> {
@@ -211,9 +211,9 @@ fn main() -> io::Result<()> {
                 // Start the timer ⏱️
                 use std::time::Instant;
                 let start = Instant::now();
-                load_csv_and_insert(&catalog, &db_name, table_name, &mut file, csv_path)?;
+                // load_csv_and_insert(&catalog, &db_name, table_name, &mut file, csv_path)?;
                 // Single call: load CSV, update header, flush to disk
-                // buffer_manager.load_csv_to_buffer(&catalog, &db_name, &table_name, csv_path)?;
+                buffer_manager.load_csv_to_buffer(&catalog, &db_name, &table_name, csv_path)?;
 
                 // Stop the timer
                 let duration = start.elapsed();
@@ -224,6 +224,8 @@ fn main() -> io::Result<()> {
                     table_name,
                     duration.as_secs_f64()
                 );
+
+                println!("Page Count: {}", page_count(&mut file)?);
             }
 
             // -----------------------

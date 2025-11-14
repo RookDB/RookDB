@@ -91,10 +91,10 @@ pub fn load_catalog() -> Catalog {
     // Step 3: Deserialize JSON into Catalog struct
     match serde_json::from_str::<Catalog>(&data) {
         Ok(catalog) => {
-            println!(
-                "Catalog loaded successfully from {}",
-                catalog_path.display()
-            );
+            // println!(
+            //     "Catalog loaded successfully from {}",
+            //     catalog_path.display()
+            // );
             catalog
         }
         Err(err) => {

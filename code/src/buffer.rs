@@ -245,7 +245,7 @@ impl BufferManager {
     /// Update header page count
     fn update_header_page_count(&mut self, new_count: u32) {
        self.pages[0].data[0..4].copy_from_slice(&new_count.to_le_bytes());
-        println!("Updated in-memory header page count to {}.", new_count);
+        // println!("Updated in-memory header page count to {}.", new_count);
     }
 
     /// Flush header + pages to disk
@@ -263,10 +263,10 @@ impl BufferManager {
             write_page(&mut file, page, i as u32)?;
         }
 
-        println!(
-            "Flushed {} used pages (including header) of '{}' to disk.",
-            used_pages, table_name
-        );
+        // println!(
+        //     "Flushed {} used pages (including header) of '{}' to disk.",
+        //     used_pages, table_name
+        // );
         Ok(())
     }
 
@@ -278,10 +278,10 @@ impl BufferManager {
         table_name: &str,
         csv_path: &str,
     ) -> io::Result<()> {
-        println!(
-            "Starting buffered CSV load for '{}.{}'.",
-            db_name, table_name
-        );
+        // println!(
+        //     "Starting buffered CSV load for '{}.{}'.",
+        //     db_name, table_name
+        // );
 
         // Step 1️⃣: Load CSV → returns total pages used (including header)
         let used_pages = self.load_csv_into_pages(catalog, db_name, table_name, csv_path)?;
