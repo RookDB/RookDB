@@ -1,4 +1,4 @@
-use crate::catalog::Catalog;
+use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
 use crate::page::{PAGE_SIZE, Page, init_page, page_free_space, ITEM_ID_SIZE, PAGE_HEADER_SIZE};
 use crate::table::TABLE_HEADER_SIZE;
