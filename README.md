@@ -1,5 +1,13 @@
 # RookDB - A Lightweight Database Storage Engine
+<iframe
+  src="RookDB.pdf"
+  width="100%"
+  height="500px"
+  style="border: none;"
+></iframe>
+
 ![Architectue](assets/StorageManagerArchitecture.png)
+
 
 ### Key Highlights
 #### Layered Storage Architecture

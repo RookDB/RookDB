@@ -1,20 +1,19 @@
 {
   "databases": {
-    "users": {
+    "s": {
       "tables": {
-        "students": {
+        "stud": {
           "columns": [
             {
               "name": "id",
               "data_type": "INT"
-            },
-            {
-              "name": "name",
-              "data_type": "TEXT"
             }
           ]
         }
       }
+    },
+    "students": {
+      "tables": {}
     }
   }
 }

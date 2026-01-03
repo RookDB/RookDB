@@ -188,7 +188,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
         println!("Database directory already exists at {}", db_path.display());
     }
 
-    println!("Database '{}' created successfully", db_name);
+    // println!("Database '{}' created successfully", db_name);
     true
 }
 

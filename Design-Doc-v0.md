@@ -502,6 +502,9 @@ Data inserted in the file.
 * Without Buffer Manager loading csv file with 1 lakh tuples took 0.92 sec
 * With Buffer Manager loading csv file with 1 lakh tuples took 0.54 sec.
 
+* PAGE ID's - IN memory
+  - Global Page ID's counter: Like two Tables parallely getting page, then page Id's 
+  - For a particular table PAGE ID's 
 
 
 * [Code - Github](https://github.com/hemanth-sunkireddy/Storage-Manager)
