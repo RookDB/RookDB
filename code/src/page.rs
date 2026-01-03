@@ -1,6 +1,6 @@
 use std::fs::{File};
 use std::io::{self, Read, Seek, SeekFrom, BufRead, BufReader};
-use crate::catalog::Catalog;
+use crate::catalog::types::Catalog;
 
 pub const PAGE_SIZE: usize = 8192; // Page size - storing as 8 bytes and as usize only because most pointers(file pointers and otheres requires it to be 8 bytes)
 pub const PAGE_HEADER_SIZE: u32 = 8;
