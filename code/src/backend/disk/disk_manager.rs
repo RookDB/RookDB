@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Read, ErrorKind, Error, Write};
 
-use crate::page::{Page, PAGE_SIZE, init_page, page_count};
-// use crate::table::{TABLE_HEADER_SIZE};
+use crate::page::{Page, PAGE_SIZE, init_page};
+use crate::table::{page_count};
 
 // Create Page 
 pub fn create_page(file: &mut File) -> io::Result<u32> {
