@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use storage_manager::buffer::BufferManager;
+use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{init_catalog, load_catalog};
 
 use crate::frontend::{

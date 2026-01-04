@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use storage_manager::buffer::BufferManager;
+use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{Catalog, Column, create_table, show_tables};
 
 pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
