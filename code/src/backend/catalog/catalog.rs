@@ -12,7 +12,7 @@ pub const DATABASE_DIR: &str = "database/base"; // Root directory for all databa
 pub const TABLE_DIR_TEMPLATE: &str = "database/base/{database}"; // Directory for specific database
 pub const TABLE_FILE_TEMPLATE: &str = "database/base/{database}/{table}.dat"; // File path for specific table
 
-use crate::table::init_table;
+use crate::heap::init_table;
 
 
 
