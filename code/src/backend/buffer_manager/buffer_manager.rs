@@ -6,7 +6,7 @@ use crate::table::TABLE_HEADER_SIZE;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 
-pub const EXTENT_SIZE: usize = 64;   // 16 data pages per extent
+pub const EXTENT_SIZE: usize = 1;   // 16 data pages per extent
 
 pub struct BufferManager {
     pub pages: Vec<Page>, // In-memory pages (header + data)

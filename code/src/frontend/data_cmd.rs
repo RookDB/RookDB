@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::fs::OpenOptions;
 
 use storage_manager::catalog::load_catalog;
-use storage_manager::buffer::BufferManager;
+use storage_manager::buffer_manager::BufferManager;
 use storage_manager::table::page_count;
 use storage_manager::executor::show_tuples;
 
