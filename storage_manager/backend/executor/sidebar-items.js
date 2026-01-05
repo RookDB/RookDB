@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["load_csv","seq_scan"]};

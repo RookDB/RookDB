@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_page","read_page","write_page"]};

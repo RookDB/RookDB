@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["print_table_page_count"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["buffer_manager","catalog","disk","executor","heap","layout","page","statistics","table"]};

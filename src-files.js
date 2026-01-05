@@ -1,0 +1,2 @@
+createSrcSidebar('[["storage_manager",["",[["backend",[["buffer_manager",[],["buffer_manager.rs","mod.rs"]],["catalog",[],["catalog.rs","mod.rs","types.rs"]],["disk",[],["disk_manager.rs","mod.rs"]],["executor",[],["load_csv.rs","mod.rs","seq_scan.rs"]],["heap",[],["mod.rs"]],["page",[],["mod.rs"]],["statistics",[],["mod.rs"]],["table",[],["mod.rs","table_file.rs"]]],["layout.rs","mod.rs"]]],["lib.rs"]]]]');
+//{"start":19,"fragment_lengths":[388]}

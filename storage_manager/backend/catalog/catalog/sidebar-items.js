@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_database","create_table","init_catalog","load_catalog","save_catalog","show_databases","show_tables"]};

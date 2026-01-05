@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["storage_manager",[["impl&lt;'de&gt; <a class=\"trait\" href=\"https://docs.rs/serde_core/1.0.228/serde_core/de/trait.Deserialize.html\" title=\"trait serde_core::de::Deserialize\">Deserialize</a>&lt;'de&gt; for <a class=\"struct\" href=\"storage_manager/backend/catalog/types/struct.Catalog.html\" title=\"struct storage_manager::backend::catalog::types::Catalog\">Catalog</a>"],["impl&lt;'de&gt; <a class=\"trait\" href=\"https://docs.rs/serde_core/1.0.228/serde_core/de/trait.Deserialize.html\" title=\"trait serde_core::de::Deserialize\">Deserialize</a>&lt;'de&gt; for <a class=\"struct\" href=\"storage_manager/backend/catalog/types/struct.Column.html\" title=\"struct storage_manager::backend::catalog::types::Column\">Column</a>"],["impl&lt;'de&gt; <a class=\"trait\" href=\"https://docs.rs/serde_core/1.0.228/serde_core/de/trait.Deserialize.html\" title=\"trait serde_core::de::Deserialize\">Deserialize</a>&lt;'de&gt; for <a class=\"struct\" href=\"storage_manager/backend/catalog/types/struct.Database.html\" title=\"struct storage_manager::backend::catalog::types::Database\">Database</a>"],["impl&lt;'de&gt; <a class=\"trait\" href=\"https://docs.rs/serde_core/1.0.228/serde_core/de/trait.Deserialize.html\" title=\"trait serde_core::de::Deserialize\">Deserialize</a>&lt;'de&gt; for <a class=\"struct\" href=\"storage_manager/backend/catalog/types/struct.Table.html\" title=\"struct storage_manager::backend::catalog::types::Table\">Table</a>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1459]}
