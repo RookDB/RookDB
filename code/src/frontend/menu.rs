@@ -1,25 +1,37 @@
+//! Handles the interactive command-line menu and routes user input
+//! to the appropriate operations. 
+
 use std::io::{self, Write};
 
+// Core storage manager components
 use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{init_catalog, load_catalog};
 
+// Frontend command handlers
 use crate::frontend::{
     database_cmd,
     table_cmd,
     data_cmd,
 };
 
+/// Runs the main interactive menu loop
 pub fn run() -> io::Result<()> {
     println!("--------------------------------------");
     println!("Welcome to RookDB");
     println!("--------------------------------------\n");
 
+    // Ensure catalog file exists
     println!("Initializing Catalog File...\n");
     init_catalog();
 
+    // Load catalog metadata into memory
     println!("Loading Catalog...\n");
     let mut catalog = load_catalog();
+
+    // Initialize buffer manager
     let mut buffer_manager = BufferManager::new();
+
+    // Tracks the currently selected database
     let mut current_db: Option<String> = None;
 
     loop {
@@ -32,9 +44,11 @@ pub fn run() -> io::Result<()> {
         println!("5. Create Table");
         println!("6. Load CSV");
         println!("7. Show Tuples");
-        println!("8. Exit");
+        println!("8. Show Table Statistics");
+        println!("9. Exit");
         println!("=============================");
 
+        // Read user input
         print!("Enter your choice: ");
         io::stdout().flush()?;
 
@@ -42,6 +56,7 @@ pub fn run() -> io::Result<()> {
         io::stdin().read_line(&mut choice)?;
         let choice = choice.trim();
 
+        // Dispatch command based on user selection
         match choice {
             "1" => database_cmd::show_databases_cmd(&catalog),
             "2" => database_cmd::create_database_cmd(&mut catalog)?,
@@ -57,7 +72,8 @@ pub fn run() -> io::Result<()> {
                 &current_db,
             )?,
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
-            "8" => {
+            "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
+            "9" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }
