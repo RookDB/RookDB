@@ -1,10 +1,9 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
-use crate::page::{PAGE_SIZE, Page, init_page, page_free_space, ITEM_ID_SIZE, PAGE_HEADER_SIZE};
-use crate::table::TABLE_HEADER_SIZE;
+use crate::page::{PAGE_SIZE, Page, init_page, page_free_space, ITEM_ID_SIZE};
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 
 pub struct BufferManager {
     pub pages: Vec<Page>, // In-memory pages (header + data)

@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self};
 
 use crate::catalog::types::Catalog;
 use crate::disk::read_page;
@@ -26,10 +26,7 @@ pub fn show_tuples(
     let columns = &table.columns;
 
     // 2. Read total number of pages
-    file.seek(SeekFrom::Start(0))?;
-    let mut buf = [0u8; 4];
-    file.read_exact(&mut buf)?;
-    let mut total_pages = u32::from_le_bytes(buf);
+     let mut total_pages =  page_count(file)?; // total pages currently in file
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
