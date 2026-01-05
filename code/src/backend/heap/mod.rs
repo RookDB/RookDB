@@ -10,7 +10,7 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
     // Move cursor to the beginning of the file
     file.seek(SeekFrom::Start(0))?;
 
-    // Allocate 8192 (TABLE_HEADER_SIZE) + 8192 (PAGE_SIZE) bytes = 16KB
+    // Allocate 8192 bytes
     let mut zero_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
 
     //  Write "1" into the first 4 bytes (little-endian u32)
@@ -19,8 +19,6 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
 
     // Write the full buffer (header) to the file
     file.write_all(&zero_buf)?;
-
-    // Optionally, flush to ensure write is committed
     file.flush()?;
     file.sync_all()?;
 
