@@ -6,18 +6,15 @@ use crate::table::TABLE_HEADER_SIZE;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 
-pub const EXTENT_SIZE: usize = 1;   // 16 data pages per extent
-
 pub struct BufferManager {
     pub pages: Vec<Page>, // In-memory pages (header + data)
 }
 
 impl BufferManager {
     pub fn new() -> Self {
-        // Start with ONLY header page + one extent? No — empty.
+        // Start with ONLY header page
         let mut pages = Vec::new();
 
-        // Create header page
         let mut header = Page::new();
         init_page(&mut header);
         pages.push(header);
@@ -27,23 +24,22 @@ impl BufferManager {
         Self { pages }
     }
 
-    /// Add a full extent (16 initialized data pages) AFTER header page.
-    pub fn allocate_extent(&mut self) {
-        // println!("Allocating new EXTENT of {} pages...", EXTENT_SIZE);
-
-        for _ in 0..EXTENT_SIZE {
-            let mut page = Page::new();
-            init_page(&mut page);
-            self.pages.push(page); // push AFTER header
-        }
+    /// Allocate ONE new data page
+    pub fn allocate_page(&mut self) {
+        let mut page = Page::new();
+        init_page(&mut page);
+        self.pages.push(page);
     }
 
-    /// Loads table from disk into buffer
-    pub fn load_table_on_create(&mut self, db_name: &str, table_name: &str) -> io::Result<()> {
+    /// Loads table from disk into buffer (opens an existing table)
+    pub fn load_table_from_disk(
+        &mut self,
+        db_name: &str,
+        table_name: &str,
+    ) -> io::Result<()> {
         let table_path = format!("database/base/{}/{}.dat", db_name, table_name);
         let mut file = File::open(&table_path)?;
 
-        // Get file size and total pages
         let metadata = file.metadata()?;
         let file_size = metadata.len();
         let total_pages = (file_size as usize) / PAGE_SIZE;
@@ -53,6 +49,7 @@ impl BufferManager {
             table_name, file_size, total_pages
         );
 
+        // Reset in-memory buffer
         self.pages.clear();
 
         // Read header (page 0)
@@ -76,7 +73,6 @@ impl BufferManager {
             }
         }
 
-        // Ensure buffer can grow when inserting
         println!(
             "Loaded {} pages (1 header + {} data).",
             self.pages.len(),
@@ -86,7 +82,7 @@ impl BufferManager {
         Ok(())
     }
 
-    /// Load CSV into memory using extent-based allocation
+    /// Load CSV into memory using page-based allocation
     pub fn load_csv_into_pages(
         &mut self,
         catalog: &Catalog,
@@ -114,14 +110,13 @@ impl BufferManager {
         if let Some(Ok(_)) = lines.next() {} // skip header
 
         let mut inserted_rows = 0usize;
-        let mut current_page_index = 1; // DATA pages start at index 1 (page 0 is header)
+        let mut current_page_index = 1; // DATA pages start at index 1
 
-        // Ensure first extent exists
+        // Ensure first data page exists
         if self.pages.len() == 1 {
-            self.allocate_extent(); // pages[1..17]
+            self.allocate_page();
         }
 
-        // --- iterate CSV ---
         for (i, line) in lines.enumerate() {
             let row = line?;
             if row.trim().is_empty() {
@@ -139,7 +134,7 @@ impl BufferManager {
                 continue;
             }
 
-            // --- serialize row ---
+            // Serialize tuple
             let mut tuple_bytes: Vec<u8> = Vec::new();
             for (val, col) in values.iter().zip(columns.iter()) {
                 match col.data_type.as_str() {
@@ -163,41 +158,34 @@ impl BufferManager {
             let tuple_len = tuple_bytes.len() as u32;
             let required = tuple_len + ITEM_ID_SIZE;
 
-            // -------------------------
-            // INSERT WITH EXTENT LOGIC
-            // -------------------------
             loop {
                 if current_page_index >= self.pages.len() {
-                    self.allocate_extent();
+                    self.allocate_page();
                 }
 
                 let page = &mut self.pages[current_page_index];
                 let free = page_free_space(page)?;
 
                 if free < required {
-                    // Move to next page
                     current_page_index += 1;
-
-                    // If we just crossed an extent boundary, allocate next extent
-                    if (current_page_index - 1) % EXTENT_SIZE == 0 {
-                        self.allocate_extent();
-                    }
-
                     continue;
                 }
 
-                // ---- Insert the tuple ----
-                let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-                let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+                let mut lower =
+                    u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+                let mut upper =
+                    u32::from_le_bytes(page.data[4..8].try_into().unwrap());
 
                 let start = upper - tuple_len;
 
-                page.data[start as usize..upper as usize].copy_from_slice(&tuple_bytes);
+                page.data[start as usize..upper as usize]
+                    .copy_from_slice(&tuple_bytes);
 
                 let item_id_pos = lower as usize;
-                page.data[item_id_pos..item_id_pos + 4].copy_from_slice(&start.to_le_bytes());
+                page.data[item_id_pos..item_id_pos + 4]
+                    .copy_from_slice(&start.to_le_bytes());
                 page.data[item_id_pos + 4..item_id_pos + 8]
-                    .copy_from_slice(&(tuple_len.to_le_bytes()));
+                    .copy_from_slice(&tuple_len.to_le_bytes());
 
                 lower += ITEM_ID_SIZE;
                 upper = start;
@@ -210,23 +198,19 @@ impl BufferManager {
             }
         }
 
-        // number of used pages
         let used_pages = self.pages.len();
-
-        // update header's page count
-        self.pages[0].data[0..4].copy_from_slice(&(used_pages as u32).to_le_bytes());
+        self.pages[0].data[0..4]
+            .copy_from_slice(&(used_pages as u32).to_le_bytes());
 
         println!(
-            "Loaded {} rows into {} data pages ({} extents).",
+            "Loaded {} rows into {} data pages.",
             inserted_rows,
-            used_pages - 1,
-            (used_pages - 1 + EXTENT_SIZE - 1) / EXTENT_SIZE
+            used_pages - 1
         );
 
         Ok(used_pages)
     }
 
-    /// Write buffer to disk
     pub fn flush_to_disk(
         &mut self,
         db_name: &str,
@@ -243,7 +227,6 @@ impl BufferManager {
         Ok(())
     }
 
-    /// Full pipeline: load CSV into buffer → flush to disk
     pub fn load_csv_to_buffer(
         &mut self,
         catalog: &Catalog,

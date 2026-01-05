@@ -7,3 +7,5 @@ pub use backend::heap;
 pub use backend::table;
 pub use backend::executor;
 pub use backend::buffer_manager;
+pub use backend::statistics;
+pub use backend::layout;

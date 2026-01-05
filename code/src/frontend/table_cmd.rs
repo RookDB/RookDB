@@ -1,8 +1,13 @@
+//! Handles table-related user commands such as listing tables,
+//! creating tables, and displaying table statistics.
+
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{Catalog, Column, create_table, show_tables};
+use storage_manager::statistics::print_table_page_count;
 
+/// Displays tables in the currently selected database
 pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
     let db = match current_db {
         Some(db) => db,
@@ -61,7 +66,30 @@ pub fn create_table_cmd(
     }
 
     create_table(catalog, &db, &table_name, columns);
-    buffer_manager.load_table_on_create(&db, &table_name)?;
+    buffer_manager.load_table_from_disk(&db, &table_name)?;
+
+    Ok(())
+}
+
+pub fn show_table_statistics_cmd(
+    current_db: &Option<String>,
+) -> io::Result<()> {
+    let db_name = match current_db {
+        Some(db) => db,
+        None => {
+            println!("No database selected.");
+            return Ok(());
+        }
+    };
+
+    print!("Enter table name: ");
+    io::stdout().flush()?;
+
+    let mut table_name = String::new();
+    io::stdin().read_line(&mut table_name)?;
+    let table_name = table_name.trim();
+
+    print_table_page_count(db_name, table_name)?;
 
     Ok(())
 }
