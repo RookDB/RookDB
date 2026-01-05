@@ -2,7 +2,6 @@
 //! Handles persistence of catalog state and creation of physical
 //! database and table structures on disk.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::path::Path;

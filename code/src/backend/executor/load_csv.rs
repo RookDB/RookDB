@@ -34,7 +34,7 @@ pub fn load_csv(
     let mut lines = reader.lines();
 
     // Skip header line
-    if let Some(Ok(header)) = lines.next() {
+    if let Some(Ok(_header)) = lines.next() {
         // println!("Header: {}", header);
     }
 
@@ -95,6 +95,6 @@ pub fn load_csv(
             inserted += 1;
         }
     }
-
+    println!("Total Number of rows inserted: {}", inserted);
     Ok(())
 }
