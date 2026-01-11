@@ -1,7 +1,8 @@
 use std::fs::OpenOptions;
-use storage_manager::page::{page_free_space, page_count, Page, PAGE_SIZE, PAGE_HEADER_SIZE};
+use storage_manager::page::{page_free_space, Page, PAGE_SIZE, PAGE_HEADER_SIZE};
 use storage_manager::disk::{create_page, read_page};
-use storage_manager::table::{init_table};
+use storage_manager::table::{page_count};
+use storage_manager::heap::init_table;
 
 #[test]
 fn test_page_free_space() {

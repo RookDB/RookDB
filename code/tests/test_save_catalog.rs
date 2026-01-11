@@ -2,8 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::{
-    init_catalog, load_catalog, save_catalog, CATALOG_FILE, Database, Table, Column,
+    init_catalog, load_catalog, save_catalog, Database, Table, Column,
 };
+
+use storage_manager::layout::CATALOG_FILE;
 
 #[test]
 fn test_save_catalog() {

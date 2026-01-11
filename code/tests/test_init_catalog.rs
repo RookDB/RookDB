@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use storage_manager::catalog::{init_catalog, CATALOG_FILE};
+use storage_manager::catalog::{init_catalog};
+
+use storage_manager::layout::CATALOG_FILE;
 
 #[test]
 fn test_init_catalog() {
@@ -21,10 +23,10 @@ fn test_init_catalog() {
     let parsed: serde_json::Value =
         serde_json::from_str(&content).expect("catalog.json contains invalid JSON");
 
-    // Step 5: Verify structure is { "tables": {} }
+    // Step 5: Verify structure is { "databases": {} }
     assert!(
-        parsed.get("tables").is_some(),
-        "catalog.json does not contain 'tables' field"
+        parsed.get("databases").is_some(),
+        "catalog.json does not contain 'databases' field"
     );
 
     // Step 6: Clean up (optional)
