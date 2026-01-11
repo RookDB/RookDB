@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use storage_manager::catalog::{init_catalog, load_catalog, CATALOG_FILE, Catalog};
+use storage_manager::catalog::{init_catalog, load_catalog, Catalog};
+
+use storage_manager::layout::CATALOG_FILE;
 
 #[test]
 fn test_load_catalog() {

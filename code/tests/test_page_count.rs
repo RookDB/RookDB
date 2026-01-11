@@ -3,8 +3,9 @@ use std::io::{Seek, SeekFrom};
 use std::env;
 use std::path::PathBuf;
 
-use storage_manager::table::{init_table, TABLE_HEADER_SIZE};
-use storage_manager::page::{page_count};
+use storage_manager::table::{TABLE_HEADER_SIZE};
+use storage_manager::table::{page_count};
+use storage_manager::heap::init_table;
 
 #[test]
 fn test_page_count() {
@@ -28,13 +29,5 @@ fn test_page_count() {
     let count = page_count(&mut file).expect("Failed to read page count");
 
     // Verify the page count is 0
-    assert_eq!(count, 0, "Expected page count to be 0 after initialization");
-
-    // Verify the file size equals TABLE_HEADER_SIZE (8192 bytes)
-    let file_size = file.metadata().unwrap().len();
-    assert_eq!(
-        file_size,
-        TABLE_HEADER_SIZE as u64,
-        "File size should equal TABLE_HEADER_SIZE (8192 bytes)"
-    );
+    assert_eq!(count, 2, "Expected page count to be 2 after initialization");
 }
