@@ -191,7 +191,7 @@ impl BufferManager {
 
                 page.data[0..4].copy_from_slice(&lower.to_le_bytes());
                 page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-
+                println!("Lower: {}", lower);
                 inserted_rows += 1;
                 break;
             }
