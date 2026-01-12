@@ -4,92 +4,85 @@ use std::io::{self, Seek, SeekFrom, Read, ErrorKind, Error, Write};
 use crate::page::{Page, PAGE_SIZE, init_page};
 use crate::table::{page_count};
 
-// Create Page 
+// Create a new page on disk and return its page number
 pub fn create_page(file: &mut File) -> io::Result<u32> {
-    // Create an empty page (all zeros) - In Memory
+    // Create a zeroed page buffer
     let mut page = Page::new();
-    // println!("Initializing a In Memory Page with Page Headers...");
-    // Initialise Page Header
+
+    // Initialize page header (lower & upper pointers)
     init_page(&mut page);
 
-    // Print the first 8 bytes (page header: lower + upper offsets)
-    // println!("Created Page. Page Data: {:?}", &page.data[0..8]);
+    // Read current number of pages from table header
+    let mut page_count = page_count(file)?;
 
-    // --- Step 1: Read existing page_count from File Header (first 4 bytes)
-    let mut page_count =  page_count(file)?; // total pages currently in file
-
-    // println!("Page count: {}", page_count);
-    
-    // --- Step 2: The new page number = current page_count
+    // New page ID is the current page count
     let page_num = page_count;
 
-    // --- Step 3: Move to end of file and append new page
+    // Append page at the end of the file
     file.seek(SeekFrom::End(0))?;
     file.write_all(&page.data)?;
 
-    // --- Step 4: Update page_count in file header
+    // Update page count in table header (page 0)
     page_count += 1;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&page_count.to_le_bytes())?;
 
-    // println!(
-    //     "Created new Page with Id: {} (total pages = {})",
-    //     page_num, page_count
-    // );
-
     Ok(page_num)
 }
 
-// Read page from disk
-pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {   // Page Number or Page Id - as offset. (For Contiguous - PageNum * offset is ok but pageId requires more)
-    
-    // calculating the offset
-    let offset = (page_num) * PAGE_SIZE as u32;
+// Read a page from disk into the provided page buffer
+pub fn read_page(
+    file: &mut File,
+    page: &mut Page,
+    page_num: u32,
+) -> io::Result<()> {
+    // Calculate byte offset for the page
+    let offset = page_num * PAGE_SIZE as u32;
 
-
-    // get file size
+    // Get total file size
     let file_size = file.metadata()?.len();
-    // println!("File Size: {}", file_size);
-    // println!("OFFSET: {}", offset);
 
+    // Validate page existence
     if offset > file_size as u32 {
-        // Return an error if the page doesn't exist
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
             format!("Page {} does not exist in the file", page_num),
         ));
     }
 
-    // move the file cursor
+    // Seek to page offset
     file.seek(SeekFrom::Start(offset as u64))?;
 
-    // read the page data
+    // Read full page data
     file.read_exact(&mut page.data)?;
-    // println!("READING PAGE OK");
+
     Ok(())
 }
 
-// Write Page into Disk
-pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {   // Page Number or Page Id - as offset. (For Contiguous - PageNum * offset is ok but pageId requires more)
-    // calculating the offset
-    let offset = (page_num) as u64 * PAGE_SIZE as u64;  // as is required because not compiling - pageNum is 4 byte but offset requries 8 bytes.
+// Write a page buffer to disk at the given page number
+pub fn write_page(
+    file: &mut File,
+    page: &mut Page,
+    page_num: u32,
+) -> io::Result<()> {
+    // Calculate byte offset for the page
+    let offset = page_num as u64 * PAGE_SIZE as u64;
 
-    // get file size
+    // Get total file size
     let file_size = file.metadata()?.len();
-    // println!("File Size: {}", file_size);
 
+    // Validate page existence
     if offset > file_size {
-        // Return an error if the page doesn't exist
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
             format!("Page {} does not exist in the file", page_num),
         ));
     }
 
-    // move the file cursor
+    // Seek to page offset
     file.seek(SeekFrom::Start(offset))?;
 
-    // Write the page data into the file at that offset
+    // Write page data to disk
     file.write_all(&page.data)?;
 
     Ok(())
