@@ -7,7 +7,7 @@ Please follow the guidelines below when contributing to this repository.
 2. Create a new branch using the following naming convention:  
    `<rollnumber>-<your-name>`
 
-3. Commit your changes with clear and meaningful commit messages.
+3. Commit your changes with meaningful commit messages.
 
 4. Push the branch to your forked repository.
 
