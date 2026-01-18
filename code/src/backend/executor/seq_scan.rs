@@ -73,6 +73,13 @@ pub fn show_tuples(
                             cursor += 10;
                         }
                     }
+                    "BOOL" | "BOOLEAN" => {
+                        if cursor + 1 <= tuple_data.len() {
+                            let val = tuple_data[cursor] != 0;
+                            print!("{}={} ", col.name, if val { "true" } else { "false" });
+                            cursor += 1;
+                        }
+                    }
                     _ => {
                         print!("{}=<unsupported> ", col.name);
                     }

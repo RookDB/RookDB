@@ -151,6 +151,14 @@ impl BufferManager {
                         }
                         tuple_bytes.extend_from_slice(&t);
                     }
+                    "BOOL" | "BOOLEAN" => {
+                        let b = match val.to_lowercase().as_str() {
+                            "true" | "yes" | "on" | "1" => true,
+                            "false" | "no" | "off" | "0" => false,
+                            _ => false,
+                        };
+                        tuple_bytes.push(b as u8);
+                    }
                     _ => continue,
                 }
             }

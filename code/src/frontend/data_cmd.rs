@@ -31,6 +31,7 @@ pub fn load_csv_cmd(
     let csv_path = csv_path.trim();
 
     let catalog = load_catalog();
+    buffer_manager.load_table_from_disk(&db, &table)?;
     buffer_manager.load_csv_to_buffer(&catalog, &db, table, csv_path)?;
 
     let path = format!("database/base/{}/{}.dat", db, table);
