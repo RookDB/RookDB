@@ -109,12 +109,13 @@ impl BufferManager {
         if let Some(Ok(_)) = lines.next() {} // skip header
 
         let mut inserted_rows = 0usize;
-        let mut current_page_index = self.pages.len() - 1;// DATA pages start at index 1
 
         // Ensure first data page exists
         if self.pages.len() == 1 {
             self.allocate_page();
         }
+
+        let mut current_page_index = self.pages.len() - 1;// DATA pages start at index 1
 
         for (i, line) in lines.enumerate() {
             let row = line?;
