@@ -1,8 +1,8 @@
 use std::fs::File;
-use std::io::{self, Seek, SeekFrom, Read, ErrorKind, Error, Write};
+use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 
-use crate::page::{Page, PAGE_SIZE, init_page};
-use crate::table::{page_count};
+use crate::page::{PAGE_SIZE, Page, init_page};
+use crate::table::page_count;
 
 // Create a new page on disk and return its page number
 pub fn create_page(file: &mut File) -> io::Result<u32> {
@@ -31,11 +31,7 @@ pub fn create_page(file: &mut File) -> io::Result<u32> {
 }
 
 // Read a page from disk into the provided page buffer
-pub fn read_page(
-    file: &mut File,
-    page: &mut Page,
-    page_num: u32,
-) -> io::Result<()> {
+pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {
     // Calculate byte offset for the page
     let offset = page_num * PAGE_SIZE as u32;
 
@@ -60,11 +56,7 @@ pub fn read_page(
 }
 
 // Write a page buffer to disk at the given page number
-pub fn write_page(
-    file: &mut File,
-    page: &mut Page,
-    page_num: u32,
-) -> io::Result<()> {
+pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {
     // Calculate byte offset for the page
     let offset = page_num as u64 * PAGE_SIZE as u64;
 

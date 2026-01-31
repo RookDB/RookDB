@@ -1,9 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use storage_manager::catalog::{
-    init_catalog, load_catalog, save_catalog, Database, Table, Column,
-};
+use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
 
 use storage_manager::layout::CATALOG_FILE;
 
@@ -20,15 +18,29 @@ fn test_save_catalog() {
     // Step 3: Ensure a test database exists
     let db_name = "test_db";
     if !catalog.databases.contains_key(db_name) {
-        catalog.databases.insert(db_name.to_string(), Database { tables: Default::default() });
+        catalog.databases.insert(
+            db_name.to_string(),
+            Database {
+                tables: Default::default(),
+            },
+        );
     }
 
     // Step 4: Add a new test table entry inside the test database
     let test_table = Table {
         columns: vec![
-            Column { name: "id".to_string(), data_type: "INT".to_string() },
-            Column { name: "name".to_string(), data_type: "TEXT".to_string() },
-            Column { name: "email".to_string(), data_type: "TEXT".to_string() },
+            Column {
+                name: "id".to_string(),
+                data_type: "INT".to_string(),
+            },
+            Column {
+                name: "name".to_string(),
+                data_type: "TEXT".to_string(),
+            },
+            Column {
+                name: "email".to_string(),
+                data_type: "TEXT".to_string(),
+            },
         ],
     };
 

@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
 use storage_manager::disk::write_page;
-use storage_manager::page::{Page, PAGE_SIZE};
+use storage_manager::page::{PAGE_SIZE, Page};
 
 #[test]
 fn test_write_page() {

@@ -1,5 +1,5 @@
 //! Handles the interactive command-line menu and routes user input
-//! to the appropriate operations. 
+//! to the appropriate operations.
 
 use std::io::{self, Write};
 
@@ -8,11 +8,7 @@ use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{init_catalog, load_catalog};
 
 // Frontend command handlers
-use crate::frontend::{
-    database_cmd,
-    table_cmd,
-    data_cmd,
-};
+use crate::frontend::{data_cmd, database_cmd, table_cmd};
 
 /// Runs the main interactive menu loop
 pub fn run() -> io::Result<()> {
@@ -62,15 +58,8 @@ pub fn run() -> io::Result<()> {
             "2" => database_cmd::create_database_cmd(&mut catalog)?,
             "3" => database_cmd::select_database_cmd(&catalog, &mut current_db)?,
             "4" => table_cmd::show_tables_cmd(&catalog, &current_db),
-            "5" => table_cmd::create_table_cmd(
-                &mut catalog,
-                &mut buffer_manager,
-                &current_db,
-            )?,
-            "6" => data_cmd::load_csv_cmd(
-                &mut buffer_manager,
-                &current_db,
-            )?,
+            "5" => table_cmd::create_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
+            "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
             "9" => {

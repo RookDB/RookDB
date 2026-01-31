@@ -1,9 +1,9 @@
 use std::fs::File;
-use std::io::{self, SeekFrom, Seek, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 
-use crate::page::{Page, page_free_space, ITEM_ID_SIZE};
 use crate::disk::{create_page, read_page, write_page};
-use crate::table::{page_count, TABLE_HEADER_SIZE};
+use crate::page::{ITEM_ID_SIZE, Page, page_free_space};
+use crate::table::{TABLE_HEADER_SIZE, page_count};
 
 /// Initialize a new table file
 pub fn init_table(file: &mut File) -> io::Result<()> {
@@ -26,7 +26,6 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
 
     Ok(())
 }
-
 
 pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     let mut total_pages = page_count(file)?;

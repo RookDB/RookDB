@@ -1,8 +1,8 @@
 use std::fs::OpenOptions;
-use storage_manager::page::{page_free_space, Page, PAGE_SIZE, PAGE_HEADER_SIZE};
 use storage_manager::disk::{create_page, read_page};
-use storage_manager::table::{page_count};
 use storage_manager::heap::init_table;
+use storage_manager::page::{PAGE_HEADER_SIZE, PAGE_SIZE, Page, page_free_space};
+use storage_manager::table::page_count;
 
 #[test]
 fn test_page_free_space() {
@@ -37,7 +37,9 @@ fn test_page_free_space() {
     println!("Total pages after creation: {}", total_pages);
 
     // --- Step 4: Read back the second (data) page from file
-    let mut page = Page { data: vec![0u8; PAGE_SIZE] };
+    let mut page = Page {
+        data: vec![0u8; PAGE_SIZE],
+    };
     read_page(&mut file, &mut page, data_page_num).expect("Failed to read created page");
 
     // --- Step 5: Compute free space using API
