@@ -12,7 +12,7 @@ pub fn show_databases_cmd(catalog: &Catalog) {
 /// Creates a new database based on user input
 pub fn create_database_cmd(catalog: &mut Catalog) -> io::Result<()> {
     let mut db_name = String::new();
-    
+
     // Prompt for database name
     print!("Enter new database name: ");
     io::stdout().flush()?;
@@ -31,11 +31,7 @@ pub fn create_database_cmd(catalog: &mut Catalog) -> io::Result<()> {
 }
 
 /// Selects an existing database and updates the current context
-pub fn select_database_cmd(
-    catalog: &Catalog,
-    current_db: &mut Option<String>,
-) -> io::Result<()> {
-
+pub fn select_database_cmd(catalog: &Catalog, current_db: &mut Option<String>) -> io::Result<()> {
     // Check if any databases exist
     if catalog.databases.is_empty() {
         println!("No databases found.");
@@ -53,7 +49,6 @@ pub fn select_database_cmd(
     print!("Enter database name: ");
     io::stdout().flush()?;
     io::stdin().read_line(&mut db_name)?;
-
 
     let db_name = db_name.trim().to_string();
     // Update selected database

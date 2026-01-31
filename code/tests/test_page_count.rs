@@ -1,11 +1,11 @@
+use std::env;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom};
-use std::env;
 use std::path::PathBuf;
 
-use storage_manager::table::{TABLE_HEADER_SIZE};
-use storage_manager::table::{page_count};
 use storage_manager::heap::init_table;
+use storage_manager::table::TABLE_HEADER_SIZE;
+use storage_manager::table::page_count;
 
 #[test]
 fn test_page_count() {

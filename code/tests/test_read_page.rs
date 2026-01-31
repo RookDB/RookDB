@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
-use std::io::{Write, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
 use storage_manager::disk::read_page;
-use storage_manager::page::{Page, PAGE_SIZE};
+use storage_manager::page::{PAGE_SIZE, Page};
 
 #[test]
 fn test_read_page() {
@@ -19,12 +19,16 @@ fn test_read_page() {
     let original_data = vec![0u8; PAGE_SIZE];
 
     // Write the single page data to the file
-    file.write_all(&original_data).expect("Failed to write to file");
+    file.write_all(&original_data)
+        .expect("Failed to write to file");
     file.flush().unwrap();
 
     // Verify file size equals PAGE_SIZE
     let file_size = file.metadata().unwrap().len();
-    assert_eq!(file_size, PAGE_SIZE as u64, "File size mismatch with PAGE_SIZE");
+    assert_eq!(
+        file_size, PAGE_SIZE as u64,
+        "File size mismatch with PAGE_SIZE"
+    );
 
     // Create a blank Page and read the first page (page_num = 0)
     let mut page = Page {

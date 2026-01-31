@@ -41,7 +41,6 @@ pub fn create_table_cmd(
     print!("\nEnter columns in the format:- column_name:data_type\n");
     print!("Press Enter on an empty line to finish\n");
 
-
     let mut columns = Vec::new();
     loop {
         let mut input = String::new();
@@ -71,9 +70,7 @@ pub fn create_table_cmd(
     Ok(())
 }
 
-pub fn show_table_statistics_cmd(
-    current_db: &Option<String>,
-) -> io::Result<()> {
+pub fn show_table_statistics_cmd(current_db: &Option<String>) -> io::Result<()> {
     let db_name = match current_db {
         Some(db) => db,
         None => {

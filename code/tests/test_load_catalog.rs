@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use storage_manager::catalog::{init_catalog, load_catalog, Catalog};
+use storage_manager::catalog::{Catalog, init_catalog, load_catalog};
 
 use storage_manager::layout::CATALOG_FILE;
 

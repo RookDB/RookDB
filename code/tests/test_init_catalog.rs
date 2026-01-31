@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use storage_manager::catalog::{init_catalog};
+use storage_manager::catalog::init_catalog;
 
 use storage_manager::layout::CATALOG_FILE;
 
@@ -16,7 +16,10 @@ fn test_init_catalog() {
     init_catalog();
 
     // Step 3: Verify the file now exists
-    assert!(Path::new(CATALOG_FILE).exists(), "catalog.json was not created");
+    assert!(
+        Path::new(CATALOG_FILE).exists(),
+        "catalog.json was not created"
+    );
 
     // Step 4: Read file content and check it’s valid JSON
     let content = fs::read_to_string(CATALOG_FILE).expect("Failed to read catalog.json");

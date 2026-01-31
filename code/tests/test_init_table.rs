@@ -1,9 +1,9 @@
-use std::fs::{remove_file, OpenOptions};
+use std::fs::{OpenOptions, remove_file};
 use std::io::{Read, Seek, SeekFrom};
 
 use storage_manager::heap::init_table;
-use storage_manager::table::TABLE_HEADER_SIZE;
 use storage_manager::page::PAGE_SIZE;
+use storage_manager::table::TABLE_HEADER_SIZE;
 
 const TEST_FILE: &str = "test_table_file.bin";
 
@@ -22,12 +22,10 @@ fn test_init_table() {
         .expect("Failed to create test file");
 
     // Initialize table
-    init_table(&mut file)
-        .expect("init_table failed");
+    init_table(&mut file).expect("init_table failed");
 
     // Rewind to start
-    file.seek(SeekFrom::Start(0))
-        .expect("Seek failed");
+    file.seek(SeekFrom::Start(0)).expect("Seek failed");
 
     // ---- Read and verify table header ----
     let mut header = vec![0u8; TABLE_HEADER_SIZE as usize];
@@ -36,11 +34,7 @@ fn test_init_table() {
 
     // First 4 bytes = number of data pages
     let page_count = u32::from_le_bytes(header[0..4].try_into().unwrap());
-    assert_eq!(
-        page_count,
-        2,
-        "Table should start with exactly 1 data page"
-    );
+    assert_eq!(page_count, 2, "Table should start with exactly 1 data page");
 
     // Remaining header bytes should be zero
     assert!(
@@ -49,11 +43,9 @@ fn test_init_table() {
     );
 
     // ---- Verify file size ----
-    let metadata = file.metadata()
-        .expect("Failed to get file metadata");
+    let metadata = file.metadata().expect("Failed to get file metadata");
 
-    let expected_size =
-        TABLE_HEADER_SIZE as u64 + PAGE_SIZE as u64;
+    let expected_size = TABLE_HEADER_SIZE as u64 + PAGE_SIZE as u64;
 
     assert_eq!(
         metadata.len(),

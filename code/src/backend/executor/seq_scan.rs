@@ -3,7 +3,7 @@ use std::io::{self};
 
 use crate::catalog::types::Catalog;
 use crate::disk::read_page;
-use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
 
 pub fn show_tuples(
@@ -13,20 +13,24 @@ pub fn show_tuples(
     file: &mut File,
 ) -> io::Result<()> {
     // 1. Get schema from catalog
-    let db = catalog
-        .databases
-        .get(db_name)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name)))?;
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Database '{}' not found", db_name),
+        )
+    })?;
 
-    let table = db
-        .tables
-        .get(table_name)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name)))?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Table '{}' not found", table_name),
+        )
+    })?;
 
     let columns = &table.columns;
 
     // 2. Read total number of pages
-     let mut total_pages =  page_count(file)?; // total pages currently in file
+    let mut total_pages = page_count(file)?; // total pages currently in file
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
@@ -60,7 +64,9 @@ pub fn show_tuples(
                 match col.data_type.as_str() {
                     "INT" => {
                         if cursor + 4 <= tuple_data.len() {
-                            let val = i32::from_le_bytes(tuple_data[cursor..cursor + 4].try_into().unwrap());
+                            let val = i32::from_le_bytes(
+                                tuple_data[cursor..cursor + 4].try_into().unwrap(),
+                            );
                             print!("{}={} ", col.name, val);
                             cursor += 4;
                         }

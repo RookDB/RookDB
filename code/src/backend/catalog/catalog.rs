@@ -73,9 +73,7 @@ pub fn load_catalog() -> Catalog {
 
     // Deserialize JSON into Catalog struct
     match serde_json::from_str::<Catalog>(&data) {
-        Ok(catalog) => {
-            catalog
-        }
+        Ok(catalog) => catalog,
         Err(err) => {
             eprintln!("Failed to parse catalog JSON: {}", err);
             Catalog {
@@ -121,7 +119,7 @@ pub fn show_databases(catalog: &Catalog) {
 
 // Creates a new database entry in the catalog and its directory on disk.
 pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
-     // Validate database name
+    // Validate database name
     if db_name.is_empty() {
         println!("Database name cannot be empty");
         return false;
@@ -140,7 +138,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
         },
     );
 
-     // Persist updated catalog
+    // Persist updated catalog
     let json = match serde_json::to_string_pretty(&catalog) {
         Ok(j) => j,
         Err(e) => {
@@ -172,7 +170,6 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
     true
 }
 
-
 // Creates a new table, updates the catalog, and initializes its data file.
 pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, columns: Vec<Column>) {
     // Step 1: Validate database existence
@@ -199,7 +196,7 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     let new_table = Table { columns };
     database.tables.insert(table_name.to_string(), new_table);
 
-   // Persist catalog changes
+    // Persist catalog changes
     save_catalog(catalog);
 
     // Construct table file path

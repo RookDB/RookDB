@@ -13,19 +13,26 @@ pub fn load_csv(
     csv_path: &str,
 ) -> io::Result<()> {
     // --- 1. Fetch table schema from catalog ---
-    let db = catalog
-        .databases
-        .get(db_name)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name)))?;
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Database '{}' not found", db_name),
+        )
+    })?;
 
-    let table = db
-        .tables
-        .get(table_name)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name)))?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Table '{}' not found", table_name),
+        )
+    })?;
 
     let columns = &table.columns;
     if columns.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Table has no columns"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Table has no columns",
+        ));
     }
 
     // --- 2. Open and read the CSV file ---

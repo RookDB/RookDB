@@ -1,6 +1,6 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
-use crate::page::{PAGE_SIZE, Page, init_page, page_free_space, ITEM_ID_SIZE};
+use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
@@ -31,11 +31,7 @@ impl BufferManager {
     }
 
     /// Loads table from disk into buffer (opens an existing table)
-    pub fn load_table_from_disk(
-        &mut self,
-        db_name: &str,
-        table_name: &str,
-    ) -> io::Result<()> {
+    pub fn load_table_from_disk(&mut self, db_name: &str, table_name: &str) -> io::Result<()> {
         let table_path = format!("database/base/{}/{}.dat", db_name, table_name);
         let mut file = File::open(&table_path)?;
 
@@ -91,15 +87,24 @@ impl BufferManager {
     ) -> io::Result<usize> {
         // --- schema ---
         let db = catalog.databases.get(db_name).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Database '{}' not found", db_name),
+            )
         })?;
         let table = db.tables.get(table_name).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Table '{}' not found", table_name),
+            )
         })?;
         let columns = &table.columns;
 
         if columns.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Table has no columns"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Table has no columns",
+            ));
         }
 
         // --- read CSV ---
@@ -109,7 +114,7 @@ impl BufferManager {
         if let Some(Ok(_)) = lines.next() {} // skip header
 
         let mut inserted_rows = 0usize;
-        let mut current_page_index = self.pages.len() - 1;// DATA pages start at index 1
+        let mut current_page_index = self.pages.len() - 1; // DATA pages start at index 1
 
         // Ensure first data page exists
         if self.pages.len() == 1 {
@@ -170,19 +175,15 @@ impl BufferManager {
                     continue;
                 }
 
-                let mut lower =
-                    u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-                let mut upper =
-                    u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+                let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+                let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
 
                 let start = upper - tuple_len;
 
-                page.data[start as usize..upper as usize]
-                    .copy_from_slice(&tuple_bytes);
+                page.data[start as usize..upper as usize].copy_from_slice(&tuple_bytes);
 
                 let item_id_pos = lower as usize;
-                page.data[item_id_pos..item_id_pos + 4]
-                    .copy_from_slice(&start.to_le_bytes());
+                page.data[item_id_pos..item_id_pos + 4].copy_from_slice(&start.to_le_bytes());
                 page.data[item_id_pos + 4..item_id_pos + 8]
                     .copy_from_slice(&tuple_len.to_le_bytes());
 
@@ -198,8 +199,7 @@ impl BufferManager {
         }
 
         let used_pages = self.pages.len();
-        self.pages[0].data[0..4]
-            .copy_from_slice(&(used_pages as u32).to_le_bytes());
+        self.pages[0].data[0..4].copy_from_slice(&(used_pages as u32).to_le_bytes());
 
         println!(
             "Loaded {} rows into {} data pages.",
