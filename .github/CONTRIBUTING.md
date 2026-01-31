@@ -51,7 +51,7 @@ markdown-pdf Database-Doc.md -o Database-Doc.pdf
 
 #### Design Doc
 For `Design-Doc.md`, use Pandoc:
-```
+```bash
 pandoc -f markdown Design-Doc.md -o Design-Doc.pdf
 ```
 Pandoc is used here because markdown-pdf does not correctly render images while generating the PDF.
