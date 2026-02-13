@@ -1,6 +1,6 @@
-# RookDB – API Documentation
+# API Doc
 
-## Index of Existing APIs
+## Index of APIs
 0. Init Catalog  
 1. Load Catalog  
 2. Create Database  
@@ -24,7 +24,11 @@
 ### 0. **init_catalog** API
 
 **Description:**  
-Creates `catalog.json` if it doesn’t exist and initializes it with an empty catalog (`{"databases": {}}`).
+Creates `catalog.json` if it doesn’t exist and initializes it with an empty catalog 
+
+```json
+{"databases": {}}
+```
 
 **Function:**  
 ```rust
@@ -33,7 +37,7 @@ pub fn init_catalog()
 
 **Implementation:**
 1. Check if database/global/catalog.json exists.
-2. If not, create parent directories and an empty file with data **{"databases": {}}**.
+2. If not, create parent directories and an empty file with data **```json{"databases": {}}```**.
 ---
 ### 1. **load_catalog** API
 
@@ -69,7 +73,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> Result<(), Stora
 **Implementation:**
 1. Check if the database already exists; if not, insert a new empty entry into catalog.databases.
 2. Serialize the updated Catalog and write it to database/global/catalog.json.
-3. Create a new directory at database/base/{db_name} for the database’s physical storage.
+3. Create a new directory at `database/base/{db_name}` for the database’s physical storage.
 
 ### 2. **save_catalog** API
 
@@ -117,7 +121,7 @@ pub fn create_table(catalog: &mut Catalog, table_name: &str, columns: Vec<Column
 * If not, creates a new Table struct using the provided columns.
 * Inserts the table into the catalog.tables HashMap.
 * Calls save_catalog(catalog) to serialize and write the updated catalog to disk.
-* Creates a new data file for the table in {TABLE_DIR}/{table_name}.dat.
+* Creates a new data file for the table in `{TABLE_DIR}/{table_name}.dat`.
 * Initializes the table file header by writing TABLE_HEADER_SIZE bytes of zeros using init_table().
 ---
 
