@@ -1,5 +1,10 @@
 Please follow the guidelines below when contributing to this repository.
 
+## Branching Strategy
+* The main working branch is `develop` branch.
+* Submit all Pull Requests targeting `develop` branch.
+* `main` is reserved for stable releases and will be periodically updated by merging changes from the `develop` branch.
+
 ## Code Contribution
 
 1. Fork this repository to your GitHub account.
