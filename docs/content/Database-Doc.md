@@ -1,3 +1,8 @@
+---
+id: database-doc
+title: "Database Doc"
+---
+
 # Codebase Structure
 - The codebase is organized into two main directories: **frontend** and **backend**.
 - All data generated for databases, tables, and tuples is stored in the **database** directory, which is automatically created when the program is executed.
@@ -33,10 +38,10 @@ database/
 - **base/**  
   Contains one subdirectory per database.
 
-- **{database}/**  
+- **`{database}/`**  
   Represents a single database and holds all table files belonging to it.
 
-- **{table}.dat**  
+- **`{table}.dat`**  
   Physical file corresponding to a table, containing both table metadata and tuple data.
 
 
