@@ -1,41 +1,19 @@
-# Website
+# Documentation Website
 
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
+The project documentation website is built using [Docusaurus](https://docusaurus.io/).
 
-## Installation
+All documentation content is maintained inside the `content/` folder.  
+To update the documentation, modify the corresponding Markdown file in this folder. Any changes made there will be reflected in the documentation website after deployment.
 
-```bash
-yarn
-```
 
 ## Local Development
 
 ```bash
-yarn start
+npm install
 ```
 
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
-
-## Build
+## Start the development server
 
 ```bash
-yarn build
+npm start
 ```
-
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
-
-## Deployment
-
-Using SSH:
-
-```bash
-USE_SSH=true yarn deploy
-```
-
-Not using SSH:
-
-```bash
-GIT_USER=<Your GitHub username> yarn deploy
-```
-
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.

@@ -4,13 +4,11 @@ RookDB is a lightweight storage manager for a relational database management sys
 
 ---
 
-## Documentation
+## 📚 Documentation
 
-- **Design Document:**  [Design-Doc.pdf](docs/Design-Doc.pdf)
+- **Project Documentation:**  [Project Documentation](https://rookdb.github.io/RookDB/)
 
-- **Database Documentation:** [Database-Doc.pdf](docs/Database-Doc.pdf)
-
-- **API Documentation:**  [API-Doc.pdf](docs/API-Doc.pdf)
+- **Rust Code Documentation:**  [Rust Code Documentation](https://rookdb.github.io/RookDB/rust-docs/storage_manager/all.html)
 
 ---
 
@@ -50,17 +48,6 @@ cargo test --test <file_name>
 
 Please check contribution details here:  
 [CONTRIBUTING.md](.github/CONTRIBUTING.md)
-
----
-
-### Auto-Generated Code Documentation
-
-The Rust API documentation for the current codebase is auto-generated using **`rustdoc`** and hosted via GitHub Pages.
-
-🔗 **Code Documentation:**  
-https://rookdb.github.io/RookDB/storage_manager/
-
-This documentation is generated directly from Rust source code and doc comments and is automatically updated on each push to the `main` branch.
 
 ---
 
