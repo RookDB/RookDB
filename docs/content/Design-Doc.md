@@ -7,7 +7,7 @@ title: "Design Doc"
 
 RookDB is a disk-oriented database management system (DBMS) aimed at exploring the internal architecture of modern database engines, with a particular focus on the design and implementation of the **Storage Manager** of DBMS. The system follows a **Relational Database model**, similar to widely used relational DBMS such as PostgreSQL and MySQL.
 
-![Relation Model DBMS Architecture](../static/assets/DBMS-Arch.png)
+![Relation Model DBMS Architecture](/assets/DBMS-Arch.png)
 
 Based on the relational database architecture shown in the above figure, the primary objective of RookDB is to implement the key components of the storage manager that operate between the query processor and the underlying disk storage.
 
@@ -41,7 +41,7 @@ In RookDB, each table is stored as a dedicated file within the directory corresp
 
 Each table file is logically divided into two distinct regions. The first region is a fixed-size table header occupying the initial 8 KB of the file. This header stores metadata required for table management, currently stores only the total number of allocated pages. The second region consists of a sequence of fixed-size data pages, each 8 KB in size, which store tuple data along with associated slot metadata.
 
-![Logical Layout of a Table File](../static/assets/Table-Arch.png)
+![Logical Layout of a Table File](/assets/Table-Arch.png)
 
 ---
 
@@ -52,7 +52,7 @@ RookDB adopts a slotted-page structure inspired by PostgreSQL, consisting of a p
 
 | Page Layout | Page Header Structure |
 |-------------|-----------------------|
-| ![Page Layout](../static/assets/Slotted-Page.png) | ![Page Header Structure](../static/assets/Page-Layout.png) |
+| ![Page Layout](/assets/Slotted-Page.png) | ![Page Header Structure](/assets/Page-Layout.png) |
 
 ---
 
