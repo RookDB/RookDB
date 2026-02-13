@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en" dir="ltr" class="docs-wrapper plugin-docs plugin-id-default docs-version-current docs-doc-page docs-doc-id-API-Doc" data-has-hydrated="false">
+<head>
+<meta charset="UTF-8">
+<meta name="generator" content="Docusaurus v3.9.2">
+<title data-rh="true">API Doc | RookDB Docs</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:image" content="https://rookdb.github.io/RookDB/img/docusaurus-social-card.jpg"><meta data-rh="true" name="twitter:image" content="https://rookdb.github.io/RookDB/img/docusaurus-social-card.jpg"><meta data-rh="true" property="og:url" content="https://rookdb.github.io/RookDB/API-Doc"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="API Doc | RookDB Docs"><meta data-rh="true" name="description" content="Index of APIs"><meta data-rh="true" property="og:description" content="Index of APIs"><link data-rh="true" rel="canonical" href="https://rookdb.github.io/RookDB/API-Doc"><link data-rh="true" rel="alternate" href="https://rookdb.github.io/RookDB/API-Doc" hreflang="en"><link data-rh="true" rel="alternate" href="https://rookdb.github.io/RookDB/API-Doc" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"API Doc","item":"https://rookdb.github.io/RookDB/API-Doc"}]}</script><link rel="stylesheet" href="/RookDB/assets/css/styles.4b065cb5.css">
+<script src="/RookDB/assets/js/runtime~main.19555072.js" defer="defer"></script>
+<script src="/RookDB/assets/js/main.1c0f28c5.js" defer="defer"></script>
+</head>
+<body class="navigation-with-keyboard">
+<svg style="display: none;"><defs>
+<symbol id="theme-svg-external-link" viewBox="0 0 24 24"><path fill="currentColor" d="M21 13v10h-21v-19h12v2h-10v15h17v-8h2zm3-12h-10.988l4.035 4-6.977 7.07 2.828 2.828 6.977-7.07 4.125 4.172v-11z"/></symbol>
+</defs></svg>
+<script>!function(){var t=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();document.documentElement.setAttribute("data-theme",t||"light"),document.documentElement.setAttribute("data-theme-choice",t||"light")}(),function(){try{const c=new URLSearchParams(window.location.search).entries();for(var[t,e]of c)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script><div id="__docusaurus"><div role="region" aria-label="Skip to main content"><a class="skipToContent_fXgn" href="#__docusaurus_skipToContent_fallback">Skip to main content</a></div><nav aria-label="Main" class="theme-layout-navbar navbar navbar--fixed-top"><div class="navbar__inner"><div class="theme-layout-navbar-left navbar__items"><button aria-label="Toggle navigation bar" aria-expanded="false" class="navbar__toggle clean-btn" type="button"><svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><path stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="2" d="M4 7h22M4 15h22M4 23h22"></path></svg></button><a class="navbar__brand" href="/RookDB/"><b class="navbar__title text--truncate">RookDB docs</b></a></div><div class="theme-layout-navbar-right navbar__items navbar__items--right"><a href="https://github.com/RookDB/RookDB/" target="_blank" rel="noopener noreferrer" class="navbar__item navbar__link">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a><div class="toggle_vylO colorModeToggle_DEke"><button class="clean-btn toggleButton_gllP toggleButtonDisabled_aARS" type="button" disabled="" title="system mode" aria-label="Switch between dark and light mode (currently system mode)"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP lightToggleIcon_pyhR"><path fill="currentColor" d="M12,9c1.65,0,3,1.35,3,3s-1.35,3-3,3s-3-1.35-3-3S10.35,9,12,9 M12,7c-2.76,0-5,2.24-5,5s2.24,5,5,5s5-2.24,5-5 S14.76,7,12,7L12,7z M2,13l2,0c0.55,0,1-0.45,1-1s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S1.45,13,2,13z M20,13l2,0c0.55,0,1-0.45,1-1 s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S19.45,13,20,13z M11,2v2c0,0.55,0.45,1,1,1s1-0.45,1-1V2c0-0.55-0.45-1-1-1S11,1.45,11,2z M11,20v2c0,0.55,0.45,1,1,1s1-0.45,1-1v-2c0-0.55-0.45-1-1-1C11.45,19,11,19.45,11,20z M5.99,4.58c-0.39-0.39-1.03-0.39-1.41,0 c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0s0.39-1.03,0-1.41L5.99,4.58z M18.36,16.95 c-0.39-0.39-1.03-0.39-1.41,0c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0c0.39-0.39,0.39-1.03,0-1.41 L18.36,16.95z M19.42,5.99c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06c-0.39,0.39-0.39,1.03,0,1.41 s1.03,0.39,1.41,0L19.42,5.99z M7.05,18.36c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06 c-0.39,0.39-0.39,1.03,0,1.41s1.03,0.39,1.41,0L7.05,18.36z"></path></svg><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP darkToggleIcon_wfgR"><path fill="currentColor" d="M9.37,5.51C9.19,6.15,9.1,6.82,9.1,7.5c0,4.08,3.32,7.4,7.4,7.4c0.68,0,1.35-0.09,1.99-0.27C17.45,17.19,14.93,19,12,19 c-3.86,0-7-3.14-7-7C5,9.07,6.81,6.55,9.37,5.51z M12,3c-4.97,0-9,4.03-9,9s4.03,9,9,9s9-4.03,9-9c0-0.46-0.04-0.92-0.1-1.36 c-0.98,1.37-2.58,2.26-4.4,2.26c-2.98,0-5.4-2.42-5.4-5.4c0-1.81,0.89-3.42,2.26-4.4C12.92,3.04,12.46,3,12,3L12,3z"></path></svg><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP systemToggleIcon_QzmC"><path fill="currentColor" d="m12 21c4.971 0 9-4.029 9-9s-4.029-9-9-9-9 4.029-9 9 4.029 9 9 9zm4.95-13.95c1.313 1.313 2.05 3.093 2.05 4.95s-0.738 3.637-2.05 4.95c-1.313 1.313-3.093 2.05-4.95 2.05v-14c1.857 0 3.637 0.737 4.95 2.05z"></path></svg></button></div><div class="navbarSearchContainer_Bca1"></div></div></div><div role="presentation" class="navbar-sidebar__backdrop"></div></nav><div id="__docusaurus_skipToContent_fallback" class="theme-layout-main main-wrapper mainWrapper_z2l0"><div class="docsWrapper_hBAB"><button aria-label="Scroll back to top" class="clean-btn theme-back-to-top-button backToTopButton_sjWU" type="button"></button><div class="docRoot_UBD9"><aside class="theme-doc-sidebar-container docSidebarContainer_YfHR"><div class="sidebarViewport_aRkj"><div class="sidebar_njMd"><nav aria-label="Docs sidebar" class="menu thin-scrollbar menu_SIkG"><ul class="theme-doc-sidebar-menu menu__list"><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-1 menu__list-item"><a class="menu__link" href="/RookDB/"><span title="Introduction" class="linkLabel_WmDU">Introduction</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-1 menu__list-item"><a class="menu__link menu__link--active" aria-current="page" href="/RookDB/API-Doc"><span title="API Doc" class="linkLabel_WmDU">API Doc</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-1 menu__list-item"><a class="menu__link" href="/RookDB/database-doc"><span title="Database Doc" class="linkLabel_WmDU">Database Doc</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-1 menu__list-item"><a class="menu__link" href="/RookDB/design-doc"><span title="Design Doc" class="linkLabel_WmDU">Design Doc</span></a></li></ul></nav></div></div></aside><main class="docMainContainer_TBSr"><div class="container padding-top--md padding-bottom--lg"><div class="row"><div class="col docItemCol_VOVn"><div class="docItemContainer_Djhp"><article><nav class="theme-doc-breadcrumbs breadcrumbsContainer_Z_bl" aria-label="Breadcrumbs"><ul class="breadcrumbs"><li class="breadcrumbs__item"><a aria-label="Home page" class="breadcrumbs__link" href="/RookDB/"><svg viewBox="0 0 24 24" class="breadcrumbHomeIcon_YNFT"><path d="M10 19v-5h4v5c0 .55.45 1 1 1h3c.55 0 1-.45 1-1v-7h1.7c.46 0 .68-.57.33-.87L12.67 3.6c-.38-.34-.96-.34-1.34 0l-8.36 7.53c-.34.3-.13.87.33.87H5v7c0 .55.45 1 1 1h3c.55 0 1-.45 1-1z" fill="currentColor"></path></svg></a></li><li class="breadcrumbs__item breadcrumbs__item--active"><span class="breadcrumbs__link">API Doc</span></li></ul></nav><div class="tocCollapsible_ETCw theme-doc-toc-mobile tocMobile_ITEo"><button type="button" class="clean-btn tocCollapsibleButton_TO0P">On this page</button></div><div class="theme-doc-markdown markdown"><header><h1>API Doc</h1></header>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="index-of-apis">Index of APIs<a href="#index-of-apis" class="hash-link" aria-label="Direct link to Index of APIs" title="Direct link to Index of APIs" translate="no">​</a></h2>
+<ol start="0">
+<li class="">Init Catalog</li>
+<li class="">Load Catalog</li>
+<li class="">Create Database</li>
+<li class="">Show Databases</li>
+<li class="">Select Database</li>
+<li class="">Show Tables</li>
+<li class="">Save Catalog</li>
+<li class="">Create Table</li>
+<li class="">Init Table</li>
+<li class="">Init Page</li>
+<li class="">Page Count</li>
+<li class="">Create Page</li>
+<li class="">Read Page</li>
+<li class="">Write Page</li>
+<li class="">Page Free Space</li>
+<li class="">Add Tuple to Page</li>
+<li class="">Read Item / Get Tuple</li>
+</ol>
+<hr>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="api-descriptions">API Descriptions<a href="#api-descriptions" class="hash-link" aria-label="Direct link to API Descriptions" title="Direct link to API Descriptions" translate="no">​</a></h2>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="0-init_catalog-api">0. <strong>init_catalog</strong> API<a href="#0-init_catalog-api" class="hash-link" aria-label="Direct link to 0-init_catalog-api" title="Direct link to 0-init_catalog-api" translate="no">​</a></h3>
+<p><strong>Description:</strong><br>
+<!-- -->Creates <code>catalog.json</code> if it doesn’t exist and initializes it with an empty catalog</p>
+<div class="language-json codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-json codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token punctuation" style="color:#393A34">{</span><span class="token property" style="color:#36acaa">&quot;databases&quot;</span><span class="token operator" style="color:#393A34">:</span><span class="token plain"> </span><span class="token punctuation" style="color:#393A34">{</span><span class="token punctuation" style="color:#393A34">}</span><span class="token punctuation" style="color:#393A34">}</span><br></span></code></pre></div></div>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">init_catalog</span><span class="token punctuation" style="color:#393A34">(</span><span class="token punctuation" style="color:#393A34">)</span><br></span></code></pre></div></div>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Check if database/global/catalog.json exists.</li>
+<li class="">If not, create parent directories and an empty file with data <strong><code>json{&quot;databases&quot;: {}}</code></strong>.</li>
+</ol>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="1-load_catalog-api">1. <strong>load_catalog</strong> API<a href="#1-load_catalog-api" class="hash-link" aria-label="Direct link to 1-load_catalog-api" title="Direct link to 1-load_catalog-api" translate="no">​</a></h3>
+<p><strong>Description:</strong></p>
+<ul>
+<li class="">Loads the catalog table metadata into memory as a <strong>Catalog struct</strong>.</li>
+</ul>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">load_catalog</span><span class="token punctuation" style="color:#393A34">(</span><span class="token punctuation" style="color:#393A34">)</span><span class="token plain"> </span><span class="token punctuation" style="color:#393A34">-&gt;</span><span class="token plain"> </span><span class="token class-name">Catalog</span><br></span></code></pre></div></div>
+<p><strong>Ouput:</strong></p>
+<ul>
+<li class="">Returns a valid Catalog struct containing table metadata.</li>
+</ul>
+<p><strong>Implementation:</strong></p>
+<ul>
+<li class="">Reads the catalog file, validates its contents, and deserializes it into a Catalog struct.</li>
+</ul>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="2-create_database-api">2. <strong>create_database</strong> API<a href="#2-create_database-api" class="hash-link" aria-label="Direct link to 2-create_database-api" title="Direct link to 2-create_database-api" translate="no">​</a></h3>
+<p><strong>Description:</strong></p>
+<ul>
+<li class="">Creates a new database in the catalog.</li>
+</ul>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">create_database</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">catalog</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">Catalog</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> db_name</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">str</span><span class="token punctuation" style="color:#393A34">)</span><span class="token plain"> </span><span class="token punctuation" style="color:#393A34">-&gt;</span><span class="token plain"> </span><span class="token class-name">Result</span><span class="token operator" style="color:#393A34">&lt;</span><span class="token punctuation" style="color:#393A34">(</span><span class="token punctuation" style="color:#393A34">)</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> </span><span class="token class-name">StorageError</span><span class="token operator" style="color:#393A34">&gt;</span><br></span></code></pre></div></div>
+<p><strong>Input:</strong></p>
+<ul>
+<li class=""><strong>catalog:</strong>	 in-memory catalog metadata.</li>
+<li class=""><strong>db_name:</strong>	Name of the new database to be created.</li>
+</ul>
+<p><strong>Ouput:</strong></p>
+<ul>
+<li class="">Returns Ok on success or an error if creation fails.</li>
+</ul>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Check if the database already exists; if not, insert a new empty entry into catalog.databases.</li>
+<li class="">Serialize the updated Catalog and write it to database/global/catalog.json.</li>
+<li class="">Create a new directory at <code>database/base/{db_name}</code> for the database’s physical storage.</li>
+</ol>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="2-save_catalog-api">2. <strong>save_catalog</strong> API<a href="#2-save_catalog-api" class="hash-link" aria-label="Direct link to 2-save_catalog-api" title="Direct link to 2-save_catalog-api" translate="no">​</a></h3>
+<p><strong>Description:</strong></p>
+<ul>
+<li class="">Writes the in-memory Catalog structure (containing table metadata) back to disk in JSON format.</li>
+</ul>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">save_catalog</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">catalog</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token class-name">Catalog</span><span class="token punctuation" style="color:#393A34">)</span><br></span></code></pre></div></div>
+<p><strong>Input:</strong></p>
+<ul>
+<li class="">catalog: A reference to a Catalog struct in memory that holds all table definitions.</li>
+</ul>
+<p><strong>Ouput:</strong></p>
+<ul>
+<li class="">Writes the catalog data to <code>CATALOG_FILE</code>.</li>
+</ul>
+<p><strong>Implementation:</strong></p>
+<ul>
+<li class="">Serializes the given Catalog struct into a  JSON string and writes it to the catalog file path.</li>
+</ul>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="3-create_table-api">3. <strong>create_table</strong> API<a href="#3-create_table-api" class="hash-link" aria-label="Direct link to 3-create_table-api" title="Direct link to 3-create_table-api" translate="no">​</a></h3>
+<p><strong>Description:</strong></p>
+<ul>
+<li class="">Creates a new table entry in the in-memory Catalog with the provided table name and column definitions.</li>
+<li class="">If the table does not already exist, it is added to the catalog and the updated catalog is written to disk in JSON format.</li>
+</ul>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">create_table</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">catalog</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">Catalog</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> table_name</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">str</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> columns</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token class-name">Vec</span><span class="token operator" style="color:#393A34">&lt;</span><span class="token class-name">Column</span><span class="token operator" style="color:#393A34">&gt;</span><span class="token punctuation" style="color:#393A34">)</span><span class="token plain"> </span><br></span></code></pre></div></div>
+<p><strong>Input:</strong></p>
+<ul>
+<li class="">catalog: A mutable reference to the in-memory Catalog structure that holds metadata for all tables.</li>
+<li class="">table_name: A string slice representing the name of the new table to be created.</li>
+<li class="">columns: A vector of Column structs, where each struct contains the column name and data type for the new table.</li>
+</ul>
+<p><strong>Ouput:</strong></p>
+<ul>
+<li class="">Updates the in-memory Catalog by inserting the new table.</li>
+<li class="">Persists the updated catalog to disk by writing to the CATALOG_FILE in JSON format using <strong>save_catalog</strong> API.</li>
+</ul>
+<p><strong>Implementation:</strong></p>
+<ul>
+<li class="">Checks if a table with the given name already exists in the catalog.</li>
+<li class="">If not, creates a new Table struct using the provided columns.</li>
+<li class="">Inserts the table into the catalog.tables HashMap.</li>
+<li class="">Calls save_catalog(catalog) to serialize and write the updated catalog to disk.</li>
+<li class="">Creates a new data file for the table in <code>{TABLE_DIR}/{table_name}.dat</code>.</li>
+<li class="">Initializes the table file header by writing TABLE_HEADER_SIZE bytes of zeros using init_table().</li>
+</ul>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="4-init_table-api">4. <strong>init_table</strong> API<a href="#4-init_table-api" class="hash-link" aria-label="Direct link to 4-init_table-api" title="Direct link to 4-init_table-api" translate="no">​</a></h3>
+<p><strong>Description:</strong></p>
+<ul>
+<li class="">Initializes the <strong>Table Header</strong> by writing the <strong>first page</strong> (8192 bytes) into the table file with 0&#x27;s. The first 4 bytes represent the <strong>Page Count</strong> (1).</li>
+</ul>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">init_table</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">file</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">File</span><span class="token punctuation" style="color:#393A34">)</span><br></span></code></pre></div></div>
+<p><strong>Input:</strong>
+<code>file:</code> File pointer to update Table Header.</p>
+<p><strong>Output:</strong>
+Table header (first page) initialized with page_count = 1 in the first 4 bytes and remaining bytes set to zero.</p>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Move the file cursor to the beginning of the file.</li>
+<li class="">Allocate a buffer of 8192 bytes (<strong>TABLE_HEADER_SIZE</strong>) initialized to zero.</li>
+<li class="">Write the entire 8192-byte buffer (including the page count) to disk, marking the creation of the first table page.</li>
+<li class="">Write another 8192-byte buffer to disk to initialize the first data page along with page headers using <code>create_page</code> API (Page 1), which will store table tuples.</li>
+</ol>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="5-init_page-api">5. <strong>init_page</strong> API<a href="#5-init_page-api" class="hash-link" aria-label="Direct link to 5-init_page-api" title="Direct link to 5-init_page-api" translate="no">​</a></h3>
+<p><strong>Description:</strong></p>
+<ul>
+<li class="">Initializes the <strong>Page Header</strong> with two offset values for <strong>In Memory Page</strong>:<!-- -->
+<ul>
+<li class=""><strong>Lower Offset</strong> (<code>PAGE_HEADER_SIZE</code>) → bytes 0..4</li>
+<li class=""><strong>Upper Offset</strong> (<code>PAGE_SIZE</code>) → bytes 4..8</li>
+</ul>
+</li>
+</ul>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">init_page</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">page</span><span class="token punctuation" style="color:#393A34">:</span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">Page</span><span class="token punctuation" style="color:#393A34">)</span><br></span></code></pre></div></div>
+<p><strong>Input:</strong>
+<code>page:</code> <strong>In Memory Page</strong> to set Header - Lower and Upper Offsets.</p>
+<p><strong>Output:</strong>
+Page header updated with lower and upper offsets.</p>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Write the lower offset (<code>PAGE_HEADER_SIZE</code>) into the first 4 bytes of the page header (0..4).</li>
+<li class="">Write the upper offset (<code>PAGE_SIZE</code>) into the next 4 bytes of the page header (4..8).</li>
+</ol>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="6page_count-api">6.<strong>page_count</strong> API<a href="#6page_count-api" class="hash-link" aria-label="Direct link to 6page_count-api" title="Direct link to 6page_count-api" translate="no">​</a></h3>
+<p><strong>Description:</strong>
+To get total number of pages in a file</p>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">page_count</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">file</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">File</span><span class="token punctuation" style="color:#393A34">)</span><br></span></code></pre></div></div>
+<p><strong>Input:</strong>
+<code>file:</code> file to calculate number of pages.</p>
+<p><strong>Output:</strong>
+Total number of pages present in the file.</p>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Use the <strong>read_page()</strong> function to read the first page (page ID 0) from the file into memory.</li>
+<li class="">Extract the <strong>first 4 bytes</strong> from the in-memory page buffer — these bytes represent the page count stored in the table header.</li>
+<li class="">Return the first 4 bytes as page count.</li>
+</ol>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="7-create_page-api">7. <strong>create_page</strong> API<a href="#7-create_page-api" class="hash-link" aria-label="Direct link to 7-create_page-api" title="Direct link to 7-create_page-api" translate="no">​</a></h3>
+<p><strong>Description:</strong><br>
+<!-- -->Create a page in disk for a file.</p>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">create_page</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">file</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">File</span><span class="token punctuation" style="color:#393A34">)</span><br></span></code></pre></div></div>
+<p><strong>Input:</strong>
+<code>file:</code> file to create to a file</p>
+<p><strong>Output:</strong></p>
+<ol>
+<li class="">Create a page at the end of the file.</li>
+<li class="">Update the File Header with <strong>Page Count</strong>.</li>
+</ol>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Initializes a new page <strong>in memory</strong> using <strong>init_page</strong> API (update page header - lower and upper).</li>
+<li class="">Reads the <strong>current page count</strong> from the file using the <strong>page_count</strong> API.</li>
+<li class="">Moves the file cursor to the end of the file.</li>
+<li class="">Writes the initialized in-memory page to the file and <strong>updates the file header</strong> by incrementing the page count stored in the first 4 bytes.</li>
+</ol>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="8-read_page-api">8. <strong>read_page</strong> API<a href="#8-read_page-api" class="hash-link" aria-label="Direct link to 8-read_page-api" title="Direct link to 8-read_page-api" translate="no">​</a></h3>
+<p><strong>Description:</strong><br>
+<!-- -->Reads a page from a disk/file into memory.</p>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">read_page</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">file</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">File</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> page</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">Page</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> page_num</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">u32</span><span class="token punctuation" style="color:#393A34">)</span><br></span></code></pre></div></div>
+<p><strong>Input:</strong>
+<code>file:</code> file to read from,
+<code>page:</code> memory page to fill,
+<code>page_num:</code> page number to read</p>
+<p><strong>Output:</strong>
+Populates the given memory page with data read from the file.</p>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Calculates the <strong>offset</strong> as <strong>(page_num * PAGE_SIZE)</strong> and moves the file cursor to the correct position.</li>
+<li class="">Reads data from that offset position up to <strong>offset + PAGE_SIZE</strong> and copies it into the page memory.</li>
+</ol>
+<p><strong>Cases Handled:</strong></p>
+<ol>
+<li class="">Checks the file size and returns an error if the requested page does not exist in the file.</li>
+</ol>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="9write_page-api">9.<strong>write_page</strong> API<a href="#9write_page-api" class="hash-link" aria-label="Direct link to 9write_page-api" title="Direct link to 9write_page-api" translate="no">​</a></h3>
+<p><strong>Description:</strong><br>
+<!-- -->Write a page from memory to disk/file.</p>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">write_page</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">file</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">File</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> page</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token keyword" style="color:#00009f">mut</span><span class="token plain"> </span><span class="token class-name">Page</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> page_num</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">u32</span><span class="token punctuation" style="color:#393A34">)</span><br></span></code></pre></div></div>
+<p><strong>Input:</strong>
+<code>file:</code> file to write,
+<code>page:</code> memory page to copy from,
+<code>page_num:</code> page number to write</p>
+<p><strong>Output:</strong>
+Writes the contents of the given memory page to the file at the specified page offset.</p>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Calculates the <strong>offset</strong> as <code>page_num * PAGE_SIZE</code> and moves the file cursor to the correct position.</li>
+<li class="">copy the contents of the given memory page from offset to <code>offset + PAGE_SIZE</code> positions to the file.</li>
+</ol>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="10-page_free_space-api">10. <strong>page_free_space</strong> API<a href="#10-page_free_space-api" class="hash-link" aria-label="Direct link to 10-page_free_space-api" title="Direct link to 10-page_free_space-api" translate="no">​</a></h3>
+<p><strong>Description:</strong><br>
+<!-- -->To calculate the total amount of free space left in the page.</p>
+<p><strong>Function:</strong></p>
+<div class="language-rust codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-rust codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#393A34"><span class="token keyword" style="color:#00009f">pub</span><span class="token plain"> </span><span class="token keyword" style="color:#00009f">fn</span><span class="token plain"> </span><span class="token function-definition function" style="color:#d73a49">page_free_space</span><span class="token punctuation" style="color:#393A34">(</span><span class="token plain">page</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token operator" style="color:#393A34">&amp;</span><span class="token class-name">Page</span><span class="token punctuation" style="color:#393A34">)</span><span class="token plain"> </span><br></span></code></pre></div></div>
+<p><strong>Input:</strong>
+<code>page:</code> page to calculate the free space.</p>
+<p><strong>Output:</strong>
+Total amount of freespace left in the page.</p>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Read the <code>lower pointer</code> from the first 4 bytes of the page.</li>
+<li class="">Read the <code>upper pointer</code> from the next 4 bytes of the page.</li>
+<li class="">Calculate <code>free space</code>  = <code>upper - lower</code>.</li>
+<li class="">Return the free space.</li>
+</ol>
+<hr>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="11-add-tuple">11. Add Tuple<a href="#11-add-tuple" class="hash-link" aria-label="Direct link to 11. Add Tuple" title="Direct link to 11. Add Tuple" translate="no">​</a></h3>
+<p><strong>Description:</strong>
+Adds raw data to the file.</p>
+<p><strong>Function:</strong></p>
+<ul>
+<li class="">In the buffer manager load_csv_into_pages function.</li>
+</ul>
+<p><strong>Output:</strong>
+Data inserted in the file.</p>
+<p><strong>Implementation:</strong></p>
+<ol>
+<li class="">Get the <strong>total number of pages</strong> in the file using <a href="#4page_count-api" class=""><code>page_count</code></a> API.</li>
+<li class="">Read the <strong>last page</strong> into memory using <a href="#2-read_page-api" class=""><code>read_page</code></a> API.</li>
+<li class="">Check <strong>free space</strong> in the page using <a href="#5-page_free_space-api" class=""><code>page_free_space</code></a> API.</li>
+<li class="">If the last page has enough free space to store the data and its ItemId
+(i.e., if <code>free_space &gt;= data.size() + ITEM_ID_SIZE</code>):
+a. Calculate the <strong>insertion offset</strong> from the upper pointer.
+<code>start = upper - data.len()</code>
+b. Copy the data bytes into the page buffer starting at this offset.
+c. Update the <strong>upper pointer</strong> in the page header to the new start of free space.
+d. Write the <strong>ItemId entry</strong> (offset and length of the data) at the position indicated by the lower pointer.
+e. Update the <strong>lower pointer</strong> in the page header to account for the newly added ItemId (<code>lower += ITEM_ID_SIZE</code>).
+f. Write the updated page back to disk using <a href="#3write_page-api" class=""><code>write_page</code></a> API.</li>
+<li class="">If the last page does not have enough free space:
+a. Create a new page in the file and add the tuple in the new page.</li>
+</ol>
+<ul>
+<li class=""><a href="https://hemanth-sunkireddy.github.io/Storage-Manager/storage_manager/all.html" target="_blank" rel="noopener noreferrer" class="">Code Documentation</a></li>
+<li class=""><strong>Reference</strong>: <a href="https://www.postgresql.org/docs/current/storage-page-layout.html" target="_blank" rel="noopener noreferrer" class="">Postgres Internals – Page Layouts &amp; Data</a></li>
+</ul>
+<blockquote>
+<p><strong>Note:</strong> Some APIs have undergone slight implementation changes during development. So, some of the implementation steps might not aligned with the actual code functions.</p>
+</blockquote></div></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/RookDB/"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Introduction</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/RookDB/database-doc"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Database Doc</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#index-of-apis" class="table-of-contents__link toc-highlight">Index of APIs</a></li><li><a href="#api-descriptions" class="table-of-contents__link toc-highlight">API Descriptions</a><ul><li><a href="#0-init_catalog-api" class="table-of-contents__link toc-highlight">0. <strong>init_catalog</strong> API</a></li><li><a href="#1-load_catalog-api" class="table-of-contents__link toc-highlight">1. <strong>load_catalog</strong> API</a></li><li><a href="#2-create_database-api" class="table-of-contents__link toc-highlight">2. <strong>create_database</strong> API</a></li><li><a href="#2-save_catalog-api" class="table-of-contents__link toc-highlight">2. <strong>save_catalog</strong> API</a></li><li><a href="#3-create_table-api" class="table-of-contents__link toc-highlight">3. <strong>create_table</strong> API</a></li><li><a href="#4-init_table-api" class="table-of-contents__link toc-highlight">4. <strong>init_table</strong> API</a></li><li><a href="#5-init_page-api" class="table-of-contents__link toc-highlight">5. <strong>init_page</strong> API</a></li><li><a href="#6page_count-api" class="table-of-contents__link toc-highlight">6.<strong>page_count</strong> API</a></li><li><a href="#7-create_page-api" class="table-of-contents__link toc-highlight">7. <strong>create_page</strong> API</a></li><li><a href="#8-read_page-api" class="table-of-contents__link toc-highlight">8. <strong>read_page</strong> API</a></li><li><a href="#9write_page-api" class="table-of-contents__link toc-highlight">9.<strong>write_page</strong> API</a></li><li><a href="#10-page_free_space-api" class="table-of-contents__link toc-highlight">10. <strong>page_free_space</strong> API</a></li><li><a href="#11-add-tuple" class="table-of-contents__link toc-highlight">11. Add Tuple</a></li></ul></li></ul></div></div></div></div></main></div></div></div></div>
+</body>
+</html>
