@@ -21,6 +21,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18
     - name: Install rustfmt
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -34,11 +38,27 @@ jobs:
     - name: Run Tests
       run: cargo test --verbose
 
-    - name: Generate Docs
+    - name: Generate Code Docs
       run: cargo doc --no-deps --verbose
+    
+    - name: Install Docusaurus dependencies
+      run: npm install
+      working-directory: docs
+
+    - name: Build Docusaurus
+      run: npm run build
+      working-directory: docs
+    
+    - name: Merge Rust docs and Docusaurus
+      working-directory: .
+      run: |
+        mkdir public
+        cp -r docs/build/* public/
+        mkdir public/rust-docs
+        cp -r code/target/doc/* public/rust-docs/
 
     - name: Deploy Docs to GitHub Pages
       uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: code/target/doc
+        publish_dir: ./public
