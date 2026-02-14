@@ -55,7 +55,7 @@ jobs:
         mkdir public
         cp -r docs/build/* public/
         mkdir public/rust-docs
-        cp -r code/target/doc/* public/rust-docs/
+        cp -r target/doc/* public/rust-docs/
 
     - name: Deploy Docs to GitHub Pages
       uses: peaceiris/actions-gh-pages@v4
