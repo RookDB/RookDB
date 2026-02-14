@@ -1,7 +1,0 @@
-# Rust build artifacts
-../target/
-target/
-assets/.DS_Store
-**/*.bin
-**/**/*.dat
-database
