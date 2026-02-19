@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RookDB Indexing System - Architecture Diagrams</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        @media print {
+            body { background: white !important; }
+            .no-print { display: none; }
+            .workflow-section { page-break-after: always; }
+        }
+        
+        body {
+            font-family: 'Times New Roman', Times, serif;
+            margin: 0;
+            padding: 20px;
+            background: #ffffff;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #000;
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            border-bottom: 2px solid #000;
+            padding-bottom: 10px;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #333;
+            margin-bottom: 40px;
+            font-size: 12px;
+            font-style: italic;
+        }
+        
+        .workflow-section {
+            margin-bottom: 60px;
+            border: 1px solid #ccc;
+            padding: 20px;
+            background: #fafafa;
+        }
+        
+        .workflow-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #000;
+            margin-bottom: 20px;
+            text-align: center;
+            border-bottom: 1px solid #666;
+            padding-bottom: 8px;
+        }
+        
+        .visualization-container {
+            background: white;
+            border: 1px solid #999;
+        }
+        
+        .node rect {
+            fill: #e8e8e8;
+            stroke: #000;
+            stroke-width: 1.5px;
+        }
+        
+        .node.start rect {
+            fill: #d4d4d4;
+            stroke: #000;
+            stroke-width: 2px;
+        }
+        
+        .node.end rect {
+            fill: #b8b8b8;
+            stroke: #000;
+            stroke-width: 2px;
+        }
+        
+        .node.decision rect {
+            fill: #c8c8c8;
+            stroke: #000;
+            stroke-width: 1.5px;
+            transform: rotate(45deg);
+            transform-origin: center;
+        }
+        
+        .node.decision text {
+            fill: #000;
+        }
+        
+        .node text {
+            fill: #000;
+            font-size: 10px;
+            font-family: 'Times New Roman', Times, serif;
+            text-anchor: middle;
+            pointer-events: none;
+            font-weight: normal;
+        }
+        
+        .link {
+            fill: none;
+            stroke: #000;
+            stroke-width: 1.5px;
+            marker-end: url(#arrowhead);
+        }
+        
+        .link-label {
+            font-size: 9px;
+            fill: #000;
+            font-family: 'Times New Roman', Times, serif;
+            font-style: italic;
+        }
+        
+        .legend {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #999;
+            background: white;
+            font-size: 11px;
+        }
+        
+        .legend-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            text-decoration: underline;
+        }
+        
+        .legend-item {
+            display: inline-block;
+            margin-right: 25px;
+            margin-bottom: 8px;
+        }
+        
+        .legend-box {
+            display: inline-block;
+            width: 20px;
+            height: 15px;
+            border: 1px solid #000;
+            vertical-align: middle;
+            margin-right: 5px;
+        }
+        
+        .control-panel {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f0f0f0;
+            border: 1px solid #999;
+        }
+        
+        .print-btn {
+            background: #333;
+            color: white;
+            border: 1px solid #000;
+            padding: 10px 20px;
+            cursor: pointer;
+            font-family: 'Times New Roman', Times, serif;
+            font-size: 12px;
+        }
+        
+        .print-btn:hover {
+            background: #000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>RookDB Indexing System Architecture Diagrams</h1>
+        <div class="subtitle">Component Workflow Documentation - Design Phase</div>
+        
+        <div class="control-panel no-print">
+            <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+        </div>
+        
+        <div id="workflows-container"></div>
+        
+        <div class="legend">
+            <div class="legend-title">Legend</div>
+            <div class="legend-item">
+                <span class="legend-box" style="background: #d4d4d4;"></span>
+                <span>Start/Entry Point</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-box" style="background: #b8b8b8;"></span>
+                <span>End/Exit Point</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-box" style="background: #c8c8c8;"></span>
+                <span>Decision Node</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-box" style="background: #e8e8e8;"></span>
+                <span>Process Step</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const workflows = {
+            creation: {
+                title: "Figure 1: Index Creation Workflow",
+                nodes: [
+                    { id: 1, label: "User selects\n'create index'", type: "start" },
+                    { id: 2, label: "Enter index details", type: "normal" },
+                    { id: 3, label: "Call create_index\nfunction", type: "normal" },
+                    { id: 4, label: "Check catalog for\ntable & column", type: "decision" },
+                    { id: 5, label: "Create index file\non disk", type: "normal" },
+                    { id: 6, label: "Write index\nheader page", type: "normal" },
+                    { id: 7, label: "Scan existing\ntable data", type: "normal" },
+                    { id: 8, label: "Extract column\nvalues & insert", type: "normal" },
+                    { id: 9, label: "Add index to\ncatalog", type: "normal" },
+                    { id: 10, label: "Save catalog\nto disk", type: "normal" },
+                    { id: 11, label: "Display success\nmessage", type: "end" }
+                ],
+                links: [
+                    { source: 1, target: 2 },
+                    { source: 2, target: 3 },
+                    { source: 3, target: 4 },
+                    { source: 4, target: 5 },
+                    { source: 5, target: 6 },
+                    { source: 6, target: 7 },
+                    { source: 7, target: 8 },
+                    { source: 8, target: 9 },
+                    { source: 9, target: 10 },
+                    { source: 10, target: 11 }
+                ]
+            },
+            search: {
+                title: "Index Search Workflow",
+                nodes: [
+                    { id: 1, label: "User selects\n'search'", type: "start", desc: "User initiates search operation from menu" },
+                    { id: 2, label: "Enter search\nparameters", type: "normal", desc: "User provides: table name, column name, search value" },
+                    { id: 3, label: "Check if index\nexists on column", type: "decision", desc: "Frontend queries catalog to see if column is indexed" },
+                    { id: 4, label: "Load index\nfrom disk", type: "normal", desc: "Call load_index to open index file and read metadata" },
+                    { id: 5, label: "Call index.search()\nwith value", type: "normal", desc: "Execute search operation on index structure" },
+                    { id: 6, label: "Get list of\n(page, item) pairs", type: "normal", desc: "Index returns locations of all matching tuples" },
+                    { id: 7, label: "Fetch tuples from\ntable pages", type: "normal", desc: "For each location, read the actual tuple data from table file" },
+                    { id: 8, label: "Sequential scan\nfallback", type: "normal", desc: "Read every page and check every tuple manually" },
+                    { id: 9, label: "Display matching\ntuples", type: "end", desc: "Show results to user" }
+                ],
+                links: [
+                    { source: 1, target: 2 },
+                    { source: 2, target: 3 },
+                    { source: 3, target: 4, label: "Yes" },
+                    { source: 3, target: 8, label: "No" },
+                    { source: 4, target: 5 },
+                    { source: 5, target: 6 },
+                    { source: 6, target: 7 },
+                    { source: 7, target: 9 },
+                    { source: 8, target: 9 }
+                ]
+            },
+            insert: {
+                title: "Insert with Index Maintenance Workflow",
+                nodes: [
+                    { id: 1, label: "User loads CSV\nor inserts data", type: "start", desc: "Data insertion operation initiated" },
+                    { id: 2, label: "Call insert_tuple\nfor each row", type: "normal", desc: "Heap manager processes each new tuple" },
+                    { id: 3, label: "Find page with\nfree space", type: "normal", desc: "Locate or create a page that can hold the new tuple" },
+                    { id: 4, label: "Insert tuple\ninto page", type: "normal", desc: "Add tuple data to the page using slotted layout" },
+                    { id: 5, label: "Get page num &\nitem id", type: "normal", desc: "Record the location of the newly inserted tuple" },
+                    { id: 6, label: "Check catalog\nfor indexes", type: "decision", desc: "Determine if this table has any indexes that need updating" },
+                    { id: 7, label: "For each index\non table", type: "normal", desc: "Iterate through all indexes defined for this table" },
+                    { id: 8, label: "Extract indexed\ncolumn value", type: "normal", desc: "Get the value from the tuple for the indexed column" },
+                    { id: 9, label: "Call index.insert()\nwith location", type: "normal", desc: "Update index with (key, page, item) entry" },
+                    { id: 10, label: "Index updates\nbucket/tree node", type: "normal", desc: "Index structure is modified to include new entry" },
+                    { id: 11, label: "Write updated\nindex page to disk", type: "normal", desc: "Persist index changes to disk" },
+                    { id: 12, label: "Success message", type: "end", desc: "Confirm insertion completed successfully" }
+                ],
+                links: [
+                    { source: 1, target: 2 },
+                    { source: 2, target: 3 },
+                    { source: 3, target: 4 },
+                    { source: 4, target: 5 },
+                    { source: 5, target: 6 },
+                    { source: 6, target: 7, label: "Has indexes" },
+                    { source: 6, target: 12, label: "No indexes" },
+                    { source: 7, target: 8 },
+                    { source: 8, target: 9 },
+                    { source: 9, target: 10 },
+                    { source: 10, target: 11 },
+                    { source: 11, target: 12 }
+                ]
+            },
+            rangescan: {
+                title: "Range Scan Workflow (B+ Tree Only)",
+                nodes: [
+                    { id: 1, label: "User selects\n'range search'", type: "start", desc: "User initiates range query operation" },
+                    { id: 2, label: "Enter range\nparameters", type: "normal", desc: "User provides: table, column, start value, end value" },
+                    { id: 3, label: "Check for B+ tree\nindex on column", type: "decision", desc: "Verify that a B+ tree index exists (hash indexes don't support ranges)" },
+                    { id: 4, label: "Load B+ tree\nindex", type: "normal", desc: "Open and load the B+ tree index structure" },
+                    { id: 5, label: "Call range_scan()\nwith start/end", type: "normal", desc: "Execute range scan operation on B+ tree" },
+                    { id: 6, label: "Find leaf node\nwith start key", type: "normal", desc: "Navigate tree to locate first matching entry" },
+                    { id: 7, label: "Collect entries\nin range", type: "normal", desc: "Gather all keys between start and end values" },
+                    { id: 8, label: "Walk through\nleaf nodes", type: "normal", desc: "Follow next_leaf_page pointers to scan consecutive leaves" },
+                    { id: 9, label: "Fetch matching\ntuples from table", type: "normal", desc: "Retrieve actual tuple data for all matching locations" },
+                    { id: 10, label: "Sequential scan\nwith filter", type: "normal", desc: "Fallback: scan all tuples and filter by range" },
+                    { id: 11, label: "Display tuples", type: "end", desc: "Show results to user in sorted order" }
+                ],
+                links: [
+                    { source: 1, target: 2 },
+                    { source: 2, target: 3 },
+                    { source: 3, target: 4, label: "Yes" },
+                    { source: 3, target: 10, label: "No" },
+                    { source: 4, target: 5 },
+                    { source: 5, target: 6 },
+                    { source: 6, target: 7 },
+                    { source: 7, target: 8 },
+                    { source: 8, target: 9 },
+                    { source: 9, target: 11 },
+                    { source: 10, target: 11 }
+                ]
+            },
+            drop: {
+                title: "Drop Index Workflow",
+                nodes: [
+                    { id: 1, label: "User selects\n'drop index'", type: "start", desc: "User initiates index deletion" },
+                    { id: 2, label: "Enter index name\nand table name", type: "normal", desc: "User specifies which index to remove" },
+                    { id: 3, label: "Call drop_index\nfunction", type: "normal", desc: "Frontend invokes backend drop operation" },
+                    { id: 4, label: "Check catalog to\nensure index exists", type: "decision", desc: "Verify that the index is registered in catalog" },
+                    { id: 5, label: "Close index file\nif open", type: "normal", desc: "Release any open file handles to the index" },
+                    { id: 6, label: "Delete index file\nfrom disk", type: "normal", desc: "Remove .idx file from database/base/{db}/ directory" },
+                    { id: 7, label: "Remove index from\ncatalog metadata", type: "normal", desc: "Delete index entry from catalog structure" },
+                    { id: 8, label: "Save updated\ncatalog to disk", type: "normal", desc: "Persist modified catalog.json" },
+                    { id: 9, label: "Display success\nmessage", type: "end", desc: "Confirm index was dropped successfully" }
+                ],
+                links: [
+                    { source: 1, target: 2 },
+                    { source: 2, target: 3 },
+                    { source: 3, target: 4 },
+                    { source: 4, target: 5 },
+                    { source: 5, target: 6 },
+                    { source: 6, target: 7 },
+                    { source: 7, target: 8 },
+                    { source: 8, target: 9 }
+                ]
+            }
+        };
+
+        let currentWorkflow = 'creation';
+        let svg, g, tooltip;
+
+        function init() {
+            tooltip = d3.select("#tooltip");
+            
+            const container = d3.select("#visualization");
+            const width = container.node().getBoundingClientRect().width;
+            const height = 700;
+
+            svg = d3.select("#visualization")
+                .append("svg")
+                .attr("width", width)
+                .attr("height", height);
+
+            // Define arrowhead marker
+            svg.append("defs").append("marker")
+                .attr("id", "arrowhead")
+                .attr("viewBox", "0 -5 10 10")
+                .attr("refX", 15)
+                .attr("refY", 0)
+                .attr("markerWidth", 6)
+                .attr("markerHeight", 6)
+                .attr("orient", "auto")
+                .append("path")
+                .attr("d", "M0,-5L10,0L0,5")
+                .attr("fill", "#4a5568");
+
+            g = svg.append("g");
+
+            renderWorkflow(currentWorkflow);
+        }
+
+        function showWorkflow(workflowName) {
+            currentWorkflow = workflowName;
+            
+            // Update button styles
+            d3.selectAll(".workflow-btn").classed("active", false);
+            d3.select(event.target).classed("active", true);
+            
+            renderWorkflow(workflowName);
+        }
+
+        function renderWorkflow(workflowName) {
+            const workflow = workflows[workflowName];
+            const width = svg.node().getBoundingClientRect().width;
+            const height = 700;
+
+            // Clear previous content
+            g.selectAll("*").remove();
+
+            // Calculate layout
+            const nodeWidth = 140;
+            const nodeHeight = 60;
+            const horizontalSpacing = 200;
+            const verticalSpacing = 100;
+            
+            // Position nodes
+            const positions = {};
+            const columns = Math.ceil(Math.sqrt(workflow.nodes.length));
+            
+            workflow.nodes.forEach((node, i) => {
+                const col = i % 3;
+                const row = Math.floor(i / 3);
+                positions[node.id] = {
+                    x: 100 + col * horizontalSpacing,
+                    y: 80 + row * verticalSpacing
+                };
+            });
+
+            // Draw links
+            const links = g.selectAll(".link")
+                .data(workflow.links)
+                .enter()
+                .append("g");
+
+            links.append("path")
+                .attr("class", "link")
+                .attr("d", d => {
+                    const source = positions[d.source];
+                    const target = positions[d.target];
+                    
+                    // Create curved path
+                    const dx = target.x - source.x;
+                    const dy = target.y - source.y;
+                    const dr = Math.sqrt(dx * dx + dy * dy) * 0.7;
+                    
+                    return `M${source.x},${source.y + nodeHeight/2} 
+                            Q${source.x + dx/2},${source.y + dy/2 + 20} 
+                            ${target.x},${target.y - nodeHeight/2}`;
+                });
+
+            // Add link labels
+            links.filter(d => d.label)
+                .append("text")
+                .attr("class", "link-label")
+                .attr("x", d => (positions[d.source].x + positions[d.target].x) / 2)
+                .attr("y", d => (positions[d.source].y + positions[d.target].y) / 2)
+                .attr("text-anchor", "middle")
+                .text(d => d.label);
+
+            // Draw nodes
+            const nodes = g.selectAll(".node")
+                .data(workflow.nodes)
+                .enter()
+                .append("g")
+                .attr("class", d => `node ${d.type}`)
+                .attr("transform", d => `translate(${positions[d.id].x - nodeWidth/2}, ${positions[d.id].y - nodeHeight/2})`)
+                .on("mouseover", function(event, d) {
+                    tooltip.style("opacity", 1)
+                        .html(`<strong>${d.label.replace(/\n/g, ' ')}</strong><br>${d.desc}`)
+                        .style("left", (event.pageX + 10) + "px")
+                        .style("top", (event.pageY - 10) + "px");
+                })
+                .on("mouseout", function() {
+                    tooltip.style("opacity", 0);
+                });
+
+            nodes.append("rect")
+                .attr("width", nodeWidth)
+                .attr("height", nodeHeight);
+
+            nodes.append("text")
+                .attr("x", nodeWidth / 2)
+                .attr("y", nodeHeight / 2)
+                .attr("dy", "0.35em")
+                .selectAll("tspan")
+                .data(d => d.label.split('\n'))
+                .enter()
+                .append("tspan")
+                .attr("x", nodeWidth / 2)
+                .attr("dy", (d, i) => i === 0 ? "-0.5em" : "1.1em")
+                .text(d => d);
+
+            // Add zoom behavior
+            const zoom = d3.zoom()
+                .scaleExtent([0.5, 2])
+                .on("zoom", (event) => {
+                    g.attr("transform", event.transform);
+                });
+
+            svg.call(zoom);
+        }
+
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>

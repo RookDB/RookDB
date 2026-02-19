@@ -1,0 +1,1595 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{float}
+\usepackage{textcomp} % Ensures < and > render correctly
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    breakatwhitespace=true,
+    columns=flexible,
+    keepspaces=true,
+    showstringspaces=false,
+}
+
+\title{RookDB Indexing System\\Solution Design Phase}
+\author{George, Sujay, Mithun}
+\date{February 18, 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Database and Architecture Design Changes}
+
+\subsection{Overview}
+
+Right now, RookDB can only find data by scanning through every single page of a table from start to finish. This is slow when tables have lots of data. We need to add indexes so the database can jump directly to the data it needs without checking every row.
+
+Our index system will sit between the catalog and the storage layers. When someone searches for data, instead of reading every page, the index will tell us exactly which page and which spot on that page has the data we want.
+
+\subsection{Index File Structure}
+
+Each index will be stored in its own file in the database directory, separate from the table data file.
+
+\textbf{File naming:}
+\begin{lstlisting}
+database/base/{database_name}/{table_name}_{index_name}.idx
+\end{lstlisting}
+
+For example, if we have a table called "students" in the "school" database with an index on the "id" column, the file would be:
+\begin{lstlisting}
+database/base/school/students_id_idx.idx
+\end{lstlisting}
+
+\subsection{Index Page Layout}
+
+Index files will use the same 8KB page size as table files to work well with the existing disk manager and buffer manager. But the pages will be organized differently based on what type of index it is.
+
+All index pages follow a slotted page layout like table pages, but they store index entries instead of table rows.
+
+\textbf{Index Page Header (8 bytes):}
+\begin{itemize}
+\item Bytes 0-3: Lower pointer (where free space starts)
+\item Bytes 4-7: Upper pointer (where free space ends)
+\end{itemize}
+
+This matches the existing page layout in RookDB, so we can reuse the read\_page and write\_page functions.
+
+\subsection{Hash Index File Layout}
+
+Hash index files store buckets of data. Each bucket is one page.
+
+\textbf{Hash Index File Structure:}
+\begin{itemize}
+\item Page 0: Index header (stores metadata like bucket count, hash function type, etc.)
+\item Page 1 onwards: Bucket pages (each page is one bucket)
+\end{itemize}
+
+\textbf{Hash Index Header Page (Page 0):}
+\begin{lstlisting}
+Bytes 0-3:   Total number of buckets (u32)
+Bytes 4-7:   Hash type (0=static, 1=extendible, 2=linear) (u32)
+Bytes 8-11:  Global depth (for extendible hashing) (u32)
+Bytes 12-15: Split pointer (for linear hashing) (u32)
+Bytes 16-19: Number of entries in index (u32)
+Remaining:   Reserved for future use
+\end{lstlisting}
+
+\textbf{Hash Bucket Page:}
+
+Each bucket page stores key-value pairs where the key is the indexed column value and the value is the page number and item ID of the actual table row.
+
+\begin{lstlisting}
+Entry format (stored in slotted page):
+- Key size: 4 bytes (u32)
+- Key data: variable (depends on data type)
+- Page number: 4 bytes (u32)
+- Item ID: 4 bytes (u32)
+\end{lstlisting}
+
+For INT keys, total entry size is 4 + 4 + 4 + 4 = 16 bytes.
+
+\subsection{B+ Tree Index File Layout}
+
+B+ tree index files store nodes as pages. Internal nodes store keys and page pointers. Leaf nodes store keys and table row pointers.
+
+\textbf{B+ Tree Index File Structure:}
+\begin{itemize}
+\item Page 0: Index header (root page number, tree height, entry count)
+\item Page 1 onwards: Tree nodes (internal or leaf)
+\end{itemize}
+
+\textbf{B+ Tree Index Header Page (Page 0):}
+\begin{lstlisting}
+Bytes 0-3:   Root page number (u32)
+Bytes 4-7:   Tree height (u32)
+Bytes 8-11:  Total number of entries (u32)
+Bytes 12-15: Leaf page count (u32)
+Remaining:   Reserved for future use
+\end{lstlisting}
+
+\textbf{B+ Tree Node Page:}
+
+First 8 bytes are the standard page header. Next 4 bytes tell if this is a leaf or internal node.
+
+\begin{lstlisting}
+Bytes 0-7:   Page header (lower, upper)
+Bytes 8-11:  Node type (0=internal, 1=leaf) (u32)
+Bytes 12-15: Number of keys in node (u32)
+Bytes 16-19: Parent page number (u32)
+Bytes 20-23: Next leaf page (only for leaf nodes) (u32)
+Remaining:   Key and pointer entries
+\end{lstlisting}
+
+\textbf{Internal Node Entry:}
+\begin{lstlisting}
+- Key size: 4 bytes
+- Key data: variable
+- Child page number: 4 bytes
+\end{lstlisting}
+
+\textbf{Leaf Node Entry:}
+\begin{lstlisting}
+- Key size: 4 bytes
+- Key data: variable
+- Table page number: 4 bytes
+- Table item ID: 4 bytes
+\end{lstlisting}
+
+\subsection{Catalog Changes}
+
+We need to add index information to the catalog.json file so the system knows which indexes exist for each table.
+
+\textbf{Updated Catalog Structure:}
+\begin{lstlisting}
+{
+  "databases": {
+    "database_name": {
+      "tables": {
+        "table_name": {
+          "columns": [...],
+          "indexes": {
+            "index_name": {
+              "indexed_column": "column_name",
+              "index_type": "hash" or "btree",
+              "hash_variant": "static" or "extendible" or "linear",
+              "is_unique": true or false,
+              "is_clustered": true or false
+            }
+          }
+        }
+      }
+    }
+  }
+}
+\end{lstlisting}
+
+Example:
+\begin{lstlisting}
+{
+  "databases": {
+    "school": {
+      "tables": {
+        "students": {
+          "columns": [
+            {"name": "id", "data_type": "INT"},
+            {"name": "name", "data_type": "TEXT"}
+          ],
+          "indexes": {
+            "students_id_idx": {
+              "indexed_column": "id",
+              "index_type": "hash",
+              "hash_variant": "static",
+              "is_unique": true,
+              "is_clustered": false
+            }
+          }
+        }
+      }
+    }
+  }
+}
+\end{lstlisting}
+
+
+\subsection{Index Types Supported}
+
+RookDB will support four distinct types of indexes, each serving different use cases and performance requirements.
+
+\subsubsection{Primary Key Index}
+
+A primary key index is automatically created when a table defines a primary key column. It enforces uniqueness and is typically implemented as a B+ tree for efficient ordered access.
+
+\textbf{Characteristics:}
+\begin{itemize}
+\item Automatically created during table creation if a primary key is specified
+\item Always enforces uniqueness constraint
+\item Can be clustered or non-clustered (user choice)
+\item Only one primary key per table
+\item Cannot contain NULL values
+\end{itemize}
+
+\textbf{Implementation:}
+\begin{itemize}
+\item When CREATE TABLE specifies PRIMARY KEY(column\_name), automatically create a B+ tree index
+\item Set is\_primary = true and is\_unique = true in catalog
+\item Validate uniqueness on every insert/update operation
+\item Reject NULL values in primary key column
+\end{itemize}
+
+\subsubsection{Clustered Index}
+
+A clustered index determines the physical ordering of table data. RookDB implements clustered indexes following PostgreSQL's approach: instead of physically reordering the table file, we create a separate index file that provides a logical ordering.
+
+\textbf{Characteristics:}
+\begin{itemize}
+\item Limited to one per table
+\item Provides logical ordering of table rows without moving data
+\item Stored in a separate .idx file like other indexes
+\item Leaf nodes contain actual tuple data or references to tuples in insertion order
+\item Range scans are highly efficient
+\end{itemize}
+
+
+Instead of reorganizing the entire table file when creating a clustered index, we follow PostgreSQL's CLUSTER command approach:
+\begin{enumerate}
+\item The original table file remains in insertion order
+\item The clustered index file contains entries in sorted order
+\item Each index entry points to the physical location in the table
+\item Range scans follow the index order, fetching pages as needed
+\item Benefit: No expensive table reorganization required
+\item Trade-off: Some random I/O during range scans, but still better than sequential scan
+\end{enumerate}
+
+
+\subsubsection{Secondary Index (Key Columns Only)}
+
+Standard non-clustered indexes on one or more columns. Can be hash or B+ tree based.
+
+\textbf{Characteristics:}
+\begin{itemize}
+\item Can have multiple secondary indexes per table
+\item Can index one or more columns (composite indexes)
+\item Allows duplicates unless is\_unique = true
+\item Stored in separate .idx file
+\item Leaf nodes contain (key, page\_num, item\_id) tuples
+\end{itemize}
+
+\textbf{Composite Index Support:}
+\begin{itemize}
+\item indexed\_columns can be a list: ["last\_name", "first\_name"]
+\item Key is formed by concatenating column values
+\item Useful for queries filtering on multiple columns
+\end{itemize}
+
+\subsubsection{Secondary Index with Included Columns (Covering Index)}
+
+A covering index includes additional non-key columns in the leaf nodes. This enables index-only scans without accessing the table.
+
+\textbf{Characteristics:}
+\begin{itemize}
+\item Contains indexed columns (for searching) plus included columns (for retrieval)
+\item Allows queries to be answered entirely from the index
+\item Reduces I/O by avoiding table lookups
+\item Larger index size due to extra data
+\end{itemize}
+
+\textbf{Example Use Case:}
+
+Table: employees(id, name, department, salary)
+
+Index: CREATE INDEX emp\_dept\_idx ON employees(department) INCLUDE (salary)
+
+Query: SELECT department, salary FROM employees WHERE department = 'Engineering'
+
+This query can be answered entirely from the index without touching the table.
+
+\textbf{Index Entry Format for Covering Index:}
+\begin{lstlisting}
+Leaf Node Entry:
+- Key size: 4 bytes
+- Key data: indexed column value(s)
+- Included data size: 4 bytes
+- Included data: non-key column values
+- Page number: 4 bytes (still needed for updates/deletes)
+- Item ID: 4 bytes
+\end{lstlisting}
+
+\subsection{Why This Design is Appropriate}
+
+\textbf{Separate index files:} Each index gets its own file. This makes it easy to create or delete indexes without touching table data. If an index gets corrupted, the table data is still safe.
+
+\textbf{Same page size:} Using 8KB pages for indexes means we can use the same disk manager functions (read\_page, write\_page, create\_page) that already exist. We do not need to write new disk code.
+
+\textbf{Slotted page layout:} Index entries have different sizes (INT keys are 4 bytes, TEXT keys are 10 bytes). Slotted pages let us store variable size entries efficiently, just like table rows.
+
+\textbf{Header page for metadata:} Page 0 of each index file stores important information like the number of buckets or the root page. This makes it fast to load index metadata without scanning the whole file.
+
+\textbf{Catalog integration:} Storing index info in catalog.json means when we load a database, we know exactly which indexes exist. The catalog already works this way for tables, so it is a natural fit.
+
+\textbf{Performance:} Hash indexes give us O(1) lookups for exact matches. B+ trees give us O(log n) lookups and can also do range scans efficiently. Both are much faster than O(n) sequential scans when tables are large.
+
+\textbf{Scalability:} Extendible and linear hashing can grow as data grows without rebuilding the whole index. B+ trees stay balanced automatically. This means indexes work well even when tables get huge.
+
+\subsection{No Changes Needed to Buffer Manager}
+
+The buffer manager already loads pages into memory and writes them back to disk. It works with any file, not just table files. So we can use it for index files without any changes. When we need an index page, we just call the existing buffer manager functions with the index file instead of the table file.
+
+\subsection{No Changes Needed to Heap Manager}
+
+The heap manager handles inserting tuples into table files. Index maintenance happens after the tuple is inserted. So the heap manager code stays the same. We will just call index insert functions after calling the heap insert function.
+
+\section{Backend Data Structures}
+
+\subsection{Data Structures to be Created}
+
+\subsubsection{Index Metadata Structure}
+
+\textbf{Purpose:} Store information about an index loaded from the catalog.
+
+\textbf{Pseudo Code:}
+\begin{lstlisting}
+struct IndexMetadata {
+    index_name: String,
+    table_name: String,
+    database_name: String,
+    indexed_column: String,
+    index_type: IndexType,        // enum: Hash or BTree
+    hash_variant: HashVariant,    // enum: Static, Extendible, Linear
+    is_unique: bool,
+    is_clustered: bool,
+}
+
+enum IndexType {
+    Hash,
+    BTree,
+}
+
+enum HashVariant {
+    Static,
+    Extendible,
+    Linear,
+}
+\end{lstlisting}
+
+\textbf{Justification:} When we want to use an index, we need to know what type it is and where to find it. This struct holds all that info in one place. We load it from catalog.json when the database starts.
+
+\subsubsection{Index Entry Structure}
+
+\textbf{Purpose:} Represent a single entry in an index (key plus where to find the row).
+
+\textbf{Pseudo Code:}
+\begin{lstlisting}
+struct IndexEntry {
+    key: IndexKey,
+    page_number: u32,
+    item_id: u32,
+}
+
+enum IndexKey {
+    Int(i32),
+    Text(String),
+    Bool(bool),
+}
+\end{lstlisting}
+
+\textbf{Justification:} Index entries map a key (like id=5) to a location (page 3, item 2). We need different key types because columns can be INT, TEXT, or BOOL. This struct makes it easy to work with index entries in memory.
+
+\subsubsection{Hash Index Structure}
+
+\textbf{Purpose:} Manage a hash based index in memory and on disk.
+
+\textbf{Pseudo Code:}
+\begin{lstlisting}
+struct HashIndex {
+    metadata: IndexMetadata,
+    file: File,
+    num_buckets: u32,
+    hash_variant: HashVariant,
+    global_depth: u32,         // for extendible hashing
+    split_pointer: u32,        // for linear hashing
+    directory: Vec<u32>,       // for extendible hashing (bucket page numbers)
+}
+
+impl HashIndex {
+    fn new(metadata: IndexMetadata, file: File) -> Self;
+    fn load_from_disk(metadata: IndexMetadata) -> Self;
+    fn insert(&mut self, key: IndexKey, page_num: u32, item_id: u32);
+    fn search(&self, key: &IndexKey) -> Vec<(u32, u32)>;
+    fn delete(&mut self, key: &IndexKey, page_num: u32, item_id: u32);
+    fn hash_function(&self, key: &IndexKey) -> u32;
+    fn get_bucket_page(&self, hash: u32) -> u32;
+    fn split_bucket(&mut self);  // for dynamic hashing
+    fn save_header(&mut self);
+}
+\end{lstlisting}
+
+\textbf{Justification:} This struct holds all the state for a hash index. Different hash types (static, extendible, linear) have different fields, but they share common operations like insert and search. The file handle lets us read and write index pages. The metadata tells us which column is indexed.
+
+\subsubsection{B+ Tree Index Structure}
+
+\textbf{Purpose:} Manage a B+ tree index in memory and on disk.
+
+\textbf{Pseudo Code:}
+\begin{lstlisting}
+struct BPlusTreeIndex {
+    metadata: IndexMetadata,
+    file: File,
+    root_page: u32,
+    tree_height: u32,
+    entry_count: u32,
+}
+
+impl BPlusTreeIndex {
+    fn new(metadata: IndexMetadata, file: File) -> Self;
+    fn load_from_disk(metadata: IndexMetadata) -> Self;
+    fn insert(&mut self, key: IndexKey, page_num: u32, item_id: u32);
+    fn search(&self, key: &IndexKey) -> Vec<(u32, u32)>;
+    fn range_scan(&self, start: &IndexKey, end: &IndexKey) -> Vec<(u32, u32)>;
+    fn delete(&mut self, key: &IndexKey, page_num: u32, item_id: u32);
+    fn find_leaf(&self, key: &IndexKey) -> u32;
+    fn split_node(&mut self, page_num: u32);
+    fn save_header(&mut self);
+}
+\end{lstlisting}
+
+\textbf{Justification:} B+ trees are more complex than hash indexes because they are trees with internal and leaf nodes. This struct keeps track of the root page so we can start searching from the top. Tree height helps us estimate search time. The functions cover all tree operations: insert causes splits when nodes are full, search walks down the tree, range scans walk through leaf nodes.
+
+\subsubsection{Tree Node Structure}
+
+\textbf{Purpose:} Represent a B+ tree node in memory.
+
+\textbf{Pseudo Code:}
+\begin{lstlisting}
+struct TreeNode {
+    page_number: u32,
+    is_leaf: bool,
+    keys: Vec<IndexKey>,
+    child_pages: Vec<u32>,        // for internal nodes
+    row_pointers: Vec<(u32, u32)>, // for leaf nodes (page, item)
+    parent_page: u32,
+    next_leaf_page: u32,           // for leaf nodes (linked list)
+}
+
+impl TreeNode {
+    fn load_from_page(page: &Page) -> Self;
+    fn save_to_page(&self, page: &mut Page);
+    fn is_full(&self, max_keys: usize) -> bool;
+    fn find_child(&self, key: &IndexKey) -> u32;
+}
+\end{lstlisting}
+
+\textbf{Justification:} When we work with B+ trees, we load nodes from disk pages into memory. This struct makes it easy to read and write node data. Internal nodes have child pointers, leaf nodes have row pointers. Keeping them in the same struct with a flag (is\_leaf) simplifies the code.
+
+\subsubsection{Index Manager Structure}
+
+\textbf{Purpose:} Central coordinator for all indexes in the database.
+
+\textbf{Pseudo Code:}
+\begin{lstlisting}
+struct IndexManager {
+    catalog: Catalog,
+    loaded_indexes: HashMap<String, Box<dyn IndexTrait>>,
+}
+
+impl IndexManager {
+    fn new(catalog: Catalog) -> Self;
+    fn create_index(&mut self, db: &str, table: &str, 
+                    index_name: &str, column: &str,
+                    index_type: IndexType, is_unique: bool);
+    fn drop_index(&mut self, db: &str, table: &str, index_name: &str);
+    fn get_index(&self, db: &str, table: &str, index_name: &str) 
+                 -> Option<&dyn IndexTrait>;
+    fn load_index(&mut self, db: &str, table: &str, index_name: &str);
+    fn maintain_indexes(&mut self, db: &str, table: &str, 
+                        operation: IndexOperation);
+}
+
+enum IndexOperation {
+    Insert { key: IndexKey, page: u32, item: u32 },
+    Delete { key: IndexKey, page: u32, item: u32 },
+}
+\end{lstlisting}
+
+\textbf{Justification:} A database can have many indexes across many tables. We need something to keep track of them all. The index manager loads index metadata from the catalog and keeps open file handles to index files. When a row is inserted or deleted, the index manager updates all indexes for that table.
+
+\subsubsection{Index Trait}
+
+\textbf{Purpose:} Common interface for all index types.
+
+\textbf{Pseudo Code:}
+\begin{lstlisting}
+trait IndexTrait {
+    fn insert(&mut self, key: IndexKey, page: u32, item: u32) -> Result<()>;
+    fn search(&self, key: &IndexKey) -> Vec<(u32, u32)>;
+    fn delete(&mut self, key: &IndexKey, page: u32, item: u32) -> Result<()>;
+    fn range_scan(&self, start: &IndexKey, end: &IndexKey) 
+                  -> Vec<(u32, u32)>;
+}
+\end{lstlisting}
+
+\textbf{Justification:} Hash indexes and B+ tree indexes work differently inside, but from the outside they do the same things: insert, search, delete. Using a trait means the index manager can work with any index type without knowing the details. This makes it easy to add new index types later.
+
+\subsection{Data Structures to be Modified}
+
+\subsubsection{Catalog Structure}
+
+\textbf{Current Structure:}
+\begin{lstlisting}
+struct Catalog {
+    databases: HashMap<String, Database>,
+}
+
+struct Database {
+    tables: HashMap<String, Table>,
+}
+
+struct Table {
+    columns: Vec<Column>,
+}
+\end{lstlisting}
+
+\textbf{Updated Structure:}
+\begin{lstlisting}
+struct Catalog {
+    databases: HashMap<String, Database>,
+}
+
+struct Database {
+    tables: HashMap<String, Table>,
+}
+
+struct Table {
+    columns: Vec<Column>,
+    indexes: HashMap<String, IndexMetadata>,  // NEW
+}
+\end{lstlisting}
+
+\textbf{Purpose of Modification:} Add index information to tables.
+
+\textbf{Justification:} Right now the catalog only knows about tables and columns. We need to add indexes so when we load a database, we know which indexes exist. The indexes field is a HashMap where the key is the index name and the value is the index metadata. This fits naturally with how tables are stored in databases.
+
+\subsubsection{Column Structure}
+
+\textbf{Current Structure:}
+\begin{lstlisting}
+struct Column {
+    name: String,
+    data_type: String,
+}
+\end{lstlisting}
+
+\textbf{Updated Structure:}
+\begin{lstlisting}
+struct Column {
+    name: String,
+    data_type: String,
+    is_indexed: bool,          // NEW
+    index_names: Vec<String>,  // NEW
+}
+\end{lstlisting}
+
+\textbf{Purpose of Modification:} Track which columns have indexes.
+
+\textbf{Justification:} When creating or using indexes, we need to quickly check if a column is indexed. Adding these fields to Column makes it easy. A column can have multiple indexes (like both a hash index and a B+ tree index), so we store a list of index names.
+
+\section{Backend Functions}
+
+\subsection{Functions to be Created}
+
+\subsubsection{create\_hash\_index}
+
+\textbf{Description:} Create a new hash index file for a table column.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item catalog: Catalog (to register the index)
+\item db\_name: String (database name)
+\item table\_name: String (table name)
+\item column\_name: String (which column to index)
+\item index\_name: String (name for this index)
+\item hash\_variant: HashVariant (static, extendible, or linear)
+\item is\_unique: bool (enforce unique values)
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Result: OK if successful, error otherwise
+\item Side effect: Creates index file on disk
+\item Side effect: Updates catalog.json
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Check that the table exists in the catalog
+\item Check that the column exists in the table
+\item Check that an index with this name does not already exist
+\item Create the index file at database/base/\{db\}/\{table\}\_\{index\}.idx
+\item Write the index header page (page 0) with initial metadata:
+    \begin{itemize}
+    \item bucket count = 16 (for static hash)
+    \item hash type = hash\_variant
+    \item global depth = 4 (for extendible hash)
+    \item split pointer = 0 (for linear hash)
+    \item entry count = 0
+    \end{itemize}
+\item Create initial bucket pages (pages 1 through bucket\_count)
+\item Add index metadata to catalog
+\item Save catalog to disk
+\item If the table already has data, scan the table and build the index:
+    \begin{itemize}
+    \item Open the table file
+    \item For each page in the table
+    \item For each tuple in the page
+    \item Extract the value of the indexed column
+    \item Insert into the index (key, page number, item id)
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{create\_btree\_index}
+
+\textbf{Description:} Create a new B+ tree index file for a table column.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item catalog: Catalog
+\item db\_name: String
+\item table\_name: String
+\item column\_name: String
+\item index\_name: String
+\item is\_unique: bool
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Result: OK if successful, error otherwise
+\item Side effect: Creates index file on disk
+\item Side effect: Updates catalog.json
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Check that the table and column exist
+\item Check that an index with this name does not already exist
+\item Create the index file
+\item Write the index header page (page 0):
+    \begin{itemize}
+    \item root page = 1
+    \item tree height = 1
+    \item entry count = 0
+    \item leaf count = 1
+    \end{itemize}
+\item Create the root page (page 1) as a leaf node
+\item Add index metadata to catalog and save
+\item If the table has data, build the index by scanning the table
+\end{enumerate}
+
+\subsubsection{drop\_index}
+
+\textbf{Description:} Delete an index.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item catalog: Catalog
+\item db\_name: String
+\item table\_name: String
+\item index\_name: String
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Result: OK if successful
+\item Side effect: Removes index file from disk
+\item Side effect: Updates catalog.json
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Check that the index exists in the catalog
+\item Close the index file if it is open
+\item Delete the index file from disk
+\item Remove index metadata from catalog
+\item Save catalog to disk
+\end{enumerate}
+
+\subsubsection{hash\_insert}
+
+\textbf{Description:} Insert an entry into a hash index.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item hash\_index: HashIndex (the index object)
+\item key: IndexKey (the value to index)
+\item page\_num: u32 (which page the row is on)
+\item item\_id: u32 (which item on the page)
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Result: OK if successful
+\item Side effect: Updates index file on disk
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Compute hash value from key using hash\_function
+\item Determine bucket number using get\_bucket\_page
+\item Read the bucket page from disk
+\item Check if there is enough free space in the bucket
+\item If not enough space:
+    \begin{itemize}
+    \item For static hash: return error (overflow)
+    \item For extendible hash: split bucket and increment global depth if needed
+    \item For linear hash: split the bucket pointed to by split\_pointer
+    \end{itemize}
+\item Serialize the index entry (key size + key data + page num + item id)
+\item Add the entry to the bucket page using slotted page format:
+    \begin{itemize}
+    \item Put entry data at upper pointer position
+    \item Add item id entry at lower pointer position
+    \item Update lower and upper pointers
+    \end{itemize}
+\item Write the updated bucket page back to disk
+\item Increment entry count in header and save header
+\end{enumerate}
+
+\subsubsection{hash\_search}
+
+\textbf{Description:} Find all rows matching a key in a hash index.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item hash\_index: HashIndex
+\item key: IndexKey
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Vec of (page\_num, item\_id) tuples
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Compute hash value from key
+\item Determine bucket number
+\item Read the bucket page from disk
+\item Scan all entries in the bucket page:
+    \begin{itemize}
+    \item Read lower pointer to get number of entries
+    \item For each entry:
+        \begin{itemize}
+        \item Read item id info (offset, length)
+        \item Read entry data from upper section
+        \item Deserialize key, page num, item id
+        \item If key matches, add (page num, item id) to results
+        \end{itemize}
+    \end{itemize}
+\item Return results
+\end{enumerate}
+
+\subsubsection{hash\_delete}
+
+\textbf{Description:} Remove an entry from a hash index.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item hash\_index: HashIndex
+\item key: IndexKey
+\item page\_num: u32
+\item item\_id: u32
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Result: OK if found and deleted
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Compute hash and find bucket
+\item Read bucket page
+\item Scan entries to find matching key, page num, and item id
+\item Mark the item id entry as deleted (set length to 0)
+\item Write bucket page back to disk
+\item Decrement entry count in header and save
+\item Note: We do not compact the page or reclaim space (simple approach)
+\end{enumerate}
+
+\subsubsection{btree\_insert}
+
+\textbf{Description:} Insert an entry into a B+ tree index.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item btree\_index: BPlusTreeIndex
+\item key: IndexKey
+\item page\_num: u32
+\item item\_id: u32
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Result: OK if successful
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Call find\_leaf to locate the correct leaf node for this key
+\item Read the leaf node page from disk
+\item Deserialize the node into a TreeNode struct
+\item Check if the leaf node is full:
+    \begin{itemize}
+    \item Max keys per leaf = (PAGE\_SIZE - header) / entry\_size
+    \item For INT keys: roughly 500 entries per page
+    \end{itemize}
+\item If not full:
+    \begin{itemize}
+    \item Insert (key, page num, item id) into the leaf node keys list in sorted order
+    \item Serialize the node back to the page
+    \item Write the page to disk
+    \end{itemize}
+\item If full:
+    \begin{itemize}
+    \item Call split\_node to split the leaf
+    \item Insert the key into the appropriate half
+    \item Update parent node with the new separator key
+    \item If parent is full, recursively split up the tree
+    \end{itemize}
+\item Increment entry count in header and save
+\end{enumerate}
+
+\subsubsection{btree\_search}
+
+\textbf{Description:} Find all rows matching a key in a B+ tree index.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item btree\_index: BPlusTreeIndex
+\item key: IndexKey
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Vec of (page\_num, item\_id) tuples
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Call find\_leaf to locate the leaf node containing this key
+\item Read the leaf node page
+\item Deserialize the node
+\item Binary search the keys list to find the key
+\item Collect all matching entries (there may be duplicates if not unique index)
+\item Return the list of (page num, item id)
+\end{enumerate}
+
+\subsubsection{btree\_range\_scan}
+
+\textbf{Description:} Find all rows with keys between start and end.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item btree\_index: BPlusTreeIndex
+\item start\_key: IndexKey
+\item end\_key: IndexKey
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Vec of (page\_num, item\_id) tuples
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Call find\_leaf to locate the leaf containing start\_key
+\item Read the leaf node page
+\item Collect all entries with key >= start and key <= end
+\item Follow the next\_leaf\_page pointer to scan subsequent leaf nodes
+\item Continue until we reach a key > end\_key or the end of the tree
+\item Return all collected (page num, item id) tuples
+\end{enumerate}
+
+\subsubsection{btree\_delete}
+
+\textbf{Description:} Remove an entry from a B+ tree index.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item btree\_index: BPlusTreeIndex
+\item key: IndexKey
+\item page\_num: u32
+\item item\_id: u32
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Result: OK if deleted
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Find the leaf node containing the key
+\item Search for the exact entry (key, page num, item id)
+\item Remove it from the keys and row\_pointers lists
+\item Write the updated node back to disk
+\item Decrement entry count in header
+\item Note: We do not rebalance the tree (simple delete)
+\item If a node becomes empty, we leave it empty (can be cleaned up later)
+\end{enumerate}
+
+\subsubsection{find\_leaf}
+
+\textbf{Description:} Navigate from root to the leaf node that should contain a key.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item btree\_index: BPlusTreeIndex
+\item key: IndexKey
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item u32: page number of the leaf node
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Start at the root page (get from header)
+\item Read the node page
+\item If the node is a leaf, return its page number
+\item If the node is internal:
+    \begin{itemize}
+    \item Find the child pointer for this key:
+        \begin{itemize}
+        \item Keys in internal nodes are separators
+        \item Find the largest key that is <= search key
+        \item Follow the corresponding child pointer
+        \end{itemize}
+    \item Recursively call find\_leaf on the child node
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{split\_node}
+
+\textbf{Description:} Split a full B+ tree node into two nodes.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item btree\_index: BPlusTreeIndex
+\item page\_num: u32 (the node to split)
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item u32: page number of the new node
+\item IndexKey: the separator key to push to parent
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Read the node page
+\item Deserialize the node
+\item Create a new page for the new node
+\item Split the keys and pointers in half:
+    \begin{itemize}
+    \item Left node keeps first half
+    \item Right node gets second half
+    \end{itemize}
+\item If leaf node:
+    \begin{itemize}
+    \item Update next\_leaf\_page pointers to link the new node
+    \item Separator key = first key of right node
+    \end{itemize}
+\item If internal node:
+    \begin{itemize}
+    \item Separator key = middle key (promoted to parent)
+    \end{itemize}
+\item Write both nodes to disk
+\item Return (new page number, separator key)
+\item Caller will insert separator into parent
+\end{enumerate}
+
+\subsubsection{load\_index}
+
+\textbf{Description:} Load an existing index from disk into memory.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item metadata: IndexMetadata (from catalog)
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Box<dyn IndexTrait>: the loaded index object
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Construct the index file path from metadata
+\item Open the index file
+\item Read the header page (page 0)
+\item Determine index type from metadata:
+    \begin{itemize}
+    \item If Hash: create HashIndex and populate fields from header
+    \item If BTree: create BPlusTreeIndex and populate fields from header
+    \end{itemize}
+\item Return the index object
+\end{enumerate}
+
+\subsubsection{index\_scan}
+
+\textbf{Description:} Use an index to fetch matching table rows.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item index: Index object
+\item key: IndexKey (search value)
+\item table\_file: File handle to table
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Vec<Vec<u8>{}>: list of tuple data
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Call index.search(key) to get list of (page num, item id)
+\item For each (page num, item id):
+    \begin{itemize}
+    \item Read the table page from disk
+    \item Extract the item id entry to get offset and length
+    \item Read the tuple data from the page
+    \item Add to results
+    \end{itemize}
+\item Return the list of tuples
+\end{enumerate}
+
+\subsubsection{benchmark\_search\_performance}
+
+\textbf{Description:} Compare how fast different search methods are.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item table\_name: String (which table to test)
+\item column\_name: String (which column to search)
+\item search\_value: IndexKey (what to look for)
+\item num\_trials: u32 (how many times to run each test)
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item BenchmarkResults: holds timing data for each method
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Start timer and do sequential scan to find the value
+\item Record how long it took
+\item If a hash index exists on the column:
+    \begin{itemize}
+    \item Start timer and search using hash index
+    \item Record how long it took
+    \end{itemize}
+\item If a btree index exists on the column:
+    \begin{itemize}
+    \item Start timer and search using btree index
+    \item Record how long it took
+    \end{itemize}
+\item Repeat num\_trials times and calculate average times
+\item Return results showing which method was fastest
+\end{enumerate}
+
+\subsubsection{benchmark\_index\_build\_time}
+
+\textbf{Description:} Measure how long it takes to build different types of indexes.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item table\_name: String (table to index)
+\item column\_name: String (column to index)
+\item index\_types: Vec<IndexType> (which index types to test)
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item HashMap<IndexType, Duration>: build time for each index type
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item For each index type in the list:
+    \begin{itemize}
+    \item Start timer
+    \item Create the index (hash or btree)
+    \item Build the index by scanning the table
+    \item Stop timer and record total time
+    \item Drop the index to clean up
+    \end{itemize}
+\item Calculate index file size for each type
+\item Return map of index type to build time and file size
+\end{enumerate}
+
+\subsubsection{create\_clustered\_index}
+
+\textbf{Description:} Create a clustered index that keeps data in sorted order.
+
+\textbf{Inputs:}
+\begin{itemize}
+\item catalog: Catalog
+\item db\_name: String
+\item table\_name: String
+\item column\_name: String
+\item index\_name: String
+\end{itemize}
+
+\textbf{Outputs:}
+\begin{itemize}
+\item Result: OK if successful
+\item Side effect: Creates clustered index file on disk
+\item Side effect: Updates catalog.json
+\end{itemize}
+
+\textbf{Implementation Steps:}
+\begin{enumerate}
+\item Check table does not already have a clustered index (only one allowed)
+\item Check that the column exists in the table
+\item Create a btree index file (clustered indexes use btree)
+\item Write the index header page with is\_clustered = true
+\item Scan all rows from the table
+\item Sort the rows by the indexed column value
+\item Build the btree with entries in sorted order
+\item Store entries in leaf nodes so range scans go fast
+\item Link leaf pages together with next\_leaf\_page pointers
+\item Add clustered index metadata to catalog
+\item Save catalog to disk
+\end{enumerate}
+
+\subsection{Functions to be Modified}
+
+\subsubsection{create\_table}
+
+\textbf{Current Functionality:} Creates a table file and adds table to catalog.
+
+\textbf{Updated Functionality:} Also initialize an empty indexes HashMap for the new table in the catalog.
+
+\textbf{Reason for Update:} Every table needs to have the indexes field, even if empty.
+
+\textbf{Updated Implementation:}
+\begin{enumerate}
+\item Check table does not exist
+\item Create table struct with columns and empty indexes HashMap
+\item Add table to catalog
+\item Save catalog
+\item Create table file and write header
+\end{enumerate}
+
+\subsubsection{load\_catalog}
+
+\textbf{Current Functionality:} Reads catalog.json and deserializes into Catalog struct.
+
+\textbf{Updated Functionality:} Same, but the Catalog struct now includes indexes.
+
+\textbf{Reason for Update:} The JSON structure changed. Rust serde will handle deserialization automatically if the structs match.
+
+\textbf{Updated Implementation:} No code changes needed. Serde deserializes the indexes field automatically. If an old catalog without indexes is loaded, serde will error or we can use default values.
+
+\subsubsection{save\_catalog}
+
+\textbf{Current Functionality:} Serializes Catalog struct to JSON and writes to disk.
+
+\textbf{Updated Functionality:} Same, but now includes indexes in the output.
+
+\textbf{Reason for Update:} We need to persist index metadata.
+
+\textbf{Updated Implementation:} No code changes needed. Serde serializes the new indexes field automatically.
+
+\subsubsection{insert\_tuple (from heap manager)}
+
+\textbf{Current Functionality:} Inserts a tuple into a table file.
+
+\textbf{Updated Functionality:} After inserting the tuple, also update all indexes for the table.
+
+\textbf{Reason for Update:} Indexes must stay in sync with table data.
+
+\textbf{Updated Implementation:}
+\begin{enumerate}
+\item Find the last page with free space (current logic)
+\item If no space, create a new page
+\item Insert tuple into the page
+\item Write page to disk
+\item NEW: If the table has indexes:
+    \begin{itemize}
+    \item Load index metadata from catalog
+    \item For each index on this table:
+        \begin{itemize}
+        \item Extract the value of the indexed column from the tuple
+        \item Call index.insert(key, page num, item id)
+        \end{itemize}
+    \end{itemize}
+\end{enumerate}
+
+Note: For now, we pass the catalog and index manager to insert\_tuple, or we call index updates separately.
+
+\subsubsection{show\_tuples (from executor)}
+
+\textbf{Current Functionality:} Scans all pages and prints tuples.
+
+\textbf{Updated Functionality:} Optionally use an index if a WHERE clause is provided.
+
+\textbf{Reason for Update:} Demonstrate index performance improvement.
+
+\textbf{Updated Inputs:}
+\begin{itemize}
+\item Add: where\_column: Option<String>
+\item Add: where\_value: Option<IndexKey>
+\end{itemize}
+
+\textbf{Updated Implementation:}
+\begin{enumerate}
+\item If where clause is provided:
+    \begin{itemize}
+    \item Check if an index exists on where\_column
+    \item If yes, use index\_scan instead of sequential scan
+    \item Call index.search(where\_value) to get matching (page, item) pairs
+    \item Fetch those specific tuples from the table
+    \end{itemize}
+\item If no where clause or no index, do sequential scan (current logic)
+\end{enumerate}
+
+\section{Frontend Changes (CLI Inputs)}
+
+We need to add new commands to the CLI so users can create, drop, and use indexes.
+
+\subsection{New CLI Commands}
+
+\textbf{CREATE INDEX:}
+\begin{lstlisting}
+Command: create index
+Prompts:
+  - Enter index name: <index_name>
+  - Enter table name: <table_name>
+  - Enter column name: <column_name>
+  - Enter index type (hash/btree): <type>
+  - If hash: Enter hash variant (static/extendible/linear): <variant>
+  - Enforce unique constraint (yes/no): <yes/no>
+Output: Index created successfully
+\end{lstlisting}
+
+\textbf{DROP INDEX:}
+\begin{lstlisting}
+Command: drop index
+Prompts:
+  - Enter index name: <index_name>
+  - Enter table name: <table_name>
+Output: Index dropped successfully
+\end{lstlisting}
+
+\textbf{SHOW INDEXES:}
+\begin{lstlisting}
+Command: show indexes
+Prompts:
+  - Enter table name: <table_name>
+Output: List of all indexes on the table with details
+  - Index name
+  - Indexed column
+  - Index type
+  - Is unique
+\end{lstlisting}
+
+\textbf{SEARCH USING INDEX:}
+\begin{lstlisting}
+Command: search
+Prompts:
+  - Enter table name: <table_name>
+  - Enter column name: <column_name>
+  - Enter search value: <value>
+Output: All rows where column = value (using index if available)
+\end{lstlisting}
+
+\textbf{RANGE SEARCH:}
+\begin{lstlisting}
+Command: range search
+Prompts:
+  - Enter table name: <table_name>
+  - Enter column name: <column_name>
+  - Enter start value: <start>
+  - Enter end value: <end>
+Output: All rows where column between start and end (using btree index)
+\end{lstlisting}
+
+\textbf{BENCHMARK INDEX:}
+\begin{lstlisting}
+Command: benchmark
+Prompts:
+  - Enter table name: <table_name>
+  - Enter column name: <column_name>
+  - Enter search value: <value>
+Output: 
+  - Sequential scan time: X ms
+  - Hash index search time: Y ms
+  - Btree index search time: Z ms
+\end{lstlisting}
+
+\subsection{Modified Commands}
+
+The existing "show tuples" command will be enhanced to use indexes when searching, but the user interface stays the same.
+
+\section{Overall Component Workflow}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{image.png}
+    \caption{Index Creation Flow}
+\end{figure}
+\subsection{Index Creation Workflow}
+
+\begin{enumerate}
+\item User selects "create index" from menu
+\item User enters index name, table name, column name, index type
+\item Frontend calls create\_hash\_index or create\_btree\_index
+\item Backend checks catalog for table and column existence
+\item Backend creates index file on disk at database/base/\{db\}/\{table\}\_\{index\}.idx
+\item Backend writes index header page with initial metadata
+\item Backend scans the table file:
+    \begin{itemize}
+    \item For each page, for each tuple
+    \item Extract the value of the indexed column
+    \item Insert (value, page num, item id) into the index
+    \end{itemize}
+\item Backend adds index metadata to catalog
+\item Backend saves catalog to disk
+\item Frontend displays success message
+\end{enumerate}
+
+\subsection{Index Search Workflow}
+
+\begin{enumerate}
+\item User selects "search" from menu
+\item User enters table name, column name, and search value
+\item Frontend checks catalog to see if an index exists on that column
+\item If index exists:
+    \begin{itemize}
+    \item Frontend loads the index using load\_index
+    \item Frontend calls index.search(search\_value)
+    \item Index returns a list of (page num, item id) tuples
+    \item For each (page num, item id):
+        \begin{itemize}
+        \item Disk manager reads the table page
+        \item Buffer manager loads page into memory
+        \item Executor extracts the tuple from the page
+        \end{itemize}
+    \item Frontend displays all matching tuples
+    \end{itemize}
+\item If no index exists:
+    \begin{itemize}
+    \item Fall back to sequential scan
+    \item Read every page and check every tuple
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Insert with Index Maintenance Workflow}
+
+\begin{enumerate}
+\item User loads CSV or inserts data
+\item Buffer manager calls heap insert\_tuple for each row
+\item Heap manager finds a page with free space
+\item Heap manager adds tuple to the page
+\item Heap manager gets the page num and item id of the new tuple
+\item Heap manager checks catalog for indexes on this table
+\item For each index:
+    \begin{itemize}
+    \item Extract the value of the indexed column from the new tuple
+    \item Load the index
+    \item Call index.insert(value, page num, item id)
+    \item Index updates the appropriate bucket or tree node
+    \item Index writes the updated page to disk
+    \end{itemize}
+\item All pages are flushed to disk
+\item User sees success message
+\end{enumerate}
+
+\subsection{Range Scan Workflow (B+ Tree Only)}
+
+\begin{enumerate}
+\item User selects "range search" from menu
+\item User enters table name, column name, start value, end value
+\item Frontend checks if a B+ tree index exists on that column
+\item If yes:
+    \begin{itemize}
+    \item Load the B+ tree index
+    \item Call index.range\_scan(start, end)
+    \item Index finds the leaf node containing start value
+    \item Index walks through leaf nodes collecting all keys in range
+    \item Index returns list of (page num, item id)
+    \item Fetch all matching tuples from table
+    \item Display tuples
+    \end{itemize}
+\item If no B+ tree index:
+    \begin{itemize}
+    \item Display error or fall back to sequential scan with filtering
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Drop Index Workflow}
+
+\begin{enumerate}
+\item User selects "drop index" from menu
+\item User enters index name and table name
+\item Frontend calls drop\_index
+\item Backend checks catalog to ensure index exists
+\item Backend deletes the index file from disk
+\item Backend removes index metadata from catalog
+\item Backend saves updated catalog
+\item Frontend displays success message
+\end{enumerate}
+
+\section{Codebase Structure Changes}
+
+\subsection{New Files to be Created}
+
+All new files will be in the src/backend/ directory.
+
+\textbf{Index module:}
+\begin{lstlisting}
+src/backend/index/
+    mod.rs                  (module declarations)
+    index_trait.rs          (IndexTrait definition)
+    index_metadata.rs       (IndexMetadata, IndexKey structs)
+    hash_index.rs           (HashIndex implementation)
+    btree_index.rs          (BPlusTreeIndex implementation)
+    tree_node.rs            (TreeNode struct)
+    index_manager.rs        (IndexManager struct)
+\end{lstlisting}
+
+\textbf{Index operations:}
+\begin{lstlisting}
+src/backend/index/operations/
+    mod.rs
+    create.rs               (create_hash_index, create_btree_index)
+    drop.rs                 (drop_index)
+    load.rs                 (load_index)
+    search.rs               (index_scan, range_scan)
+\end{lstlisting}
+
+\textbf{Frontend commands:}
+\begin{lstlisting}
+src/frontend/
+    index_cmd.rs            (CLI handlers for index commands)
+\end{lstlisting}
+
+\textbf{Tests:}
+\begin{lstlisting}
+tests/
+    test_hash_index.rs
+    test_btree_index.rs
+    test_extendible_hash.rs
+    test_linear_hash.rs
+    test_index_search.rs
+    test_range_scan.rs
+    test_index_maintenance.rs
+    test_benchmark.rs
+\end{lstlisting}
+
+\subsection{Files to be Modified}
+
+\begin{itemize}
+\item src/backend/catalog/types.rs: Add indexes field to Table struct
+\item src/backend/catalog/catalog.rs: Update create\_table to initialize indexes HashMap
+\item src/backend/heap/mod.rs: Update insert\_tuple to maintain indexes
+\item src/frontend/menu.rs: Add menu options for index commands
+\item src/backend/mod.rs: Add index module declaration
+\end{itemize}
+
+\section{Test Cases}
+
+\subsection{What Will Be Tested}
+
+\subsubsection{Hash Index Tests}
+
+\begin{itemize}
+\item Create a static hash index
+\item Insert 100 entries into the index
+\item Search for each entry and verify correct (page, item) is returned
+\item Delete entries and verify they are removed
+\item Handle collisions: insert multiple keys that hash to the same bucket
+\item Test extendible hashing: insert enough entries to trigger bucket splits
+\item Verify global depth increases when needed
+\item Test linear hashing: verify split pointer advances correctly
+\end{itemize}
+
+\subsubsection{B+ Tree Index Tests}
+
+\begin{itemize}
+\item Create a B+ tree index
+\item Insert 1000 entries in random order
+\item Verify tree stays balanced
+\item Search for keys and verify correctness
+\item Range scan: verify all keys in range are returned in sorted order
+\item Test node splits: insert enough to force multiple levels of splits
+\item Delete keys and verify they are removed
+\end{itemize}
+
+\subsubsection{Index Maintenance Tests}
+
+\begin{itemize}
+\item Create a table with an index
+\item Insert rows into the table
+\item Verify index is updated automatically
+\item Search using the index and verify correct rows are returned
+\item Delete rows from the table
+\item Verify index entries are removed
+\end{itemize}
+
+\subsubsection{Performance Tests}
+
+\begin{itemize}
+\item Create a table with 10,000 rows
+\item Measure sequential scan time for finding a specific row
+\item Create a hash index
+\item Measure index search time for the same row
+\item Verify index is faster than sequential scan
+\item Create a B+ tree index
+\item Measure range scan time vs sequential scan with filter
+\end{itemize}
+
+\subsubsection{Catalog Integration Tests}
+
+\begin{itemize}
+\item Create an index
+\item Verify it appears in catalog.json
+\item Close and reload the database
+\item Verify index metadata is loaded correctly
+\item Drop the index
+\item Verify it is removed from catalog.json
+\end{itemize}
+
+\subsubsection{Error Handling Tests}
+
+\begin{itemize}
+\item Try to create an index on a nonexistent table: should fail
+\item Try to create an index on a nonexistent column: should fail
+\item Try to create an index with a duplicate name: should fail
+\item Try to insert a duplicate key into a unique index: should fail
+\item Try to drop a nonexistent index: should fail
+\end{itemize}
+
+\subsection{Testing Approach}
+
+We will use Rust unit tests and integration tests.
+
+\textbf{Unit tests:} Test individual functions in isolation.
+\begin{itemize}
+\item Test hash function produces correct bucket numbers
+\item Test key serialization and deserialization
+\item Test tree node split logic
+\item Test find\_leaf navigation
+\end{itemize}
+
+\textbf{Integration tests:} Test end to end workflows.
+\begin{itemize}
+\item Create index, insert data, search, verify results
+\item Test with real table files and index files on disk
+\item Test multiple indexes on the same table
+\end{itemize}
+
+\textbf{Performance benchmarks:} Measure and compare index types.
+\begin{itemize}
+\item Generate large datasets (10k, 100k, 1M rows)
+\item Time sequential scans vs index scans
+\item Measure index build time
+\item Measure index file size
+\item Compare hash vs B+ tree for point queries
+\item Compare B+ tree range scans vs filtered sequential scans
+\end{itemize}
+
+Each test will print pass or fail and error details if it fails. We will run all tests before submitting to make sure everything works.
+
+\end{document}
