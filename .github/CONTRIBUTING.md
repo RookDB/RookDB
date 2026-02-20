@@ -1,23 +1,11 @@
 Please follow the guidelines below when contributing to this repository.
 
-## Branching Strategy
-* The main working branch is `develop` branch.
-* Submit all Pull Requests targeting `develop` branch.
-* `main` is reserved for stable releases and will be periodically updated by merging changes from the `develop` branch.
-
 ## Code Contribution
-
-1. Fork this repository to your GitHub account.
-
-2. Create a new branch following the naming convention: **feature-name**
-
-3. Make your changes and commit them using meaningful commit messages.
-
-4. Push the branch to your forked repository.
-
-5. Write corresponding test cases (if applicable) and update the relevant documentation.
-
-6. Submit a Pull Request to the `develop` branch, including a clear title and summary of changes.
+1. Create a branch using the naming convention: *feature-name*.
+2. Make changes with meaningful commit messages.
+3. Push your changes.
+4. Add tests (if applicable) and update documentation.
+5. Submit a Pull Request to the main branch with a clear title and summary.
 
 ## Documentation Contribution
 Please refer to `docs/README.md` for documentation contribution guidelines.
