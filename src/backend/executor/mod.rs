@@ -1,5 +1,7 @@
 pub mod load_csv;
 pub mod seq_scan;
+pub mod projection;
 
 pub use load_csv::load_csv;
 pub use seq_scan::show_tuples;
+pub use projection::{select_tuples, ProjectionRequest};
