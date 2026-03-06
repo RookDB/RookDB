@@ -1,3 +1,3 @@
 pub mod buffer_manager;
 
-pub use buffer_manager::BufferManager;
+pub use buffer_manager::{BufferManager, PageId, PageMetadata};

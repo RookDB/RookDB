@@ -1,10 +1,11 @@
-//! Handles table-related user commands such as listing tables,
+﻿//! Handles table-related user commands such as listing tables,
 //! creating tables, and displaying table statistics.
 
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{Catalog, Column, create_table, show_tables};
+use storage_manager::catalog::{Catalog, create_table, show_tables};
+use storage_manager::catalog::types::{Column, DataType};
 use storage_manager::statistics::print_table_page_count;
 
 /// Displays tables in the currently selected database
@@ -41,7 +42,8 @@ pub fn create_table_cmd(
     print!("\nEnter columns in the format:- column_name:data_type\n");
     print!("Press Enter on an empty line to finish\n");
 
-    let mut columns = Vec::new();
+    let mut columns: Vec<Column> = Vec::new();
+    let mut position: u16 = 1;
     loop {
         let mut input = String::new();
         print!("Enter column (name:type): ");
@@ -52,16 +54,30 @@ pub fn create_table_cmd(
             break;
         }
 
-        let parts: Vec<&str> = input.split(':').collect();
+        let parts: Vec<&str> = input.splitn(2, ':').collect();
         if parts.len() != 2 {
             println!("Invalid format. Please use name:type (e.g. id:INT)");
             continue;
         }
 
-        columns.push(Column {
-            name: parts[0].to_string(),
-            data_type: parts[1].to_string(),
+        let col_name = parts[0].trim().to_string();
+        let type_str = parts[1].trim();
+        let data_type = DataType::from_name(type_str).unwrap_or_else(|| {
+            println!("Unknown type '{}', defaulting to TEXT", type_str);
+            DataType::text()
         });
+
+        columns.push(Column {
+            column_oid: 0,
+            name: col_name,
+            column_position: position,
+            data_type,
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+            constraints: vec![],
+        });
+        position += 1;
     }
 
     create_table(catalog, &db, &table_name, columns);

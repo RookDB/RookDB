@@ -1,13 +1,12 @@
-use std::fs;
+﻿use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::init_catalog;
-
-use storage_manager::layout::CATALOG_FILE;
+use storage_manager::layout::{CATALOG_FILE, CATALOG_PAGES_DIR};
 
 #[test]
 fn test_init_catalog() {
-    // Step 1: Ensure catalog.json doesn’t exist before test
+    // Step 1: Ensure catalog file/dir does not exist before test
     if Path::new(CATALOG_FILE).exists() {
         fs::remove_file(CATALOG_FILE).expect("Failed to remove existing catalog file");
     }
@@ -15,23 +14,30 @@ fn test_init_catalog() {
     // Step 2: Run init_catalog()
     init_catalog();
 
-    // Step 3: Verify the file now exists
+    // Step 3: Verify that either the JSON file or the page-based directory was created.
+    // In legacy/bootstrap mode init_catalog writes catalog.json.
+    // In full page-backend mode it creates catalog_pages/.
+    let json_created  = Path::new(CATALOG_FILE).exists();
+    let pages_created = Path::new(CATALOG_PAGES_DIR).exists();
+
     assert!(
-        Path::new(CATALOG_FILE).exists(),
-        "catalog.json was not created"
+        json_created || pages_created,
+        "init_catalog() did not create catalog.json or catalog_pages/"
     );
 
-    // Step 4: Read file content and check it’s valid JSON
-    let content = fs::read_to_string(CATALOG_FILE).expect("Failed to read catalog.json");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&content).expect("catalog.json contains invalid JSON");
+    // Step 4: If JSON was written, check it contains valid JSON with a "databases" key
+    if json_created {
+        let content = fs::read_to_string(CATALOG_FILE).expect("Failed to read catalog.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("catalog.json contains invalid JSON");
+        assert!(
+            parsed.get("databases").is_some(),
+            "catalog.json does not contain 'databases' field"
+        );
+    }
 
-    // Step 5: Verify structure is { "databases": {} }
-    assert!(
-        parsed.get("databases").is_some(),
-        "catalog.json does not contain 'databases' field"
-    );
-
-    // Step 6: Clean up (optional)
-    fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
+    // Step 5: Clean up
+    if Path::new(CATALOG_FILE).exists() {
+        let _ = fs::remove_file(CATALOG_FILE);
+    }
 }

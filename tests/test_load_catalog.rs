@@ -1,8 +1,7 @@
-use std::fs;
+﻿use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::{Catalog, init_catalog, load_catalog};
-
 use storage_manager::layout::CATALOG_FILE;
 
 #[test]
@@ -16,12 +15,13 @@ fn test_load_catalog() {
     let catalog = load_catalog();
 
     // Step 3: Verify it returns a valid Catalog struct
-    // (Just ensuring type correctness and successful deserialization)
     assert!(
         matches!(catalog, Catalog { .. }),
         "load_catalog did not return a valid Catalog struct"
     );
 
     // Step 4: Clean up (optional)
-    fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
+    if Path::new(CATALOG_FILE).exists() {
+        fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
+    }
 }

@@ -1,0 +1,1132 @@
+Solution Design
+4. Catalog Manager
+[ Data Systems ]
+Aviral Gupta (2023111023) Inesh Dheer (2023111010)
+1. Database and Architecture Design Changes
+1.1 Catalog Storage Architecture
+We propose a self-hosting catalog system with page-based storage that integrates
+seamlessly with the existing RookDB's existing infrastructure. The proposed Catalog
+Storage Architecture is as follows:
+database/
+├── global/
+│ ├── catalog_pages/ # NEW: Page-based catalog storage
+│ │ ├── pg_database.dat # System catalog: databases
+│ │ ├── pg_table.dat # System catalog: tables
+│ │ ├── pg_column.dat # System catalog: columns
+│ │ ├── pg_constraint.dat # System catalog: constraints
+│ │ ├── pg_index.dat # System catalog: indexes
+│ │ └── pg_type.dat # System catalog: data types
+│ └── catalog.json # DEPRECATED: Legacy format (migration support)
+└── base/
+└── {database}/
+└── {table}.dat # User table data files
+To justify this structure:
+● Page-based storage enables buffer manager integration for efficient caching,
+● System catalogs provide self-hosting capabilities similar to PostgreSQL,
+● Separation of concerns between system metadata, and
+● Scalability supports large numbers of databases, tables, and constraints
+1.2 Page Layout for Catalog Pages
+For catalog pages, we’ll continue following the slotted page layout consistent with
+RookDB's existing page structure, for the following reasons:
+● Consistency: Matches existing RookDB page layout
+● Efficient updates: Item IDs allow tuple relocation without changing references
+● Space efficiency: Variable-length tuples with compact storage
+● Buffer compatibility: Standard page size (8KB) works with buffer manager
+1.3 System Catalog Schema Design
+Following are snippets to exemplify the proposed storage schema design
+pg_database (Database Metadata)
+Column Name Data Type Constraints Description
+db_oid UINT32 PRIMARY KEY Unique database identifier
+db_name VARCHAR(64) UNIQUE, NOT NULL Database name
+db_owner VARCHAR(64) NOT NULL Database owner (future)
+db_created_at UINT64 Creation timestamp (Unix)
+db_encoding UINT8 NOT NULL Character encoding
+pg_table (Table Metadata)
+Column Name Data Type Constraints Description
+table_oid UINT32 PRIMARY KEY Unique table identifier
+table_name VARCHAR(64) NOT NULL Table name
+db_oid UINT32 FOREIGN KEY →
+pg_database(db_oid)
+Parent database
+table_type UINT8 NOT NULL Type: 0=user, 1=system
+catalog
+row_count UINT64 - Row count
+page_count UINT32 - Number of data pages
+created_at UINT64 - Creation timestamp
+pg_column (Column Metadata)
+Column Name Data Type Constraints Description
+column_oid UINT32 PRIMARY KEY Unique column identifier
+table_oid UINT32 FOREIGN KEY →
+pg_table(table_oid)
+Parent table
+column_name VARCHAR(64) NOT NULL Column name
+column_pos UINT16 NOT NULL Position in table (1-based)
+type_oid UINT32 FOREIGN KEY →
+pg_type(type_oid)
+Data type
+type_mod INT32 Type modifier (e.g.,
+VARCHAR length)
+is_nullable BOOL NOT NULL NULL allowed (true/false)
+default_value BYTES Default value (serialized)
+pg_constraint (Constraint Metadata)
+Column Name Data Type Constraints Description
+constraint_oid UINT32 PRIMARY KEY Unique constraint identifier
+constraint_na
+me
+VARCHAR(64
+)
+NOT NULL Constraint name
+constraint_typ
+e
+UINT8 NOT NULL Type: 1=PK, 2=FK,
+3=UNIQUE, 4=NOT NULL,
+5=CHECK
+table_oid UINT32 FOREIGN KEY →
+pg_table(table_oid)
+Constrained table
+column_oids UINT32[] Array of column OIDs
+referenced_tab
+le
+UINT32 FK: referenced table OID
+referenced_col
+umns
+UINT32[] FK: referenced column
+OIDs
+on_delete UINT8 FK: action (0=NO ACTION,
+1=CASCADE, 2=SET NULL,
+3=RESTRICT)
+on_update UINT8 FK: action
+check_expressi
+on
+VARCHAR(25
+6)
+CHECK: SQL expression
+is_deferrable BOOL Deferrable constraint
+(future)
+pg_index (Index Metadata)
+Column Name Data Type Constraints Description
+index_oid UINT32 PRIMARY KEY Unique index identifier
+index_name VARCHAR(64
+)
+NOT NULL Index name
+table_oid UINT32 FOREIGN KEY →
+pg_table(table_oid)
+Indexed table
+index_type UINT8 NOT NULL Type: 1=B-Tree, 2=Hash
+(future)
+column_oids UINT32[] NOT NULL Indexed columns
+is_unique BOOL NOT NULL Unique index flag
+is_primary BOOL NOT NULL Primary key index flag
+index_pages UINT32 Number of index pages
+pg_data (Data Type Metadata)
+Column Name Data Type Constraints Description
+type_oid UINT32 PRIMARY KEY Unique type identifier
+type_name VARCHAR(32) UNIQUE, NOT NULL Type name (INT, VARCHAR,
+etc.)
+type_category UINT8 NOT NULL Category: 1=numeric,
+2=string, 3=datetime,
+4=boolean
+type_length INT16 Fixed length (-1 for variable)
+type_align UINT8 Alignment requirement
+(bytes)
+is_builtin BOOL NOT NULL Built-in type flag
+Note: The system catalog tuples all follow a general layout structure consisting of a
+fixed-length header followed by variable-length attributes.
+1.4 Buffer Manager
+We further propose to integrate the catalog system with the existing Buffer Manager
+through a Catalog Page Cache; via the following key
+integration points:
+● Catalog Page Allocation:
+○ System catalog tables use reserved page range
+(OID < 10000)
+○ Special page type identifier in page header
+● Cache Invalidation:
+○ Catalog cache entries invalidated on DDL ops
+○ Write-through updates ensure consistency
+1.5 Constraint System Architecture
+The architecture supports the following constraints on attribute columns:
+● Primary Key: Unique index, NOT NULL enforced, supports composite keys.
+● Foreign Key: Referential integrity, cascading actions (CASCADE, SET NULL,
+RESTRICT, NO ACTION), supports composite keys.
+● Unique: Creates unique index, allows NULLs (unless
+combined with NOT NULL).
+● NOT NULL: Column-level, enforced on INSERT/UPDATE.
+1.6 OID (Object Identifier) System
+To uniquely identify all database objects, we implement an OID
+system. Stored in a special system page:
+database/global/pg_oid_counter.dat with atomic increment
+operations and next available OID (UINT32) stored in page 0
+header for efficiency.
+1.7 Justification
+To justify all the proposed changes:
+● Scalability
+○ Scales to millions of tables/columns via page-based storage.
+○ Efficient caching through buffer manager integration.
+○ Supports 4 billion unique objects using the OID system.
+● Performance
+○ Reduced disk I/O with in-memory catalog cache.
+○ Fast constraint checks (O(log n)) using index-backed lookups.
+○ Minimized fragmentation with slotted page layout.
+● Consistency
+○ Maintains referential integrity via foreign key constraints.
+○ Prevents partial schema changes with transaction support.
+○ Ensures durability through a write-through cache.
+● Extensibility
+○ Modular constraint system allows for future constraint types.
+○ Supports user-defined types using the pg_type table.
+○ Generic page format supports adding system catalogs.
+● Standards Compliance
+○ Based on PostgreSQL's proven catalog architecture.
+○ Adheres to standard SQL constraint semantics.
+○ Uses industry-standard 8KB page size.
+2. Backend Data Structures
+2.1 Data Structures to be Created
+2.1.1 Enhanced Type System: Support extended data types beyond INT and TEXT
+● Current system only supports INT and TEXT
+● Extended types (VARCHAR, FLOAT, DATE) required for real-world applications
+● Type metadata enables proper validation and storage layout calculations
+● Alignment information ensures proper memory access on all platforms
+struct DataType {
+type_oid: u32,
+type_name: String,
+type_category: TypeCategory,
+type_length: i16, // -1 for variable length
+type_align: u8, // 1, 2, 4, or 8 byte alignment
+is_builtin: bool,
+}
+enum TypeCategory {
+Numeric,
+String,
+DateTime,
+Boolean,
+}
+2.1.2 Constraint Structures: Represent all constraint types in a unified system
+● Unified constraint representation simplifies validation logic
+● Enum-based design ensures type safety in Rust
+● Metadata struct stores constraint-specific details
+● Referential actions enable cascading delete/update operations
+struct Constraint {
+constraint_oid: u32,
+constraint_name: String,
+constraint_type: ConstraintType,
+table_oid: u32,
+column_oids: Vec<u32>,
+metadata: ConstraintMetadata,
+}
+enum ConstraintType {
+PrimaryKey,
+ForeignKey,
+Unique,
+NotNull,
+Check,
+}
+enum ConstraintMetadata {
+PrimaryKey { index_oid: u32 },
+ForeignKey {
+referenced_table_oid: u32,
+referenced_column_oids: Vec<u32>,
+on_delete: ReferentialAction,
+on_update: ReferentialAction,
+},
+Unique { index_oid: u32 },
+NotNull,
+Check { check_expression: String },
+}
+enum ReferentialAction {
+NoAction,
+Cascade,
+SetNull,
+Restrict,
+}
+2.1.3 Index Metadata: Storing for constraint enforcement and query optimisation
+● Indexes required for efficient constraint checking (UNIQUE, PK, FK)
+● Metadata enables query optimizer to use indexes
+● Support for multiple index types (extensible design)
+struct Index {
+index_oid: u32,
+index_name: String,
+table_oid: u32,
+index_type: IndexType,
+column_oids: Vec<u32>,
+is_unique: bool,
+is_primary: bool,
+index_pages: u32,
+}
+enum IndexType {
+BTree,
+Hash,
+}
+2.1.4 OID Counter Manager: Thread-safe OID allocation for database objects
+● Ensures unique identifiers for all objects
+● Persistent counter survives restarts
+● Centralized allocation prevents OID conflicts
+struct OidCounter {
+next_oid: u32,
+counter_file_path: String,
+}
+impl OidCounter {
+fn allocate_oid(&mut self) -> Result<u32, CatalogError> {
+oid = next_oid
+next_oid += 1
+persist_counter()
+return oid
+}
+fn load_counter(&mut self) -> Result<(), CatalogError> {
+// read next_oid from disk file
+}
+fn persist_counter(&self) -> Result<(), CatalogError> {
+// write next_oid to disk file
+}
+}
+2.1.5 Catalog Cache: In-memory cache for frequently accessed catalog entries
+● Reduces disk I/O for frequently accessed metadata
+● LRU eviction prevents unlimited memory growth
+● Invalidation on DDL ensures consistency
+● Write-through policy maintains durability
+struct CatalogCache {
+databases: Map<DbName, DatabaseEntry>,
+tables: Map<(DbOid, TableName), TableEntry>,
+constraints: Map<TableOid, List<Constraint>>,
+indexes: Map<TableOid, List<Index>>,
+types: Map<TypeOid, DataType>,
+access_order: List<CacheKey>, // LRU
+max_cache_size: usize,
+}
+impl CatalogCache {
+fn new(max_size)
+fn get_database(db_name)
+fn insert_database(db_name, entry)
+fn invalidate_table(db_oid, table_name)
+fn evict_if_needed()
+fn update_access(key)
+}
+2.1.5 Catalog Page Manager: Interface between catalog operations and storage
+● Abstracts page-level operations from catalog logic
+● Integrates with existing buffer manager
+● Provides CRUD operations for catalog tuples
+● Handles page allocation and space management
+struct CatalogPageManager {
+buffer_manager: BufferManager,
+catalog_file_paths: Map<CatalogName, FilePath>,
+}
+impl CatalogPageManager {
+fn read_catalog_tuple(catalog_name, page_num, slot_id)
+// fetch page via buffer manager
+// return tuple bytes
+fn insert_catalog_tuple(catalog_name, tuple_data)
+// find page with free space
+// insert tuple
+// return (page_num, slot_id)
+fn scan_catalog(catalog_name)
+// iterate all pages
+// collect tuples
+fn update_catalog_tuple(catalog_name, page_num, slot_id, new_data)
+// fetch page
+// update tuple
+// mark page dirty
+}
+2.2 Data Structures to be Modified
+2.2.1 Column Structure: Support extended metadata for columns including
+constraints and defaults
+● OID enables foreign key references from pg_column
+● Position ensures deterministic column ordering
+● Type modifier supports variable-length types
+● Nullable flag enforces NOT NULL constraint
+● Default value support for INSERT operations
+struct Column {
+column_oid: u32,
+name: String,
+column_position: u16,
+data_type: DataType,
+type_modifier: Option<TypeModifier>,
+is_nullable: bool,
+default_value: Option<DefaultValue>,
+constraints: Vec<u32>, // constraint OIDs
+}
+enum DefaultValue {
+Integer(i32),
+BigInt(i64),
+Float(f32),
+Double(f64),
+String(String),
+Boolean(bool),
+Null,
+CurrentTimestamp,
+}
+2.2.2 Table Structure: Transform Table from simple column container to full metadata
+structure
+● OID enables references from constraints and indexes
+● Parent database reference maintains catalog hierarchy
+● Constraints stored with table for efficient validation
+● Statistics support query optimization
+● Table type distinguishes system catalogs from user tables
+struct Table {
+table_oid: u32,
+table_name: String,
+db_oid: u32,
+columns: Vec<Column>,
+constraints: Vec<Constraint>,
+indexes: Vec<u32>, // index OIDs
+table_type: TableType,
+statistics: TableStatistics,
+}
+enum TableType {
+UserTable,
+SystemCatalog,
+}
+struct TableStatistics {
+row_count: u64,
+page_count: u32,
+created_at: u64,
+last_modified: u64,
+}
+2.2.3 Database Structure: Add database-level metadata and ownership
+● OID enables foreign key references from pg_table
+● Encoding ensures proper string handling
+● Owner field prepares for future user management
+● Timestamp supports auditing
+struct Database {
+db_oid: u32,
+db_name: String,
+tables: Map<String, Table>,
+owner: String,
+encoding: Encoding,
+created_at: u64,
+}
+enum Encoding {
+UTF8,
+ASCII,
+}
+2.2.4 Catalog Structure: Transform Catalog from passive data structure to active
+manager
+● OID counter centralizes object ID allocation
+● Cache integration improves performance
+● Page manager enables dual-storage mode (JSON + pages)
+● Bootstrap mode supports self-hosting initialization
+struct Catalog {
+databases: Map<String, Database>,
+oid_counter: u32,
+cache: CatalogCache,
+page_manager: Option<CatalogPageManager>,
+bootstrap_mode: bool,
+}
+impl Catalog {
+fn new() -> Self
+initialize empty databases
+set oid_counter (e.g., start at 10000)
+create cache
+page_manager = None
+bootstrap_mode = false
+fn enable_page_backend(buffer_manager)
+page_manager = Some(new CatalogPageManager(buffer_manager))
+}
+2.2.5 Buffer Manager Structure: Enhance buffer manager with pin/unpin semantics
+and dirty page tracking
+● Pin/unpin prevents eviction of actively used pages
+● Dirty tracking ensures modified pages are persisted
+● LRU replacement maximizes cache hit rate
+● Max page limit prevents unlimited memory growth
+struct BufferManager {
+pages: Vec<Page>, // buffer frames
+page_metadata: Map<PageId, PageMetadata>, // page table
+lru_queue: Vec<PageId>, // LRU tracking
+max_pages: usize,
+}
+struct PageId {
+file_path: String,
+page_num: u32,
+}
+struct PageMetadata {
+pin_count: u32,
+is_dirty: bool,
+last_accessed: u64,
+buffer_index: usize,
+}
+impl BufferManager {
+fn pin_page(page_id) -> Result<&mut Page>
+// if in buffer → increment pin + update LRU
+// else load from disk (evict if needed)
+// return page reference
+fn unpin_page(page_id, is_dirty) -> Result<()>
+// decrement pin
+// mark dirty if modified
+fn flush_pages() -> Result<()>
+// write all dirty pages to disk
+fn evict_page() -> Result<()>
+// remove oldest unpinned page (LRU)
+}
+3. Backend Functions
+3.1 Functions to be Created
+3.1.1 Catalog Initialization Functions
+bootstrap_catalog() -> <(), CatalogError>
+Description: Initialize the self-hosting catalog system with system tables
+Implementation:
+● Setup Storage: Create database/global/catalog_pages/, initialize OID counter at
+10000, and create system catalog files (pg_database, pg_table, pg_column,
+pg_constraint, pg_index, pg_type).
+● Initialize Files: For each catalog file, create it, initialize page 0 as header, and
+allocate the first data page.
+● Bootstrap Metadata: Insert self-describing entries into pg_table and pg_column
+for all system catalogs.
+● Insert Core Data: Add built-in types (INT, BIGINT, FLOAT, etc.) into pg_type and
+create the system database entry (db_oid=1, name="system").
+● Finalize & Verify: Enable bootstrap_mode and verify setup by querying pg_table
+to ensure all catalogs are registered.
+init_catalog_page_storage(buffer_manager: &mut BufferManager) ->
+Result<CatalogPageManager, CatalogError>
+Description: Initialize page-based catalog storage backend
+Implementation:
+● Instantiate Manager: Create CatalogPageManager instance.
+● Register Paths: Map catalog names (pg_database, pg_table, etc.) to their file
+paths in database/global/catalog_pages/.
+● Check Files: For each catalog file, verify whether it exists.
+● Initialize or Bootstrap: If file exists, load page count from header; if not, call
+bootstrap_catalog().
+● Return Manager: Provide the fully initialized page manager.
+3.1.2 Catalog Initialization Functions
+register_builtin_types(catalog: &mut Catalog) -> Result<(), CatalogError>
+Description: Register all built-in data types in pg_type
+Implementation:
+● Iterate Types: Process each built-in type.
+● Serialize: Convert type metadata to bytes using serialize_type_tuple(type).
+● Insert: Store in pg_type via page_manager.insert_catalog_tuple("pg_type",
+bytes).
+● Cache: Add type to in-memory cache (cache.insert_type(type_oid, type)).
+● Complete: Return Ok(()) after successful insertion.
+lookup_type_by_name(catalog: &Catalog, type_name: &str) -> Result<DataType,
+CatalogError>
+Description: Resolve type name to DataType metadata
+Implementation:
+● Check Cache First: Call cache.get_type_by_name(type_name) and return if
+found.
+● Scan Catalog: If not cached, scan pg_type using
+page_manager.scan_catalog("pg_type").
+● Deserialize Tuples: Convert each tuple using deserialize_type_tuple(bytes).
+● Match & Cache: If type_name matches, cache the entry and return it.
+● Handle Miss: If no match found, return CatalogError::TypeNotFound.
+calculate_tuple_size(columns: &[Column], types: &HashMap<u32, DataType>) ->
+(usize, bool)
+Description: Calculate fixed and variable portions of tuple size
+Implementation:
+● Initialize: Set fixed_size = 0 and has_variable = false.
+● Iterate Columns: For each column, fetch its type using
+types.get(&column.type_oid).
+● Handle Fixed Types: If type_length > 0, add it to fixed_size.
+● Handle Variable Types: If type_length == -1, set has_variable = true and add 2
+bytes (length prefix) to fixed_size.
+● Return Result: Output (fixed_size, has_variable).
+3.1.3 Constraint Management Functions
+add_primary_key_constraint(catalog: &mut Catalog, table_oid: u32, column_oids:
+Vec<u32>, constraint_name: Option<String>) -> Result<u32, CatalogError>
+Description: Add a primary key constraint to a table
+Implementation:
+● Validate Preconditions: Ensure table exists and no existing primary key (scan
+pg_constraint for table_oid + PrimaryKey).
+● Validate & Update Columns: Confirm each column exists and set is_nullable =
+false in pg_column.
+● Prepare Metadata: Generate constraint name if missing, allocate a new
+constraint OID.
+● Create Backing Index: Create a unique B-tree index (is_unique=true,
+is_primary=true) and obtain index_oid.
+● Persist & Refresh: Build Constraint struct, serialize and insert into pg_constraint,
+invalidate table cache, and return constraint_oid.
+add_foreign_key_constraint(catalog: &mut Catalog, table_oid: u32, column_oids:
+Vec<u32>, referenced_table_oid: u32, referenced_column_oids: Vec<u32>,
+on_delete: ReferentialAction, on_update: ReferentialAction, constraint_name:
+Option<String>) -> Result<u32, CatalogError>
+Description: Add a foreign key constraint
+Implementation:
+● Validate Tables & Columns: Ensure referencing and referenced tables exist, and
+column counts match.
+● Check Referenced Integrity: Confirm referenced columns are covered by a
+PRIMARY KEY or UNIQUE constraint in pg_constraint.
+● Verify Type Compatibility: For each column pair, fetch type_oid from pg_column
+and ensure types match.
+● Prepare Constraint: Generate name if missing, allocate constraint OID, and build
+Constraint struct with ForeignKey metadata.
+● Persist & Refresh: Serialize and insert into pg_constraint, invalidate cache, and
+return constraint_oid.
+add_unique_constraint(catalog: &mut Catalog, table_oid: u32, column_oids:
+Vec<u32>, constraint_name: Option<String>) -> Result<u32, CatalogError>
+Description: Add a unique constraint to a table
+Implementation:
+● Validate Inputs: Ensure table and specified columns exist.
+● Create Index: Create a unique B-tree index (is_unique=true, is_primary=false).
+● Allocate OID: Generate a new constraint OID.
+● Build & Persist: Create Constraint struct with Unique metadata, serialize, and
+insert into pg_constraint.
+● Refresh & Return: Invalidate cache and return constraint_oid.
+add_not_null_constraint(catalog: &mut Catalog, table_oid: u32, column_oid: u32)
+-> Result<(), CatalogError>
+Description: Add a NOT NULL constraint to a column
+Implementation:
+● Validate Inputs: Ensure the table and column exist.
+● Update Metadata: Set is_nullable = false in pg_column for the given column_oid.
+● Optional Constraint Record: Optionally create and insert a corresponding record
+in pg_constraint.
+● Invalidate Cache: Clear affected table metadata from cache.
+● Return Result: Return Ok(()) upon success.
+validate_constraints(catalog: &Catalog, table_oid: u32, tuple_data: &[u8]) ->
+Result<(), ConstraintViolation>
+Description: Validate all constraints for a tuple before insertion
+Implementation:
+● Prepare Context: Deserialize tuple and fetch table metadata (get_table_by_oid).
+● Column Validation: Enforce NOT NULL constraints; return error if any
+non-nullable column is NULL.
+● Load Constraints: Retrieve all table constraints (get_constraints_for_table).
+● Enforce Constraints:
+○ UNIQUE / PRIMARY KEY: Check index for duplicates; return
+UniqueViolation if found.
+○ FOREIGN KEY: Verify referenced values exist; return ForeignKeyViolation
+if missing.
+○ CHECK: Evaluate expression (future support).
+● Success: Return Ok(()) if all validations pass.
+3.1.4 Index Management Functions
+create_index(catalog: &mut Catalog, table_oid: u32, column_oids: Vec<u32>,
+is_unique: bool, is_primary: bool, index_name: Option<String>) -> Result<u32,
+CatalogError>
+Description: Create a B-tree index on specified columns
+Implementation:
+● Validate & Prepare: Ensure table and columns exist; generate index name if
+missing and allocate a new index_oid.
+● Create Storage: Create (database/base/{db_name}/indexes/{index_name}.idx)
+index file and initialize B-tree root page.
+● Build Metadata: Construct Index struct (BTree, column_oids, uniqueness flags,
+initial root page).
+● Persist Catalog Entry: Serialize and insert index record into pg_index.
+● Populate Index: Scan table tuples, extract indexed values, insert into B-tree, and
+return index_oid.
+drop_index(catalog: &mut Catalog, index_oid: u32) -> Result<(), CatalogError>
+Description: Drop an index from the system
+Implementation:
+● Load Metadata: Query pg_index to retrieve index details.
+● Check Dependencies: Scan pg_constraint for matching index_oid; if referenced,
+return error.
+● Remove Storage: Delete the index file from disk.
+● Update Catalog: Remove the corresponding row from pg_index.
+● Refresh & Return: Invalidate cache and return Ok(()).
+3.1.5 Database Operations Functions
+create_database_enhanced(catalog: &mut Catalog, db_name: &str, owner: &str,
+encoding: Encoding) -> Result<u32, CatalogError>
+Description: Enhanced database creation with metadata
+Implementation:
+● Validate & Allocate: Ensure database name is non-empty and unique; allocate a
+new db_oid.
+● Create Storage: Create directory database/base/{db_name}.
+● Build Metadata: Construct Database struct with owner, encoding, timestamp,
+and empty tables map.
+● Persist Catalog Entry: Serialize tuple ([oid][owner][name][created_at][encoding])
+and insert into pg_database.
+● Update Memory & Return: Add to in-memory map and cache, then return
+db_oid.
+drop_database(catalog: &mut Catalog, db_name: &str) -> Result<(), CatalogError>
+Description: Enhanced database creation with metadata
+Implementation:
+● Locate Database: Fetch database from catalog.databases and obtain db_oid.
+● Drop All Tables: Query pg_table for tables with matching db_oid and call
+drop_table for each.
+● Remove Catalog Entry: Delete the corresponding row from pg_database.
+● Delete Storage: Remove database directory (database/base/{db_name}).
+● Cleanup & Return: Remove from in-memory map, invalidate cache, and return
+Ok(()).
+3.1.6 Table Operations Functions
+create_table_enhanced(catalog: &mut Catalog, db_name: &str, table_name: &str,
+columns: Vec<ColumnDefinition>, constraints: Vec<ConstraintDefinition>) ->
+Result<u32, CatalogError>
+Description: Enhanced table creation with constraints
+Implementation:
+● Validate & Allocate: Ensure database exists and table name is unique; allocate
+table_oid.
+● Process Columns: For each column: allocate column_oid, resolve type, build
+Column struct, serialize, and insert into pg_column.
+● Create Storage & Metadata: Create table file, initialize header + first data page,
+build Table struct (stats, constraints, indexes).
+● Persist & Apply Constraints: Serialize and insert into pg_table; process constraint
+definitions (PK, FK, UNIQUE, NOT NULL) via respective functions.
+● Update Memory & Return: Add table to database map, cache metadata, and
+return table_oid.
+drop_table(catalog: &mut Catalog, table_oid: u32) -> Result<(), CatalogError>
+Description: Drop table and all dependent objects
+Implementation:
+● Validate & Check Dependencies: Load table metadata and ensure no foreign
+keys reference it (pg_constraint check).
+● Drop Indexes: Query pg_index for the table and call drop_index for each.
+● Remove Constraints & Columns: Delete related rows from pg_constraint and
+pg_column.
+● Delete Storage & Catalog Entry: Remove table file and delete corresponding row
+from pg_table.
+● Cleanup & Return: Remove from in-memory database map, invalidate cache,
+and return Ok(()).
+alter_table_add_column(catalog: &mut Catalog, table_oid: u32, column_def:
+ColumnDefinition) -> Result<u32, CatalogError>
+Description: Add a new column to an existing table
+Implementation:
+● Validate & Allocate: Ensure table exists and column name is unique; allocate
+column_oid and determine new column position.
+● Prepare Column: Resolve type, build Column struct, serialize, and insert into
+pg_column.
+● Update Table Metadata: Append column to table.columns and update
+last_modified timestamp.
+● Handle Defaults & Constraints: If NOT NULL without default, return error; if
+default exists, update all existing rows.
+● Finalize: Invalidate cache and return column_oid.
+3.1.7 Catalog Query Functions
+get_table_metadata(catalog: &Catalog, db_name: &str, table_name: &str) ->
+Result<TableMetadata, CatalogError>
+Description: Retrieve complete table metadata including columns and constraints
+Implementation:
+● Check Cache First: Attempt to retrieve table metadata from cache; return if
+found.
+● Resolve Identifiers: If not cached, get db_oid from pg_database and fetch
+table_oid from pg_table.
+● Load Components: Query pg_column (ordered), pg_constraint, and pg_index for
+the table.
+● Construct Metadata: Build TableMetadata struct from retrieved data.
+● Cache & Return: Store in cache and return the metadata.
+get_constraints_for_table(catalog: &Catalog, table_oid: u32) ->
+Result<Vec<Constraint>, CatalogError>
+Description: Get all constraints for a table
+Implementation:
+● Check Cache First: Attempt to retrieve constraints from
+catalog.cache.get_constraints(table_oid); return if found.
+● Query Catalog: If not cached, scan pg_constraint for matching table_oid.
+● Deserialize: Convert each constraint tuple into a Constraint struct.
+● Cache Results: Store retrieved constraints in cache.
+● Return Data: Return the list of constraints.
+3.2 Functions to be Modified
+3.2.1 init_catalog() -> Result<(), CatalogError>
+Current Implementation: The system creates database/global/catalog.json if it does
+not exist and initializes it with an empty JSON structure: {"databases": {}}.
+Updated Functionality: The system now supports dual-mode initialization by
+maintaining legacy JSON compatibility while detecting whether page-based system
+catalogs exist and calling bootstrap_catalog() if they do not.
+Reason for Update: This enables migration from JSON-based storage to page-based
+storage while maintaining backward compatibility during the transition period.
+Implementation:
+● Check Page Storage: If database/global/catalog_pages/ exists, initialize
+page-based backend and load system catalogs into memory.
+● Fallback to Legacy: If not, check for catalog.json; load JSON catalog (legacy
+mode) and optionally migrate.
+● Bootstrap if Needed: If neither exists, call bootstrap_catalog() to create system
+catalogs and register built-in types.
+● Initialize Core State: Load OID counter (pg_oid_counter.dat) and set up catalog
+cache.
+● Finalize: Complete initialization and return Ok(()).
+3.2.2 load_catalog(buffer_manager: &mut BufferManager) -> Result<(),
+CatalogError>
+Current Implementation: The system reads catalog.json from disk, deserializes the
+JSON into a Catalog struct, and returns an empty catalog if an error occurs.
+Updated Functionality: The system now loads catalog metadata from system catalog
+pages and populates an in-memory cache with frequently accessed entries.
+Reason for Update: The update supports the transition to page-based storage while
+improving performance through caching.
+Implementation:
+● Initialize Core Components: Create empty Catalog, load OID counter, and
+initialize page manager with buffer_manager.
+● Load Databases: Scan pg_database, deserialize each tuple, and populate
+catalog.databases.
+● Load Tables per Database: For each database, scan pg_table by db_oid and
+deserialize tables.
+● Load Table Dependencies: For each table, query and attach pg_column,
+pg_constraint, and pg_index data.
+● Warm Cache & Return: Populate cache with initial entries (e.g., first 100) and
+return the fully built catalog.
+3.2.3 save_catalog(catalog: &Catalog) -> Result<Catalog, CatalogError>
+Current Implementation: The system serializes the Catalog to JSON and writes it to
+catalog.json.
+Updated Functionality: The system now persists catalog changes by flushing dirty
+catalog pages to disk and performing incremental updates that write only modified
+entries instead of the entire catalog.
+Reason for Update: Page-based storage removes the need for full catalog serialization
+and improves performance for large catalogs.
+Implementation:
+● Flush Buffers: Call buffer_manager.flush_pages() to write all dirty pages to disk.
+● Persist OID Counter: Save current OID state to pg_oid_counter.dat.
+● Sync Catalog Files: Ensure all catalog files are fully synced to disk.
+● Optional Backup: Write JSON backup for backward compatibility (if enabled).
+● Complete: Return Ok(()).
+3.2.4 create_database(catalog: &mut Catalog, db_name: &str) -> Result<u32,
+CatalogError>
+Current Implementation: The system validates the database name, inserts it into the
+in-memory catalog, writes the catalog to JSON, and creates the corresponding
+directory.
+Updated Functionality: The system now calls create_database_enhanced() with a
+default owner and UTF-8 encoding and persists the database entry by inserting it into
+pg_database in the page-based catalog.
+Reason for Update: The update enables support for additional metadata such as
+owner, encoding, and timestamp while integrating database creation with the
+page-based catalog system.
+Implementation:
+● Invoke Creation: Call create_database_enhanced(catalog, db_name,
+"default_user", Encoding::UTF8).
+● Handle Initialization: Let the enhanced function perform validation, allocation,
+and setup.
+● Create Metadata & Storage: Database directory and catalog entries are created
+internally.
+● Update Catalog State: In-memory structures and cache are updated.
+● Return Result: Return the generated db_oid.
+3.2.5 create_table(catalog: &mut Catalog, db_name: &str, table_name: &str,
+columns: Vec<ColumnDefinition>, constraints: Vec<ConstraintDefinition>)
+-> Result<u32, CatalogError>
+Current Implementation: The system validates the database and table name, creates
+a Table struct with columns, inserts it into the in-memory catalog, saves the catalog to
+JSON, and creates the table file initialized with init_table().
+Updated Functionality: The system now accepts and validates constraint definitions
+for consistency and persists metadata in a page-based catalog by inserting entries
+into pg_table and pg_column.
+Reason for Update: The update enables support for primary keys, foreign keys,
+unique, and NOT NULL constraints while integrating table creation with the
+page-based catalog system.
+Implementation:
+● Invoke Creation: Call create_table_enhanced(catalog, db_name, table_name,
+columns, constraints).
+● Handle Validation: Let the enhanced function validate database, table name,
+columns, and constraints.
+● Create Storage & Metadata: Table file and catalog entries are created internally.
+● Apply Constraints & Indexes: Primary key, foreign key, unique, and other
+constraints are processed.
+● Return Result: Return the generated table_oid.
+3.2.6 show_databases(catalog: &Catalog) -> Result<(), CatalogError>
+Current Implementation: The system iterates over catalog.databases.keys() and prints
+the database names.
+Updated Functionality: The system now queries pg_database in the page-based
+system catalog and displays additional metadata such as owner, created_at, and
+encoding.
+Reason for Update: The update makes the page-based catalog the source of truth
+and provides richer database information.
+Implementation:
+● Scan Catalog: Call catalog.page_manager.scan_catalog("pg_database").
+● Deserialize Tuples: Convert raw tuple bytes into Database structs.
+● Format Output: Extract db_name | owner | created_at | encoding.
+● Print Results: Display rows (e.g., mydb | default_user | ... | UTF-8).
+● Return: Finish with Ok(()).
+3.2.7 show_databases(catalog: &Catalog, db_name: &str) -> Result<(),
+CatalogError>
+Current Implementation: The system retrieves the database from catalog.databases,
+iterates over database.tables.keys(), and prints the table names.
+Updated Functionality: The system now queries pg_table, filters results by db_oid, and
+displays additional metadata such as row count, page count, and created_at.
+Reason for Update: The update uses the page-based catalog as the authoritative
+source and provides table-level statistics.
+Implementation:
+● Resolve Database ID: Fetch db_oid from pg_database.
+● Scan Tables: Query pg_table using db_oid.
+● Deserialize Tuples: Convert raw bytes into Table structs.
+● Format & Print: Display table_name | row_count | page_count | created_at.
+● Return: Complete operation with Ok(()).
+4. Frontend Changes (CLI Inputs)
+4.1 New CLI Commands
+4.1.1 Enhanced Table Creation: During table creation, the system will prompt the user
+to define table constraints using the format name:type[:constraints]. This allows for
+the implementation of attribute-specific constraints such as Primary Key, Foreign Key,
+and Unique constraints.
+4.1.2 Foreign Key Creation: Use the ALTER TABLE ADD FOREIGN KEY command to
+implement a foreign key constraint. This command allows you to define various
+cascading actions, such as NO ACTION, CASCADE, SET NULL, or RESTRICT, for specific
+actions like ON DELETE or ON UPDATE.
+4.1.3 Show Table Schema: Update the DESCRIBE user command to show constraints
+and indexes associated with the columns.
+4.2 Modified CLI Commands
+4.2.1 Database Creation: Apart from the name, the new implementation would now
+ask for details like owner, encoding, etc.
+4.2.2 Show Database: Displays metadata apart from the name list.
+Note: The user experience (UX) remains largely unchanged. The primary modifications
+are focused on the backend, specifically how the code interacts with the storage and
+the structure of the stored information. These changes, which include thorough
+validation, encoding, and a new storage structure, do not affect the end-user.
+5. Overall Component Workflow (End-to-End View)
+5.1 Catalog Cache Invalidation Workflow
+5.2 CREATE TABLE Workflow
+5.3 INSERT with Constraint Validation Workflow
+5.4 Query Metadata Workflow (DESCRIBE TABLE)
+5.5 Foreign Key Cascade DELETE Workflow
+6. Codebase Structure Changes
+6.1 New Files to be Created
+6.1.1 Backend Catalog Module (src/backend/catalog/)
+File Name Purpose
+constraints.rs Constraint management (add, validate, drop)
+indexes.rs Index management (create, drop, query)
+types.rs (enhanced) Extended data type definitions
+oid_counter.rs OID allocation and persistence
+cache.rs Catalog cache implementation
+page_manager.rs Catalog page operations
+bootstrap.rs Catalog bootstrapping logic
+serialization.rs Tuple serialization/deserialization for catalogs
+validation.rs Constraint validation logic
+system_catalogs.rs System catalog schemas (pg_database, pg_table, etc.)
+errors.rs Catalog-specific error types
+6.1.2 System Catalog Data Files (database/global/catalog_pages/)
+File Name Purpose
+pg_database.dat Database metadata pages
+pg_table.dat Table metadata pages
+pg_column.dat Column metadata pages
+pg_constraint.dat Constraint metadata pages
+pg_index.dat Index metadata pages
+pg_type.dat Data type metadata pages
+pg_oid_counter.dat OID counter persistence
+6.1.3 Test Files (tests/)
+File Name Purpose
+test_catalog_bootstrap.
+rs
+Test catalog bootstrapping
+test_constraints.rs Test constraint creation and validation
+test_foreign_keys.rs Test FK constraints and cascade actions
+test_indexes.rs Test index creation and queries
+test_type_system.rs Test extended data types
+test_catalog_cache.rs Test cache invalidation and LRU
+test_catalog_page_manag
+er.rs
+Test page-based catalog operations
+test_alter_table.rs Test ALTER TABLE operations
+6.2 Modified Files
+6.2.1 Existing Catalog Files (src/backend/catalog/)
+File Name Modifications
+catalog.rs Integrate page manager, cache, enhanced functions
+types.rs Add OIDs, constraints, statistics to structs
+mod.rs Export new modules (constraints, indexes, cache)
+6.2.2 Frontend Files (src/frontend/)
+File Name Modifications
+table_cmd.rs Enhanced CREATE TABLE, DESCRIBE TABLE, SHOW
+CONSTRAINTS
+database_cmd.rs Enhanced CREATE DATABASE, SHOW DATABASES
+menu.rs Add new menu options for constraints, describe
+6.2.3 Backend Infrastructure (src/backend/)
+File Name Modifications
+buffer_manager/buffer_m
+anager.rs
+Add pin/unpin, dirty tracking, LRU
+page/mod.rs No changes (already uses slotted page)
+6.3 New Folder Structure
+src/
+├── backend/
+│ ├── catalog/
+│ │ ├── mod.rs # MODIFIED: Export new modules
+│ │ ├── catalog.rs # MODIFIED: Enhanced functions
+│ │ ├── types.rs # MODIFIED: Add OIDs, constraints
+│ │ ├── constraints.rs # NEW: Constraint management
+│ │ ├── indexes.rs # NEW: Index management
+│ │ ├── oid_counter.rs # NEW: OID allocation
+│ │ ├── cache.rs # NEW: Catalog cache
+│ │ ├── page_manager.rs # NEW: Catalog page operations
+│ │ ├── bootstrap.rs # NEW: Bootstrapping
+│ │ ├── serialization.rs # NEW: Tuple serialization
+│ │ ├── validation.rs # NEW: Constraint validation
+│ │ ├── system_catalogs.rs # NEW: System catalog schemas
+│ │ └── errors.rs # NEW: Error types
+│ ├── buffer_manager/
+│ │ ├── mod.rs
+│ │ └── buffer_manager.rs # MODIFIED: Pin/unpin, dirty
+│ ├── disk/
+│ ├── page/
+│ ├── heap/
+│ ├── table/
+│ ├── executor/
+│ └── statistics/
+├── frontend/
+│ ├── mod.rs
+│ ├── menu.rs # MODIFIED: New options
+│ ├── database_cmd.rs # MODIFIED: Enhanced commands
+│ ├── table_cmd.rs # MODIFIED: Enhanced commands
+│ └── data_cmd.rs
+├── lib.rs
+└── main.rs
+6.4 Database Directory Structure
+database/
+├── global/
+│ ├── catalog_pages/ # NEW: Page-based catalog storage
+│ │ ├── pg_database.dat # System catalog: databases
+│ │ ├── pg_table.dat # System catalog: tables
+│ │ ├── pg_column.dat # System catalog: columns
+│ │ ├── pg_constraint.dat # System catalog: constraints
+│ │ ├── pg_index.dat # System catalog: indexes
+│ │ └── pg_type.dat # System catalog: data types
+│ └── catalog.json # DEPRECATED: Legacy format (migration support)
+└── base/
+└── {database}/
+├── {table}.dat # User table data files
+└── indexes/ # NEW: Index files
+└── {index_name}.idx
+7. Test Cases
+7.1 Catalog Bootstrapping Tests
+7.1.1 Bootstrap System Catalogs
+1. Delete database/global/catalog_pages/ if exists
+2. Call bootstrap_catalog()
+3. Verify all system catalog files created (pg_database.dat, pg_table.dat, etc)
+4. Verify each file has header page (page 0) and at least one data page
+5. Query pg_table: Should list all 6 system catalogs
+6. Query pg_column: Should list columns for all system catalogs
+7. Verify built-in types in pg_type (INT, VARCHAR, etc.)
+Expected Result: All system catalogs created and self-described
+Test 7.1.2: OID Counter Persistence
+1. Initialize catalog, allocate 10 OIDs
+2. Save catalog
+3. Restart application (reload catalog)
+4. Allocate next OID
+5. Verify next OID = 10011 (not reused)
+Expected Result: OID counter correctly restored from disk
+7.2 Data Type Tests
+Test 7.2.1: Register Built-in Types
+1. Call register_builtin_types()
+2. Verify pg_type contains 9 built-in types
+3. For each type, verify:
+a. type_oid matches expected (1..9)
+b. type_name correct
+c. type_length, type_align correct
+Expected Result: All 9 types registered with correct metadata
+Test 7.2.2: Lookup Type by Name
+1. Call lookup_type_by_name(catalog, "VARCHAR")
+2. Verify returned DataType.type_oid == 5
+3. Call lookup_type_by_name(catalog, "INVALID_TYPE")
+4. Verify returns CatalogError::TypeNotFound
+Expected Result: Valid types resolved, invalid types return error
+Test 7.2.3: Variable-Length Type Modifier
+1. Create column: name:VARCHAR(50)
+2. Verify type_modifier.max_length == Some(50)
+3. Insert tuple with 60-character string
+4. Verify string truncated to 50 characters
+Expected Result: Type modifiers enforced
+7.3 Constraint Tests
+Test 7.3.1: Primary Key Constraint
+1. Create table: CREATE TABLE users (id INT PRIMARY KEY, name TEXT(50))
+2. Verify pg_constraint has PK constraint
+3. Verify unique index created in pg_index
+4. Insert row: id=1, name='Alice'
+5. Insert row: id=1, name='Bob' (duplicate PK)
+6. Verify second insert returns ConstraintViolation::PrimaryKeyViolation
+Expected Result: Duplicate PK rejected
+Test 7.3.2: Foreign Key Constraint
+1. Create table1: CREATE TABLE users (id INT PRIMARY KEY, name TEXT(50))
+2. Create table2: CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, FOREIGN
+KEY (user_id) REFERENCES users(id))
+3. Insert into users: id=1, name='Alice'
+4. Insert into orders: id=1, user_id=1 (valid FK)
+5. Insert into orders: id=2, user_id=999 (invalid FK)
+6. Verify step 4 returns ConstraintViolation::ForeignKeyViolation
+Expected Result: FK points to existing row, invalid FK rejected
+Test 7.3.3: Foreign Key CASCADE DELETE
+1. Create tables with FK ON DELETE CASCADE: CREATE TABLE users(id INT
+PRIMARY KEY, name TEXT(8)) ; CREATE TABLE acc(id INT PRIMARY KEY, user_id
+INT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)
+2. Insert into users: id=1, name='Alice'
+3. Insert into acc: id=1, user_id=1
+4. Insert into acc: id=2, user_id=1
+5. Delete from users: id=1
+6. Query orders table
+7. Verify both orders deleted (CASCADE)
+Expected Result: Dependent rows automatically deleted
+Test 7.3.4: Foreign Key SET NULL
+1. Create tables with FK ON DELETE SET NULL
+2. Insert parent and child rows
+3. Delete parent row
+4. Verify child FK column set to NULL
+Expected Result: FK column set to NULL, child row retained
+Test 7.3.5: UNIQUE Constraint
+1. Create table: CREATE TABLE users(id INT, email TEXT(100) UNIQUE)
+2. Insert: id=1, email='alice@example.com'
+3. Insert: id=2, email='alice@example.com' (duplicate email)
+4. Verify step 3 returns ConstraintViolation::UniqueViolation
+Expected Result: Duplicate unique value rejected
+Test 7.3.6: NOT NULL Constraint
+1. Create table: CREATE TABLE users(id INT, name TEXT(50) NOT NULL)
+2. Insert: id=1, name=NULL
+3. Verify returns ConstraintViolation::NotNullViolation
+Expected Result: NULL value rejected for NOT NULL column
+Test 7.3.7: Composite Primary Key
+1. Create table: CREATE TABLE enroll(student_id INT, course_id INT, PRIMARY
+KEY (student_id, course_id))
+2. Insert: student_id=1, course_id=101
+3. Insert: student_id=1, course_id=102 (different course, valid)
+4. Insert: student_id=1, course_id=101 (duplicate composite PK)
+5. Verify step 4 rejected
+Expected Result: Composite PK enforced
+7.4 Index Tests
+Test 7.4.1: Create B-Tree Index
+1. Create table with 1000 rows
+2. Create index: CREATE INDEX idx_name ON users(name)
+3. Verify pg_index has entry
+4. Verify index file created: database/base/{db}/indexes/idx_name.idx
+Expected Result: Index created and registered
+Test 7.4.2: Index Supports Unique Constraint
+1. Create table with UNIQUE constraint (auto-creates index)
+2. Insert 10,000 rows with unique values
+3. Insert duplicate value
+4. Verify duplicate rejected via index lookup (not full table scan)
+Expected Result: Duplicate detected efficiently
+7.5 Catalog Cache Tests
+Test 7.5.1: Cache Hit
+1. Clear cache
+2. Query table metadata (cache miss, loads from disk)
+3. Query same table metadata (cache hit)
+4. Instrument code to count disk reads
+5. Verify 0 disk reads on second query
+Expected Result: Cache reduces disk I/O
+Test 7.5.2: Cache Invalidation on DDL
+1. Query table metadata (cached)
+2. Alter table: ALTER TABLE users ADD COLUMN age INT
+3. Verify cache entry invalidated
+4. Query table metadata again
+5. Verify new column included
+Expected Result: Cache reflects DDL changes
+Test 7.5.3: LRU Eviction
+1. Set cache size to 5 entries
+2. Access 10 different tables
+3. Verify cache contains only 5 entries (least recently used evicted)
+Expected Result: LRU eviction prevents unlimited growth
+7.6 Page-Based Catalog Tests
+Test 7.6.1: Insert Catalog Tuple
+1. Serialize database tuple
+2. Call page_manager.insert_catalog_tuple("pg_database", bytes)
+3. Verify returns (page_num, slot_id)
+4. Read tuple back using page_num and slot_id
+5. Verify deserialized data matches original
+Expected Result: Tuple correctly stored and retrieved
+Test 7.6.2: Scan Catalog
+1. Insert 10 tuples into pg_table
+2. Call page_manager.scan_catalog("pg_table")
+3. Verify 10 tuples returned
+4. Verify no duplicate or missing tuples
+Expected Result: All tuples retrieved
+Test 7.6.3: Update Catalog Tuple
+1. Insert database tuple: db_name="testdb"
+2. Update tuple: db_name="newdb"
+3. Read tuple back
+4. Verify updated value
+Expected Result: Tuple correctly updated
+7.7 Integration Tests
+Test 7.7.1: End-to-End Table Creation
+1. User creates database via CLI
+2. User creates table with PK, FK, UNIQUE constraints
+3. Verify: Database directory created
+4. Table file initialized
+5. pg_database, pg_table, pg_column, pg_constraint updated
+6. Indexes created
+7. User inserts valid data (succeeds)
+8. User inserts invalid data (PK violation, FK violation)
+9. Verify errors returned
+Expected Result: Complete workflow functions correctly
+Test 7.7.2: Catalog Persistence
+1. Create database, tables, constraints
+2. Save catalog
+3. Restart application
+4. Load catalog
+5. Verify all metadata restored
+Expected Result: Catalog survives restart
+Test 7.7.3: ALTER TABLE ADD COLUMN
+1. Create table with 2 columns
+2. Insert 10 rows
+3. Alter table: ADD COLUMN age INT DEFAULT 0
+4. Query table: Verify all rows have age=0
+5. Insert new row with age value
+6. Verify new row stored correctly
+Expected Result: Schema evolution works with default values
+7.8 Error Handling Tests
+Test 7.8.1: Drop Table with Dependent FK
+1. Create tables: users, orders (FK to users)
+2. Attempt to drop users table
+3. Verify error: "Cannot drop table with dependent foreign keys"
+Expected Result: Prevents orphaned foreign keys
+Test 7.8.2: Invalid Type Name
+1. Create table with invalid type: CREATE TABLE test (id INVALID_TYPE)
+2. Verify error: "Type 'INVALID_TYPE' not found"
+Expected Result: Invalid types rejected
+- THE END -

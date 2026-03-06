@@ -1,8 +1,9 @@
+﻿use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
-
+use storage_manager::catalog::{init_catalog, load_catalog, save_catalog};
+use storage_manager::catalog::types::{Column, DataType, Database, Encoding, Table, TableStatistics, TableType};
 use storage_manager::layout::CATALOG_FILE;
 
 #[test]
@@ -21,27 +22,41 @@ fn test_save_catalog() {
         catalog.databases.insert(
             db_name.to_string(),
             Database {
-                tables: Default::default(),
+                db_oid: 9999,
+                db_name: db_name.to_string(),
+                tables: HashMap::new(),
+                owner: "test_user".to_string(),
+                encoding: Encoding::UTF8,
+                created_at: 0,
             },
         );
     }
 
     // Step 4: Add a new test table entry inside the test database
+    let make_col = |pos: u16, name: &str, dt: DataType| Column {
+        column_oid: 0,
+        name: name.to_string(),
+        column_position: pos,
+        data_type: dt,
+        type_modifier: None,
+        is_nullable: true,
+        default_value: None,
+        constraints: vec![],
+    };
+
     let test_table = Table {
+        table_oid: 9999,
+        table_name: "users".to_string(),
+        db_oid: 9999,
         columns: vec![
-            Column {
-                name: "id".to_string(),
-                data_type: "INT".to_string(),
-            },
-            Column {
-                name: "name".to_string(),
-                data_type: "TEXT".to_string(),
-            },
-            Column {
-                name: "email".to_string(),
-                data_type: "TEXT".to_string(),
-            },
+            make_col(1, "id",    DataType::int()),
+            make_col(2, "name",  DataType::text()),
+            make_col(3, "email", DataType::text()),
         ],
+        constraints: vec![],
+        indexes: vec![],
+        table_type: TableType::UserTable,
+        statistics: TableStatistics::default(),
     };
 
     let db = catalog.databases.get_mut(db_name).unwrap();
@@ -74,7 +89,7 @@ fn test_save_catalog() {
         "Expected 3 columns in 'users' table"
     );
 
-    // Step 7: Clean up (optional)
+    // Step 7: Clean up
     if Path::new(CATALOG_FILE).exists() {
         fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
     }
