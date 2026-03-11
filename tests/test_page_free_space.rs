@@ -37,7 +37,9 @@ fn test_page_free_space() {
     println!("Total pages after creation: {}", total_pages);
 
     // --- Step 4: Read back the second (data) page from file
-    let mut page = Page { data: vec![0u8; PAGE_SIZE] };
+    let mut page = Page {
+        data: vec![0u8; PAGE_SIZE],
+    };
     read_page(&mut file, &mut page, data_page_num).expect("Failed to read created page");
 
     // --- Step 5: Compute free space using API

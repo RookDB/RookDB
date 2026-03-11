@@ -1,16 +1,16 @@
 Please follow the guidelines below when contributing to this repository.
 
-## How to Contribute
+## Code Contribution
+1. Create a branch using the naming convention: *feature-name*.
+2. Make changes with meaningful commit messages.
+3. Push your changes.
+4. Add tests (if applicable) and update documentation.
+5. Submit a Pull Request to the main branch with a clear title and summary.
 
-1. Fork this repository to your GitHub account.
+## Documentation Contribution
+Please refer to `docs/README.md` for documentation contribution guidelines.
 
-2. Create a new branch using the following naming convention:  
-   `<rollnumber>-<your-name>`
-
-3. Commit your changes with meaningful commit messages.
-
-4. Push the branch to your forked repository.
-
-5. Create a Pull Request to the main branch of this repository.
-   - Use a clear and descriptive title.
-   - Briefly describe the changes made.
+### Test case Contribution
+* For every new function, write a corresponding test case in the tests/ directory.
+* Name the test file using the following format: `<test_function_name>.rs`
+* Refer to existing test cases for guidance on structure and style.

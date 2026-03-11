@@ -1,8 +1,8 @@
-use std::fs::{remove_file, OpenOptions};
+use std::fs::{OpenOptions, remove_file};
 use std::io::{Read, Seek, SeekFrom, Write};
 use storage_manager::disk::create_page;
-use storage_manager::page::{PAGE_SIZE};
-use storage_manager::table::{TABLE_HEADER_SIZE};
+use storage_manager::page::PAGE_SIZE;
+use storage_manager::table::TABLE_HEADER_SIZE;
 
 const TEST_FILE: &str = "test_page_file.bin";
 
@@ -13,15 +13,15 @@ fn test_create_page() {
 
     // Create a new test file
     let mut file = OpenOptions::new()
-    .read(true)
-    .write(true)
-    .create(true)
-    .open(TEST_FILE)
-    .expect("Failed to create file");
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(TEST_FILE)
+        .expect("Failed to create file");
 
     // Initialize table header with 0 pages (so page_count read works correctly)
-   file.write_all(&vec![0u8; TABLE_HEADER_SIZE as usize])
-    .expect("Failed to write table header");
+    file.write_all(&vec![0u8; TABLE_HEADER_SIZE as usize])
+        .expect("Failed to write table header");
 
     // Call API
     let page_num = create_page(&mut file).expect("Failed to create page");
@@ -38,8 +38,10 @@ fn test_create_page() {
 
     // Read back the first page (skip table header)
     let mut buffer = vec![0u8; PAGE_SIZE];
-    file.seek(SeekFrom::Start(TABLE_HEADER_SIZE as u64)).expect("Failed to seek to first page");
-    file.read_exact(&mut buffer).expect("Failed to read first page");
+    file.seek(SeekFrom::Start(TABLE_HEADER_SIZE as u64))
+        .expect("Failed to seek to first page");
+    file.read_exact(&mut buffer)
+        .expect("Failed to read first page");
 
     // Verify page header in the first 8 bytes
     let lower = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
@@ -47,5 +49,9 @@ fn test_create_page() {
     assert_eq!(lower, 8, "Lower offset should be PAGE_HEADER_SIZE (8)");
     assert_eq!(upper, PAGE_SIZE as u32, "Upper offset should be PAGE_SIZE");
 
-    println!("Page {} created correctly with header bytes: {:?}", page_num, &buffer[0..8]);
+    println!(
+        "Page {} created correctly with header bytes: {:?}",
+        page_num,
+        &buffer[0..8]
+    );
 }

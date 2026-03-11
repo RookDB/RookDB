@@ -16,7 +16,10 @@ fn test_init_catalog() {
     init_catalog();
 
     // Step 3: Verify the file now exists
-    assert!(Path::new(CATALOG_FILE).exists(), "catalog.json was not created");
+    assert!(
+        Path::new(CATALOG_FILE).exists(),
+        "catalog.json was not created"
+    );
 
     // Step 4: Read file content and check it’s valid JSON
     let content = fs::read_to_string(CATALOG_FILE).expect("Failed to read catalog.json");
@@ -24,7 +27,10 @@ fn test_init_catalog() {
         serde_json::from_str(&content).expect("catalog.json contains invalid JSON");
 
     // Step 5: Verify structure is { "databases": {} }
+    // Step 5: Verify structure is { "databases": {} }
     assert!(
+        parsed.get("databases").is_some(),
+        "catalog.json does not contain 'databases' field"
         parsed.get("databases").is_some(),
         "catalog.json does not contain 'databases' field"
     );

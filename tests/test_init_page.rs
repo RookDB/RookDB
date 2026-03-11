@@ -1,4 +1,4 @@
-use storage_manager::page::{init_page, Page, PAGE_HEADER_SIZE, PAGE_SIZE};
+use storage_manager::page::{PAGE_HEADER_SIZE, PAGE_SIZE, Page, init_page};
 
 #[test]
 fn test_init_page() {
