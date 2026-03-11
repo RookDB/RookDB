@@ -1,10 +1,10 @@
-use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::fs::OpenOptions;
 
-use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::load_catalog;
-use storage_manager::executor::show_tuples;
+use storage_manager::buffer_manager::BufferManager;
 use storage_manager::table::page_count;
+use storage_manager::executor::show_tuples;
 
 pub fn load_csv_cmd(
     buffer_manager: &mut BufferManager,
@@ -31,6 +31,7 @@ pub fn load_csv_cmd(
     let csv_path = csv_path.trim();
 
     let catalog = load_catalog();
+    buffer_manager.load_table_from_disk(&db, &table)?;
     buffer_manager.load_csv_to_buffer(&catalog, &db, table, csv_path)?;
 
     let path = format!("database/base/{}/{}.dat", db, table);

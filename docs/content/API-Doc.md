@@ -1,12 +1,6 @@
-<<<<<<<< HEAD:docs/API-Doc.md
-# RookDB – API Documentation
-
-## Index of Existing APIs
-========
 # API Doc
 
 ## Index of APIs
->>>>>>>> 5aab452a0506745bee0edff297a1dcbb254a3fc0:docs/content/API-Doc.md
 0. Init Catalog  
 1. Load Catalog  
 2. Create Database  
@@ -30,15 +24,11 @@
 ### 0. **init_catalog** API
 
 **Description:**  
-<<<<<<<< HEAD:docs/API-Doc.md
-Creates `catalog.json` if it doesn’t exist and initializes it with an empty catalog (`{"databases": {}}`).
-========
 Creates `catalog.json` if it doesn’t exist and initializes it with an empty catalog 
 
 ```json
 {"databases": {}}
 ```
->>>>>>>> 5aab452a0506745bee0edff297a1dcbb254a3fc0:docs/content/API-Doc.md
 
 **Function:**  
 ```rust
@@ -47,11 +37,7 @@ pub fn init_catalog()
 
 **Implementation:**
 1. Check if database/global/catalog.json exists.
-<<<<<<<< HEAD:docs/API-Doc.md
-2. If not, create parent directories and an empty file with data **{"databases": {}}**.
-========
 2. If not, create parent directories and an empty file with data **```json{"databases": {}}```**.
->>>>>>>> 5aab452a0506745bee0edff297a1dcbb254a3fc0:docs/content/API-Doc.md
 ---
 ### 1. **load_catalog** API
 
@@ -87,11 +73,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> Result<(), Stora
 **Implementation:**
 1. Check if the database already exists; if not, insert a new empty entry into catalog.databases.
 2. Serialize the updated Catalog and write it to database/global/catalog.json.
-<<<<<<<< HEAD:docs/API-Doc.md
-3. Create a new directory at database/base/{db_name} for the database’s physical storage.
-========
 3. Create a new directory at `database/base/{db_name}` for the database’s physical storage.
->>>>>>>> 5aab452a0506745bee0edff297a1dcbb254a3fc0:docs/content/API-Doc.md
 
 ### 2. **save_catalog** API
 
@@ -139,11 +121,7 @@ pub fn create_table(catalog: &mut Catalog, table_name: &str, columns: Vec<Column
 * If not, creates a new Table struct using the provided columns.
 * Inserts the table into the catalog.tables HashMap.
 * Calls save_catalog(catalog) to serialize and write the updated catalog to disk.
-<<<<<<<< HEAD:docs/API-Doc.md
-* Creates a new data file for the table in {TABLE_DIR}/{table_name}.dat.
-========
 * Creates a new data file for the table in `{TABLE_DIR}/{table_name}.dat`.
->>>>>>>> 5aab452a0506745bee0edff297a1dcbb254a3fc0:docs/content/API-Doc.md
 * Initializes the table file header by writing TABLE_HEADER_SIZE bytes of zeros using init_table().
 ---
 

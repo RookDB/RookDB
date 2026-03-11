@@ -1,9 +1,10 @@
-use std::env;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom};
+use std::env;
 use std::path::PathBuf;
 
-use storage_manager::table::page_count;
+use storage_manager::table::{TABLE_HEADER_SIZE};
+use storage_manager::table::{page_count};
 use storage_manager::heap::init_table;
 
 #[test]
@@ -28,6 +29,5 @@ fn test_page_count() {
     let count = page_count(&mut file).expect("Failed to read page count");
 
     // Verify the page count is 0
-    assert_eq!(count, 2, "Expected page count to be 2 after initialization");
     assert_eq!(count, 2, "Expected page count to be 2 after initialization");
 }
