@@ -1,0 +1,357 @@
+//! High-level index management: `AnyIndex` enum dispatcher and helpers for
+//! building, loading, saving, and querying indices regardless of algorithm.
+//!
+//! # Design rationale
+//!
+//! Rust trait objects (`Box<dyn IndexTrait>`) cannot easily include the static
+//! `load(path) -> Self` constructor (which needs a concrete type).  An enum
+//! wrapper solves this by enumerating every concrete index type and forwarding
+//! method calls to the inner value.  All six index algorithms are covered.
+//!
+//! # Usage
+//!
+//! ```rust,ignore
+//! // Build a B+ Tree index on column "age" from an existing table.
+//! let idx = AnyIndex::build_from_table(
+//!     &catalog, "mydb", "employees", "age", "age_idx",
+//!     &IndexAlgorithm::BPlusTree,
+//! )?;
+//! idx.save(&index_file_path("mydb", "employees", "age_idx"))?;
+//!
+//! // Later: load and query.
+//! let idx = AnyIndex::load(path, &IndexAlgorithm::BPlusTree)?;
+//! let records = idx.search(&IndexKey::Int(30))?;
+//! ```
+
+use std::fs::OpenOptions;
+use std::io::{self, Read, Seek, SeekFrom};
+
+use crate::catalog::types::{Catalog, IndexAlgorithm};
+use crate::index::config::{DEFAULT_HASH_INDEX, DEFAULT_TREE_INDEX, HashIndexType, TreeIndexType};
+use crate::index::hash::{ExtendibleHashIndex, LinearHashIndex, StaticHashIndex};
+use crate::index::index_trait::{HashBasedIndex, IndexKey, IndexTrait, RecordId, TreeBasedIndex};
+use crate::index::tree::{BPlusTree, BTree, RadixTree};
+use crate::layout::TABLE_FILE_TEMPLATE;
+use crate::page::{PAGE_HEADER_SIZE, ITEM_ID_SIZE};
+use crate::table::page_count;
+
+// ─── AnyIndex ─────────────────────────────────────────────────────────────────
+
+/// A type-erased index value that wraps any concrete index implementation.
+///
+/// All `IndexTrait` methods are forwarded to the inner variant.  Tree-based
+/// variants additionally expose `range_scan`, `min_key`, and `max_key` through
+/// `AnyIndex::range_scan`.
+pub enum AnyIndex {
+    StaticHash(StaticHashIndex),
+    ExtendibleHash(ExtendibleHashIndex),
+    LinearHash(LinearHashIndex),
+    BTree(BTree),
+    BPlusTree(BPlusTree),
+    RadixTree(RadixTree),
+}
+
+impl AnyIndex {
+    // ─── Construction ────────────────────────────────────────────────────────
+
+    /// Create an empty `AnyIndex` of the type specified by `algorithm`.
+    pub fn new_empty(algorithm: &IndexAlgorithm) -> Self {
+        match algorithm {
+            IndexAlgorithm::StaticHash => Self::StaticHash(StaticHashIndex::with_defaults()),
+            IndexAlgorithm::ExtendibleHash => {
+                Self::ExtendibleHash(ExtendibleHashIndex::with_defaults())
+            }
+            IndexAlgorithm::LinearHash => Self::LinearHash(LinearHashIndex::with_defaults()),
+            IndexAlgorithm::BTree => Self::BTree(BTree::with_defaults()),
+            IndexAlgorithm::BPlusTree => Self::BPlusTree(BPlusTree::with_defaults()),
+            IndexAlgorithm::RadixTree => Self::RadixTree(RadixTree::new()),
+        }
+    }
+
+    /// Create an empty index using the system-wide default algorithm for the
+    /// index family (hash or tree) implied by `family`.
+    ///
+    /// `family` is either `"hash"` or `"tree"`.  Any other string falls back
+    /// to the default tree index.
+    pub fn new_default(family: &str) -> Self {
+        if family == "hash" {
+            match DEFAULT_HASH_INDEX {
+                HashIndexType::Static => Self::StaticHash(StaticHashIndex::with_defaults()),
+                HashIndexType::Extendible => {
+                    Self::ExtendibleHash(ExtendibleHashIndex::with_defaults())
+                }
+                HashIndexType::Linear => Self::LinearHash(LinearHashIndex::with_defaults()),
+            }
+        } else {
+            match DEFAULT_TREE_INDEX {
+                TreeIndexType::BTree => Self::BTree(BTree::with_defaults()),
+                TreeIndexType::BPlusTree => Self::BPlusTree(BPlusTree::with_defaults()),
+                TreeIndexType::RadixTree => Self::RadixTree(RadixTree::new()),
+            }
+        }
+    }
+
+    /// Load a previously saved index from `path`.  The `algorithm` field in
+    /// the catalog's `IndexEntry` tells us which concrete type to deserialise.
+    pub fn load(path: &str, algorithm: &IndexAlgorithm) -> io::Result<Self> {
+        match algorithm {
+            IndexAlgorithm::StaticHash => {
+                Ok(Self::StaticHash(StaticHashIndex::load(path)?))
+            }
+            IndexAlgorithm::ExtendibleHash => {
+                Ok(Self::ExtendibleHash(ExtendibleHashIndex::load(path)?))
+            }
+            IndexAlgorithm::LinearHash => {
+                Ok(Self::LinearHash(LinearHashIndex::load(path)?))
+            }
+            IndexAlgorithm::BTree => Ok(Self::BTree(BTree::load(path)?)),
+            IndexAlgorithm::BPlusTree => Ok(Self::BPlusTree(BPlusTree::load(path)?)),
+            IndexAlgorithm::RadixTree => Ok(Self::RadixTree(RadixTree::load(path)?)),
+        }
+    }
+
+    // ─── IndexTrait forwarding ────────────────────────────────────────────────
+
+    pub fn insert(&mut self, key: IndexKey, record_id: RecordId) -> io::Result<()> {
+        match self {
+            Self::StaticHash(i) => i.insert(key, record_id),
+            Self::ExtendibleHash(i) => i.insert(key, record_id),
+            Self::LinearHash(i) => i.insert(key, record_id),
+            Self::BTree(i) => i.insert(key, record_id),
+            Self::BPlusTree(i) => i.insert(key, record_id),
+            Self::RadixTree(i) => i.insert(key, record_id),
+        }
+    }
+
+    pub fn search(&self, key: &IndexKey) -> io::Result<Vec<RecordId>> {
+        match self {
+            Self::StaticHash(i) => i.search(key),
+            Self::ExtendibleHash(i) => i.search(key),
+            Self::LinearHash(i) => i.search(key),
+            Self::BTree(i) => i.search(key),
+            Self::BPlusTree(i) => i.search(key),
+            Self::RadixTree(i) => i.search(key),
+        }
+    }
+
+    pub fn delete(&mut self, key: &IndexKey, record_id: &RecordId) -> io::Result<bool> {
+        match self {
+            Self::StaticHash(i) => i.delete(key, record_id),
+            Self::ExtendibleHash(i) => i.delete(key, record_id),
+            Self::LinearHash(i) => i.delete(key, record_id),
+            Self::BTree(i) => i.delete(key, record_id),
+            Self::BPlusTree(i) => i.delete(key, record_id),
+            Self::RadixTree(i) => i.delete(key, record_id),
+        }
+    }
+
+    pub fn save(&self, path: &str) -> io::Result<()> {
+        match self {
+            Self::StaticHash(i) => i.save(path),
+            Self::ExtendibleHash(i) => i.save(path),
+            Self::LinearHash(i) => i.save(path),
+            Self::BTree(i) => i.save(path),
+            Self::BPlusTree(i) => i.save(path),
+            Self::RadixTree(i) => i.save(path),
+        }
+    }
+
+    pub fn entry_count(&self) -> usize {
+        match self {
+            Self::StaticHash(i) => i.entry_count(),
+            Self::ExtendibleHash(i) => i.entry_count(),
+            Self::LinearHash(i) => i.entry_count(),
+            Self::BTree(i) => i.entry_count(),
+            Self::BPlusTree(i) => i.entry_count(),
+            Self::RadixTree(i) => i.entry_count(),
+        }
+    }
+
+    pub fn index_type_name(&self) -> &'static str {
+        match self {
+            Self::StaticHash(i) => i.index_type_name(),
+            Self::ExtendibleHash(i) => i.index_type_name(),
+            Self::LinearHash(i) => i.index_type_name(),
+            Self::BTree(i) => i.index_type_name(),
+            Self::BPlusTree(i) => i.index_type_name(),
+            Self::RadixTree(i) => i.index_type_name(),
+        }
+    }
+
+    // ─── Tree-only operations ─────────────────────────────────────────────────
+
+    /// Perform a range scan on a tree-based index.
+    ///
+    /// Returns `Err` with `ErrorKind::Unsupported` for hash-based indices
+    /// (hash indices do not support ordered range queries).
+    pub fn range_scan(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+    ) -> io::Result<Vec<RecordId>> {
+        match self {
+            Self::BTree(i) => i.range_scan(start, end),
+            Self::BPlusTree(i) => i.range_scan(start, end),
+            Self::RadixTree(i) => i.range_scan(start, end),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "range_scan is not supported by hash-based index '{}'",
+                    self.index_type_name()
+                ),
+            )),
+        }
+    }
+
+    /// `true` if this index supports ordered range scans.
+    pub fn supports_range_scan(&self) -> bool {
+        matches!(self, Self::BTree(_) | Self::BPlusTree(_) | Self::RadixTree(_))
+    }
+
+    // ─── Hash-only statistics ─────────────────────────────────────────────────
+
+    /// Current load factor for hash-based indices; `None` for tree indices.
+    pub fn load_factor(&self) -> Option<f64> {
+        match self {
+            Self::StaticHash(i) => Some(i.load_factor()),
+            Self::ExtendibleHash(i) => Some(i.load_factor()),
+            Self::LinearHash(i) => Some(i.load_factor()),
+            _ => None,
+        }
+    }
+
+    // ─── Build from table ─────────────────────────────────────────────────────
+
+    /// Scan all existing tuples in `table_name` and populate a fresh index on
+    /// `column_name`.
+    ///
+    /// Column values are decoded using the same encoding that `load_csv` uses:
+    /// * `INT`  : 4-byte little-endian `i32`
+    /// * `TEXT` : 10-byte fixed-width, space-padded UTF-8
+    ///
+    /// Returns the populated `AnyIndex` ready to be saved to disk.
+    pub fn build_from_table(
+        catalog: &Catalog,
+        db_name: &str,
+        table_name: &str,
+        column_name: &str,
+        algorithm: &IndexAlgorithm,
+    ) -> io::Result<Self> {
+        let db = catalog.databases.get(db_name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+        })?;
+        let table = db.tables.get(table_name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+        })?;
+
+        // Compute the byte offset and type of the indexed column.
+        let (col_offset, col_type) = {
+            let mut offset = 0usize;
+            let mut found = None;
+            for col in &table.columns {
+                if col.name == column_name {
+                    found = Some((offset, col.data_type.clone()));
+                    break;
+                }
+                offset += column_byte_size(&col.data_type);
+            }
+            found.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Column '{}' not found in table '{}'", column_name, table_name),
+                )
+            })?
+        };
+
+        let table_path = TABLE_FILE_TEMPLATE
+            .replace("{database}", db_name)
+            .replace("{table}", table_name);
+
+        let mut file = OpenOptions::new().read(true).open(&table_path)?;
+        let total_pages = page_count(&mut file)?;
+
+        let mut index = Self::new_empty(algorithm);
+
+        // Scan every data page (page 0 is the header; data starts at page 1).
+        for page_num in 1..total_pages {
+            let page_offset = page_num as u64 * crate::page::PAGE_SIZE as u64;
+            file.seek(SeekFrom::Start(page_offset))?;
+
+            let mut page_bytes = vec![0u8; crate::page::PAGE_SIZE];
+            file.read_exact(&mut page_bytes)?;
+
+            let lower = u32::from_le_bytes(page_bytes[0..4].try_into().unwrap()) as usize;
+            let num_items =
+                (lower - PAGE_HEADER_SIZE as usize) / ITEM_ID_SIZE as usize;
+
+            for item_id in 0..num_items as u32 {
+                let slot_base =
+                    PAGE_HEADER_SIZE as usize + item_id as usize * ITEM_ID_SIZE as usize;
+                let tuple_offset = u32::from_le_bytes(
+                    page_bytes[slot_base..slot_base + 4].try_into().unwrap(),
+                ) as usize;
+                let tuple_len = u32::from_le_bytes(
+                    page_bytes[slot_base + 4..slot_base + 8].try_into().unwrap(),
+                ) as usize;
+
+                if tuple_offset + tuple_len > page_bytes.len() {
+                    continue; // Corrupt slot; skip.
+                }
+
+                let tuple = &page_bytes[tuple_offset..tuple_offset + tuple_len];
+
+                if let Some(key) = extract_key(tuple, col_offset, &col_type) {
+                    let rid = RecordId::new(page_num, item_id);
+                    index.insert(key, rid)?;
+                }
+            }
+        }
+
+        Ok(index)
+    }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Return the on-disk byte size of a column given its data type.
+fn column_byte_size(data_type: &str) -> usize {
+    match data_type {
+        "INT" => 4,
+        "TEXT" => 10,
+        "BOOL" | "BOOLEAN" => 1,
+        _ => 0,
+    }
+}
+
+/// Extract an `IndexKey` from raw tuple bytes at the given byte offset.
+fn extract_key(tuple: &[u8], offset: usize, data_type: &str) -> Option<IndexKey> {
+    match data_type {
+        "INT" => {
+            if offset + 4 > tuple.len() {
+                return None;
+            }
+            let val = i32::from_le_bytes(tuple[offset..offset + 4].try_into().unwrap());
+            Some(IndexKey::Int(val as i64))
+        }
+        "TEXT" => {
+            if offset + 10 > tuple.len() {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&tuple[offset..offset + 10])
+                .trim()
+                .to_string();
+            Some(IndexKey::Text(text))
+        }
+        _ => None,
+    }
+}
+
+/// Construct the canonical on-disk file path for an index.
+///
+/// Stored alongside the table file in `database/base/{db}/{table}_{index}.idx`.
+pub fn index_file_path(db_name: &str, table_name: &str, index_name: &str) -> String {
+    format!(
+        "database/base/{}/{}_{}.idx",
+        db_name, table_name, index_name
+    )
+}

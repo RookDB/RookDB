@@ -196,7 +196,7 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     }
 
     // Insert table metadata into catalog
-    let new_table = Table { columns };
+    let new_table = Table { columns, indexes: Vec::new() };
     database.tables.insert(table_name.to_string(), new_table);
 
    // Persist catalog changes
@@ -242,6 +242,91 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
         "Table '{}' created successfully in database '{}' and saved to catalog.",
         table_name, db_name
     );
+}
+
+// ─── Index catalog operations ─────────────────────────────────────────────────
+
+pub fn create_index(
+    catalog: &mut Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+    column_name: &str,
+    algorithm: crate::catalog::types::IndexAlgorithm,
+) -> bool {
+    use crate::catalog::types::IndexEntry;
+
+    let db = match catalog.databases.get_mut(db_name) {
+        Some(d) => d,
+        None => {
+            println!("Database '{}' not found.", db_name);
+            return false;
+        }
+    };
+    let table = match db.tables.get_mut(table_name) {
+        Some(t) => t,
+        None => {
+            println!("Table '{}' not found in database '{}'.", table_name, db_name);
+            return false;
+        }
+    };
+    if !table.columns.iter().any(|c| c.name == column_name) {
+        println!("Column '{}' not found in table '{}'.", column_name, table_name);
+        return false;
+    }
+    if table.indexes.iter().any(|i| i.index_name == index_name) {
+        println!("Index '{}' already exists on table '{}'.", index_name, table_name);
+        return false;
+    }
+    table.indexes.push(IndexEntry {
+        index_name: index_name.to_string(),
+        column_name: column_name.to_string(),
+        algorithm,
+    });
+    save_catalog(catalog);
+    true
+}
+
+pub fn drop_index(
+    catalog: &mut Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> bool {
+    let db = match catalog.databases.get_mut(db_name) {
+        Some(d) => d,
+        None => {
+            println!("Database '{}' not found.", db_name);
+            return false;
+        }
+    };
+    let table = match db.tables.get_mut(table_name) {
+        Some(t) => t,
+        None => {
+            println!("Table '{}' not found.", table_name);
+            return false;
+        }
+    };
+    let before = table.indexes.len();
+    table.indexes.retain(|i| i.index_name != index_name);
+    if table.indexes.len() == before {
+        println!("Index '{}' not found on table '{}'.", index_name, table_name);
+        return false;
+    }
+    save_catalog(catalog);
+    true
+}
+
+pub fn list_indexes<'a>(
+    catalog: &'a Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> Option<&'a Vec<crate::catalog::types::IndexEntry>> {
+    catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .map(|t| &t.indexes)
 }
 
 /// Lists all tables in the specified database.

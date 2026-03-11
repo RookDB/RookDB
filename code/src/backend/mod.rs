@@ -7,3 +7,4 @@ pub mod executor;
 pub mod buffer_manager;
 pub mod statistics;
 pub mod layout;
+pub mod index;

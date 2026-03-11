@@ -9,3 +9,4 @@ pub use backend::executor;
 pub use backend::buffer_manager;
 pub use backend::statistics;
 pub use backend::layout;
+pub use backend::index;
