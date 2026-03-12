@@ -15,28 +15,24 @@ impl ReplacementPolicy for ClockPolicy {
 
     fn victim(&mut self, frames: &Vec<BufferFrame>) -> Option<usize> {
 
-        let n = frames.len();
-        let mut scanned = 0;
+    let n = frames.len();
 
-        while scanned < 2 * n {
+    loop {
 
-            let frame = &frames[self.hand];
+        let frame = &frames[self.hand];
 
-            if frame.metadata.pin_count == 0 {
+        if frame.metadata.pin_count == 0 {
 
-                if frame.metadata.usage_count == 0 {
-                    let victim = self.hand;
-                    self.hand = (self.hand + 1) % n;
-                    return Some(victim);
-                }
+            if frame.metadata.usage_count == 0 {
+                let victim = self.hand;
+                self.hand = (self.hand + 1) % n;
+                return Some(victim);
             }
-
-            self.hand = (self.hand + 1) % n;
-            scanned += 1;
         }
 
-        None
+        self.hand = (self.hand + 1) % n;
     }
+}
 
     fn record_access(&mut self, _frame_id: usize) {
         // CLOCK uses usage_count in metadata.
