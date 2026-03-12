@@ -1,5 +1,5 @@
 pub mod types;
-pub use types::{Catalog, Column, Database, Table};
+pub use types::{Catalog, Column, Database, SortDirection, SortKey, Table};
 pub mod catalog;
 
 pub use catalog::{

@@ -4,6 +4,8 @@ pub mod disk;
 pub mod executor;
 pub mod heap;
 pub mod layout;
+pub mod ordered;
 pub mod page;
+pub mod sorting;
 pub mod statistics;
 pub mod table;

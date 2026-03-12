@@ -1,12 +1,15 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
-use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
+use crate::ordered::ordered_file::{FileType, SortKeyEntry};
+use crate::page::{init_page, page_free_space, Page, ITEM_ID_SIZE, PAGE_SIZE};
+use crate::sorting::comparator::TupleComparator;
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 
 pub struct BufferManager {
     pub pages: Vec<Page>, // In-memory pages (header + data)
+    pub pool_size: usize, // Buffer pool size in pages (for external sort)
 }
 
 impl BufferManager {
@@ -20,7 +23,10 @@ impl BufferManager {
 
         println!("Buffer Manager initialized with header page only.");
 
-        Self { pages }
+        Self {
+            pages,
+            pool_size: 64, // default: 64 pages = 512 KB
+        }
     }
 
     /// Allocate ONE new data page
@@ -192,7 +198,6 @@ impl BufferManager {
 
                 page.data[0..4].copy_from_slice(&lower.to_le_bytes());
                 page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-                println!("Lower: {}", lower);
                 inserted_rows += 1;
                 break;
             }
@@ -234,6 +239,125 @@ impl BufferManager {
         csv_path: &str,
     ) -> io::Result<()> {
         let used = self.load_csv_into_pages(catalog, db_name, table_name, csv_path)?;
+
+        // Check if table is ordered - if so, sort tuples before flushing
+        let db = catalog.databases.get(db_name);
+        let is_ordered = db
+            .and_then(|d| d.tables.get(table_name))
+            .and_then(|t| t.file_type.as_ref())
+            .map(|ft| ft == "ordered")
+            .unwrap_or(false);
+
+        if is_ordered {
+            if let Some(table) = db.and_then(|d| d.tables.get(table_name)) {
+                if let Some(sort_keys) = &table.sort_keys {
+                    let comparator = TupleComparator::new(table.columns.clone(), sort_keys.clone());
+
+                    // Extract all tuples from data pages
+                    let mut all_tuples: Vec<Vec<u8>> = Vec::new();
+                    for page_idx in 1..self.pages.len() {
+                        let page = &self.pages[page_idx];
+                        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+                        let num_items = (lower - crate::page::PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+
+                        for i in 0..num_items {
+                            let base = (crate::page::PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
+                            let offset =
+                                u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap())
+                                    as usize;
+                            let length = u32::from_le_bytes(
+                                page.data[base + 4..base + 8].try_into().unwrap(),
+                            ) as usize;
+                            all_tuples.push(page.data[offset..offset + length].to_vec());
+                        }
+                    }
+
+                    // Sort tuples
+                    all_tuples.sort_by(|a, b| comparator.compare(a, b));
+
+                    // Clear data pages and rewrite sorted tuples
+                    self.pages.truncate(1); // keep header page
+
+                    let mut current_page = Page::new();
+                    init_page(&mut current_page);
+
+                    for tuple in &all_tuples {
+                        let tuple_len = tuple.len() as u32;
+                        let required = tuple_len + ITEM_ID_SIZE;
+                        let free = {
+                            let lower =
+                                u32::from_le_bytes(current_page.data[0..4].try_into().unwrap());
+                            let upper =
+                                u32::from_le_bytes(current_page.data[4..8].try_into().unwrap());
+                            upper - lower
+                        };
+
+                        if required > free {
+                            self.pages.push(current_page);
+                            current_page = Page::new();
+                            init_page(&mut current_page);
+                        }
+
+                        let mut lower =
+                            u32::from_le_bytes(current_page.data[0..4].try_into().unwrap());
+                        let mut upper =
+                            u32::from_le_bytes(current_page.data[4..8].try_into().unwrap());
+
+                        let start = upper - tuple_len;
+                        current_page.data[start as usize..upper as usize].copy_from_slice(tuple);
+
+                        current_page.data[lower as usize..lower as usize + 4]
+                            .copy_from_slice(&start.to_le_bytes());
+                        current_page.data[lower as usize + 4..lower as usize + 8]
+                            .copy_from_slice(&tuple_len.to_le_bytes());
+
+                        lower += ITEM_ID_SIZE;
+                        upper = start;
+
+                        current_page.data[0..4].copy_from_slice(&lower.to_le_bytes());
+                        current_page.data[4..8].copy_from_slice(&upper.to_le_bytes());
+                    }
+
+                    self.pages.push(current_page);
+
+                    // Write ordered file header into page 0
+                    let total_page_count = self.pages.len() as u32;
+                    let sort_key_entries: Vec<SortKeyEntry> = sort_keys
+                        .iter()
+                        .map(|sk| SortKeyEntry {
+                            column_index: sk.column_index,
+                            direction: match sk.direction {
+                                crate::catalog::types::SortDirection::Ascending => 0,
+                                crate::catalog::types::SortDirection::Descending => 1,
+                            },
+                        })
+                        .collect();
+
+                    // Build ordered header into page 0
+                    let header_page = &mut self.pages[0];
+                    header_page.data[0..4].copy_from_slice(&total_page_count.to_le_bytes());
+                    header_page.data[4] = FileType::Ordered.to_u8();
+                    header_page.data[5..9]
+                        .copy_from_slice(&(sort_key_entries.len() as u32).to_le_bytes());
+                    for (i, key) in sort_key_entries.iter().enumerate() {
+                        let base = 9 + i * 5;
+                        header_page.data[base..base + 4]
+                            .copy_from_slice(&key.column_index.to_le_bytes());
+                        header_page.data[base + 4] = key.direction;
+                    }
+
+                    println!(
+                        "Sorted {} tuples for ordered table before flushing.",
+                        all_tuples.len()
+                    );
+
+                    let used = self.pages.len();
+                    self.flush_to_disk(db_name, table_name, used)?;
+                    return Ok(());
+                }
+            }
+        }
+
         self.flush_to_disk(db_name, table_name, used)?;
         Ok(())
     }

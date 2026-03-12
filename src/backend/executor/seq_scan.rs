@@ -1,9 +1,10 @@
 use std::fs::File;
 use std::io::{self};
 
-use crate::catalog::types::Catalog;
+use crate::catalog::types::{Catalog, SortDirection};
 use crate::disk::read_page;
-use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
+use crate::ordered::ordered_file::{read_ordered_file_header, FileType};
+use crate::page::{Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE};
 use crate::table::page_count;
 
 pub fn show_tuples(
@@ -30,12 +31,35 @@ pub fn show_tuples(
     let columns = &table.columns;
 
     // 2. Read total number of pages
-    let mut total_pages = page_count(file)?; // total pages currently in file
+    let total_pages = page_count(file)?; // total pages currently in file
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
-    println!("Total pages: {}", total_pages);
-    total_pages = total_pages;
 
+    // Check if this is an ordered file and print sort order indicator
+    if let Ok(header) = read_ordered_file_header(file) {
+        if header.file_type == FileType::Ordered {
+            if let Some(sort_keys) = &table.sort_keys {
+                let parts: Vec<String> = sort_keys
+                    .iter()
+                    .map(|sk| {
+                        let col_name = if (sk.column_index as usize) < columns.len() {
+                            &columns[sk.column_index as usize].name
+                        } else {
+                            "?"
+                        };
+                        let dir = match sk.direction {
+                            SortDirection::Ascending => "ASC",
+                            SortDirection::Descending => "DESC",
+                        };
+                        format!("{} {}", col_name, dir)
+                    })
+                    .collect();
+                println!("[Ordered by: {}]", parts.join(", "));
+            }
+        }
+    }
+
+    println!("Total pages: {}", total_pages);
     // 3. Loop through each page
     for page_num in 1..total_pages {
         let mut page = Page::new();
