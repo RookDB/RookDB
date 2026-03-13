@@ -4,7 +4,7 @@
 //! runtime `DataValue` enum for the types assigned in the proposal:
 //! `SMALLINT`, `INTEGER`, `VARCHAR(n)`, and `DATE`.
 
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
@@ -49,6 +49,23 @@ impl DataType {
 
     pub fn is_variable_length(&self) -> bool {
         matches!(self, DataType::Varchar(_))
+    }
+
+    pub fn encoded_len(&self, bytes: &[u8]) -> Result<usize, String> {
+        match self {
+            DataType::Varchar(_) => {
+                if bytes.len() < 2 {
+                    return Err("VARCHAR field is missing its 2-byte length prefix".to_string());
+                }
+                let payload_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+                let total_len = 2 + payload_len;
+                if bytes.len() < total_len {
+                    return Err("VARCHAR field is truncated".to_string());
+                }
+                Ok(total_len)
+            }
+            _ => Ok(self.fixed_size().expect("fixed-width type") as usize),
+        }
     }
 }
 
@@ -115,6 +132,105 @@ impl fmt::Display for DataValue {
             DataValue::Int(v) => write!(f, "{}", v),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
+        }
+    }
+}
+
+impl DataValue {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            DataValue::SmallInt(v) => v.to_le_bytes().to_vec(),
+            DataValue::Int(v) => v.to_le_bytes().to_vec(),
+            DataValue::Varchar(v) => {
+                let bytes = v.as_bytes();
+                let mut out = Vec::with_capacity(2 + bytes.len());
+                out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+                out.extend_from_slice(bytes);
+                out
+            }
+            DataValue::Date(v) => {
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+                let days = v.signed_duration_since(epoch).num_days() as i32;
+                days.to_le_bytes().to_vec()
+            }
+        }
+    }
+
+    pub fn from_bytes(ty: &DataType, bytes: &[u8]) -> Result<Self, String> {
+        match ty {
+            DataType::SmallInt => {
+                if bytes.len() < 2 {
+                    return Err("SMALLINT requires 2 bytes".to_string());
+                }
+                Ok(DataValue::SmallInt(i16::from_le_bytes([
+                    bytes[0], bytes[1],
+                ])))
+            }
+            DataType::Int => {
+                if bytes.len() < 4 {
+                    return Err("INT requires 4 bytes".to_string());
+                }
+                Ok(DataValue::Int(i32::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                ])))
+            }
+            DataType::Varchar(max_len) => {
+                let encoded_len = ty.encoded_len(bytes)?;
+                let payload_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+                if payload_len > *max_len as usize {
+                    return Err(format!(
+                        "VARCHAR payload length {} exceeds declared limit {}",
+                        payload_len, max_len
+                    ));
+                }
+                let payload = &bytes[2..encoded_len];
+                let value = String::from_utf8(payload.to_vec())
+                    .map_err(|_| "VARCHAR payload is not valid UTF-8".to_string())?;
+                Ok(DataValue::Varchar(value))
+            }
+            DataType::Date => {
+                if bytes.len() < 4 {
+                    return Err("DATE requires 4 bytes".to_string());
+                }
+                let days = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64;
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+                let value = epoch
+                    .checked_add_signed(Duration::days(days))
+                    .ok_or_else(|| "DATE is outside supported chrono range".to_string())?;
+                Ok(DataValue::Date(value))
+            }
+        }
+    }
+
+    pub fn parse_and_encode(ty: &DataType, input: &str) -> Result<Vec<u8>, String> {
+        let input = input.trim();
+        match ty {
+            DataType::SmallInt => input
+                .parse::<i16>()
+                .map(DataValue::SmallInt)
+                .map(|v| v.to_bytes())
+                .map_err(|e| e.to_string()),
+            DataType::Int => input
+                .parse::<i32>()
+                .map(DataValue::Int)
+                .map(|v| v.to_bytes())
+                .map_err(|e| e.to_string()),
+            DataType::Varchar(max_len) => {
+                let value = input.trim_matches('"').trim_matches('\'');
+                if value.len() > *max_len as usize {
+                    return Err(format!(
+                        "VARCHAR({}) cannot store {} bytes",
+                        max_len,
+                        value.len()
+                    ));
+                }
+                Ok(DataValue::Varchar(value.to_string()).to_bytes())
+            }
+            DataType::Date => {
+                let date = NaiveDate::parse_from_str(input.trim_matches('\''), "%Y-%m-%d")
+                    .map_err(|e| e.to_string())?;
+                Ok(DataValue::Date(date).to_bytes())
+            }
         }
     }
 }
@@ -186,5 +302,36 @@ mod tests {
         assert_eq!(DataType::Varchar(64).min_storage_size(), 2);
         assert!(DataType::Varchar(64).is_variable_length());
         assert!(!DataType::Date.is_variable_length());
+    }
+
+    #[test]
+    fn roundtrip_smallint() {
+        let encoded = DataValue::parse_and_encode(&DataType::SmallInt, "-12").unwrap();
+        assert_eq!(DataValue::from_bytes(&DataType::SmallInt, &encoded).unwrap(), DataValue::SmallInt(-12));
+    }
+
+    #[test]
+    fn roundtrip_int() {
+        let encoded = DataValue::parse_and_encode(&DataType::Int, "42").unwrap();
+        assert_eq!(DataValue::from_bytes(&DataType::Int, &encoded).unwrap(), DataValue::Int(42));
+    }
+
+    #[test]
+    fn roundtrip_varchar() {
+        let encoded = DataValue::parse_and_encode(&DataType::Varchar(32), "Alice").unwrap();
+        assert_eq!(u16::from_le_bytes([encoded[0], encoded[1]]), 5);
+        assert_eq!(DataValue::from_bytes(&DataType::Varchar(32), &encoded).unwrap(), DataValue::Varchar("Alice".to_string()));
+    }
+
+    #[test]
+    fn roundtrip_date() {
+        let encoded = DataValue::parse_and_encode(&DataType::Date, "2026-03-13").unwrap();
+        assert_eq!(DataValue::from_bytes(&DataType::Date, &encoded).unwrap(), DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap()));
+    }
+
+    #[test]
+    fn varchar_length_violation_is_error() {
+        let err = DataValue::parse_and_encode(&DataType::Varchar(3), "Alice").unwrap_err();
+        assert!(err.contains("VARCHAR(3)"));
     }
 }
