@@ -4,6 +4,7 @@
 
 use chrono::{Duration, NaiveDate};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
@@ -313,6 +314,84 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComparisonError {
+    TypeMismatch { left: String, right: String },
+}
+
+impl fmt::Display for ComparisonError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ComparisonError::TypeMismatch { left, right } => {
+                write!(f, "Cannot compare {} with {}", left, right)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ComparisonError {}
+
+pub trait Comparable: Sized {
+    fn compare(&self, other: &Self) -> Result<Ordering, ComparisonError>;
+
+    fn is_equal(&self, other: &Self) -> Result<bool, ComparisonError> {
+        Ok(self.compare(other)? == Ordering::Equal)
+    }
+}
+
+fn value_type_name(value: &DataValue) -> &'static str {
+    match value {
+        DataValue::SmallInt(_) => "SMALLINT",
+        DataValue::Int(_) => "INT",
+        DataValue::Varchar(_) => "VARCHAR",
+        DataValue::Date(_) => "DATE",
+    }
+}
+
+impl Comparable for DataValue {
+    fn compare(&self, other: &Self) -> Result<Ordering, ComparisonError> {
+        match (self, other) {
+            // Numeric promotion for SMALLINT / INT
+            (DataValue::SmallInt(a), DataValue::SmallInt(b)) => Ok(a.cmp(b)),
+            (DataValue::Int(a), DataValue::Int(b)) => Ok(a.cmp(b)),
+            (DataValue::SmallInt(a), DataValue::Int(b)) => Ok((*a as i32).cmp(b)),
+            (DataValue::Int(a), DataValue::SmallInt(b)) => Ok(a.cmp(&(*b as i32))),
+
+            // VARCHAR lexicographic ordering (case-sensitive)
+            (DataValue::Varchar(a), DataValue::Varchar(b)) => Ok(a.cmp(b)),
+
+            // DATE chronological ordering
+            (DataValue::Date(a), DataValue::Date(b)) => Ok(a.cmp(b)),
+
+            _ => Err(ComparisonError::TypeMismatch {
+                left: value_type_name(self).to_string(),
+                right: value_type_name(other).to_string(),
+            }),
+        }
+    }
+}
+
+/// SQL-style NULL semantics for comparisons.
+///
+/// If either side is NULL, comparison result is UNKNOWN (`None`).
+/// Otherwise returns the ordering of the two non-null values.
+pub fn compare_nullable(
+    left: Option<&DataValue>,
+    right: Option<&DataValue>,
+) -> Result<Option<Ordering>, ComparisonError> {
+    match (left, right) {
+        (Some(l), Some(r)) => Ok(Some(l.compare(r)?)),
+        _ => Ok(None),
+    }
+}
+
+pub fn nullable_equals(
+    left: Option<&DataValue>,
+    right: Option<&DataValue>,
+) -> Result<Option<bool>, ComparisonError> {
+    Ok(compare_nullable(left, right)?.map(|o| o == Ordering::Equal))
+}
+
 /// Row-level NULL bitmap as described in the proposal.
 ///
 /// One bit per column: bit=1 means the column value is NULL.
@@ -613,5 +692,50 @@ mod tests {
             Some(DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap()))
         );
         assert_eq!(decoded[3], Some(DataValue::SmallInt(-7)));
+    }
+
+    #[test]
+    fn compare_numeric_with_promotion() {
+        let a = DataValue::SmallInt(7);
+        let b = DataValue::Int(10);
+        assert_eq!(a.compare(&b).unwrap(), Ordering::Less);
+        assert_eq!(b.compare(&a).unwrap(), Ordering::Greater);
+        assert!(a.is_equal(&DataValue::Int(7)).unwrap());
+    }
+
+    #[test]
+    fn compare_varchar_lexicographic() {
+        let a = DataValue::Varchar("Alice".to_string());
+        let b = DataValue::Varchar("Bob".to_string());
+        assert_eq!(a.compare(&b).unwrap(), Ordering::Less);
+    }
+
+    #[test]
+    fn compare_date_chronological() {
+        let a = DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 12).unwrap());
+        let b = DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap());
+        assert_eq!(a.compare(&b).unwrap(), Ordering::Less);
+    }
+
+    #[test]
+    fn compare_type_mismatch_errors() {
+        let a = DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap());
+        let b = DataValue::Varchar("2026-03-13".to_string());
+        assert!(a.compare(&b).is_err());
+    }
+
+    #[test]
+    fn compare_nullable_unknown_when_null_present() {
+        let a = DataValue::Int(1);
+        assert_eq!(compare_nullable(Some(&a), None).unwrap(), None);
+        assert_eq!(nullable_equals(Some(&a), None).unwrap(), None);
+    }
+
+    #[test]
+    fn compare_nullable_non_null_values() {
+        let a = DataValue::Int(5);
+        let b = DataValue::SmallInt(5);
+        assert_eq!(compare_nullable(Some(&a), Some(&b)).unwrap(), Some(Ordering::Equal));
+        assert_eq!(nullable_equals(Some(&a), Some(&b)).unwrap(), Some(true));
     }
 }
