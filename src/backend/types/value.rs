@@ -1,4 +1,4 @@
-use chrono::{Duration, NaiveDate};
+use chrono::{Duration, NaiveDate, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -78,6 +78,7 @@ pub enum DataValue {
     Char(String),
     Varchar(String),
     Date(NaiveDate),
+    Time(NaiveTime),
     Bit(String),
 }
 
@@ -93,6 +94,7 @@ impl fmt::Display for DataValue {
             DataValue::Char(v) => write!(f, "'{}'", v.trim_end_matches(' ')),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
+            DataValue::Time(v) => write!(f, "{}", v.format("%H:%M:%S%.6f")),
             DataValue::Bit(v) => write!(f, "B'{}'", v),
         }
     }
@@ -119,6 +121,12 @@ impl DataValue {
                 let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
                 let days = v.signed_duration_since(epoch).num_days() as i32;
                 days.to_le_bytes().to_vec()
+            }
+            DataValue::Time(v) => {
+                // microseconds since midnight
+                let micros = v.num_seconds_from_midnight() as i64 * 1_000_000
+                    + v.nanosecond() as i64 / 1_000;
+                micros.to_le_bytes().to_vec()
             }
             DataValue::Bit(v) => pack_bit_string(v),
         }
@@ -208,6 +216,20 @@ impl DataValue {
                     .ok_or_else(|| "DATE is outside supported chrono range".to_string())?;
                 Ok(DataValue::Date(value))
             }
+            DataType::Time => {
+                if bytes.len() < 8 {
+                    return Err("TIME requires 8 bytes".to_string());
+                }
+                let micros = i64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+                let secs = (micros / 1_000_000) as u32;
+                let nanos = ((micros % 1_000_000) * 1_000) as u32;
+                NaiveTime::from_num_seconds_from_midnight_opt(secs, nanos)
+                    .map(DataValue::Time)
+                    .ok_or_else(|| "TIME value out of range".to_string())
+            }
             DataType::Bit(n) => {
                 let needed = (*n as usize).div_ceil(8);
                 if bytes.len() < needed {
@@ -273,6 +295,14 @@ impl DataValue {
                 let date = NaiveDate::parse_from_str(input.trim_matches('\''), "%Y-%m-%d")
                     .map_err(|e| e.to_string())?;
                 Ok(DataValue::Date(date).to_bytes())
+            }
+            DataType::Time => {
+                let raw = input.trim_matches('\'');
+                // Accept HH:MM:SS, HH:MM:SS.ffffff
+                NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
+                    .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M:%S"))
+                    .map(|v| DataValue::Time(v).to_bytes())
+                    .map_err(|e| e.to_string())
             }
             DataType::Bit(_) => {
                 let bits = normalize_bit_literal(input);

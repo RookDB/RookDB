@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime};
 use std::fmt;
 
 use crate::types::bit_utils::normalize_bit_literal;
@@ -140,6 +140,18 @@ pub fn validate_date(input: &str) -> Result<(), TypeValidationError> {
         })
 }
 
+pub fn validate_time(input: &str) -> Result<(), TypeValidationError> {
+    let raw = input.trim().trim_matches('\'');
+    NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
+        .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M:%S"))
+        .map(|_| ())
+        .map_err(|e| TypeValidationError::InvalidFormat {
+            ty: "TIME".to_string(),
+            value: raw.to_string(),
+            details: format!("expected HH:MM:SS[.ffffff] ({})", e),
+        })
+}
+
 pub fn validate_bit(input: &str, bit_len: u16) -> Result<(), TypeValidationError> {
     let value = normalize_bit_literal(input);
     if value.len() != bit_len as usize {
@@ -170,6 +182,7 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
         DataType::Char(fixed_len) => validate_char(input, *fixed_len),
         DataType::Varchar(max_len) => validate_varchar(input, *max_len),
         DataType::Date => validate_date(input),
+        DataType::Time => validate_time(input),
         DataType::Bit(bit_len) => validate_bit(input, *bit_len),
     }
 }

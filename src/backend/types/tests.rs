@@ -18,6 +18,7 @@ fn parse_phase_one_types() {
     );
     assert_eq!("BOOLEAN".parse::<DataType>().unwrap(), DataType::Bool);
     assert_eq!("DATE".parse::<DataType>().unwrap(), DataType::Date);
+    assert_eq!("TIME".parse::<DataType>().unwrap(), DataType::Time);
     assert_eq!("BIT(12)".parse::<DataType>().unwrap(), DataType::Bit(12));
 }
 
@@ -38,6 +39,7 @@ fn serde_roundtrip() {
         DataType::Char(10),
         DataType::Varchar(32),
         DataType::Date,
+        DataType::Time,
         DataType::Bit(9),
     ];
     for dt in &types {
@@ -59,6 +61,7 @@ fn display_matches_parse() {
         DataType::Char(5),
         DataType::Varchar(8),
         DataType::Date,
+        DataType::Time,
         DataType::Bit(5),
     ];
     for dt in &types {
@@ -76,6 +79,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::Real.alignment(), 4);
     assert_eq!(DataType::DoublePrecision.alignment(), 8);
     assert_eq!(DataType::Char(10).alignment(), 1);
+    assert_eq!(DataType::Time.alignment(), 8);
     assert_eq!(DataType::Date.alignment(), 4);
     assert_eq!(DataType::Bool.alignment(), 1);
     assert_eq!(DataType::Varchar(64).alignment(), 1);
@@ -87,6 +91,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::Real.fixed_size(), Some(4));
     assert_eq!(DataType::DoublePrecision.fixed_size(), Some(8));
     assert_eq!(DataType::Char(10).fixed_size(), Some(10));
+    assert_eq!(DataType::Time.fixed_size(), Some(8));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
     assert_eq!(DataType::Bool.fixed_size(), Some(1));
     assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
@@ -273,6 +278,39 @@ fn validate_char_length() {
 fn compare_char_lexicographic() {
     let a = DataValue::Char("abc      ".to_string());
     let b = DataValue::Char("abd      ".to_string());
+    assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
+}
+
+#[test]
+fn roundtrip_time() {
+    use chrono::NaiveTime;
+    let encoded = DataValue::parse_and_encode(&DataType::Time, "14:30:00").unwrap();
+    assert_eq!(encoded.len(), 8);
+    let v = DataValue::from_bytes(&DataType::Time, &encoded).unwrap();
+    assert_eq!(v, DataValue::Time(NaiveTime::from_hms_opt(14, 30, 0).unwrap()));
+}
+
+#[test]
+fn roundtrip_time_with_micros() {
+    use chrono::NaiveTime;
+    let encoded = DataValue::parse_and_encode(&DataType::Time, "23:59:59.123456").unwrap();
+    assert_eq!(encoded.len(), 8);
+    let v = DataValue::from_bytes(&DataType::Time, &encoded).unwrap();
+    assert_eq!(v, DataValue::Time(NaiveTime::from_hms_micro_opt(23, 59, 59, 123456).unwrap()));
+}
+
+#[test]
+fn validate_time_format() {
+    assert!(validate_time("09:05:03").is_ok());
+    assert!(validate_time("23:59:59.999999").is_ok());
+    assert!(validate_time("not-a-time").is_err());
+}
+
+#[test]
+fn compare_time_chronological() {
+    use chrono::NaiveTime;
+    let a = DataValue::Time(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+    let b = DataValue::Time(NaiveTime::from_hms_opt(12, 0, 0).unwrap());
     assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
 }
 

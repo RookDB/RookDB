@@ -39,6 +39,7 @@ pub(crate) fn value_type_name(value: &DataValue) -> &'static str {
         DataValue::Char(_) => "CHAR",
         DataValue::Varchar(_) => "VARCHAR",
         DataValue::Date(_) => "DATE",
+        DataValue::Time(_) => "TIME",
         DataValue::Bit(_) => "BIT",
     }
 }
@@ -61,6 +62,7 @@ impl Comparable for DataValue {
             (DataValue::Char(a), DataValue::Char(b)) => Ok(a.cmp(b)),
             (DataValue::Varchar(a), DataValue::Varchar(b)) => Ok(a.cmp(b)),
             (DataValue::Date(a), DataValue::Date(b)) => Ok(a.cmp(b)),
+            (DataValue::Time(a), DataValue::Time(b)) => Ok(a.cmp(b)),
             (DataValue::Bit(a), DataValue::Bit(b)) => Ok(a.cmp(b)),
             _ => Err(ComparisonError::TypeMismatch {
                 left: value_type_name(self).to_string(),

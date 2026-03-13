@@ -16,8 +16,8 @@ pub use null_bitmap::NullBitmap;
 pub use row::{Row, deserialize_nullable_row, serialize_nullable_row};
 pub use validation::{
     TypeValidationError, validate_bigint, validate_bit, validate_bool, validate_char,
-    validate_date, validate_double, validate_int, validate_real, validate_smallint, validate_value,
-    validate_varchar,
+    validate_date, validate_double, validate_int, validate_real, validate_smallint, validate_time,
+    validate_value, validate_varchar,
 };
 pub use value::{DataValue, OrderedF32, OrderedF64};
 

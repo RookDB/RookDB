@@ -81,6 +81,7 @@ fn data_value_matches_type(ty: &DataType, value: &DataValue) -> bool {
             | (DataType::Char(_), DataValue::Char(_))
             | (DataType::Varchar(_), DataValue::Varchar(_))
             | (DataType::Date, DataValue::Date(_))
+            | (DataType::Time, DataValue::Time(_))
             | (DataType::Bit(_), DataValue::Bit(_))
     )
 }
