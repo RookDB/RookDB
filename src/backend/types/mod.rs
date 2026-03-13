@@ -17,6 +17,41 @@ pub enum DataType {
     Date,
 }
 
+impl DataType {
+    /// Returns the alignment rule described in the proposal.
+    pub fn alignment(&self) -> u32 {
+        match self {
+            DataType::SmallInt => 2,
+            DataType::Int | DataType::Date => 4,
+            DataType::Varchar(_) => 1,
+        }
+    }
+
+    /// Returns the exact on-disk size for fixed-width types.
+    pub fn fixed_size(&self) -> Option<u32> {
+        match self {
+            DataType::SmallInt => Some(2),
+            DataType::Int => Some(4),
+            DataType::Date => Some(4),
+            DataType::Varchar(_) => None,
+        }
+    }
+
+    /// Returns the minimum number of bytes required to store this type.
+    ///
+    /// `VARCHAR(n)` uses a 2-byte length prefix followed by payload bytes.
+    pub fn min_storage_size(&self) -> u32 {
+        match self {
+            DataType::Varchar(_) => 2,
+            _ => self.fixed_size().expect("fixed-width type"),
+        }
+    }
+
+    pub fn is_variable_length(&self) -> bool {
+        matches!(self, DataType::Varchar(_))
+    }
+}
+
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -134,5 +169,22 @@ mod tests {
             let back: DataType = s.parse().unwrap();
             assert_eq!(dt, &back);
         }
+    }
+
+    #[test]
+    fn phase_two_layout_rules() {
+        assert_eq!(DataType::SmallInt.alignment(), 2);
+        assert_eq!(DataType::Int.alignment(), 4);
+        assert_eq!(DataType::Date.alignment(), 4);
+        assert_eq!(DataType::Varchar(64).alignment(), 1);
+
+        assert_eq!(DataType::SmallInt.fixed_size(), Some(2));
+        assert_eq!(DataType::Int.fixed_size(), Some(4));
+        assert_eq!(DataType::Date.fixed_size(), Some(4));
+        assert_eq!(DataType::Varchar(64).fixed_size(), None);
+
+        assert_eq!(DataType::Varchar(64).min_storage_size(), 2);
+        assert!(DataType::Varchar(64).is_variable_length());
+        assert!(!DataType::Date.is_variable_length());
     }
 }
