@@ -10,6 +10,7 @@ use crate::catalog::types::*;
 
 use crate::heap::init_table;
 use crate::layout::*;
+use crate::ordered::ordered_file::{init_ordered_table, SortKeyEntry};
 
 /// Initializes the catalog and required directory structure on disk.
 /// Creates the catalog file if it does not already exist.
@@ -171,7 +172,13 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
 }
 
 // Creates a new table, updates the catalog, and initializes its data file.
-pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, columns: Vec<Column>) {
+pub fn create_table(
+    catalog: &mut Catalog,
+    db_name: &str,
+    table_name: &str,
+    columns: Vec<Column>,
+    sort_keys: Option<Vec<SortKey>>,
+) {
     // Step 1: Validate database existence
     if !catalog.databases.contains_key(db_name) {
         println!(
@@ -193,7 +200,11 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     }
 
     // Insert table metadata into catalog
-    let new_table = Table { columns };
+    let new_table = Table {
+        columns,
+        file_type: sort_keys.as_ref().map(|_| "ordered".to_string()),
+        sort_keys: sort_keys.clone(),
+    };
     database.tables.insert(table_name.to_string(), new_table);
 
     // Persist catalog changes
@@ -217,10 +228,30 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
             Ok(mut file) => {
                 println!("Table data file created at '{}'.", table_file_path);
 
-                if let Err(e) = init_table(&mut file) {
-                    eprintln!("Failed to initialize table '{}': {}", table_name, e);
+                if let Some(keys) = &sort_keys {
+                    // Create ordered file
+                    let sort_key_entries: Vec<SortKeyEntry> = keys
+                        .iter()
+                        .map(|sk| SortKeyEntry {
+                            column_index: sk.column_index,
+                            direction: match sk.direction {
+                                SortDirection::Ascending => 0,
+                                SortDirection::Descending => 1,
+                            },
+                        })
+                        .collect();
+                    if let Err(e) = init_ordered_table(&mut file, &sort_key_entries) {
+                        eprintln!("Failed to initialize ordered table '{}': {}", table_name, e);
+                    } else {
+                        println!("Ordered table '{}' initialized successfully.", table_name);
+                    }
                 } else {
-                    println!("Table '{}' initialized successfully.", table_name);
+                    // Create heap file
+                    if let Err(e) = init_table(&mut file) {
+                        eprintln!("Failed to initialize table '{}': {}", table_name, e);
+                    } else {
+                        println!("Table '{}' initialized successfully.", table_name);
+                    }
                 }
             }
             Err(e) => {

@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{Catalog, Column, create_table, show_tables};
+use storage_manager::catalog::{create_table, show_tables, Catalog, Column};
 use storage_manager::statistics::print_table_page_count;
 
 /// Displays tables in the currently selected database
@@ -64,7 +64,7 @@ pub fn create_table_cmd(
         });
     }
 
-    create_table(catalog, &db, &table_name, columns);
+    create_table(catalog, &db, &table_name, columns, None);
     buffer_manager.load_table_from_disk(&db, &table_name)?;
 
     Ok(())

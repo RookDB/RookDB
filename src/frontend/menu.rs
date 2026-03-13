@@ -8,7 +8,7 @@ use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{init_catalog, load_catalog};
 
 // Frontend command handlers
-use crate::frontend::{data_cmd, database_cmd, table_cmd};
+use crate::frontend::{data_cmd, database_cmd, sort_cmd, table_cmd};
 
 /// Runs the main interactive menu loop
 pub fn run() -> io::Result<()> {
@@ -31,7 +31,7 @@ pub fn run() -> io::Result<()> {
     let mut current_db: Option<String> = None;
 
     loop {
-        println!("\n=============================");
+        println!("\n========== RookDB Storage Manager ==========");
         println!("Choose an option:");
         println!("1. Show Databases");
         println!("2. Create Database");
@@ -42,7 +42,11 @@ pub fn run() -> io::Result<()> {
         println!("7. Show Tuples");
         println!("8. Show Table Statistics");
         println!("9. Exit");
-        println!("=============================");
+        println!("10. Sort Table");
+        println!("11. Create Ordered Table");
+        println!("12. Range Scan");
+        println!("13. ORDER BY Query");
+        println!("=============================================");
 
         // Read user input
         print!("Enter your choice: ");
@@ -66,6 +70,12 @@ pub fn run() -> io::Result<()> {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }
+            "10" => sort_cmd::sort_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
+            "11" => {
+                sort_cmd::create_ordered_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?
+            }
+            "12" => sort_cmd::range_scan_cmd(&mut catalog, &current_db)?,
+            "13" => sort_cmd::order_by_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
             _ => println!("Invalid option."),
         }
     }
