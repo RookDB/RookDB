@@ -202,6 +202,8 @@ impl DataValue {
 
     pub fn parse_and_encode(ty: &DataType, input: &str) -> Result<Vec<u8>, String> {
         let input = input.trim();
+        validate_value(ty, input).map_err(|e| e.to_string())?;
+
         match ty {
             DataType::SmallInt => input
                 .parse::<i16>()
@@ -213,15 +215,8 @@ impl DataValue {
                 .map(DataValue::Int)
                 .map(|v| v.to_bytes())
                 .map_err(|e| e.to_string()),
-            DataType::Varchar(max_len) => {
+            DataType::Varchar(_) => {
                 let value = input.trim_matches('"').trim_matches('\'');
-                if value.len() > *max_len as usize {
-                    return Err(format!(
-                        "VARCHAR({}) cannot store {} bytes",
-                        max_len,
-                        value.len()
-                    ));
-                }
                 Ok(DataValue::Varchar(value.to_string()).to_bytes())
             }
             DataType::Date => {
@@ -230,6 +225,91 @@ impl DataValue {
                 Ok(DataValue::Date(date).to_bytes())
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeValidationError {
+    OutOfRange {
+        ty: String,
+        value: String,
+        details: String,
+    },
+    InvalidFormat {
+        ty: String,
+        value: String,
+        details: String,
+    },
+}
+
+impl fmt::Display for TypeValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypeValidationError::OutOfRange { ty, value, details } => {
+                write!(f, "{} value '{}' is out of range: {}", ty, value, details)
+            }
+            TypeValidationError::InvalidFormat { ty, value, details } => {
+                write!(f, "{} value '{}' has invalid format: {}", ty, value, details)
+            }
+        }
+    }
+}
+
+impl std::error::Error for TypeValidationError {}
+
+pub fn validate_smallint(input: &str) -> Result<(), TypeValidationError> {
+    input
+        .trim()
+        .parse::<i16>()
+        .map(|_| ())
+        .map_err(|_| TypeValidationError::OutOfRange {
+            ty: "SMALLINT".to_string(),
+            value: input.trim().to_string(),
+            details: "expected signed 16-bit integer [-32768, 32767]".to_string(),
+        })
+}
+
+pub fn validate_int(input: &str) -> Result<(), TypeValidationError> {
+    input
+        .trim()
+        .parse::<i32>()
+        .map(|_| ())
+        .map_err(|_| TypeValidationError::OutOfRange {
+            ty: "INT".to_string(),
+            value: input.trim().to_string(),
+            details: "expected signed 32-bit integer".to_string(),
+        })
+}
+
+pub fn validate_varchar(input: &str, max_len: u16) -> Result<(), TypeValidationError> {
+    let value = input.trim().trim_matches('"').trim_matches('\'');
+    if value.len() > max_len as usize {
+        return Err(TypeValidationError::OutOfRange {
+            ty: format!("VARCHAR({})", max_len),
+            value: value.to_string(),
+            details: format!("maximum length is {} bytes", max_len),
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_date(input: &str) -> Result<(), TypeValidationError> {
+    let raw = input.trim().trim_matches('\'');
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map(|_| ())
+        .map_err(|e| TypeValidationError::InvalidFormat {
+            ty: "DATE".to_string(),
+            value: raw.to_string(),
+            details: format!("expected YYYY-MM-DD ({})", e),
+        })
+}
+
+pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationError> {
+    match ty {
+        DataType::SmallInt => validate_smallint(input),
+        DataType::Int => validate_int(input),
+        DataType::Varchar(max_len) => validate_varchar(input, *max_len),
+        DataType::Date => validate_date(input),
     }
 }
 
@@ -462,6 +542,32 @@ mod tests {
     fn varchar_length_violation_is_error() {
         let err = DataValue::parse_and_encode(&DataType::Varchar(3), "Alice").unwrap_err();
         assert!(err.contains("VARCHAR(3)"));
+    }
+
+    #[test]
+    fn validate_smallint_bounds() {
+        assert!(validate_smallint("-32768").is_ok());
+        assert!(validate_smallint("32767").is_ok());
+        assert!(validate_smallint("32768").is_err());
+    }
+
+    #[test]
+    fn validate_int_bounds() {
+        assert!(validate_int("2147483647").is_ok());
+        assert!(validate_int("2147483648").is_err());
+    }
+
+    #[test]
+    fn validate_varchar_length() {
+        assert!(validate_varchar("abc", 3).is_ok());
+        assert!(validate_varchar("abcd", 3).is_err());
+    }
+
+    #[test]
+    fn validate_date_format() {
+        assert!(validate_date("2026-03-13").is_ok());
+        assert!(validate_date("2026-13-40").is_err());
+        assert!(validate_date("13-03-2026").is_err());
     }
 
     #[test]
