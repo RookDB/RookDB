@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{Catalog, Column, create_table, show_tables};
+use storage_manager::catalog::{Catalog, Column, DataType, create_table, show_tables};
 use storage_manager::statistics::print_table_page_count;
 
 /// Displays tables in the currently selected database
@@ -58,9 +58,21 @@ pub fn create_table_cmd(
             continue;
         }
 
+        let type_str = parts[1].trim();
+        let data_type = match type_str.parse::<DataType>() {
+            Ok(dt) => dt,
+            Err(e) => {
+                println!(
+                    "Unknown type '{}': {}. Supported: SMALLINT, INT, VARCHAR(n), DATE",
+                    type_str, e
+                );
+                continue;
+            }
+        };
+
         columns.push(Column {
-            name: parts[0].to_string(),
-            data_type: parts[1].to_string(),
+            name: parts[0].trim().to_string(),
+            data_type,
         });
     }
 

@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
+use storage_manager::types::DataType;
 
 use storage_manager::layout::CATALOG_FILE;
 
@@ -31,15 +32,15 @@ fn test_save_catalog() {
         columns: vec![
             Column {
                 name: "id".to_string(),
-                data_type: "INT".to_string(),
+                data_type: DataType::Int,
             },
             Column {
                 name: "name".to_string(),
-                data_type: "TEXT".to_string(),
+                data_type: DataType::Varchar(10),
             },
             Column {
                 name: "email".to_string(),
-                data_type: "TEXT".to_string(),
+                data_type: DataType::Varchar(10),
             },
         ],
     };

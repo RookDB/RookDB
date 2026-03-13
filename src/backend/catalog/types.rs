@@ -4,11 +4,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::types::DataType;
+
 /// Represents a column within a table.
 #[derive(Serialize, Deserialize)]
 pub struct Column {
     pub name: String,
-    pub data_type: String,
+    pub data_type: DataType,
 }
 
 /// Represents a table schema.
