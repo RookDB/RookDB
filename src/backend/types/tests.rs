@@ -10,6 +10,13 @@ fn parse_phase_one_types() {
     assert_eq!("BIGINT".parse::<DataType>().unwrap(), DataType::BigInt);
     assert_eq!("REAL".parse::<DataType>().unwrap(), DataType::Real);
     assert_eq!("DOUBLE PRECISION".parse::<DataType>().unwrap(), DataType::DoublePrecision);
+    assert_eq!(
+        "NUMERIC(10,2)".parse::<DataType>().unwrap(),
+        DataType::Numeric {
+            precision: 10,
+            scale: 2
+        }
+    );
     assert_eq!("CHAR(10)".parse::<DataType>().unwrap(), DataType::Char(10));
     assert_eq!("CHARACTER(10)".parse::<DataType>().unwrap(), DataType::Char(10));
     assert_eq!(
@@ -36,6 +43,10 @@ fn serde_roundtrip() {
         DataType::BigInt,
         DataType::Real,
         DataType::DoublePrecision,
+        DataType::Numeric {
+            precision: 10,
+            scale: 2,
+        },
         DataType::Bool,
         DataType::Char(10),
         DataType::Varchar(32),
@@ -59,6 +70,10 @@ fn display_matches_parse() {
         DataType::BigInt,
         DataType::Real,
         DataType::DoublePrecision,
+        DataType::Numeric {
+            precision: 8,
+            scale: 3,
+        },
         DataType::Bool,
         DataType::Char(5),
         DataType::Varchar(8),
@@ -81,6 +96,14 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::BigInt.alignment(), 8);
     assert_eq!(DataType::Real.alignment(), 4);
     assert_eq!(DataType::DoublePrecision.alignment(), 8);
+    assert_eq!(
+        DataType::Numeric {
+            precision: 10,
+            scale: 2
+        }
+        .alignment(),
+        1
+    );
     assert_eq!(DataType::Char(10).alignment(), 1);
     assert_eq!(DataType::Time.alignment(), 8);
     assert_eq!(DataType::Date.alignment(), 4);
@@ -94,6 +117,14 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::BigInt.fixed_size(), Some(8));
     assert_eq!(DataType::Real.fixed_size(), Some(4));
     assert_eq!(DataType::DoublePrecision.fixed_size(), Some(8));
+    assert_eq!(
+        DataType::Numeric {
+            precision: 10,
+            scale: 2
+        }
+        .fixed_size(),
+        Some(6)
+    );
     assert_eq!(DataType::Char(10).fixed_size(), Some(10));
     assert_eq!(DataType::Time.fixed_size(), Some(8));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
@@ -207,6 +238,44 @@ fn compare_bigint_promotion() {
     let c = DataValue::Int(300);
     assert_eq!(b.compare(&c).unwrap(), std::cmp::Ordering::Less);
     assert!(a.is_equal(&DataValue::BigInt(100)).unwrap());
+}
+
+#[test]
+fn roundtrip_numeric() {
+    let ty = DataType::Numeric {
+        precision: 10,
+        scale: 2,
+    };
+    let encoded = DataValue::parse_and_encode(&ty, "-12345.67").unwrap();
+    assert_eq!(encoded.len(), 6);
+    assert_eq!(
+        DataValue::from_bytes(&ty, &encoded).unwrap(),
+        DataValue::Numeric(NumericValue {
+            unscaled: -1234567,
+            scale: 2,
+        })
+    );
+}
+
+#[test]
+fn validate_numeric_values() {
+    assert!(validate_numeric("123.45", 10, 2).is_ok());
+    assert!(validate_numeric("0.1", 5, 2).is_ok());
+    assert!(validate_numeric("12345.678", 8, 2).is_err());
+    assert!(validate_numeric("abcdef", 8, 2).is_err());
+}
+
+#[test]
+fn compare_numeric_exact_values() {
+    let a = DataValue::Numeric(NumericValue {
+        unscaled: 12345,
+        scale: 2,
+    });
+    let b = DataValue::Numeric(NumericValue {
+        unscaled: 12346,
+        scale: 2,
+    });
+    assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
 }
 
 #[test]

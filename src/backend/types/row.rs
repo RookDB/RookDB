@@ -77,13 +77,14 @@ fn data_value_matches_type(ty: &DataType, value: &DataValue) -> bool {
             | (DataType::BigInt, DataValue::BigInt(_))
             | (DataType::Real, DataValue::Real(_))
             | (DataType::DoublePrecision, DataValue::DoublePrecision(_))
+            | (DataType::Numeric { .. }, DataValue::Numeric(_))
             | (DataType::Bool, DataValue::Bool(_))
             | (DataType::Char(_), DataValue::Char(_))
             | (DataType::Varchar(_), DataValue::Varchar(_))
             | (DataType::Date, DataValue::Date(_))
             | (DataType::Time, DataValue::Time(_))
             | (DataType::Bit(_), DataValue::Bit(_))
-                | (DataType::Timestamp, DataValue::Timestamp(_))
+            | (DataType::Timestamp, DataValue::Timestamp(_))
     )
 }
 
@@ -114,7 +115,8 @@ fn serialize_nullable_typed_row(
                         value_type_name(value)
                     ));
                 }
-                out.extend_from_slice(&value.to_bytes());
+                let encoded = value.to_bytes_for_type(ty)?;
+                out.extend_from_slice(&encoded);
             }
             None => bitmap.set_null(i),
         }

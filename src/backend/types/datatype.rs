@@ -9,6 +9,7 @@ pub enum DataType {
     BigInt,
     Real,
     DoublePrecision,
+    Numeric { precision: u8, scale: u8 },
     Bool,
     Char(u16),
     Varchar(u16),
@@ -25,12 +26,13 @@ impl DataType {
             DataType::SmallInt => 2,
             DataType::Int | DataType::Date | DataType::Real => 4,
             DataType::BigInt | DataType::DoublePrecision => 8,
+            DataType::Numeric { .. } => 1,
             DataType::Bool => 1,
             DataType::Char(_) => 1,
             DataType::Varchar(_) => 1,
             DataType::Time => 8,
             DataType::Bit(_) => 1,
-                    DataType::Timestamp => 8,
+            DataType::Timestamp => 8,
         }
     }
 
@@ -40,12 +42,13 @@ impl DataType {
             DataType::SmallInt => Some(2),
             DataType::Int | DataType::Real => Some(4),
             DataType::BigInt | DataType::DoublePrecision => Some(8),
+            DataType::Numeric { precision, .. } => Some(((*precision as u32) + 1).div_ceil(2)),
             DataType::Date => Some(4),
             DataType::Bool => Some(1),
             DataType::Char(n) => Some(*n as u32),
             DataType::Time => Some(8),
             DataType::Bit(n) => Some((*n as u32).div_ceil(8)),
-                        DataType::Timestamp => Some(8),
+            DataType::Timestamp => Some(8),
             DataType::Varchar(_) => None,
         }
     }
@@ -90,15 +93,41 @@ impl fmt::Display for DataType {
             DataType::BigInt => write!(f, "BIGINT"),
             DataType::Real => write!(f, "REAL"),
             DataType::DoublePrecision => write!(f, "DOUBLE PRECISION"),
+            DataType::Numeric { precision, scale } => {
+                write!(f, "NUMERIC({},{})", precision, scale)
+            }
             DataType::Bool => write!(f, "BOOLEAN"),
             DataType::Char(n) => write!(f, "CHAR({})", n),
             DataType::Varchar(n) => write!(f, "VARCHAR({})", n),
             DataType::Date => write!(f, "DATE"),
             DataType::Time => write!(f, "TIME"),
             DataType::Bit(n) => write!(f, "BIT({})", n),
-                    DataType::Timestamp => write!(f, "TIMESTAMP"),
+            DataType::Timestamp => write!(f, "TIMESTAMP"),
         }
     }
+}
+
+fn parse_precision_scale(raw: &str) -> Result<(u8, u8), String> {
+    let parts: Vec<&str> = raw.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "Invalid precision/scale '{}': expected format (p,s)",
+            raw
+        ));
+    }
+    let precision = parts[0]
+        .parse::<u8>()
+        .map_err(|_| format!("Invalid precision '{}'", parts[0]))?;
+    let scale = parts[1]
+        .parse::<u8>()
+        .map_err(|_| format!("Invalid scale '{}'", parts[1]))?;
+    if precision == 0 || precision > 38 {
+        return Err("NUMERIC precision must be in [1, 38]".to_string());
+    }
+    if scale > precision {
+        return Err("NUMERIC scale must be <= precision".to_string());
+    }
+    Ok((precision, scale))
 }
 
 impl FromStr for DataType {
@@ -117,7 +146,11 @@ impl FromStr for DataType {
             "TIME" => Ok(DataType::Time),
             "TIMESTAMP" => Ok(DataType::Timestamp),
             _ => {
-                if upper.starts_with("CHAR(") && upper.ends_with(')') && !upper.starts_with("CHARACTER(") {
+                if upper.starts_with("NUMERIC(") && upper.ends_with(')') {
+                    let inner = &upper[8..upper.len() - 1];
+                    let (precision, scale) = parse_precision_scale(inner)?;
+                    Ok(DataType::Numeric { precision, scale })
+                } else if upper.starts_with("CHAR(") && upper.ends_with(')') && !upper.starts_with("CHARACTER(") {
                     let inner = &upper[5..upper.len() - 1];
                     inner
                         .parse::<u16>()

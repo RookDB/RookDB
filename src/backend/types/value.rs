@@ -6,6 +6,12 @@ use crate::types::bit_utils::{normalize_bit_literal, pack_bit_string, unpack_bit
 use crate::types::datatype::DataType;
 use crate::types::validation::validate_value;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NumericValue {
+    pub unscaled: i128,
+    pub scale: u8,
+}
+
 /// IEEE 754 `f32` wrapper that satisfies `Eq` by comparing bit patterns.
 /// NaN values with identical bit patterns compare equal.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -74,6 +80,7 @@ pub enum DataValue {
     BigInt(i64),
     Real(OrderedF32),
     DoublePrecision(OrderedF64),
+    Numeric(NumericValue),
     Bool(bool),
     Char(String),
     Varchar(String),
@@ -91,15 +98,156 @@ impl fmt::Display for DataValue {
             DataValue::BigInt(v) => write!(f, "{}", v),
             DataValue::Real(v) => write!(f, "{}", v.0),
             DataValue::DoublePrecision(v) => write!(f, "{}", v.0),
+            DataValue::Numeric(v) => {
+                let sign = if v.unscaled < 0 { "-" } else { "" };
+                let mut digits = v.unscaled.abs().to_string();
+                let scale = v.scale as usize;
+                if scale == 0 {
+                    write!(f, "{}{}", sign, digits)
+                } else {
+                    if digits.len() <= scale {
+                        digits = format!("{}{}", "0".repeat(scale + 1 - digits.len()), digits);
+                    }
+                    let split = digits.len() - scale;
+                    write!(f, "{}{}.{}", sign, &digits[..split], &digits[split..])
+                }
+            }
             DataValue::Bool(v) => write!(f, "{}", v),
             DataValue::Char(v) => write!(f, "'{}'", v.trim_end_matches(' ')),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
             DataValue::Time(v) => write!(f, "{}", v.format("%H:%M:%S%.6f")),
             DataValue::Bit(v) => write!(f, "B'{}'", v),
-                    DataValue::Timestamp(v) => write!(f, "{}", v.format("%Y-%m-%d %H:%M:%S%.6f")),
+            DataValue::Timestamp(v) => write!(f, "{}", v.format("%Y-%m-%d %H:%M:%S%.6f")),
         }
     }
+}
+
+fn parse_numeric_literal(input: &str, precision: u8, scale: u8) -> Result<NumericValue, String> {
+    let raw = input.trim().trim_matches('"').trim_matches('\'');
+    if raw.is_empty() {
+        return Err("NUMERIC value cannot be empty".to_string());
+    }
+
+    let (sign, body) = if let Some(rest) = raw.strip_prefix('-') {
+        (-1_i128, rest)
+    } else if let Some(rest) = raw.strip_prefix('+') {
+        (1_i128, rest)
+    } else {
+        (1_i128, raw)
+    };
+
+    let mut parts = body.split('.');
+    let int_part = parts.next().unwrap_or("");
+    let frac_part = parts.next();
+    if parts.next().is_some() {
+        return Err(format!("Invalid NUMERIC value '{}': too many decimal points", raw));
+    }
+    if !int_part.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("Invalid NUMERIC value '{}': invalid integer digits", raw));
+    }
+    let frac = frac_part.unwrap_or("");
+    if !frac.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("Invalid NUMERIC value '{}': invalid fractional digits", raw));
+    }
+    if frac.len() > scale as usize {
+        return Err(format!(
+            "NUMERIC({}, {}) value '{}' has too many fractional digits",
+            precision, scale, raw
+        ));
+    }
+
+    let mut combined = String::new();
+    if int_part.is_empty() {
+        combined.push('0');
+    } else {
+        combined.push_str(int_part);
+    }
+    combined.push_str(frac);
+    combined.push_str(&"0".repeat(scale as usize - frac.len()));
+
+    let normalized = combined.trim_start_matches('0');
+    let effective_digits = if normalized.is_empty() { 1 } else { normalized.len() };
+    if effective_digits > precision as usize {
+        return Err(format!(
+            "NUMERIC({}, {}) value '{}' exceeds precision {}",
+            precision, scale, raw, precision
+        ));
+    }
+
+    let unscaled_abs = combined
+        .parse::<i128>()
+        .map_err(|_| format!("NUMERIC value '{}' is out of supported range", raw))?;
+    Ok(NumericValue {
+        unscaled: sign * unscaled_abs,
+        scale,
+    })
+}
+
+fn encode_numeric_bcd(value: &NumericValue, precision: u8) -> Result<Vec<u8>, String> {
+    let mut digits = value.unscaled.abs().to_string();
+    if digits.len() > precision as usize {
+        return Err(format!(
+            "NUMERIC value '{}' exceeds precision {}",
+            value.unscaled, precision
+        ));
+    }
+    if digits.len() < precision as usize {
+        digits = format!("{}{}", "0".repeat(precision as usize - digits.len()), digits);
+    }
+
+    let mut nibbles: Vec<u8> = Vec::with_capacity(precision as usize + 2);
+    if precision % 2 == 0 {
+        nibbles.push(0);
+    }
+    for ch in digits.chars() {
+        nibbles.push((ch as u8) - b'0');
+    }
+    nibbles.push(if value.unscaled < 0 { 0x0D } else { 0x0C });
+
+    let mut out = Vec::with_capacity(nibbles.len().div_ceil(2));
+    for pair in nibbles.chunks(2) {
+        let hi = pair[0] & 0x0F;
+        let lo = pair.get(1).copied().unwrap_or(0) & 0x0F;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn decode_numeric_bcd(bytes: &[u8], precision: u8, scale: u8) -> Result<NumericValue, String> {
+    let expected = ((precision as usize) + 1).div_ceil(2);
+    if bytes.len() < expected {
+        return Err(format!("NUMERIC({}, {}) requires {} bytes", precision, scale, expected));
+    }
+
+    let mut nibbles = Vec::with_capacity(expected * 2);
+    for b in &bytes[..expected] {
+        nibbles.push((b >> 4) & 0x0F);
+        nibbles.push(b & 0x0F);
+    }
+
+    let start = if precision % 2 == 0 { 1 } else { 0 };
+    let digits_slice = &nibbles[start..start + precision as usize];
+    let sign_nibble = nibbles[start + precision as usize];
+    if !digits_slice.iter().all(|d| *d <= 9) {
+        return Err("NUMERIC payload contains invalid BCD digit".to_string());
+    }
+    let mut digits = String::with_capacity(precision as usize);
+    for d in digits_slice {
+        digits.push((b'0' + *d) as char);
+    }
+    let abs_val = digits
+        .parse::<i128>()
+        .map_err(|_| "NUMERIC decoded value is out of range".to_string())?;
+    let sign = match sign_nibble {
+        0x0C => 1_i128,
+        0x0D => -1_i128,
+        _ => return Err("NUMERIC payload has invalid sign nibble".to_string()),
+    };
+    Ok(NumericValue {
+        unscaled: sign * abs_val,
+        scale,
+    })
 }
 
 impl DataValue {
@@ -110,6 +258,13 @@ impl DataValue {
             DataValue::BigInt(v) => v.to_le_bytes().to_vec(),
             DataValue::Real(v) => v.0.to_le_bytes().to_vec(),
             DataValue::DoublePrecision(v) => v.0.to_le_bytes().to_vec(),
+            DataValue::Numeric(v) => {
+                // This variant needs precision from DataType; callers should prefer to_bytes_for_type.
+                let mut out = Vec::with_capacity(18);
+                out.extend_from_slice(&v.unscaled.to_le_bytes());
+                out.push(v.scale);
+                out
+            }
             DataValue::Bool(v) => vec![u8::from(*v)],
             DataValue::Char(v) => v.as_bytes().to_vec(),
             DataValue::Varchar(v) => {
@@ -187,6 +342,10 @@ impl DataValue {
                     bytes[0], bytes[1], bytes[2], bytes[3],
                     bytes[4], bytes[5], bytes[6], bytes[7],
                 ]))))
+            }
+            DataType::Numeric { precision, scale } => {
+                let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
+                Ok(DataValue::Numeric(decoded))
             }
             DataType::Bool => {
                 if bytes.is_empty() {
@@ -299,6 +458,10 @@ impl DataValue {
                 .map(|v| DataValue::DoublePrecision(OrderedF64(v)))
                 .map(|v| v.to_bytes())
                 .map_err(|e| e.to_string()),
+            DataType::Numeric { precision, scale } => {
+                let parsed = parse_numeric_literal(input, *precision, *scale)?;
+                encode_numeric_bcd(&parsed, *precision)
+            }
             DataType::Bool => match input.to_ascii_lowercase().as_str() {
                 "true" | "t" | "1" => Ok(DataValue::Bool(true).to_bytes()),
                 "false" | "f" | "0" => Ok(DataValue::Bool(false).to_bytes()),
@@ -344,6 +507,29 @@ impl DataValue {
                 let bits = normalize_bit_literal(input);
                 Ok(DataValue::Bit(bits).to_bytes())
             }
+        }
+    }
+
+    pub fn to_bytes_for_type(&self, ty: &DataType) -> Result<Vec<u8>, String> {
+        match (ty, self) {
+            (DataType::Numeric { precision, scale }, DataValue::Numeric(v)) => {
+                if v.scale != *scale {
+                    return Err(format!(
+                        "NUMERIC scale mismatch: value has scale {}, type requires {}",
+                        v.scale, scale
+                    ));
+                }
+                encode_numeric_bcd(v, *precision)
+            }
+            (DataType::Char(n), DataValue::Char(v)) => {
+                let mut bytes = v.as_bytes().to_vec();
+                if bytes.len() > *n as usize {
+                    return Err(format!("CHAR({}) value exceeds maximum length {}", n, n));
+                }
+                bytes.resize(*n as usize, b' ');
+                Ok(bytes)
+            }
+            _ => Ok(self.to_bytes()),
         }
     }
 }

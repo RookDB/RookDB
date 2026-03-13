@@ -35,6 +35,7 @@ pub(crate) fn value_type_name(value: &DataValue) -> &'static str {
         DataValue::BigInt(_) => "BIGINT",
         DataValue::Real(_) => "REAL",
         DataValue::DoublePrecision(_) => "DOUBLE PRECISION",
+        DataValue::Numeric(_) => "NUMERIC",
         DataValue::Bool(_) => "BOOLEAN",
         DataValue::Char(_) => "CHAR",
         DataValue::Varchar(_) => "VARCHAR",
@@ -59,6 +60,18 @@ impl Comparable for DataValue {
             (DataValue::BigInt(a), DataValue::Int(b)) => Ok(a.cmp(&(*b as i64))),
             (DataValue::Real(a), DataValue::Real(b)) => Ok(a.cmp(b)),
             (DataValue::DoublePrecision(a), DataValue::DoublePrecision(b)) => Ok(a.cmp(b)),
+            (DataValue::Numeric(a), DataValue::Numeric(b)) => {
+                let ordering = if a.scale == b.scale {
+                    a.unscaled.cmp(&b.unscaled)
+                } else if a.scale > b.scale {
+                    let factor = 10_i128.pow((a.scale - b.scale) as u32);
+                    a.unscaled.cmp(&(b.unscaled * factor))
+                } else {
+                    let factor = 10_i128.pow((b.scale - a.scale) as u32);
+                    (a.unscaled * factor).cmp(&b.unscaled)
+                };
+                Ok(ordering)
+            }
             (DataValue::Bool(a), DataValue::Bool(b)) => Ok(a.cmp(b)),
             (DataValue::Char(a), DataValue::Char(b)) => Ok(a.cmp(b)),
             (DataValue::Varchar(a), DataValue::Varchar(b)) => Ok(a.cmp(b)),

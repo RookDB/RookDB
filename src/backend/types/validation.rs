@@ -94,6 +94,57 @@ pub fn validate_double(input: &str) -> Result<(), TypeValidationError> {
         })
 }
 
+pub fn validate_numeric(input: &str, precision: u8, scale: u8) -> Result<(), TypeValidationError> {
+    let raw = input.trim().trim_matches('"').trim_matches('\'');
+    if raw.is_empty() {
+        return Err(TypeValidationError::InvalidFormat {
+            ty: format!("NUMERIC({},{})", precision, scale),
+            value: raw.to_string(),
+            details: "value cannot be empty".to_string(),
+        });
+    }
+    let body = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+    let mut parts = body.split('.');
+    let int_part = parts.next().unwrap_or("");
+    let frac_part = parts.next().unwrap_or("");
+    if parts.next().is_some()
+        || !int_part.chars().all(|c| c.is_ascii_digit())
+        || !frac_part.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(TypeValidationError::InvalidFormat {
+            ty: format!("NUMERIC({},{})", precision, scale),
+            value: raw.to_string(),
+            details: "expected numeric literal [+-]?digits[.digits]".to_string(),
+        });
+    }
+    if frac_part.len() > scale as usize {
+        return Err(TypeValidationError::OutOfRange {
+            ty: format!("NUMERIC({},{})", precision, scale),
+            value: raw.to_string(),
+            details: format!("fractional digits must be <= {}", scale),
+        });
+    }
+
+    let mut combined = String::new();
+    if int_part.is_empty() {
+        combined.push('0');
+    } else {
+        combined.push_str(int_part);
+    }
+    combined.push_str(frac_part);
+    combined.push_str(&"0".repeat(scale as usize - frac_part.len()));
+    let significant = combined.trim_start_matches('0');
+    let digits = if significant.is_empty() { 1 } else { significant.len() };
+    if digits > precision as usize {
+        return Err(TypeValidationError::OutOfRange {
+            ty: format!("NUMERIC({},{})", precision, scale),
+            value: raw.to_string(),
+            details: format!("precision exceeded; max {} significant digits", precision),
+        });
+    }
+    Ok(())
+}
+
 pub fn validate_bool(input: &str) -> Result<(), TypeValidationError> {
     match input.trim().to_ascii_lowercase().as_str() {
         "true" | "false" | "t" | "f" | "1" | "0" => Ok(()),
@@ -190,6 +241,7 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
         DataType::BigInt => validate_bigint(input),
         DataType::Real => validate_real(input),
         DataType::DoublePrecision => validate_double(input),
+        DataType::Numeric { precision, scale } => validate_numeric(input, *precision, *scale),
         DataType::Bool => validate_bool(input),
         DataType::Char(fixed_len) => validate_char(input, *fixed_len),
         DataType::Varchar(max_len) => validate_varchar(input, *max_len),
