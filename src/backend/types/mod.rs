@@ -1,5 +1,3 @@
-//! Phase 1 foundation for Shubhadeep's fixed-length type work.
-//!
 //! This module introduces the schema-level `DataType` enum and the
 //! runtime `DataValue` enum for the types assigned in the proposal:
 //! `SMALLINT`, `INTEGER`, `VARCHAR(n)`, and `DATE`.
@@ -235,6 +233,137 @@ impl DataValue {
     }
 }
 
+/// Row-level NULL bitmap as described in the proposal.
+///
+/// One bit per column: bit=1 means the column value is NULL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NullBitmap {
+    column_count: usize,
+    data: Vec<u8>,
+}
+
+impl NullBitmap {
+    pub fn new(column_count: usize) -> Self {
+        let byte_len = column_count.div_ceil(8);
+        Self {
+            column_count,
+            data: vec![0u8; byte_len],
+        }
+    }
+
+    pub fn from_bytes(column_count: usize, raw: &[u8]) -> Result<Self, String> {
+        let expected = column_count.div_ceil(8);
+        if raw.len() != expected {
+            return Err(format!(
+                "Invalid NULL bitmap length: expected {}, found {}",
+                expected,
+                raw.len()
+            ));
+        }
+        Ok(Self {
+            column_count,
+            data: raw.to_vec(),
+        })
+    }
+
+    pub fn set_null(&mut self, column_index: usize) {
+        assert!(column_index < self.column_count, "column index out of range");
+        let byte_idx = column_index / 8;
+        let bit_idx = column_index % 8;
+        self.data[byte_idx] |= 1 << bit_idx;
+    }
+
+    pub fn clear_null(&mut self, column_index: usize) {
+        assert!(column_index < self.column_count, "column index out of range");
+        let byte_idx = column_index / 8;
+        let bit_idx = column_index % 8;
+        self.data[byte_idx] &= !(1 << bit_idx);
+    }
+
+    pub fn is_null(&self, column_index: usize) -> bool {
+        assert!(column_index < self.column_count, "column index out of range");
+        let byte_idx = column_index / 8;
+        let bit_idx = column_index % 8;
+        (self.data[byte_idx] & (1 << bit_idx)) != 0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+/// Serialize one row of optional values using:
+/// [NULL_BITMAP][COLUMN_DATA...]
+///
+/// NULL values are represented only in the bitmap and are omitted
+/// from column data bytes.
+pub fn serialize_nullable_row(
+    schema: &[DataType],
+    values: &[Option<&str>],
+) -> Result<Vec<u8>, String> {
+    if schema.len() != values.len() {
+        return Err(format!(
+            "Schema/value length mismatch: schema={}, values={}",
+            schema.len(),
+            values.len()
+        ));
+    }
+
+    let mut bitmap = NullBitmap::new(schema.len());
+    let bitmap_len = schema.len().div_ceil(8);
+    let mut row = vec![0u8; bitmap_len];
+
+    for (i, (ty, maybe_value)) in schema.iter().zip(values.iter()).enumerate() {
+        match maybe_value {
+            Some(raw) => {
+                let encoded = DataValue::parse_and_encode(ty, raw)?;
+                row.extend_from_slice(&encoded);
+            }
+            None => bitmap.set_null(i),
+        }
+    }
+
+    row[..bitmap_len].copy_from_slice(bitmap.as_bytes());
+    Ok(row)
+}
+
+/// Deserialize one row encoded by `serialize_nullable_row`.
+pub fn deserialize_nullable_row(
+    schema: &[DataType],
+    row_bytes: &[u8],
+) -> Result<Vec<Option<DataValue>>, String> {
+    let bitmap_len = schema.len().div_ceil(8);
+    if row_bytes.len() < bitmap_len {
+        return Err("Row shorter than NULL bitmap".to_string());
+    }
+
+    let bitmap = NullBitmap::from_bytes(schema.len(), &row_bytes[..bitmap_len])?;
+    let mut cursor = bitmap_len;
+    let mut out = Vec::with_capacity(schema.len());
+
+    for (i, ty) in schema.iter().enumerate() {
+        if bitmap.is_null(i) {
+            out.push(None);
+            continue;
+        }
+
+        let remaining = &row_bytes[cursor..];
+        let encoded_len = ty.encoded_len(remaining)?;
+        let value = DataValue::from_bytes(ty, &remaining[..encoded_len])?;
+        cursor += encoded_len;
+        out.push(Some(value));
+    }
+
+    if cursor != row_bytes.len() {
+        return Err(format!(
+            "Row has {} trailing byte(s) after decode",
+            row_bytes.len() - cursor
+        ));
+    }
+
+    Ok(out)
+}
+
 // ──────────────────────────────────────────────
 //  Unit tests
 // ──────────────────────────────────────────────
@@ -333,5 +462,50 @@ mod tests {
     fn varchar_length_violation_is_error() {
         let err = DataValue::parse_and_encode(&DataType::Varchar(3), "Alice").unwrap_err();
         assert!(err.contains("VARCHAR(3)"));
+    }
+
+    #[test]
+    fn null_bitmap_set_clear_and_probe() {
+        let mut bitmap = NullBitmap::new(10);
+        bitmap.set_null(0);
+        bitmap.set_null(3);
+        bitmap.set_null(9);
+
+        assert!(bitmap.is_null(0));
+        assert!(!bitmap.is_null(1));
+        assert!(bitmap.is_null(3));
+        assert!(bitmap.is_null(9));
+
+        bitmap.clear_null(3);
+        assert!(!bitmap.is_null(3));
+    }
+
+    #[test]
+    fn nullable_row_roundtrip() {
+        let schema = vec![
+            DataType::Int,
+            DataType::Varchar(16),
+            DataType::Date,
+            DataType::SmallInt,
+        ];
+
+        let encoded = serialize_nullable_row(
+            &schema,
+            &[Some("42"), None, Some("2026-03-13"), Some("-7")],
+        )
+        .unwrap();
+
+        // Column 1 is NULL.
+        assert_eq!(encoded[0] & (1 << 1), 1 << 1);
+
+        let decoded = deserialize_nullable_row(&schema, &encoded).unwrap();
+        assert_eq!(decoded.len(), 4);
+        assert_eq!(decoded[0], Some(DataValue::Int(42)));
+        assert_eq!(decoded[1], None);
+        assert_eq!(
+            decoded[2],
+            Some(DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap()))
+        );
+        assert_eq!(decoded[3], Some(DataValue::SmallInt(-7)));
     }
 }
