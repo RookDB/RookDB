@@ -7,3 +7,4 @@ pub mod layout;
 pub mod page;
 pub mod statistics;
 pub mod table;
+pub mod types;
