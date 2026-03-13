@@ -2,14 +2,19 @@
 //! Creates a fresh test database, inserts known data, and verifies join results.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::sync::{Mutex, OnceLock};
 
-use storage_manager::catalog::types::{Catalog, Column, Database, Table};
-use storage_manager::catalog::{create_database, create_table, save_catalog, load_catalog, init_catalog};
-use storage_manager::heap::{init_table, insert_tuple};
+use storage_manager::catalog::types::Column;
+use storage_manager::catalog::{create_database, create_table, init_catalog, load_catalog, save_catalog};
+use storage_manager::heap::insert_tuple;
 use storage_manager::join::{JoinType, NLJMode};
 use storage_manager::join::condition::{JoinCondition, JoinOp};
 use storage_manager::join::nlj::NLJExecutor;
+
+fn test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn setup_test_db() -> String {
     let db_name = "test_nlj_db";
@@ -81,6 +86,7 @@ fn make_dept_tuple(id: i32, dname: &str) -> Vec<u8> {
 
 #[test]
 fn test_nlj_inner_join() {
+    let _guard = test_lock().lock().unwrap();
     let db = setup_test_db();
     let catalog = load_catalog();
 
@@ -107,6 +113,7 @@ fn test_nlj_inner_join() {
 
 #[test]
 fn test_nlj_left_outer_join() {
+    let _guard = test_lock().lock().unwrap();
     let db = setup_test_db();
     let catalog = load_catalog();
 
@@ -132,6 +139,7 @@ fn test_nlj_left_outer_join() {
 
 #[test]
 fn test_nlj_cross_join() {
+    let _guard = test_lock().lock().unwrap();
     let db = setup_test_db();
     let catalog = load_catalog();
 
@@ -151,6 +159,7 @@ fn test_nlj_cross_join() {
 
 #[test]
 fn test_nlj_no_matches() {
+    let _guard = test_lock().lock().unwrap();
     let db = setup_test_db();
     let catalog = load_catalog();
 
@@ -176,6 +185,7 @@ fn test_nlj_no_matches() {
 
 #[test]
 fn test_nlj_block_mode_matches_simple() {
+    let _guard = test_lock().lock().unwrap();
     let db = setup_test_db();
     let catalog = load_catalog();
 

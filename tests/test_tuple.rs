@@ -59,7 +59,7 @@ fn test_deserialize_tuple_text() {
     let schema = vec![
         Column { name: "name".to_string(), data_type: "TEXT".to_string() },
     ];
-    let mut bytes = b"hello     ".to_vec(); // 10 bytes
+    let bytes = b"hello     ".to_vec(); // 10 bytes
     let tuple = deserialize_tuple(&bytes, &schema);
 
     assert_eq!(tuple.values.len(), 1);
