@@ -215,8 +215,8 @@ Creates a new ordered table file: writes header page + one empty data page.
 
 ```rust
 pub fn in_memory_sort(
-    file: &mut File, catalog: &mut Catalog,
-    db_name: &str, table_name: &str, sort_keys: Vec<SortKey>,
+    catalog: &mut Catalog, db_name: &str, table_name: &str,
+    sort_keys: Vec<SortKey>, file: &mut File,
 ) -> io::Result<()>
 ```
 Sorts a table that fits in memory. Loads all pages, extracts and sorts tuples, rewrites pages with sorted ItemId arrays, updates header and catalog.
@@ -267,7 +267,7 @@ Binary search within a page's ItemId array to find the correct slot position.
 ```rust
 pub fn split_page(
     file: &mut File, page_num: u32, page: &Page,
-    tuple_data: &[u8], comparator: &TupleComparator,
+    tuple_data: &[u8], comparator: &TupleComparator, total_pages: u32,
 ) -> io::Result<()>
 ```
 Splits a full page 50/50, inserts the new tuple, shifts subsequent pages forward.
@@ -329,6 +329,7 @@ Four new menu options are added (options 10-13):
 
 ```
 ========== RookDB Storage Manager ==========
+Choose an option:
 1. Show Databases
 2. Create Database
 3. Select Database
@@ -365,10 +366,7 @@ Creates a new table that maintains sort order from creation.
 ```
 > 11
 Enter table name: employees_sorted
-Enter columns (one per line, format - column_name:data_type, empty line to finish):
-id:INT
-name:TEXT
-
+Enter columns (format: col1:type,col2:type): id:INT,name:TEXT
 Enter sort columns (format: col1:ASC,col2:DESC): id:ASC
 ```
 
