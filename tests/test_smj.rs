@@ -2,6 +2,7 @@
 // Cross-checks results against NLJ for correctness parity.
 
 use std::fs::{self, OpenOptions};
+use std::sync::{Mutex, OnceLock};
 
 use storage_manager::catalog::types::Column;
 use storage_manager::catalog::{create_database, create_table, save_catalog, load_catalog, init_catalog};
@@ -10,6 +11,11 @@ use storage_manager::join::{JoinType, NLJMode};
 use storage_manager::join::condition::{JoinCondition, JoinOp};
 use storage_manager::join::nlj::NLJExecutor;
 use storage_manager::join::smj::SMJExecutor;
+
+fn test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn setup_test_db() -> String {
     let db_name = "test_smj_db";
@@ -63,6 +69,7 @@ fn setup_test_db() -> String {
 
 #[test]
 fn test_smj_inner_join_correctness() {
+    let _guard = test_lock().lock().unwrap();
     let db = setup_test_db();
     let catalog = load_catalog();
 
@@ -102,6 +109,7 @@ fn test_smj_inner_join_correctness() {
 
 #[test]
 fn test_smj_produces_results() {
+    let _guard = test_lock().lock().unwrap();
     let db = setup_test_db();
     let catalog = load_catalog();
 
