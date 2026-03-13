@@ -245,6 +245,7 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
         DataType::Decimal { precision, scale } => validate_numeric(input, *precision, *scale),
         DataType::Bool => validate_bool(input),
         DataType::Char(fixed_len) => validate_char(input, *fixed_len),
+        DataType::Character(fixed_len) => validate_char(input, *fixed_len),
         DataType::Varchar(max_len) => validate_varchar(input, *max_len),
         DataType::Date => validate_date(input),
         DataType::Time => validate_time(input),

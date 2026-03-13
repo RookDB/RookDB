@@ -13,6 +13,7 @@ pub enum DataType {
     Decimal { precision: u8, scale: u8 },
     Bool,
     Char(u16),
+    Character(u16),
     Varchar(u16),
     Date,
     Time,
@@ -31,6 +32,7 @@ impl DataType {
             DataType::Decimal { .. } => 1,
             DataType::Bool => 1,
             DataType::Char(_) => 1,
+            DataType::Character(_) => 1,
             DataType::Varchar(_) => 1,
             DataType::Time => 8,
             DataType::Bit(_) => 1,
@@ -49,6 +51,7 @@ impl DataType {
             DataType::Date => Some(4),
             DataType::Bool => Some(1),
             DataType::Char(n) => Some(*n as u32),
+            DataType::Character(n) => Some(*n as u32),
             DataType::Time => Some(8),
             DataType::Bit(n) => Some((*n as u32).div_ceil(8)),
             DataType::Timestamp => Some(8),
@@ -104,6 +107,7 @@ impl fmt::Display for DataType {
             }
             DataType::Bool => write!(f, "BOOLEAN"),
             DataType::Char(n) => write!(f, "CHAR({})", n),
+            DataType::Character(n) => write!(f, "CHARACTER({})", n),
             DataType::Varchar(n) => write!(f, "VARCHAR({})", n),
             DataType::Date => write!(f, "DATE"),
             DataType::Time => write!(f, "TIME"),
@@ -170,7 +174,7 @@ impl FromStr for DataType {
                     let inner = &upper[10..upper.len() - 1];
                     inner
                         .parse::<u16>()
-                        .map(DataType::Char)
+                        .map(DataType::Character)
                         .map_err(|_| format!("Invalid CHARACTER size: '{}'", inner))
                 } else if upper.starts_with("VARCHAR(") && upper.ends_with(')') {
                     let inner = &upper[8..upper.len() - 1];

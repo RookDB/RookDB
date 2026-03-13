@@ -11,7 +11,11 @@ pub mod value;
 
 pub use comparison::{Comparable, ComparisonError, compare_nullable, nullable_equals};
 pub use datatype::DataType;
-pub use functions::{DatePart, FunctionError, extract, length, lower, substring, trim, upper};
+pub use functions::{
+    DatePart, FunctionError, abs, cast, ceiling, coalesce, current_date, current_time,
+    current_timestamp, extract, floor, length, lower, ltrim, nullif, round, rtrim, substring,
+    trim, upper,
+};
 pub use null_bitmap::NullBitmap;
 pub use row::{Row, deserialize_nullable_row, serialize_nullable_row};
 pub use validation::{

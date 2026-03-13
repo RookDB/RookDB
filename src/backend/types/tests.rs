@@ -25,7 +25,10 @@ fn parse_phase_one_types() {
         }
     );
     assert_eq!("CHAR(10)".parse::<DataType>().unwrap(), DataType::Char(10));
-    assert_eq!("CHARACTER(10)".parse::<DataType>().unwrap(), DataType::Char(10));
+    assert_eq!(
+        "CHARACTER(10)".parse::<DataType>().unwrap(),
+        DataType::Character(10)
+    );
     assert_eq!(
         "VARCHAR(64)".parse::<DataType>().unwrap(),
         DataType::Varchar(64)
@@ -60,6 +63,7 @@ fn serde_roundtrip() {
         },
         DataType::Bool,
         DataType::Char(10),
+        DataType::Character(10),
         DataType::Varchar(32),
         DataType::Date,
         DataType::Time,
@@ -91,6 +95,7 @@ fn display_matches_parse() {
         },
         DataType::Bool,
         DataType::Char(5),
+        DataType::Character(5),
         DataType::Varchar(8),
         DataType::Date,
         DataType::Time,
@@ -128,6 +133,7 @@ fn phase_two_layout_rules() {
         1
     );
     assert_eq!(DataType::Char(10).alignment(), 1);
+    assert_eq!(DataType::Character(10).alignment(), 1);
     assert_eq!(DataType::Time.alignment(), 8);
     assert_eq!(DataType::Date.alignment(), 4);
         assert_eq!(DataType::Timestamp.alignment(), 8);
@@ -157,6 +163,7 @@ fn phase_two_layout_rules() {
         Some(6)
     );
     assert_eq!(DataType::Char(10).fixed_size(), Some(10));
+    assert_eq!(DataType::Character(10).fixed_size(), Some(10));
     assert_eq!(DataType::Time.fixed_size(), Some(8));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
         assert_eq!(DataType::Timestamp.fixed_size(), Some(8));
@@ -388,6 +395,16 @@ fn roundtrip_char() {
     // from_bytes stores the raw (padded) bytes; Display trims trailing spaces
     let v = DataValue::from_bytes(&DataType::Char(8), &encoded).unwrap();
     assert_eq!(format!("{}", v), "'hello'");
+}
+
+#[test]
+fn roundtrip_character_alias() {
+    let encoded = DataValue::parse_and_encode(&DataType::Character(8), "hello").unwrap();
+    assert_eq!(encoded.len(), 8);
+    assert_eq!(
+        DataValue::from_bytes(&DataType::Character(8), &encoded).unwrap(),
+        DataValue::Char("hello   ".to_string())
+    );
 }
 
 #[test]
@@ -715,4 +732,70 @@ fn fn_type_mismatch_errors() {
     let i = DataValue::Int(7);
     assert!(length(&i).is_err());
     assert!(extract(DatePart::Year, &i).is_err());
+}
+
+#[test]
+fn fn_ltrim_rtrim() {
+    let v = DataValue::Varchar("  rookdb  ".to_string());
+    assert_eq!(ltrim(&v).unwrap(), DataValue::Varchar("rookdb  ".to_string()));
+    assert_eq!(rtrim(&v).unwrap(), DataValue::Varchar("  rookdb".to_string()));
+}
+
+#[test]
+fn fn_abs_round_floor_ceiling() {
+    assert_eq!(abs(&DataValue::Int(-7)).unwrap(), DataValue::Int(7));
+    let r = round(&DataValue::DoublePrecision(OrderedF64(3.14159)), 2).unwrap();
+    assert_eq!(r, DataValue::DoublePrecision(OrderedF64(3.14)));
+
+    let n = DataValue::Numeric(NumericValue {
+        unscaled: -12345,
+        scale: 2,
+    });
+    assert_eq!(floor(&n).unwrap(), DataValue::Numeric(NumericValue { unscaled: -124, scale: 0 }));
+    assert_eq!(ceiling(&n).unwrap(), DataValue::Numeric(NumericValue { unscaled: -123, scale: 0 }));
+}
+
+#[test]
+fn fn_cast_between_types() {
+    let i = DataValue::Int(42);
+    let b = cast(&i, &DataType::BigInt).unwrap();
+    assert_eq!(b, DataValue::BigInt(42));
+
+    let s = DataValue::Varchar("2026-03-13".to_string());
+    let d = cast(&s, &DataType::Date).unwrap();
+    assert_eq!(
+        d,
+        DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap())
+    );
+}
+
+#[test]
+fn fn_coalesce_and_nullif() {
+    let out = coalesce(&[None, Some(DataValue::Int(7)), Some(DataValue::Int(9))]);
+    assert_eq!(out, Some(DataValue::Int(7)));
+
+    assert_eq!(
+        nullif(DataValue::Int(5), DataValue::Int(5)).unwrap(),
+        None
+    );
+    assert_eq!(
+        nullif(DataValue::Int(5), DataValue::Int(6)).unwrap(),
+        Some(DataValue::Int(5))
+    );
+}
+
+#[test]
+fn fn_current_temporal_values() {
+    match current_date() {
+        DataValue::Date(_) => {}
+        _ => panic!("expected Date"),
+    }
+    match current_time() {
+        DataValue::Time(_) => {}
+        _ => panic!("expected Time"),
+    }
+    match current_timestamp() {
+        DataValue::Timestamp(_) => {}
+        _ => panic!("expected Timestamp"),
+    }
 }

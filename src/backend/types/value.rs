@@ -366,6 +366,15 @@ impl DataValue {
                     .map_err(|_| "CHAR payload is not valid UTF-8".to_string())?;
                 Ok(DataValue::Char(value))
             }
+            DataType::Character(n) => {
+                let len = *n as usize;
+                if bytes.len() < len {
+                    return Err(format!("CHARACTER({}) requires {} bytes", n, len));
+                }
+                let value = String::from_utf8(bytes[..len].to_vec())
+                    .map_err(|_| "CHARACTER payload is not valid UTF-8".to_string())?;
+                Ok(DataValue::Char(value))
+            }
             DataType::Varchar(max_len) => {
                 let encoded_len = ty.encoded_len(bytes)?;
                 let payload_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
@@ -487,6 +496,18 @@ impl DataValue {
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
             }
+            DataType::Character(n) => {
+                let value = input.trim_matches('"').trim_matches('\'');
+                let mut bytes = value.as_bytes().to_vec();
+                if bytes.len() > *n as usize {
+                    return Err(format!(
+                        "CHARACTER({}) value exceeds maximum length {}",
+                        n, n
+                    ));
+                }
+                bytes.resize(*n as usize, b' ');
+                Ok(bytes)
+            }
             DataType::Varchar(_) => {
                 let value = input.trim_matches('"').trim_matches('\'');
                 Ok(DataValue::Varchar(value.to_string()).to_bytes())
@@ -542,6 +563,14 @@ impl DataValue {
                 let mut bytes = v.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
                     return Err(format!("CHAR({}) value exceeds maximum length {}", n, n));
+                }
+                bytes.resize(*n as usize, b' ');
+                Ok(bytes)
+            }
+            (DataType::Character(n), DataValue::Char(v)) => {
+                let mut bytes = v.as_bytes().to_vec();
+                if bytes.len() > *n as usize {
+                    return Err(format!("CHARACTER({}) value exceeds maximum length {}", n, n));
                 }
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
