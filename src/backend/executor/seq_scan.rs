@@ -3,8 +3,16 @@ use std::io::{self};
 
 use crate::catalog::types::Catalog;
 use crate::disk::read_page;
-use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
+use crate::page::{Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE};
 use crate::table::page_count;
+
+/// Reads a variable-length value from a tuple byte slice at a given cursor position.
+/// Returns (raw value bytes, new cursor position).
+fn deserialize_variable_length(tuple_data: &[u8], cursor: usize) -> (Vec<u8>, usize) {
+    let len = u32::from_le_bytes(tuple_data[cursor..cursor + 4].try_into().unwrap()) as usize;
+    let data = tuple_data[cursor + 4..cursor + 4 + len].to_vec();
+    (data, cursor + 4 + len)
+}
 
 pub fn show_tuples(
     catalog: &Catalog,
@@ -78,6 +86,13 @@ pub fn show_tuples(
                             print!("{}='{}' ", col.name, text);
                             cursor += 10;
                         }
+                    }
+                    "JSON" => {
+                        let (json_bytes, new_cursor) =
+                            deserialize_variable_length(tuple_data, cursor);
+                        let json = String::from_utf8_lossy(&json_bytes).to_string();
+                        print!("{}={} ", col.name, json);
+                        cursor = new_cursor;
                     }
                     _ => {
                         print!("{}=<unsupported> ", col.name);

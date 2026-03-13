@@ -1,3 +1,4 @@
+pub mod json_utils;
 pub mod load_csv;
 pub mod seq_scan;
 

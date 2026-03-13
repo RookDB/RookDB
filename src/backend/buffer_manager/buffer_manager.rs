@@ -1,9 +1,17 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
-use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
+use crate::executor::json_utils::validate_json;
+use crate::page::{init_page, page_free_space, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
+
+/// Writes a variable-length value as [4-byte length prefix][data bytes] into a tuple byte vector.
+fn serialize_variable_length(tuple_bytes: &mut Vec<u8>, data: &[u8]) {
+    let len = data.len() as u32;
+    tuple_bytes.extend_from_slice(&len.to_le_bytes());
+    tuple_bytes.extend_from_slice(data);
+}
 
 pub struct BufferManager {
     pub pages: Vec<Page>, // In-memory pages (header + data)
@@ -108,10 +116,10 @@ impl BufferManager {
         }
 
         // --- read CSV ---
-        let csv_file = File::open(csv_path)?;
-        let reader = BufReader::new(csv_file);
-        let mut lines = reader.lines();
-        if let Some(Ok(_)) = lines.next() {} // skip header
+        let mut csv_reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(csv_path)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         let mut inserted_rows = 0usize;
         let mut current_page_index = self.pages.len() - 1; // DATA pages start at index 1
@@ -121,26 +129,31 @@ impl BufferManager {
             self.allocate_page();
         }
 
-        for (i, line) in lines.enumerate() {
-            let row = line?;
-            if row.trim().is_empty() {
-                continue;
-            }
+        for (i, result) in csv_reader.records().enumerate() {
+            let record = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("Skipping row {}: CSV parse error: {}", i + 1, e);
+                    continue;
+                }
+            };
 
-            let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
-            if values.len() != columns.len() {
+            if record.len() != columns.len() {
                 println!(
                     "Skipping row {}: expected {} columns, got {}",
                     i + 1,
                     columns.len(),
-                    values.len()
+                    record.len()
                 );
                 continue;
             }
 
             // Serialize tuple
             let mut tuple_bytes: Vec<u8> = Vec::new();
-            for (val, col) in values.iter().zip(columns.iter()) {
+            let mut skip_row = false;
+
+            for (idx, col) in columns.iter().enumerate() {
+                let val = &record[idx];
                 match col.data_type.as_str() {
                     "INT" => {
                         let num: i32 = val.parse().unwrap_or_default();
@@ -155,8 +168,32 @@ impl BufferManager {
                         }
                         tuple_bytes.extend_from_slice(&t);
                     }
+                    "JSON" => {
+                        if let Err(e) = validate_json(val) {
+                            println!("Skipping row: {}", e);
+                            skip_row = true;
+                            break;
+                        }
+                        serialize_variable_length(&mut tuple_bytes, val.as_bytes());
+                    }
                     _ => continue,
                 }
+            }
+
+            if skip_row {
+                continue;
+            }
+
+            // Check max tuple size
+            let max_tuple_size = PAGE_SIZE as u32 - PAGE_HEADER_SIZE - ITEM_ID_SIZE;
+            if tuple_bytes.len() as u32 > max_tuple_size {
+                println!(
+                    "Skipping row {}: tuple size {} exceeds maximum {}",
+                    i + 1,
+                    tuple_bytes.len(),
+                    max_tuple_size
+                );
+                continue;
             }
 
             let tuple_len = tuple_bytes.len() as u32;
