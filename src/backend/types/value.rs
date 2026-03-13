@@ -6,11 +6,43 @@ use crate::types::bit_utils::{normalize_bit_literal, pack_bit_string, unpack_bit
 use crate::types::datatype::DataType;
 use crate::types::validation::validate_value;
 
+/// IEEE 754 `f32` wrapper that satisfies `Eq` by comparing bit patterns.
+/// NaN values with identical bit patterns compare equal.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OrderedF32(pub f32);
+
+impl PartialEq for OrderedF32 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+impl Eq for OrderedF32 {}
+
+impl PartialOrd for OrderedF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for OrderedF32 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or_else(|| {
+            match (self.0.is_nan(), other.0.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Less,
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataValue {
     SmallInt(i16),
     Int(i32),
     BigInt(i64),
+    Real(OrderedF32),
     Bool(bool),
     Varchar(String),
     Date(NaiveDate),
@@ -23,6 +55,7 @@ impl fmt::Display for DataValue {
             DataValue::SmallInt(v) => write!(f, "{}", v),
             DataValue::Int(v) => write!(f, "{}", v),
             DataValue::BigInt(v) => write!(f, "{}", v),
+            DataValue::Real(v) => write!(f, "{}", v.0),
             DataValue::Bool(v) => write!(f, "{}", v),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
@@ -37,6 +70,7 @@ impl DataValue {
             DataValue::SmallInt(v) => v.to_le_bytes().to_vec(),
             DataValue::Int(v) => v.to_le_bytes().to_vec(),
             DataValue::BigInt(v) => v.to_le_bytes().to_vec(),
+            DataValue::Real(v) => v.0.to_le_bytes().to_vec(),
             DataValue::Bool(v) => vec![u8::from(*v)],
             DataValue::Varchar(v) => {
                 let bytes = v.as_bytes();
@@ -80,6 +114,14 @@ impl DataValue {
                     bytes[0], bytes[1], bytes[2], bytes[3],
                     bytes[4], bytes[5], bytes[6], bytes[7],
                 ])))
+            }
+            DataType::Real => {
+                if bytes.len() < 4 {
+                    return Err("REAL requires 4 bytes".to_string());
+                }
+                Ok(DataValue::Real(OrderedF32(f32::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                ]))))
             }
             DataType::Bool => {
                 if bytes.is_empty() {
@@ -140,6 +182,11 @@ impl DataValue {
             DataType::BigInt => input
                 .parse::<i64>()
                 .map(DataValue::BigInt)
+                .map(|v| v.to_bytes())
+                .map_err(|e| e.to_string()),
+            DataType::Real => input
+                .parse::<f32>()
+                .map(|v| DataValue::Real(OrderedF32(v)))
                 .map(|v| v.to_bytes())
                 .map_err(|e| e.to_string()),
             DataType::Bool => match input.to_ascii_lowercase().as_str() {

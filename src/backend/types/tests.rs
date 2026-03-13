@@ -8,6 +8,7 @@ fn parse_phase_one_types() {
     assert_eq!("SMALLINT".parse::<DataType>().unwrap(), DataType::SmallInt);
     assert_eq!("INT".parse::<DataType>().unwrap(), DataType::Int);
     assert_eq!("BIGINT".parse::<DataType>().unwrap(), DataType::BigInt);
+    assert_eq!("REAL".parse::<DataType>().unwrap(), DataType::Real);
     assert_eq!(
         "VARCHAR(64)".parse::<DataType>().unwrap(),
         DataType::Varchar(64)
@@ -28,6 +29,7 @@ fn serde_roundtrip() {
         DataType::SmallInt,
         DataType::Int,
         DataType::BigInt,
+        DataType::Real,
         DataType::Bool,
         DataType::Varchar(32),
         DataType::Date,
@@ -46,6 +48,7 @@ fn display_matches_parse() {
         DataType::SmallInt,
         DataType::Int,
         DataType::BigInt,
+        DataType::Real,
         DataType::Bool,
         DataType::Varchar(8),
         DataType::Date,
@@ -63,6 +66,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::SmallInt.alignment(), 2);
     assert_eq!(DataType::Int.alignment(), 4);
     assert_eq!(DataType::BigInt.alignment(), 8);
+    assert_eq!(DataType::Real.alignment(), 4);
     assert_eq!(DataType::Date.alignment(), 4);
     assert_eq!(DataType::Bool.alignment(), 1);
     assert_eq!(DataType::Varchar(64).alignment(), 1);
@@ -71,6 +75,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::SmallInt.fixed_size(), Some(2));
     assert_eq!(DataType::Int.fixed_size(), Some(4));
     assert_eq!(DataType::BigInt.fixed_size(), Some(8));
+    assert_eq!(DataType::Real.fixed_size(), Some(4));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
     assert_eq!(DataType::Bool.fixed_size(), Some(1));
     assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
@@ -181,6 +186,31 @@ fn compare_bigint_promotion() {
     let c = DataValue::Int(300);
     assert_eq!(b.compare(&c).unwrap(), std::cmp::Ordering::Less);
     assert!(a.is_equal(&DataValue::BigInt(100)).unwrap());
+}
+
+#[test]
+fn roundtrip_real() {
+    let encoded = DataValue::parse_and_encode(&DataType::Real, "3.14").unwrap();
+    assert_eq!(encoded.len(), 4);
+    match DataValue::from_bytes(&DataType::Real, &encoded).unwrap() {
+        DataValue::Real(v) => assert!((v.0 - 3.14_f32).abs() < 1e-5),
+        _ => panic!("expected Real variant"),
+    }
+}
+
+#[test]
+fn validate_real_values() {
+    assert!(validate_real("3.14").is_ok());
+    assert!(validate_real("-1.5e10").is_ok());
+    assert!(validate_real("inf").is_ok());
+    assert!(validate_real("not_a_float").is_err());
+}
+
+#[test]
+fn compare_real_ordering() {
+    let a = DataValue::Real(OrderedF32(1.0_f32));
+    let b = DataValue::Real(OrderedF32(2.0_f32));
+    assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
 }
 
 #[test]

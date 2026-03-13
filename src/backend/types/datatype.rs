@@ -7,6 +7,7 @@ pub enum DataType {
     SmallInt,
     Int,
     BigInt,
+    Real,
     Bool,
     Varchar(u16),
     Date,
@@ -18,7 +19,7 @@ impl DataType {
     pub fn alignment(&self) -> u32 {
         match self {
             DataType::SmallInt => 2,
-            DataType::Int | DataType::Date => 4,
+            DataType::Int | DataType::Date | DataType::Real => 4,
             DataType::BigInt => 8,
             DataType::Bool => 1,
             DataType::Varchar(_) => 1,
@@ -30,7 +31,7 @@ impl DataType {
     pub fn fixed_size(&self) -> Option<u32> {
         match self {
             DataType::SmallInt => Some(2),
-            DataType::Int => Some(4),
+            DataType::Int | DataType::Real => Some(4),
             DataType::BigInt => Some(8),
             DataType::Date => Some(4),
             DataType::Bool => Some(1),
@@ -77,6 +78,7 @@ impl fmt::Display for DataType {
             DataType::SmallInt => write!(f, "SMALLINT"),
             DataType::Int => write!(f, "INT"),
             DataType::BigInt => write!(f, "BIGINT"),
+            DataType::Real => write!(f, "REAL"),
             DataType::Bool => write!(f, "BOOLEAN"),
             DataType::Varchar(n) => write!(f, "VARCHAR({})", n),
             DataType::Date => write!(f, "DATE"),
@@ -94,6 +96,7 @@ impl FromStr for DataType {
             "SMALLINT" => Ok(DataType::SmallInt),
             "INT" | "INTEGER" => Ok(DataType::Int),
             "BIGINT" => Ok(DataType::BigInt),
+            "REAL" => Ok(DataType::Real),
             "BOOL" | "BOOLEAN" => Ok(DataType::Bool),
             "DATE" => Ok(DataType::Date),
             _ => {

@@ -70,6 +70,18 @@ pub fn validate_bigint(input: &str) -> Result<(), TypeValidationError> {
         })
 }
 
+pub fn validate_real(input: &str) -> Result<(), TypeValidationError> {
+    input
+        .trim()
+        .parse::<f32>()
+        .map(|_| ())
+        .map_err(|_| TypeValidationError::InvalidFormat {
+            ty: "REAL".to_string(),
+            value: input.trim().to_string(),
+            details: "expected IEEE 754 single-precision float".to_string(),
+        })
+}
+
 pub fn validate_bool(input: &str) -> Result<(), TypeValidationError> {
     match input.trim().to_ascii_lowercase().as_str() {
         "true" | "false" | "t" | "f" | "1" | "0" => Ok(()),
@@ -128,6 +140,7 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
         DataType::SmallInt => validate_smallint(input),
         DataType::Int => validate_int(input),
         DataType::BigInt => validate_bigint(input),
+        DataType::Real => validate_real(input),
         DataType::Bool => validate_bool(input),
         DataType::Varchar(max_len) => validate_varchar(input, *max_len),
         DataType::Date => validate_date(input),
