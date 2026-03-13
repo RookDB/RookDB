@@ -15,6 +15,7 @@ pub enum DataType {
     Date,
     Time,
     Bit(u16),
+    Timestamp,
 }
 
 impl DataType {
@@ -29,6 +30,7 @@ impl DataType {
             DataType::Varchar(_) => 1,
             DataType::Time => 8,
             DataType::Bit(_) => 1,
+                    DataType::Timestamp => 8,
         }
     }
 
@@ -43,6 +45,7 @@ impl DataType {
             DataType::Char(n) => Some(*n as u32),
             DataType::Time => Some(8),
             DataType::Bit(n) => Some((*n as u32).div_ceil(8)),
+                        DataType::Timestamp => Some(8),
             DataType::Varchar(_) => None,
         }
     }
@@ -93,6 +96,7 @@ impl fmt::Display for DataType {
             DataType::Date => write!(f, "DATE"),
             DataType::Time => write!(f, "TIME"),
             DataType::Bit(n) => write!(f, "BIT({})", n),
+                    DataType::Timestamp => write!(f, "TIMESTAMP"),
         }
     }
 }
@@ -111,6 +115,7 @@ impl FromStr for DataType {
             "BOOL" | "BOOLEAN" => Ok(DataType::Bool),
             "DATE" => Ok(DataType::Date),
             "TIME" => Ok(DataType::Time),
+            "TIMESTAMP" => Ok(DataType::Timestamp),
             _ => {
                 if upper.starts_with("CHAR(") && upper.ends_with(')') && !upper.starts_with("CHARACTER(") {
                     let inner = &upper[5..upper.len() - 1];

@@ -1,4 +1,4 @@
-use chrono::{Duration, NaiveDate, NaiveTime, Timelike};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -80,6 +80,7 @@ pub enum DataValue {
     Date(NaiveDate),
     Time(NaiveTime),
     Bit(String),
+    Timestamp(NaiveDateTime),
 }
 
 impl fmt::Display for DataValue {
@@ -96,6 +97,7 @@ impl fmt::Display for DataValue {
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
             DataValue::Time(v) => write!(f, "{}", v.format("%H:%M:%S%.6f")),
             DataValue::Bit(v) => write!(f, "B'{}'", v),
+                    DataValue::Timestamp(v) => write!(f, "{}", v.format("%Y-%m-%d %H:%M:%S%.6f")),
         }
     }
 }
@@ -129,6 +131,16 @@ impl DataValue {
                 micros.to_le_bytes().to_vec()
             }
             DataValue::Bit(v) => pack_bit_string(v),
+                    DataValue::Timestamp(v) => {
+                        // microseconds since Unix epoch
+                        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
+                            .unwrap()
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap();
+                        let micros = v.signed_duration_since(epoch).num_microseconds()
+                            .unwrap_or(i64::MAX);
+                        micros.to_le_bytes().to_vec()
+                    }
         }
     }
 
@@ -230,6 +242,23 @@ impl DataValue {
                     .map(DataValue::Time)
                     .ok_or_else(|| "TIME value out of range".to_string())
             }
+            DataType::Timestamp => {
+                if bytes.len() < 8 {
+                    return Err("TIMESTAMP requires 8 bytes".to_string());
+                }
+                let micros = i64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap();
+                epoch
+                    .checked_add_signed(Duration::microseconds(micros))
+                    .map(DataValue::Timestamp)
+                    .ok_or_else(|| "TIMESTAMP is outside supported chrono range".to_string())
+            }
             DataType::Bit(n) => {
                 let needed = (*n as usize).div_ceil(8);
                 if bytes.len() < needed {
@@ -302,6 +331,13 @@ impl DataValue {
                 NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
                     .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M:%S"))
                     .map(|v| DataValue::Time(v).to_bytes())
+                    .map_err(|e| e.to_string())
+            }
+            DataType::Timestamp => {
+                let raw = input.trim_matches('\'');
+                NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
+                    .map(|v| DataValue::Timestamp(v).to_bytes())
                     .map_err(|e| e.to_string())
             }
             DataType::Bit(_) => {

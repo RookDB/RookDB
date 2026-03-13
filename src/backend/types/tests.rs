@@ -20,6 +20,7 @@ fn parse_phase_one_types() {
     assert_eq!("DATE".parse::<DataType>().unwrap(), DataType::Date);
     assert_eq!("TIME".parse::<DataType>().unwrap(), DataType::Time);
     assert_eq!("BIT(12)".parse::<DataType>().unwrap(), DataType::Bit(12));
+    assert_eq!("TIMESTAMP".parse::<DataType>().unwrap(), DataType::Timestamp);
 }
 
 #[test]
@@ -41,6 +42,7 @@ fn serde_roundtrip() {
         DataType::Date,
         DataType::Time,
         DataType::Bit(9),
+        DataType::Timestamp,
     ];
     for dt in &types {
         let json = serde_json::to_string(dt).unwrap();
@@ -63,6 +65,7 @@ fn display_matches_parse() {
         DataType::Date,
         DataType::Time,
         DataType::Bit(5),
+        DataType::Timestamp,
     ];
     for dt in &types {
         let s = dt.to_string();
@@ -81,6 +84,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::Char(10).alignment(), 1);
     assert_eq!(DataType::Time.alignment(), 8);
     assert_eq!(DataType::Date.alignment(), 4);
+        assert_eq!(DataType::Timestamp.alignment(), 8);
     assert_eq!(DataType::Bool.alignment(), 1);
     assert_eq!(DataType::Varchar(64).alignment(), 1);
     assert_eq!(DataType::Bit(13).alignment(), 1);
@@ -93,6 +97,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::Char(10).fixed_size(), Some(10));
     assert_eq!(DataType::Time.fixed_size(), Some(8));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
+        assert_eq!(DataType::Timestamp.fixed_size(), Some(8));
     assert_eq!(DataType::Bool.fixed_size(), Some(1));
     assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
     assert_eq!(DataType::Varchar(64).fixed_size(), None);
@@ -311,6 +316,40 @@ fn compare_time_chronological() {
     use chrono::NaiveTime;
     let a = DataValue::Time(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
     let b = DataValue::Time(NaiveTime::from_hms_opt(12, 0, 0).unwrap());
+    assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
+}
+
+#[test]
+fn roundtrip_timestamp() {
+    use chrono::NaiveDateTime;
+    let encoded =
+        DataValue::parse_and_encode(&DataType::Timestamp, "2026-03-13 14:30:00").unwrap();
+    assert_eq!(encoded.len(), 8);
+    let v = DataValue::from_bytes(&DataType::Timestamp, &encoded).unwrap();
+    assert_eq!(
+        v,
+        DataValue::Timestamp(
+            NaiveDateTime::parse_from_str("2026-03-13 14:30:00", "%Y-%m-%d %H:%M:%S").unwrap()
+        )
+    );
+}
+
+#[test]
+fn validate_timestamp_format() {
+    assert!(validate_timestamp("2026-03-13 00:00:00").is_ok());
+    assert!(validate_timestamp("2026-03-13 23:59:59.123456").is_ok());
+    assert!(validate_timestamp("not-a-timestamp").is_err());
+}
+
+#[test]
+fn compare_timestamp_chronological() {
+    use chrono::NaiveDateTime;
+    let a = DataValue::Timestamp(
+        NaiveDateTime::parse_from_str("2026-03-13 08:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+    );
+    let b = DataValue::Timestamp(
+        NaiveDateTime::parse_from_str("2026-03-13 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+    );
     assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
 }
 

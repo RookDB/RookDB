@@ -63,7 +63,7 @@ pub fn create_table_cmd(
             Ok(dt) => dt,
             Err(e) => {
                 println!(
-                    "Unknown type '{}': {}. Supported: SMALLINT, INT, BIGINT, REAL, \"DOUBLE PRECISION\", BOOLEAN, CHAR(n), CHARACTER(n), VARCHAR(n), DATE, TIME, BIT(n)",
+                    "Unknown type '{}': {}. Supported: SMALLINT, INT, BIGINT, REAL, \"DOUBLE PRECISION\", BOOLEAN, CHAR(n), CHARACTER(n), VARCHAR(n), DATE, TIME, TIMESTAMP, BIT(n)",
                     type_str, e
                 );
                 continue;
