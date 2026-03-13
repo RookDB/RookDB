@@ -8,3 +8,6 @@ database
 target/*
 code/.DS_Store
 .DS_Store
+.tex
+.txt
+.sh
