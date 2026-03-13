@@ -70,10 +70,7 @@ pub fn create_table_cmd(
             }
         };
 
-        columns.push(Column {
-            name: parts[0].trim().to_string(),
-            data_type,
-        });
+        columns.push(Column::new(parts[0].trim().to_string(), data_type));
     }
 
     create_table(catalog, &db, &table_name, columns);
