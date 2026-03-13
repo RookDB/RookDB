@@ -5,26 +5,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Represents a column within a table.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Column {
     pub name: String,
     pub data_type: String,
 }
 
 /// Represents a table schema.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Table {
     pub columns: Vec<Column>,
 }
 
 /// Represents a database containing multiple tables.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Database {
     pub tables: HashMap<String, Table>,
 }
 
 /// Represents the top-level catalog holding all databases.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Catalog {
     pub databases: HashMap<String, Database>,
 }
