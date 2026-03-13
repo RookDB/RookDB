@@ -117,6 +117,18 @@ pub fn validate_varchar(input: &str, max_len: u16) -> Result<(), TypeValidationE
     Ok(())
 }
 
+pub fn validate_char(input: &str, fixed_len: u16) -> Result<(), TypeValidationError> {
+    let value = input.trim().trim_matches('"').trim_matches('\'');
+    if value.len() > fixed_len as usize {
+        return Err(TypeValidationError::OutOfRange {
+            ty: format!("CHAR({})", fixed_len),
+            value: value.to_string(),
+            details: format!("maximum length is {} bytes (shorter values are space-padded)", fixed_len),
+        });
+    }
+    Ok(())
+}
+
 pub fn validate_date(input: &str) -> Result<(), TypeValidationError> {
     let raw = input.trim().trim_matches('\'');
     NaiveDate::parse_from_str(raw, "%Y-%m-%d")
@@ -155,6 +167,7 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
         DataType::Real => validate_real(input),
         DataType::DoublePrecision => validate_double(input),
         DataType::Bool => validate_bool(input),
+        DataType::Char(fixed_len) => validate_char(input, *fixed_len),
         DataType::Varchar(max_len) => validate_varchar(input, *max_len),
         DataType::Date => validate_date(input),
         DataType::Bit(bit_len) => validate_bit(input, *bit_len),

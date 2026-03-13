@@ -10,6 +10,7 @@ pub enum DataType {
     Real,
     DoublePrecision,
     Bool,
+    Char(u16),
     Varchar(u16),
     Date,
     Bit(u16),
@@ -23,6 +24,7 @@ impl DataType {
             DataType::Int | DataType::Date | DataType::Real => 4,
             DataType::BigInt | DataType::DoublePrecision => 8,
             DataType::Bool => 1,
+            DataType::Char(_) => 1,
             DataType::Varchar(_) => 1,
             DataType::Bit(_) => 1,
         }
@@ -36,6 +38,7 @@ impl DataType {
             DataType::BigInt | DataType::DoublePrecision => Some(8),
             DataType::Date => Some(4),
             DataType::Bool => Some(1),
+            DataType::Char(n) => Some(*n as u32),
             DataType::Bit(n) => Some((*n as u32).div_ceil(8)),
             DataType::Varchar(_) => None,
         }
@@ -82,6 +85,7 @@ impl fmt::Display for DataType {
             DataType::Real => write!(f, "REAL"),
             DataType::DoublePrecision => write!(f, "DOUBLE PRECISION"),
             DataType::Bool => write!(f, "BOOLEAN"),
+            DataType::Char(n) => write!(f, "CHAR({})", n),
             DataType::Varchar(n) => write!(f, "VARCHAR({})", n),
             DataType::Date => write!(f, "DATE"),
             DataType::Bit(n) => write!(f, "BIT({})", n),
@@ -103,7 +107,13 @@ impl FromStr for DataType {
             "BOOL" | "BOOLEAN" => Ok(DataType::Bool),
             "DATE" => Ok(DataType::Date),
             _ => {
-                if upper.starts_with("VARCHAR(") && upper.ends_with(')') {
+                if upper.starts_with("CHAR(") && upper.ends_with(')') && !upper.starts_with("CHARACTER(") {
+                    let inner = &upper[5..upper.len() - 1];
+                    inner
+                        .parse::<u16>()
+                        .map(DataType::Char)
+                        .map_err(|_| format!("Invalid CHAR size: '{}'", inner))
+                } else if upper.starts_with("VARCHAR(") && upper.ends_with(')') {
                     let inner = &upper[8..upper.len() - 1];
                     inner
                         .parse::<u16>()

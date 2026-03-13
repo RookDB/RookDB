@@ -75,6 +75,7 @@ pub enum DataValue {
     Real(OrderedF32),
     DoublePrecision(OrderedF64),
     Bool(bool),
+    Char(String),
     Varchar(String),
     Date(NaiveDate),
     Bit(String),
@@ -89,6 +90,7 @@ impl fmt::Display for DataValue {
             DataValue::Real(v) => write!(f, "{}", v.0),
             DataValue::DoublePrecision(v) => write!(f, "{}", v.0),
             DataValue::Bool(v) => write!(f, "{}", v),
+            DataValue::Char(v) => write!(f, "'{}'", v.trim_end_matches(' ')),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
             DataValue::Bit(v) => write!(f, "B'{}'", v),
@@ -105,6 +107,7 @@ impl DataValue {
             DataValue::Real(v) => v.0.to_le_bytes().to_vec(),
             DataValue::DoublePrecision(v) => v.0.to_le_bytes().to_vec(),
             DataValue::Bool(v) => vec![u8::from(*v)],
+            DataValue::Char(v) => v.as_bytes().to_vec(),
             DataValue::Varchar(v) => {
                 let bytes = v.as_bytes();
                 let mut out = Vec::with_capacity(2 + bytes.len());
@@ -170,6 +173,15 @@ impl DataValue {
                     return Err("BOOLEAN requires 1 byte".to_string());
                 }
                 Ok(DataValue::Bool(bytes[0] != 0))
+            }
+            DataType::Char(n) => {
+                let len = *n as usize;
+                if bytes.len() < len {
+                    return Err(format!("CHAR({}) requires {} bytes", n, len));
+                }
+                let value = String::from_utf8(bytes[..len].to_vec())
+                    .map_err(|_| "CHAR payload is not valid UTF-8".to_string())?;
+                Ok(DataValue::Char(value))
             }
             DataType::Varchar(max_len) => {
                 let encoded_len = ty.encoded_len(bytes)?;
@@ -241,6 +253,18 @@ impl DataValue {
                 "false" | "f" | "0" => Ok(DataValue::Bool(false).to_bytes()),
                 _ => Err(format!("Invalid BOOLEAN value '{}': expected true/false", input)),
             },
+            DataType::Char(n) => {
+                let value = input.trim_matches('"').trim_matches('\'');
+                let mut bytes = value.as_bytes().to_vec();
+                if bytes.len() > *n as usize {
+                    return Err(format!(
+                        "CHAR({}) value exceeds maximum length {}",
+                        n, n
+                    ));
+                }
+                bytes.resize(*n as usize, b' ');
+                Ok(bytes)
+            }
             DataType::Varchar(_) => {
                 let value = input.trim_matches('"').trim_matches('\'');
                 Ok(DataValue::Varchar(value.to_string()).to_bytes())

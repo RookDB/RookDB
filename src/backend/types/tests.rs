@@ -10,6 +10,7 @@ fn parse_phase_one_types() {
     assert_eq!("BIGINT".parse::<DataType>().unwrap(), DataType::BigInt);
     assert_eq!("REAL".parse::<DataType>().unwrap(), DataType::Real);
     assert_eq!("DOUBLE PRECISION".parse::<DataType>().unwrap(), DataType::DoublePrecision);
+    assert_eq!("CHAR(10)".parse::<DataType>().unwrap(), DataType::Char(10));
     assert_eq!(
         "VARCHAR(64)".parse::<DataType>().unwrap(),
         DataType::Varchar(64)
@@ -33,6 +34,7 @@ fn serde_roundtrip() {
         DataType::Real,
         DataType::DoublePrecision,
         DataType::Bool,
+        DataType::Char(10),
         DataType::Varchar(32),
         DataType::Date,
         DataType::Bit(9),
@@ -53,6 +55,7 @@ fn display_matches_parse() {
         DataType::Real,
         DataType::DoublePrecision,
         DataType::Bool,
+        DataType::Char(5),
         DataType::Varchar(8),
         DataType::Date,
         DataType::Bit(5),
@@ -71,6 +74,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::BigInt.alignment(), 8);
     assert_eq!(DataType::Real.alignment(), 4);
     assert_eq!(DataType::DoublePrecision.alignment(), 8);
+    assert_eq!(DataType::Char(10).alignment(), 1);
     assert_eq!(DataType::Date.alignment(), 4);
     assert_eq!(DataType::Bool.alignment(), 1);
     assert_eq!(DataType::Varchar(64).alignment(), 1);
@@ -81,6 +85,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::BigInt.fixed_size(), Some(8));
     assert_eq!(DataType::Real.fixed_size(), Some(4));
     assert_eq!(DataType::DoublePrecision.fixed_size(), Some(8));
+    assert_eq!(DataType::Char(10).fixed_size(), Some(10));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
     assert_eq!(DataType::Bool.fixed_size(), Some(1));
     assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
@@ -243,6 +248,30 @@ fn validate_double_values() {
 fn compare_double_ordering() {
     let a = DataValue::DoublePrecision(OrderedF64(1.0_f64));
     let b = DataValue::DoublePrecision(OrderedF64(9.99_f64));
+    assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
+}
+
+#[test]
+fn roundtrip_char() {
+    // CHAR(8): "hello" is padded to 8 bytes on disk
+    let encoded = DataValue::parse_and_encode(&DataType::Char(8), "hello").unwrap();
+    assert_eq!(encoded.len(), 8);
+    assert_eq!(&encoded, b"hello   ");
+    // from_bytes stores the raw (padded) bytes; Display trims trailing spaces
+    let v = DataValue::from_bytes(&DataType::Char(8), &encoded).unwrap();
+    assert_eq!(format!("{}", v), "'hello'");
+}
+
+#[test]
+fn validate_char_length() {
+    assert!(validate_char("hello", 8).is_ok());
+    assert!(validate_char("toolongstring", 5).is_err());
+}
+
+#[test]
+fn compare_char_lexicographic() {
+    let a = DataValue::Char("abc      ".to_string());
+    let b = DataValue::Char("abd      ".to_string());
     assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
 }
 
