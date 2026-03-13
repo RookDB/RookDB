@@ -63,7 +63,7 @@ pub fn create_table_cmd(
             Ok(dt) => dt,
             Err(e) => {
                 println!(
-                    "Unknown type '{}': {}. Supported: SMALLINT, INT, VARCHAR(n), DATE",
+                    "Unknown type '{}': {}. Supported: SMALLINT, INT, VARCHAR(n), DATE, BIT(n)",
                     type_str, e
                 );
                 continue;

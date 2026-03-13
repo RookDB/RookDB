@@ -14,6 +14,7 @@ pub enum DataType {
     Int,
     Varchar(u16),
     Date,
+    Bit(u16),
 }
 
 impl DataType {
@@ -23,6 +24,7 @@ impl DataType {
             DataType::SmallInt => 2,
             DataType::Int | DataType::Date => 4,
             DataType::Varchar(_) => 1,
+            DataType::Bit(_) => 1,
         }
     }
 
@@ -32,6 +34,7 @@ impl DataType {
             DataType::SmallInt => Some(2),
             DataType::Int => Some(4),
             DataType::Date => Some(4),
+            DataType::Bit(n) => Some((*n as u32).div_ceil(8)),
             DataType::Varchar(_) => None,
         }
     }
@@ -75,6 +78,7 @@ impl fmt::Display for DataType {
             DataType::Int => write!(f, "INT"),
             DataType::Varchar(n) => write!(f, "VARCHAR({})", n),
             DataType::Date => write!(f, "DATE"),
+            DataType::Bit(n) => write!(f, "BIT({})", n),
         }
     }
 }
@@ -95,6 +99,12 @@ impl FromStr for DataType {
                         .parse::<u16>()
                         .map(DataType::Varchar)
                         .map_err(|_| format!("Invalid VARCHAR size: '{}'", inner))
+                } else if upper.starts_with("BIT(") && upper.ends_with(')') {
+                    let inner = &upper[4..upper.len() - 1];
+                    inner
+                        .parse::<u16>()
+                        .map(DataType::Bit)
+                        .map_err(|_| format!("Invalid BIT size: '{}'", inner))
                 } else {
                     Err(format!("Unknown data type: '{}'", s))
                 }
@@ -122,6 +132,7 @@ pub enum DataValue {
     Int(i32),
     Varchar(String),
     Date(NaiveDate),
+    Bit(String),
 }
 
 impl fmt::Display for DataValue {
@@ -131,7 +142,53 @@ impl fmt::Display for DataValue {
             DataValue::Int(v) => write!(f, "{}", v),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
+            DataValue::Bit(v) => write!(f, "B'{}'", v),
         }
+    }
+}
+
+fn pack_bit_string(bits: &str) -> Vec<u8> {
+    let bit_count = bits.len();
+    let byte_count = bit_count.div_ceil(8);
+    let mut out = vec![0u8; byte_count];
+
+    for (i, ch) in bits.chars().enumerate() {
+        if ch == '1' {
+            let byte_idx = i / 8;
+            let bit_in_byte = i % 8;
+            out[byte_idx] |= 1 << (7 - bit_in_byte);
+        }
+    }
+
+    out
+}
+
+fn unpack_bit_string(bytes: &[u8], bit_count: usize) -> String {
+    let mut out = String::with_capacity(bit_count);
+    for i in 0..bit_count {
+        let byte_idx = i / 8;
+        let bit_in_byte = i % 8;
+        let is_one = (bytes[byte_idx] & (1 << (7 - bit_in_byte))) != 0;
+        out.push(if is_one { '1' } else { '0' });
+    }
+    out
+}
+
+fn normalize_bit_literal(input: &str) -> String {
+    let s = input.trim();
+    if s.len() >= 3
+        && (s.starts_with("B'") || s.starts_with("b'"))
+        && s.ends_with('"')
+    {
+        // Unreachable for single-quoted syntax but retained defensively.
+        s[2..s.len() - 1].to_string()
+    } else if s.len() >= 3
+        && (s.starts_with("B'") || s.starts_with("b'"))
+        && s.ends_with('\'')
+    {
+        s[2..s.len() - 1].to_string()
+    } else {
+        s.trim_matches('\'').to_string()
     }
 }
 
@@ -152,6 +209,7 @@ impl DataValue {
                 let days = v.signed_duration_since(epoch).num_days() as i32;
                 days.to_le_bytes().to_vec()
             }
+            DataValue::Bit(v) => pack_bit_string(v),
         }
     }
 
@@ -198,6 +256,13 @@ impl DataValue {
                     .ok_or_else(|| "DATE is outside supported chrono range".to_string())?;
                 Ok(DataValue::Date(value))
             }
+            DataType::Bit(n) => {
+                let needed = (*n as usize).div_ceil(8);
+                if bytes.len() < needed {
+                    return Err(format!("BIT({}) requires {} bytes", n, needed));
+                }
+                Ok(DataValue::Bit(unpack_bit_string(&bytes[..needed], *n as usize)))
+            }
         }
     }
 
@@ -224,6 +289,10 @@ impl DataValue {
                 let date = NaiveDate::parse_from_str(input.trim_matches('\''), "%Y-%m-%d")
                     .map_err(|e| e.to_string())?;
                 Ok(DataValue::Date(date).to_bytes())
+            }
+            DataType::Bit(_) => {
+                let bits = normalize_bit_literal(input);
+                Ok(DataValue::Bit(bits).to_bytes())
             }
         }
     }
@@ -311,7 +380,27 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
         DataType::Int => validate_int(input),
         DataType::Varchar(max_len) => validate_varchar(input, *max_len),
         DataType::Date => validate_date(input),
+        DataType::Bit(bit_len) => validate_bit(input, *bit_len),
     }
+}
+
+pub fn validate_bit(input: &str, bit_len: u16) -> Result<(), TypeValidationError> {
+    let value = normalize_bit_literal(input);
+    if value.len() != bit_len as usize {
+        return Err(TypeValidationError::OutOfRange {
+            ty: format!("BIT({})", bit_len),
+            value,
+            details: format!("requires exactly {} bits", bit_len),
+        });
+    }
+    if !value.chars().all(|c| c == '0' || c == '1') {
+        return Err(TypeValidationError::InvalidFormat {
+            ty: format!("BIT({})", bit_len),
+            value,
+            details: "allowed symbols are only '0' and '1'".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,6 +434,7 @@ fn value_type_name(value: &DataValue) -> &'static str {
         DataValue::Int(_) => "INT",
         DataValue::Varchar(_) => "VARCHAR",
         DataValue::Date(_) => "DATE",
+        DataValue::Bit(_) => "BIT",
     }
 }
 
@@ -362,6 +452,9 @@ impl Comparable for DataValue {
 
             // DATE chronological ordering
             (DataValue::Date(a), DataValue::Date(b)) => Ok(a.cmp(b)),
+
+            // BIT(n) lexicographic ordering
+            (DataValue::Bit(a), DataValue::Bit(b)) => Ok(a.cmp(b)),
 
             _ => Err(ComparisonError::TypeMismatch {
                 left: value_type_name(self).to_string(),
@@ -642,6 +735,7 @@ fn data_value_matches_type(ty: &DataType, value: &DataValue) -> bool {
             | (DataType::Int, DataValue::Int(_))
             | (DataType::Varchar(_), DataValue::Varchar(_))
             | (DataType::Date, DataValue::Date(_))
+            | (DataType::Bit(_), DataValue::Bit(_))
     )
 }
 
@@ -792,6 +886,7 @@ mod tests {
         assert_eq!("INT".parse::<DataType>().unwrap(), DataType::Int);
         assert_eq!("VARCHAR(64)".parse::<DataType>().unwrap(), DataType::Varchar(64));
         assert_eq!("DATE".parse::<DataType>().unwrap(), DataType::Date);
+        assert_eq!("BIT(12)".parse::<DataType>().unwrap(), DataType::Bit(12));
     }
 
     #[test]
@@ -807,6 +902,7 @@ mod tests {
             DataType::Int,
             DataType::Varchar(32),
             DataType::Date,
+            DataType::Bit(9),
         ];
         for dt in &types {
             let json = serde_json::to_string(dt).unwrap();
@@ -822,6 +918,7 @@ mod tests {
             DataType::Int,
             DataType::Varchar(8),
             DataType::Date,
+            DataType::Bit(5),
         ];
         for dt in &types {
             let s = dt.to_string();
@@ -836,15 +933,18 @@ mod tests {
         assert_eq!(DataType::Int.alignment(), 4);
         assert_eq!(DataType::Date.alignment(), 4);
         assert_eq!(DataType::Varchar(64).alignment(), 1);
+        assert_eq!(DataType::Bit(13).alignment(), 1);
 
         assert_eq!(DataType::SmallInt.fixed_size(), Some(2));
         assert_eq!(DataType::Int.fixed_size(), Some(4));
         assert_eq!(DataType::Date.fixed_size(), Some(4));
+        assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
         assert_eq!(DataType::Varchar(64).fixed_size(), None);
 
         assert_eq!(DataType::Varchar(64).min_storage_size(), 2);
         assert!(DataType::Varchar(64).is_variable_length());
         assert!(!DataType::Date.is_variable_length());
+        assert!(!DataType::Bit(13).is_variable_length());
     }
 
     #[test]
@@ -870,6 +970,16 @@ mod tests {
     fn roundtrip_date() {
         let encoded = DataValue::parse_and_encode(&DataType::Date, "2026-03-13").unwrap();
         assert_eq!(DataValue::from_bytes(&DataType::Date, &encoded).unwrap(), DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap()));
+    }
+
+    #[test]
+    fn roundtrip_bit() {
+        let encoded = DataValue::parse_and_encode(&DataType::Bit(10), "B'1011001110'").unwrap();
+        assert_eq!(encoded.len(), 2);
+        assert_eq!(
+            DataValue::from_bytes(&DataType::Bit(10), &encoded).unwrap(),
+            DataValue::Bit("1011001110".to_string())
+        );
     }
 
     #[test]
@@ -902,6 +1012,14 @@ mod tests {
         assert!(validate_date("2026-03-13").is_ok());
         assert!(validate_date("2026-13-40").is_err());
         assert!(validate_date("13-03-2026").is_err());
+    }
+
+    #[test]
+    fn validate_bit_rules() {
+        assert!(validate_bit("B'0101'", 4).is_ok());
+        assert!(validate_bit("0101", 4).is_ok());
+        assert!(validate_bit("011", 4).is_err());
+        assert!(validate_bit("B'01A1'", 4).is_err());
     }
 
     #[test]
@@ -980,6 +1098,13 @@ mod tests {
     }
 
     #[test]
+    fn compare_bit_lexicographic() {
+        let a = DataValue::Bit("0011".to_string());
+        let b = DataValue::Bit("0100".to_string());
+        assert_eq!(a.compare(&b).unwrap(), Ordering::Less);
+    }
+
+    #[test]
     fn compare_nullable_unknown_when_null_present() {
         let a = DataValue::Int(1);
         assert_eq!(compare_nullable(Some(&a), None).unwrap(), None);
@@ -1020,12 +1145,18 @@ mod tests {
 
     #[test]
     fn row_serialize_deserialize_roundtrip() {
-        let schema = vec![DataType::SmallInt, DataType::Varchar(8), DataType::Date];
+        let schema = vec![
+            DataType::SmallInt,
+            DataType::Varchar(8),
+            DataType::Date,
+            DataType::Bit(4),
+        ];
         let mut row = Row::new(schema.clone());
         row.set_value(0, &DataValue::SmallInt(-5)).unwrap();
         row.set_value(1, &DataValue::Varchar("rook".to_string()))
             .unwrap();
         row.set_null(2).unwrap();
+        row.set_value(3, &DataValue::Bit("1010".to_string())).unwrap();
 
         let bytes = row.serialize();
         let restored = Row::deserialize(&schema, &bytes).unwrap();
@@ -1036,6 +1167,10 @@ mod tests {
             Some(DataValue::Varchar("rook".to_string()))
         );
         assert_eq!(restored.get_value(2).unwrap(), None);
+        assert_eq!(
+            restored.get_value(3).unwrap(),
+            Some(DataValue::Bit("1010".to_string()))
+        );
     }
 
     #[test]
