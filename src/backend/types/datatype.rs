@@ -113,6 +113,12 @@ impl FromStr for DataType {
                         .parse::<u16>()
                         .map(DataType::Char)
                         .map_err(|_| format!("Invalid CHAR size: '{}'", inner))
+                } else if upper.starts_with("CHARACTER(") && upper.ends_with(')') {
+                    let inner = &upper[10..upper.len() - 1];
+                    inner
+                        .parse::<u16>()
+                        .map(DataType::Char)
+                        .map_err(|_| format!("Invalid CHARACTER size: '{}'", inner))
                 } else if upper.starts_with("VARCHAR(") && upper.ends_with(')') {
                     let inner = &upper[8..upper.len() - 1];
                     inner

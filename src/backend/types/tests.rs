@@ -11,6 +11,7 @@ fn parse_phase_one_types() {
     assert_eq!("REAL".parse::<DataType>().unwrap(), DataType::Real);
     assert_eq!("DOUBLE PRECISION".parse::<DataType>().unwrap(), DataType::DoublePrecision);
     assert_eq!("CHAR(10)".parse::<DataType>().unwrap(), DataType::Char(10));
+    assert_eq!("CHARACTER(10)".parse::<DataType>().unwrap(), DataType::Char(10));
     assert_eq!(
         "VARCHAR(64)".parse::<DataType>().unwrap(),
         DataType::Varchar(64)
