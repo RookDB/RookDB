@@ -2,7 +2,7 @@
 //! runtime `DataValue` enum for the types assigned in the proposal:
 //! `SMALLINT`, `INTEGER`, `VARCHAR(n)`, and `DATE`.
 
-use chrono::{Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::fmt;
@@ -390,6 +390,118 @@ pub fn nullable_equals(
     right: Option<&DataValue>,
 ) -> Result<Option<bool>, ComparisonError> {
     Ok(compare_nullable(left, right)?.map(|o| o == Ordering::Equal))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FunctionError {
+    TypeMismatch { expected: String, found: String },
+    InvalidArgument(String),
+}
+
+impl fmt::Display for FunctionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FunctionError::TypeMismatch { expected, found } => {
+                write!(f, "Type mismatch: expected {}, found {}", expected, found)
+            }
+            FunctionError::InvalidArgument(msg) => write!(f, "Invalid argument: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for FunctionError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatePart {
+    Year,
+    Month,
+    Day,
+}
+
+pub fn length(value: &DataValue) -> Result<usize, FunctionError> {
+    match value {
+        DataValue::Varchar(s) => Ok(s.chars().count()),
+        _ => Err(FunctionError::TypeMismatch {
+            expected: "VARCHAR".to_string(),
+            found: value_type_name(value).to_string(),
+        }),
+    }
+}
+
+pub fn substring(value: &DataValue, start: usize, len: usize) -> Result<DataValue, FunctionError> {
+    let s = match value {
+        DataValue::Varchar(s) => s,
+        _ => {
+            return Err(FunctionError::TypeMismatch {
+                expected: "VARCHAR".to_string(),
+                found: value_type_name(value).to_string(),
+            });
+        }
+    };
+
+    if start == 0 {
+        return Err(FunctionError::InvalidArgument(
+            "start is 1-based and must be >= 1".to_string(),
+        ));
+    }
+
+    let chars: Vec<char> = s.chars().collect();
+    if start > chars.len() {
+        return Ok(DataValue::Varchar(String::new()));
+    }
+
+    let from = start - 1;
+    let to = (from + len).min(chars.len());
+    let out: String = chars[from..to].iter().collect();
+    Ok(DataValue::Varchar(out))
+}
+
+pub fn upper(value: &DataValue) -> Result<DataValue, FunctionError> {
+    match value {
+        DataValue::Varchar(s) => Ok(DataValue::Varchar(s.to_uppercase())),
+        _ => Err(FunctionError::TypeMismatch {
+            expected: "VARCHAR".to_string(),
+            found: value_type_name(value).to_string(),
+        }),
+    }
+}
+
+pub fn lower(value: &DataValue) -> Result<DataValue, FunctionError> {
+    match value {
+        DataValue::Varchar(s) => Ok(DataValue::Varchar(s.to_lowercase())),
+        _ => Err(FunctionError::TypeMismatch {
+            expected: "VARCHAR".to_string(),
+            found: value_type_name(value).to_string(),
+        }),
+    }
+}
+
+pub fn trim(value: &DataValue) -> Result<DataValue, FunctionError> {
+    match value {
+        DataValue::Varchar(s) => Ok(DataValue::Varchar(s.trim().to_string())),
+        _ => Err(FunctionError::TypeMismatch {
+            expected: "VARCHAR".to_string(),
+            found: value_type_name(value).to_string(),
+        }),
+    }
+}
+
+pub fn extract(part: DatePart, value: &DataValue) -> Result<i32, FunctionError> {
+    let d = match value {
+        DataValue::Date(d) => d,
+        _ => {
+            return Err(FunctionError::TypeMismatch {
+                expected: "DATE".to_string(),
+                found: value_type_name(value).to_string(),
+            });
+        }
+    };
+
+    Ok(match part {
+        DatePart::Year => d.year(),
+        DatePart::Month => d.month() as i32,
+        DatePart::Day => d.day() as i32,
+    })
 }
 
 /// Row-level NULL bitmap as described in the proposal.
@@ -933,5 +1045,43 @@ mod tests {
         assert!(row
             .set_value(0, &DataValue::Varchar("oops".to_string()))
             .is_err());
+    }
+
+    #[test]
+    fn fn_length_and_trim() {
+        let v = DataValue::Varchar("  rookdb  ".to_string());
+        assert_eq!(length(&v).unwrap(), 10);
+        assert_eq!(trim(&v).unwrap(), DataValue::Varchar("rookdb".to_string()));
+    }
+
+    #[test]
+    fn fn_substring() {
+        let v = DataValue::Varchar("database".to_string());
+        assert_eq!(substring(&v, 1, 4).unwrap(), DataValue::Varchar("data".to_string()));
+        assert_eq!(substring(&v, 5, 99).unwrap(), DataValue::Varchar("base".to_string()));
+        assert_eq!(substring(&v, 50, 2).unwrap(), DataValue::Varchar("".to_string()));
+        assert!(substring(&v, 0, 2).is_err());
+    }
+
+    #[test]
+    fn fn_upper_and_lower() {
+        let v = DataValue::Varchar("RookDb".to_string());
+        assert_eq!(upper(&v).unwrap(), DataValue::Varchar("ROOKDB".to_string()));
+        assert_eq!(lower(&v).unwrap(), DataValue::Varchar("rookdb".to_string()));
+    }
+
+    #[test]
+    fn fn_extract_date_parts() {
+        let d = DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap());
+        assert_eq!(extract(DatePart::Year, &d).unwrap(), 2026);
+        assert_eq!(extract(DatePart::Month, &d).unwrap(), 3);
+        assert_eq!(extract(DatePart::Day, &d).unwrap(), 13);
+    }
+
+    #[test]
+    fn fn_type_mismatch_errors() {
+        let i = DataValue::Int(7);
+        assert!(length(&i).is_err());
+        assert!(extract(DatePart::Year, &i).is_err());
     }
 }
