@@ -6,6 +6,7 @@ use std::str::FromStr;
 pub enum DataType {
     SmallInt,
     Int,
+    Bool,
     Varchar(u16),
     Date,
     Bit(u16),
@@ -17,6 +18,7 @@ impl DataType {
         match self {
             DataType::SmallInt => 2,
             DataType::Int | DataType::Date => 4,
+            DataType::Bool => 1,
             DataType::Varchar(_) => 1,
             DataType::Bit(_) => 1,
         }
@@ -28,6 +30,7 @@ impl DataType {
             DataType::SmallInt => Some(2),
             DataType::Int => Some(4),
             DataType::Date => Some(4),
+            DataType::Bool => Some(1),
             DataType::Bit(n) => Some((*n as u32).div_ceil(8)),
             DataType::Varchar(_) => None,
         }
@@ -70,6 +73,7 @@ impl fmt::Display for DataType {
         match self {
             DataType::SmallInt => write!(f, "SMALLINT"),
             DataType::Int => write!(f, "INT"),
+            DataType::Bool => write!(f, "BOOLEAN"),
             DataType::Varchar(n) => write!(f, "VARCHAR({})", n),
             DataType::Date => write!(f, "DATE"),
             DataType::Bit(n) => write!(f, "BIT({})", n),
@@ -85,6 +89,7 @@ impl FromStr for DataType {
         match upper.as_str() {
             "SMALLINT" => Ok(DataType::SmallInt),
             "INT" | "INTEGER" => Ok(DataType::Int),
+            "BOOL" | "BOOLEAN" => Ok(DataType::Bool),
             "DATE" => Ok(DataType::Date),
             _ => {
                 if upper.starts_with("VARCHAR(") && upper.ends_with(')') {

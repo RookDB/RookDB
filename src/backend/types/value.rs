@@ -10,6 +10,7 @@ use crate::types::validation::validate_value;
 pub enum DataValue {
     SmallInt(i16),
     Int(i32),
+    Bool(bool),
     Varchar(String),
     Date(NaiveDate),
     Bit(String),
@@ -20,6 +21,7 @@ impl fmt::Display for DataValue {
         match self {
             DataValue::SmallInt(v) => write!(f, "{}", v),
             DataValue::Int(v) => write!(f, "{}", v),
+            DataValue::Bool(v) => write!(f, "{}", v),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
             DataValue::Bit(v) => write!(f, "B'{}'", v),
@@ -32,6 +34,7 @@ impl DataValue {
         match self {
             DataValue::SmallInt(v) => v.to_le_bytes().to_vec(),
             DataValue::Int(v) => v.to_le_bytes().to_vec(),
+            DataValue::Bool(v) => vec![u8::from(*v)],
             DataValue::Varchar(v) => {
                 let bytes = v.as_bytes();
                 let mut out = Vec::with_capacity(2 + bytes.len());
@@ -65,6 +68,12 @@ impl DataValue {
                 Ok(DataValue::Int(i32::from_le_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3],
                 ])))
+            }
+            DataType::Bool => {
+                if bytes.is_empty() {
+                    return Err("BOOLEAN requires 1 byte".to_string());
+                }
+                Ok(DataValue::Bool(bytes[0] != 0))
             }
             DataType::Varchar(max_len) => {
                 let encoded_len = ty.encoded_len(bytes)?;
@@ -116,6 +125,11 @@ impl DataValue {
                 .map(DataValue::Int)
                 .map(|v| v.to_bytes())
                 .map_err(|e| e.to_string()),
+            DataType::Bool => match input.to_ascii_lowercase().as_str() {
+                "true" | "t" | "1" => Ok(DataValue::Bool(true).to_bytes()),
+                "false" | "f" | "0" => Ok(DataValue::Bool(false).to_bytes()),
+                _ => Err(format!("Invalid BOOLEAN value '{}': expected true/false", input)),
+            },
             DataType::Varchar(_) => {
                 let value = input.trim_matches('"').trim_matches('\'');
                 Ok(DataValue::Varchar(value.to_string()).to_bytes())

@@ -57,6 +57,17 @@ pub fn validate_int(input: &str) -> Result<(), TypeValidationError> {
         })
 }
 
+pub fn validate_bool(input: &str) -> Result<(), TypeValidationError> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "true" | "false" | "t" | "f" | "1" | "0" => Ok(()),
+        _ => Err(TypeValidationError::InvalidFormat {
+            ty: "BOOLEAN".to_string(),
+            value: input.trim().to_string(),
+            details: "expected one of: true, false, t, f, 1, 0".to_string(),
+        }),
+    }
+}
+
 pub fn validate_varchar(input: &str, max_len: u16) -> Result<(), TypeValidationError> {
     let value = input.trim().trim_matches('"').trim_matches('\'');
     if value.len() > max_len as usize {
@@ -103,6 +114,7 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
     match ty {
         DataType::SmallInt => validate_smallint(input),
         DataType::Int => validate_int(input),
+        DataType::Bool => validate_bool(input),
         DataType::Varchar(max_len) => validate_varchar(input, *max_len),
         DataType::Date => validate_date(input),
         DataType::Bit(bit_len) => validate_bit(input, *bit_len),

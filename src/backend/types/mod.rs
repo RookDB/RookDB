@@ -15,7 +15,7 @@ pub use functions::{DatePart, FunctionError, extract, length, lower, substring, 
 pub use null_bitmap::NullBitmap;
 pub use row::{Row, deserialize_nullable_row, serialize_nullable_row};
 pub use validation::{
-    TypeValidationError, validate_bit, validate_date, validate_int, validate_smallint,
+    TypeValidationError, validate_bit, validate_bool, validate_date, validate_int, validate_smallint,
     validate_value, validate_varchar,
 };
 pub use value::DataValue;

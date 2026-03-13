@@ -11,6 +11,7 @@ fn parse_phase_one_types() {
         "VARCHAR(64)".parse::<DataType>().unwrap(),
         DataType::Varchar(64)
     );
+    assert_eq!("BOOLEAN".parse::<DataType>().unwrap(), DataType::Bool);
     assert_eq!("DATE".parse::<DataType>().unwrap(), DataType::Date);
     assert_eq!("BIT(12)".parse::<DataType>().unwrap(), DataType::Bit(12));
 }
@@ -26,6 +27,7 @@ fn serde_roundtrip() {
     let types = vec![
         DataType::SmallInt,
         DataType::Int,
+        DataType::Bool,
         DataType::Varchar(32),
         DataType::Date,
         DataType::Bit(9),
@@ -42,6 +44,7 @@ fn display_matches_parse() {
     let types = vec![
         DataType::SmallInt,
         DataType::Int,
+        DataType::Bool,
         DataType::Varchar(8),
         DataType::Date,
         DataType::Bit(5),
@@ -58,12 +61,14 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::SmallInt.alignment(), 2);
     assert_eq!(DataType::Int.alignment(), 4);
     assert_eq!(DataType::Date.alignment(), 4);
+    assert_eq!(DataType::Bool.alignment(), 1);
     assert_eq!(DataType::Varchar(64).alignment(), 1);
     assert_eq!(DataType::Bit(13).alignment(), 1);
 
     assert_eq!(DataType::SmallInt.fixed_size(), Some(2));
     assert_eq!(DataType::Int.fixed_size(), Some(4));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
+    assert_eq!(DataType::Bool.fixed_size(), Some(1));
     assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
     assert_eq!(DataType::Varchar(64).fixed_size(), None);
 
@@ -89,6 +94,14 @@ fn roundtrip_int() {
         DataValue::from_bytes(&DataType::Int, &encoded).unwrap(),
         DataValue::Int(42)
     );
+}
+
+#[test]
+fn roundtrip_bool() {
+    let t = DataValue::parse_and_encode(&DataType::Bool, "true").unwrap();
+    let f = DataValue::parse_and_encode(&DataType::Bool, "0").unwrap();
+    assert_eq!(DataValue::from_bytes(&DataType::Bool, &t).unwrap(), DataValue::Bool(true));
+    assert_eq!(DataValue::from_bytes(&DataType::Bool, &f).unwrap(), DataValue::Bool(false));
 }
 
 #[test]
@@ -137,6 +150,15 @@ fn validate_smallint_bounds() {
 fn validate_int_bounds() {
     assert!(validate_int("2147483647").is_ok());
     assert!(validate_int("2147483648").is_err());
+}
+
+#[test]
+fn validate_bool_values() {
+    assert!(validate_bool("true").is_ok());
+    assert!(validate_bool("FALSE").is_ok());
+    assert!(validate_bool("1").is_ok());
+    assert!(validate_bool("0").is_ok());
+    assert!(validate_bool("maybe").is_err());
 }
 
 #[test]
@@ -219,6 +241,13 @@ fn compare_varchar_lexicographic() {
 }
 
 #[test]
+fn compare_boolean_ordering() {
+    let f = DataValue::Bool(false);
+    let t = DataValue::Bool(true);
+    assert_eq!(f.compare(&t).unwrap(), Ordering::Less);
+}
+
+#[test]
 fn compare_date_chronological() {
     let a = DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 12).unwrap());
     let b = DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap());
@@ -259,26 +288,28 @@ fn compare_nullable_non_null_values() {
 
 #[test]
 fn row_set_get_and_null() {
-    let schema = vec![DataType::Int, DataType::Varchar(16), DataType::Date];
+    let schema = vec![DataType::Int, DataType::Bool, DataType::Varchar(16), DataType::Date];
     let mut row = Row::new(schema);
 
     row.set_value(0, &DataValue::Int(99)).unwrap();
-    row.set_value(1, &DataValue::Varchar("alice".to_string()))
+    row.set_value(1, &DataValue::Bool(true)).unwrap();
+    row.set_value(2, &DataValue::Varchar("alice".to_string()))
         .unwrap();
     row.set_value(
-        2,
+        3,
         &DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap()),
     )
     .unwrap();
 
     assert_eq!(row.get_value(0).unwrap(), Some(DataValue::Int(99)));
+    assert_eq!(row.get_value(1).unwrap(), Some(DataValue::Bool(true)));
     assert_eq!(
-        row.get_value(1).unwrap(),
+        row.get_value(2).unwrap(),
         Some(DataValue::Varchar("alice".to_string()))
     );
 
-    row.set_null(1).unwrap();
-    assert_eq!(row.get_value(1).unwrap(), None);
+    row.set_null(2).unwrap();
+    assert_eq!(row.get_value(2).unwrap(), None);
 }
 
 #[test]

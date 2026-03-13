@@ -32,6 +32,7 @@ pub(crate) fn value_type_name(value: &DataValue) -> &'static str {
     match value {
         DataValue::SmallInt(_) => "SMALLINT",
         DataValue::Int(_) => "INT",
+        DataValue::Bool(_) => "BOOLEAN",
         DataValue::Varchar(_) => "VARCHAR",
         DataValue::Date(_) => "DATE",
         DataValue::Bit(_) => "BIT",
@@ -45,6 +46,7 @@ impl Comparable for DataValue {
             (DataValue::Int(a), DataValue::Int(b)) => Ok(a.cmp(b)),
             (DataValue::SmallInt(a), DataValue::Int(b)) => Ok((*a as i32).cmp(b)),
             (DataValue::Int(a), DataValue::SmallInt(b)) => Ok(a.cmp(&(*b as i32))),
+            (DataValue::Bool(a), DataValue::Bool(b)) => Ok(a.cmp(b)),
             (DataValue::Varchar(a), DataValue::Varchar(b)) => Ok(a.cmp(b)),
             (DataValue::Date(a), DataValue::Date(b)) => Ok(a.cmp(b)),
             (DataValue::Bit(a), DataValue::Bit(b)) => Ok(a.cmp(b)),
