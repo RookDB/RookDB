@@ -10,6 +10,7 @@ use crate::types::validation::validate_value;
 pub enum DataValue {
     SmallInt(i16),
     Int(i32),
+    BigInt(i64),
     Bool(bool),
     Varchar(String),
     Date(NaiveDate),
@@ -21,6 +22,7 @@ impl fmt::Display for DataValue {
         match self {
             DataValue::SmallInt(v) => write!(f, "{}", v),
             DataValue::Int(v) => write!(f, "{}", v),
+            DataValue::BigInt(v) => write!(f, "{}", v),
             DataValue::Bool(v) => write!(f, "{}", v),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
@@ -34,6 +36,7 @@ impl DataValue {
         match self {
             DataValue::SmallInt(v) => v.to_le_bytes().to_vec(),
             DataValue::Int(v) => v.to_le_bytes().to_vec(),
+            DataValue::BigInt(v) => v.to_le_bytes().to_vec(),
             DataValue::Bool(v) => vec![u8::from(*v)],
             DataValue::Varchar(v) => {
                 let bytes = v.as_bytes();
@@ -67,6 +70,15 @@ impl DataValue {
                 }
                 Ok(DataValue::Int(i32::from_le_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3],
+                ])))
+            }
+            DataType::BigInt => {
+                if bytes.len() < 8 {
+                    return Err("BIGINT requires 8 bytes".to_string());
+                }
+                Ok(DataValue::BigInt(i64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
                 ])))
             }
             DataType::Bool => {
@@ -123,6 +135,11 @@ impl DataValue {
             DataType::Int => input
                 .parse::<i32>()
                 .map(DataValue::Int)
+                .map(|v| v.to_bytes())
+                .map_err(|e| e.to_string()),
+            DataType::BigInt => input
+                .parse::<i64>()
+                .map(DataValue::BigInt)
                 .map(|v| v.to_bytes())
                 .map_err(|e| e.to_string()),
             DataType::Bool => match input.to_ascii_lowercase().as_str() {

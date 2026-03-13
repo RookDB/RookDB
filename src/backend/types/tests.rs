@@ -7,6 +7,7 @@ use super::*;
 fn parse_phase_one_types() {
     assert_eq!("SMALLINT".parse::<DataType>().unwrap(), DataType::SmallInt);
     assert_eq!("INT".parse::<DataType>().unwrap(), DataType::Int);
+    assert_eq!("BIGINT".parse::<DataType>().unwrap(), DataType::BigInt);
     assert_eq!(
         "VARCHAR(64)".parse::<DataType>().unwrap(),
         DataType::Varchar(64)
@@ -18,7 +19,6 @@ fn parse_phase_one_types() {
 
 #[test]
 fn parse_unknown_type_is_error() {
-    assert!("BIGINT".parse::<DataType>().is_err());
     assert!("BLOB".parse::<DataType>().is_err());
 }
 
@@ -27,6 +27,7 @@ fn serde_roundtrip() {
     let types = vec![
         DataType::SmallInt,
         DataType::Int,
+        DataType::BigInt,
         DataType::Bool,
         DataType::Varchar(32),
         DataType::Date,
@@ -44,6 +45,7 @@ fn display_matches_parse() {
     let types = vec![
         DataType::SmallInt,
         DataType::Int,
+        DataType::BigInt,
         DataType::Bool,
         DataType::Varchar(8),
         DataType::Date,
@@ -60,6 +62,7 @@ fn display_matches_parse() {
 fn phase_two_layout_rules() {
     assert_eq!(DataType::SmallInt.alignment(), 2);
     assert_eq!(DataType::Int.alignment(), 4);
+    assert_eq!(DataType::BigInt.alignment(), 8);
     assert_eq!(DataType::Date.alignment(), 4);
     assert_eq!(DataType::Bool.alignment(), 1);
     assert_eq!(DataType::Varchar(64).alignment(), 1);
@@ -67,6 +70,7 @@ fn phase_two_layout_rules() {
 
     assert_eq!(DataType::SmallInt.fixed_size(), Some(2));
     assert_eq!(DataType::Int.fixed_size(), Some(4));
+    assert_eq!(DataType::BigInt.fixed_size(), Some(8));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
     assert_eq!(DataType::Bool.fixed_size(), Some(1));
     assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
@@ -150,6 +154,33 @@ fn validate_smallint_bounds() {
 fn validate_int_bounds() {
     assert!(validate_int("2147483647").is_ok());
     assert!(validate_int("2147483648").is_err());
+}
+
+#[test]
+fn roundtrip_bigint() {
+    let encoded = DataValue::parse_and_encode(&DataType::BigInt, "-9000000000").unwrap();
+    assert_eq!(encoded.len(), 8);
+    assert_eq!(
+        DataValue::from_bytes(&DataType::BigInt, &encoded).unwrap(),
+        DataValue::BigInt(-9_000_000_000)
+    );
+}
+
+#[test]
+fn validate_bigint_bounds() {
+    assert!(validate_bigint("9223372036854775807").is_ok());
+    assert!(validate_bigint("9223372036854775808").is_err());
+    assert!(validate_bigint("-9223372036854775808").is_ok());
+}
+
+#[test]
+fn compare_bigint_promotion() {
+    let a = DataValue::SmallInt(100);
+    let b = DataValue::BigInt(200);
+    assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
+    let c = DataValue::Int(300);
+    assert_eq!(b.compare(&c).unwrap(), std::cmp::Ordering::Less);
+    assert!(a.is_equal(&DataValue::BigInt(100)).unwrap());
 }
 
 #[test]
