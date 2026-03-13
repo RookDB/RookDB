@@ -122,12 +122,14 @@ impl BufferManager {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         let mut inserted_rows = 0usize;
-        let mut current_page_index = self.pages.len() - 1; // DATA pages start at index 1
 
         // Ensure first data page exists
         if self.pages.len() == 1 {
             self.allocate_page();
         }
+
+        // Start inserting at the last data page (index >= 1, never the header page)
+        let mut current_page_index = self.pages.len() - 1;
 
         for (i, result) in csv_reader.records().enumerate() {
             let record = match result {

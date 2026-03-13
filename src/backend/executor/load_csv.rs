@@ -49,6 +49,8 @@ pub fn load_csv(
     // --- 3. Iterate through rows ---
     let mut inserted = 0;
     for (i, line) in lines.enumerate() {
+        println!("Processing row {}", i + 1);
+
         let row = line?;
         if row.trim().is_empty() {
             continue;

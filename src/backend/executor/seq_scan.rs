@@ -3,7 +3,7 @@ use std::io::{self};
 
 use crate::catalog::types::Catalog;
 use crate::disk::read_page;
-use crate::page::{Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
 
 /// Reads a variable-length value from a tuple byte slice at a given cursor position.
@@ -42,7 +42,6 @@ pub fn show_tuples(
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
-    total_pages = total_pages;
 
     // 3. Loop through each page
     for page_num in 1..total_pages {
