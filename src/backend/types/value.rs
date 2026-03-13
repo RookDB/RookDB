@@ -347,6 +347,10 @@ impl DataValue {
                 let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
                 Ok(DataValue::Numeric(decoded))
             }
+            DataType::Decimal { precision, scale } => {
+                let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
+                Ok(DataValue::Numeric(decoded))
+            }
             DataType::Bool => {
                 if bytes.is_empty() {
                     return Err("BOOLEAN requires 1 byte".to_string());
@@ -462,6 +466,10 @@ impl DataValue {
                 let parsed = parse_numeric_literal(input, *precision, *scale)?;
                 encode_numeric_bcd(&parsed, *precision)
             }
+            DataType::Decimal { precision, scale } => {
+                let parsed = parse_numeric_literal(input, *precision, *scale)?;
+                encode_numeric_bcd(&parsed, *precision)
+            }
             DataType::Bool => match input.to_ascii_lowercase().as_str() {
                 "true" | "t" | "1" => Ok(DataValue::Bool(true).to_bytes()),
                 "false" | "f" | "0" => Ok(DataValue::Bool(false).to_bytes()),
@@ -516,6 +524,15 @@ impl DataValue {
                 if v.scale != *scale {
                     return Err(format!(
                         "NUMERIC scale mismatch: value has scale {}, type requires {}",
+                        v.scale, scale
+                    ));
+                }
+                encode_numeric_bcd(v, *precision)
+            }
+            (DataType::Decimal { precision, scale }, DataValue::Numeric(v)) => {
+                if v.scale != *scale {
+                    return Err(format!(
+                        "DECIMAL scale mismatch: value has scale {}, type requires {}",
                         v.scale, scale
                     ));
                 }

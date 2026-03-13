@@ -242,6 +242,7 @@ pub fn validate_value(ty: &DataType, input: &str) -> Result<(), TypeValidationEr
         DataType::Real => validate_real(input),
         DataType::DoublePrecision => validate_double(input),
         DataType::Numeric { precision, scale } => validate_numeric(input, *precision, *scale),
+        DataType::Decimal { precision, scale } => validate_numeric(input, *precision, *scale),
         DataType::Bool => validate_bool(input),
         DataType::Char(fixed_len) => validate_char(input, *fixed_len),
         DataType::Varchar(max_len) => validate_varchar(input, *max_len),

@@ -10,6 +10,7 @@ pub enum DataType {
     Real,
     DoublePrecision,
     Numeric { precision: u8, scale: u8 },
+    Decimal { precision: u8, scale: u8 },
     Bool,
     Char(u16),
     Varchar(u16),
@@ -27,6 +28,7 @@ impl DataType {
             DataType::Int | DataType::Date | DataType::Real => 4,
             DataType::BigInt | DataType::DoublePrecision => 8,
             DataType::Numeric { .. } => 1,
+            DataType::Decimal { .. } => 1,
             DataType::Bool => 1,
             DataType::Char(_) => 1,
             DataType::Varchar(_) => 1,
@@ -43,6 +45,7 @@ impl DataType {
             DataType::Int | DataType::Real => Some(4),
             DataType::BigInt | DataType::DoublePrecision => Some(8),
             DataType::Numeric { precision, .. } => Some(((*precision as u32) + 1).div_ceil(2)),
+            DataType::Decimal { precision, .. } => Some(((*precision as u32) + 1).div_ceil(2)),
             DataType::Date => Some(4),
             DataType::Bool => Some(1),
             DataType::Char(n) => Some(*n as u32),
@@ -95,6 +98,9 @@ impl fmt::Display for DataType {
             DataType::DoublePrecision => write!(f, "DOUBLE PRECISION"),
             DataType::Numeric { precision, scale } => {
                 write!(f, "NUMERIC({},{})", precision, scale)
+            }
+            DataType::Decimal { precision, scale } => {
+                write!(f, "DECIMAL({},{})", precision, scale)
             }
             DataType::Bool => write!(f, "BOOLEAN"),
             DataType::Char(n) => write!(f, "CHAR({})", n),
@@ -150,6 +156,10 @@ impl FromStr for DataType {
                     let inner = &upper[8..upper.len() - 1];
                     let (precision, scale) = parse_precision_scale(inner)?;
                     Ok(DataType::Numeric { precision, scale })
+                } else if upper.starts_with("DECIMAL(") && upper.ends_with(')') {
+                    let inner = &upper[8..upper.len() - 1];
+                    let (precision, scale) = parse_precision_scale(inner)?;
+                    Ok(DataType::Decimal { precision, scale })
                 } else if upper.starts_with("CHAR(") && upper.ends_with(')') && !upper.starts_with("CHARACTER(") {
                     let inner = &upper[5..upper.len() - 1];
                     inner

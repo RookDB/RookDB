@@ -17,6 +17,13 @@ fn parse_phase_one_types() {
             scale: 2
         }
     );
+    assert_eq!(
+        "DECIMAL(10,2)".parse::<DataType>().unwrap(),
+        DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }
+    );
     assert_eq!("CHAR(10)".parse::<DataType>().unwrap(), DataType::Char(10));
     assert_eq!("CHARACTER(10)".parse::<DataType>().unwrap(), DataType::Char(10));
     assert_eq!(
@@ -47,6 +54,10 @@ fn serde_roundtrip() {
             precision: 10,
             scale: 2,
         },
+        DataType::Decimal {
+            precision: 10,
+            scale: 2,
+        },
         DataType::Bool,
         DataType::Char(10),
         DataType::Varchar(32),
@@ -71,6 +82,10 @@ fn display_matches_parse() {
         DataType::Real,
         DataType::DoublePrecision,
         DataType::Numeric {
+            precision: 8,
+            scale: 3,
+        },
+        DataType::Decimal {
             precision: 8,
             scale: 3,
         },
@@ -104,6 +119,14 @@ fn phase_two_layout_rules() {
         .alignment(),
         1
     );
+    assert_eq!(
+        DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }
+        .alignment(),
+        1
+    );
     assert_eq!(DataType::Char(10).alignment(), 1);
     assert_eq!(DataType::Time.alignment(), 8);
     assert_eq!(DataType::Date.alignment(), 4);
@@ -119,6 +142,14 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::DoublePrecision.fixed_size(), Some(8));
     assert_eq!(
         DataType::Numeric {
+            precision: 10,
+            scale: 2
+        }
+        .fixed_size(),
+        Some(6)
+    );
+    assert_eq!(
+        DataType::Decimal {
             precision: 10,
             scale: 2
         }
@@ -252,6 +283,23 @@ fn roundtrip_numeric() {
         DataValue::from_bytes(&ty, &encoded).unwrap(),
         DataValue::Numeric(NumericValue {
             unscaled: -1234567,
+            scale: 2,
+        })
+    );
+}
+
+#[test]
+fn roundtrip_decimal() {
+    let ty = DataType::Decimal {
+        precision: 10,
+        scale: 2,
+    };
+    let encoded = DataValue::parse_and_encode(&ty, "123.40").unwrap();
+    assert_eq!(encoded.len(), 6);
+    assert_eq!(
+        DataValue::from_bytes(&ty, &encoded).unwrap(),
+        DataValue::Numeric(NumericValue {
+            unscaled: 12_340,
             scale: 2,
         })
     );
