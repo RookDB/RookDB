@@ -15,10 +15,11 @@ pub use functions::{DatePart, FunctionError, extract, length, lower, substring, 
 pub use null_bitmap::NullBitmap;
 pub use row::{Row, deserialize_nullable_row, serialize_nullable_row};
 pub use validation::{
-    TypeValidationError, validate_bigint, validate_bit, validate_bool, validate_date, validate_int,
-    validate_real, validate_smallint, validate_value, validate_varchar,
+    TypeValidationError, validate_bigint, validate_bit, validate_bool, validate_date,
+    validate_double, validate_int, validate_real, validate_smallint, validate_value,
+    validate_varchar,
 };
-pub use value::{DataValue, OrderedF32};
+pub use value::{DataValue, OrderedF32, OrderedF64};
 
 #[cfg(test)]
 mod tests;

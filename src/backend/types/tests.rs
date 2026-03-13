@@ -9,6 +9,7 @@ fn parse_phase_one_types() {
     assert_eq!("INT".parse::<DataType>().unwrap(), DataType::Int);
     assert_eq!("BIGINT".parse::<DataType>().unwrap(), DataType::BigInt);
     assert_eq!("REAL".parse::<DataType>().unwrap(), DataType::Real);
+    assert_eq!("DOUBLE PRECISION".parse::<DataType>().unwrap(), DataType::DoublePrecision);
     assert_eq!(
         "VARCHAR(64)".parse::<DataType>().unwrap(),
         DataType::Varchar(64)
@@ -30,6 +31,7 @@ fn serde_roundtrip() {
         DataType::Int,
         DataType::BigInt,
         DataType::Real,
+        DataType::DoublePrecision,
         DataType::Bool,
         DataType::Varchar(32),
         DataType::Date,
@@ -49,6 +51,7 @@ fn display_matches_parse() {
         DataType::Int,
         DataType::BigInt,
         DataType::Real,
+        DataType::DoublePrecision,
         DataType::Bool,
         DataType::Varchar(8),
         DataType::Date,
@@ -67,6 +70,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::Int.alignment(), 4);
     assert_eq!(DataType::BigInt.alignment(), 8);
     assert_eq!(DataType::Real.alignment(), 4);
+    assert_eq!(DataType::DoublePrecision.alignment(), 8);
     assert_eq!(DataType::Date.alignment(), 4);
     assert_eq!(DataType::Bool.alignment(), 1);
     assert_eq!(DataType::Varchar(64).alignment(), 1);
@@ -76,6 +80,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::Int.fixed_size(), Some(4));
     assert_eq!(DataType::BigInt.fixed_size(), Some(8));
     assert_eq!(DataType::Real.fixed_size(), Some(4));
+    assert_eq!(DataType::DoublePrecision.fixed_size(), Some(8));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
     assert_eq!(DataType::Bool.fixed_size(), Some(1));
     assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
@@ -210,6 +215,34 @@ fn validate_real_values() {
 fn compare_real_ordering() {
     let a = DataValue::Real(OrderedF32(1.0_f32));
     let b = DataValue::Real(OrderedF32(2.0_f32));
+    assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
+}
+
+#[test]
+fn roundtrip_double_precision() {
+    let encoded =
+        DataValue::parse_and_encode(&DataType::DoublePrecision, "2.718281828459045").unwrap();
+    assert_eq!(encoded.len(), 8);
+    match DataValue::from_bytes(&DataType::DoublePrecision, &encoded).unwrap() {
+        DataValue::DoublePrecision(v) => {
+            assert!((v.0 - std::f64::consts::E).abs() < 1e-14)
+        }
+        _ => panic!("expected DoublePrecision variant"),
+    }
+}
+
+#[test]
+fn validate_double_values() {
+    assert!(validate_double("1.23456789012345").is_ok());
+    assert!(validate_double("-inf").is_ok());
+    assert!(validate_double("NaN").is_ok());
+    assert!(validate_double("not_a_float").is_err());
+}
+
+#[test]
+fn compare_double_ordering() {
+    let a = DataValue::DoublePrecision(OrderedF64(1.0_f64));
+    let b = DataValue::DoublePrecision(OrderedF64(9.99_f64));
     assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
 }
 

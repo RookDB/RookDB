@@ -37,12 +37,43 @@ impl Ord for OrderedF32 {
     }
 }
 
+/// IEEE 754 `f64` wrapper that satisfies `Eq` by comparing bit patterns.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OrderedF64(pub f64);
+
+impl PartialEq for OrderedF64 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+impl Eq for OrderedF64 {}
+
+impl PartialOrd for OrderedF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for OrderedF64 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or_else(|| {
+            match (self.0.is_nan(), other.0.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Less,
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataValue {
     SmallInt(i16),
     Int(i32),
     BigInt(i64),
     Real(OrderedF32),
+    DoublePrecision(OrderedF64),
     Bool(bool),
     Varchar(String),
     Date(NaiveDate),
@@ -56,6 +87,7 @@ impl fmt::Display for DataValue {
             DataValue::Int(v) => write!(f, "{}", v),
             DataValue::BigInt(v) => write!(f, "{}", v),
             DataValue::Real(v) => write!(f, "{}", v.0),
+            DataValue::DoublePrecision(v) => write!(f, "{}", v.0),
             DataValue::Bool(v) => write!(f, "{}", v),
             DataValue::Varchar(v) => write!(f, "'{}'", v),
             DataValue::Date(v) => write!(f, "{}", v.format("%Y-%m-%d")),
@@ -71,6 +103,7 @@ impl DataValue {
             DataValue::Int(v) => v.to_le_bytes().to_vec(),
             DataValue::BigInt(v) => v.to_le_bytes().to_vec(),
             DataValue::Real(v) => v.0.to_le_bytes().to_vec(),
+            DataValue::DoublePrecision(v) => v.0.to_le_bytes().to_vec(),
             DataValue::Bool(v) => vec![u8::from(*v)],
             DataValue::Varchar(v) => {
                 let bytes = v.as_bytes();
@@ -121,6 +154,15 @@ impl DataValue {
                 }
                 Ok(DataValue::Real(OrderedF32(f32::from_le_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3],
+                ]))))
+            }
+            DataType::DoublePrecision => {
+                if bytes.len() < 8 {
+                    return Err("DOUBLE PRECISION requires 8 bytes".to_string());
+                }
+                Ok(DataValue::DoublePrecision(OrderedF64(f64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
                 ]))))
             }
             DataType::Bool => {
@@ -187,6 +229,11 @@ impl DataValue {
             DataType::Real => input
                 .parse::<f32>()
                 .map(|v| DataValue::Real(OrderedF32(v)))
+                .map(|v| v.to_bytes())
+                .map_err(|e| e.to_string()),
+            DataType::DoublePrecision => input
+                .parse::<f64>()
+                .map(|v| DataValue::DoublePrecision(OrderedF64(v)))
                 .map(|v| v.to_bytes())
                 .map_err(|e| e.to_string()),
             DataType::Bool => match input.to_ascii_lowercase().as_str() {

@@ -76,6 +76,7 @@ fn data_value_matches_type(ty: &DataType, value: &DataValue) -> bool {
             | (DataType::Int, DataValue::Int(_))
             | (DataType::BigInt, DataValue::BigInt(_))
             | (DataType::Real, DataValue::Real(_))
+            | (DataType::DoublePrecision, DataValue::DoublePrecision(_))
             | (DataType::Bool, DataValue::Bool(_))
             | (DataType::Varchar(_), DataValue::Varchar(_))
             | (DataType::Date, DataValue::Date(_))

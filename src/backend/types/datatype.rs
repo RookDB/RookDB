@@ -8,6 +8,7 @@ pub enum DataType {
     Int,
     BigInt,
     Real,
+    DoublePrecision,
     Bool,
     Varchar(u16),
     Date,
@@ -20,7 +21,7 @@ impl DataType {
         match self {
             DataType::SmallInt => 2,
             DataType::Int | DataType::Date | DataType::Real => 4,
-            DataType::BigInt => 8,
+            DataType::BigInt | DataType::DoublePrecision => 8,
             DataType::Bool => 1,
             DataType::Varchar(_) => 1,
             DataType::Bit(_) => 1,
@@ -32,7 +33,7 @@ impl DataType {
         match self {
             DataType::SmallInt => Some(2),
             DataType::Int | DataType::Real => Some(4),
-            DataType::BigInt => Some(8),
+            DataType::BigInt | DataType::DoublePrecision => Some(8),
             DataType::Date => Some(4),
             DataType::Bool => Some(1),
             DataType::Bit(n) => Some((*n as u32).div_ceil(8)),
@@ -79,6 +80,7 @@ impl fmt::Display for DataType {
             DataType::Int => write!(f, "INT"),
             DataType::BigInt => write!(f, "BIGINT"),
             DataType::Real => write!(f, "REAL"),
+            DataType::DoublePrecision => write!(f, "DOUBLE PRECISION"),
             DataType::Bool => write!(f, "BOOLEAN"),
             DataType::Varchar(n) => write!(f, "VARCHAR({})", n),
             DataType::Date => write!(f, "DATE"),
@@ -97,6 +99,7 @@ impl FromStr for DataType {
             "INT" | "INTEGER" => Ok(DataType::Int),
             "BIGINT" => Ok(DataType::BigInt),
             "REAL" => Ok(DataType::Real),
+            "DOUBLE PRECISION" | "DOUBLEPRECISION" | "FLOAT8" => Ok(DataType::DoublePrecision),
             "BOOL" | "BOOLEAN" => Ok(DataType::Bool),
             "DATE" => Ok(DataType::Date),
             _ => {
