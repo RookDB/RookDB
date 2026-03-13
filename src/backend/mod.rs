@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod disk;
 pub mod executor;
 pub mod heap;
+pub mod join;
 pub mod layout;
 pub mod page;
 pub mod statistics;
