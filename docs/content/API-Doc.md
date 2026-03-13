@@ -17,7 +17,15 @@
 13. Write Page  
 14. Page Free Space  
 15. Add Tuple to Page  
-16. Read Item / Get Tuple
+16. Read Item / Get Tuple  
+17. Create Index  
+18. Drop Index  
+19. List Indexes  
+20. Build Index From Table  
+21. Load Index  
+22. Index Insert Maintenance  
+23. Index Delete Maintenance  
+24. Rebuild Indexes
 ---
 
 ## API Descriptions
@@ -302,6 +310,184 @@ Data inserted in the file.
     f. Write the updated page back to disk using [`write_page`](#3write_page-api) API.
 5. If the last page does not have enough free space:
     a. Create a new page in the file and add the tuple in the new page.
+
+---
+
+### 17. **create_index** API
+
+**Description:**  
+Adds an index entry to the catalog for a table column.
+
+**Function:**  
+```rust
+pub fn create_index(
+    catalog: &mut Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+    column_name: &str,
+    algorithm: IndexAlgorithm,
+) -> bool
+```
+
+**Output:**  
+Returns true on success, false if the database/table/column/index is invalid.
+
+**Implementation:**
+1. Validate database, table, and column.
+2. Append the `IndexEntry` to `table.indexes`.
+3. Save the catalog to disk.
+
+---
+
+### 18. **drop_index** API
+
+**Description:**  
+Removes an index entry from the catalog for a table.
+
+**Function:**  
+```rust
+pub fn drop_index(
+    catalog: &mut Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> bool
+```
+
+**Output:**  
+Returns true on success, false if the index does not exist.
+
+**Implementation:**
+1. Validate database and table.
+2. Remove the matching `IndexEntry` from `table.indexes`.
+3. Save the catalog to disk.
+
+---
+
+### 19. **list_indexes** API
+
+**Description:**  
+Returns the list of indexes defined on a table.
+
+**Function:**  
+```rust
+pub fn list_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> Option<&Vec<IndexEntry>>
+```
+
+**Output:**  
+Returns `Some(&Vec<IndexEntry>)` if the table exists, otherwise `None`.
+
+---
+
+### 20. **build_from_table** API
+
+**Description:**  
+Scans a table file and builds a fresh index for the selected column.
+
+**Function:**  
+```rust
+pub fn build_from_table(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    column_name: &str,
+    algorithm: &IndexAlgorithm,
+) -> io::Result<AnyIndex>
+```
+
+**Output:**  
+Returns a populated in-memory index ready to be saved to disk.
+
+**Implementation:**
+1. Resolve the column offset and type from the catalog schema.
+2. Scan all data pages and decode each tuple's key.
+3. Insert keys into the new index with `(page_no, item_id)` RecordIds.
+
+---
+
+### 21. **load** API (AnyIndex)
+
+**Description:**  
+Loads a persisted index file from disk into memory.
+
+**Function:**  
+```rust
+pub fn load(path: &str, algorithm: &IndexAlgorithm) -> io::Result<AnyIndex>
+```
+
+**Output:**  
+Returns a concrete index wrapped in `AnyIndex`.
+
+---
+
+### 22. **add_tuple_to_all_indexes** API
+
+**Description:**  
+Incrementally inserts a tuple into all indexes on a table.
+
+**Function:**  
+```rust
+pub fn add_tuple_to_all_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    tuple: &[u8],
+    record_id: RecordId,
+) -> io::Result<usize>
+```
+
+**Output:**  
+Returns the number of indexes updated.
+
+**Implementation:**
+1. Resolve each index entry in the table.
+2. Extract the key from the tuple using the column definition.
+3. Load index file, insert `(key, record_id)`, and save the index.
+
+---
+
+### 23. **remove_tuple_from_all_indexes** API
+
+**Description:**  
+Incrementally removes a tuple from all indexes on a table.
+
+**Function:**  
+```rust
+pub fn remove_tuple_from_all_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    tuple: &[u8],
+    record_id: RecordId,
+) -> io::Result<usize>
+```
+
+**Output:**  
+Returns the number of indexes updated.
+
+---
+
+### 24. **rebuild_table_indexes** API
+
+**Description:**  
+Rebuilds all indexes on a table by rescanning the heap (full refresh).
+
+**Function:**  
+```rust
+pub fn rebuild_table_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<usize>
+```
+
+**Output:**  
+Returns the number of indexes rebuilt.
 
 
 * [Code Documentation](https://hemanth-sunkireddy.github.io/Storage-Manager/storage_manager/all.html)

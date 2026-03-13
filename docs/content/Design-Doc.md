@@ -23,6 +23,7 @@ The storage manager in RookDB is broadly divided into the following four layers:
 - Table Layer  
 - Page Layer  
 - Buffer Manager Layer  
+- Index Layer  
 
 ---
 
@@ -59,3 +60,15 @@ RookDB adopts a slotted-page structure inspired by PostgreSQL, consisting of a p
 ## Buffer Manager Layer
 
 The Buffer Manager Layer maintains an in-memory cache of pages to minimize disk I/O and efficiently support data loading and manipulation.
+
+---
+
+## Index Layer
+
+The Index Layer provides secondary indexes over table columns to accelerate point lookups and range scans.  Each index is stored as a separate file alongside its table file and is described in the catalog via an `IndexEntry` (index name, column name, algorithm).
+
+Supported algorithms include Static Hash, Extendible Hash, Linear Hash, B-Tree, B+ Tree, and Radix Tree.  The index layer uses a type-erased `AnyIndex` wrapper so all algorithms share a common interface.
+
+Index maintenance is handled in two ways:
+- **Bulk rebuilds**: CSV ingestion triggers a full rebuild of every index on the table.
+- **Incremental updates**: Single-row insert/delete paths update each index by loading, applying the change, and saving back to disk.
