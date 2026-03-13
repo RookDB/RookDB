@@ -1,5 +1,6 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
+use crate::index::rebuild_table_indexes;
 use crate::page::{PAGE_SIZE, Page, init_page, page_free_space, ITEM_ID_SIZE};
 
 use std::fs::File;
@@ -244,6 +245,7 @@ impl BufferManager {
     ) -> io::Result<()> {
         let used = self.load_csv_into_pages(catalog, db_name, table_name, csv_path)?;
         self.flush_to_disk(db_name, table_name, used)?;
+        rebuild_table_indexes(catalog, db_name, table_name)?;
         Ok(())
     }
 }

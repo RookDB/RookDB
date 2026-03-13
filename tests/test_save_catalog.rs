@@ -30,6 +30,7 @@ fn test_save_catalog() {
             Column { name: "name".to_string(), data_type: "TEXT".to_string() },
             Column { name: "email".to_string(), data_type: "TEXT".to_string() },
         ],
+        indexes: vec![],
     };
 
     let db = catalog.databases.get_mut(db_name).unwrap();

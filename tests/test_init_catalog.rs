@@ -27,10 +27,7 @@ fn test_init_catalog() {
         serde_json::from_str(&content).expect("catalog.json contains invalid JSON");
 
     // Step 5: Verify structure is { "databases": {} }
-    // Step 5: Verify structure is { "databases": {} }
     assert!(
-        parsed.get("databases").is_some(),
-        "catalog.json does not contain 'databases' field"
         parsed.get("databases").is_some(),
         "catalog.json does not contain 'databases' field"
     );

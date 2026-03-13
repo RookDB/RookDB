@@ -26,7 +26,7 @@
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom};
 
-use crate::catalog::types::{Catalog, IndexAlgorithm};
+use crate::catalog::types::{Catalog, Column, IndexAlgorithm};
 use crate::index::config::{DEFAULT_HASH_INDEX, DEFAULT_TREE_INDEX, HashIndexType, TreeIndexType};
 use crate::index::hash::{ExtendibleHashIndex, LinearHashIndex, StaticHashIndex};
 use crate::index::index_trait::{HashBasedIndex, IndexKey, IndexTrait, RecordId, TreeBasedIndex};
@@ -354,4 +354,120 @@ pub fn index_file_path(db_name: &str, table_name: &str, index_name: &str) -> Str
         "database/base/{}/{}_{}.idx",
         db_name, table_name, index_name
     )
+}
+
+fn key_from_tuple(tuple: &[u8], columns: &[Column], column_name: &str) -> io::Result<IndexKey> {
+    let mut offset = 0usize;
+    for col in columns {
+        if col.name == column_name {
+            return extract_key(tuple, offset, &col.data_type).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "failed to extract key for column '{}' with type '{}'",
+                        column_name, col.data_type
+                    ),
+                )
+            });
+        }
+        let size = column_byte_size(&col.data_type);
+        if size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported column type '{}'", col.data_type),
+            ));
+        }
+        offset = offset.checked_add(size).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "tuple offset overflow")
+        })?;
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("column '{}' not found", column_name),
+    ))
+}
+
+pub fn rebuild_table_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> io::Result<usize> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    for idx in &table.indexes {
+        let rebuilt = AnyIndex::build_from_table(
+            catalog,
+            db_name,
+            table_name,
+            &idx.column_name,
+            &idx.algorithm,
+        )?;
+        rebuilt.save(&index_file_path(db_name, table_name, &idx.index_name))?;
+    }
+
+    Ok(table.indexes.len())
+}
+
+pub fn add_tuple_to_all_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    tuple: &[u8],
+    record_id: RecordId,
+) -> io::Result<usize> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    for idx in &table.indexes {
+        let key = key_from_tuple(tuple, &table.columns, &idx.column_name)?;
+        let path = index_file_path(db_name, table_name, &idx.index_name);
+        let mut index = AnyIndex::load(&path, &idx.algorithm)?;
+        index.insert(key, record_id.clone())?;
+        index.save(&path)?;
+    }
+
+    Ok(table.indexes.len())
+}
+
+pub fn remove_tuple_from_all_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    tuple: &[u8],
+    record_id: RecordId,
+) -> io::Result<usize> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    for idx in &table.indexes {
+        let key = key_from_tuple(tuple, &table.columns, &idx.column_name)?;
+        let path = index_file_path(db_name, table_name, &idx.index_name);
+        let mut index = AnyIndex::load(&path, &idx.algorithm)?;
+        index.delete(&key, &record_id)?;
+        index.save(&path)?;
+    }
+
+    Ok(table.indexes.len())
 }
