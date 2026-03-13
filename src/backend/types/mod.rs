@@ -523,6 +523,149 @@ pub fn deserialize_nullable_row(
     Ok(out)
 }
 
+fn data_value_matches_type(ty: &DataType, value: &DataValue) -> bool {
+    matches!(
+        (ty, value),
+        (DataType::SmallInt, DataValue::SmallInt(_))
+            | (DataType::Int, DataValue::Int(_))
+            | (DataType::Varchar(_), DataValue::Varchar(_))
+            | (DataType::Date, DataValue::Date(_))
+    )
+}
+
+fn serialize_nullable_typed_row(
+    schema: &[DataType],
+    values: &[Option<DataValue>],
+) -> Result<Vec<u8>, String> {
+    if schema.len() != values.len() {
+        return Err(format!(
+            "Schema/value length mismatch: schema={}, values={}",
+            schema.len(),
+            values.len()
+        ));
+    }
+
+    let bitmap_len = schema.len().div_ceil(8);
+    let mut bitmap = NullBitmap::new(schema.len());
+    let mut out = vec![0u8; bitmap_len];
+
+    for (i, (ty, maybe_value)) in schema.iter().zip(values.iter()).enumerate() {
+        match maybe_value {
+            Some(value) => {
+                if !data_value_matches_type(ty, value) {
+                    return Err(format!(
+                        "Type mismatch at column {}: expected {}, got {}",
+                        i,
+                        ty,
+                        value_type_name(value)
+                    ));
+                }
+                out.extend_from_slice(&value.to_bytes());
+            }
+            None => bitmap.set_null(i),
+        }
+    }
+
+    out[..bitmap_len].copy_from_slice(bitmap.as_bytes());
+    Ok(out)
+}
+
+#[derive(Debug, Clone)]
+pub struct Row {
+    schema: Vec<DataType>,
+    null_bitmap: NullBitmap,
+    data: Vec<u8>,
+}
+
+impl Row {
+    pub fn new(schema: Vec<DataType>) -> Self {
+        let mut null_bitmap = NullBitmap::new(schema.len());
+        for i in 0..schema.len() {
+            null_bitmap.set_null(i);
+        }
+        Self {
+            schema,
+            null_bitmap,
+            data: Vec::new(),
+        }
+    }
+
+    fn to_values(&self) -> Result<Vec<Option<DataValue>>, String> {
+        deserialize_nullable_row(&self.schema, &self.serialize())
+    }
+
+    fn rebuild_from_values(&mut self, values: &[Option<DataValue>]) -> Result<(), String> {
+        let row_bytes = serialize_nullable_typed_row(&self.schema, values)?;
+        let bitmap_len = self.schema.len().div_ceil(8);
+        self.null_bitmap = NullBitmap::from_bytes(self.schema.len(), &row_bytes[..bitmap_len])?;
+        self.data = row_bytes[bitmap_len..].to_vec();
+        Ok(())
+    }
+
+    pub fn set_value(&mut self, column_index: usize, value: &DataValue) -> Result<(), String> {
+        if column_index >= self.schema.len() {
+            return Err(format!("Column index {} out of bounds", column_index));
+        }
+
+        if !data_value_matches_type(&self.schema[column_index], value) {
+            return Err(format!(
+                "Type mismatch at column {}: expected {}, got {}",
+                column_index,
+                self.schema[column_index],
+                value_type_name(value)
+            ));
+        }
+
+        let mut values = self.to_values()?;
+        values[column_index] = Some(value.clone());
+        self.rebuild_from_values(&values)
+    }
+
+    pub fn set_null(&mut self, column_index: usize) -> Result<(), String> {
+        if column_index >= self.schema.len() {
+            return Err(format!("Column index {} out of bounds", column_index));
+        }
+
+        let mut values = self.to_values()?;
+        values[column_index] = None;
+        self.rebuild_from_values(&values)
+    }
+
+    pub fn get_value(&self, column_index: usize) -> Result<Option<DataValue>, String> {
+        if column_index >= self.schema.len() {
+            return Err(format!("Column index {} out of bounds", column_index));
+        }
+        let values = self.to_values()?;
+        Ok(values[column_index].clone())
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let bitmap_len = self.schema.len().div_ceil(8);
+        let mut out = Vec::with_capacity(bitmap_len + self.data.len());
+        out.extend_from_slice(self.null_bitmap.as_bytes());
+        out.extend_from_slice(&self.data);
+        out
+    }
+
+    pub fn deserialize(schema: &[DataType], bytes: &[u8]) -> Result<Self, String> {
+        let bitmap_len = schema.len().div_ceil(8);
+        if bytes.len() < bitmap_len {
+            return Err("Row shorter than NULL bitmap".to_string());
+        }
+
+        // Validate full decode once to ensure row integrity.
+        let _ = deserialize_nullable_row(schema, bytes)?;
+
+        let null_bitmap = NullBitmap::from_bytes(schema.len(), &bytes[..bitmap_len])?;
+        let data = bytes[bitmap_len..].to_vec();
+        Ok(Self {
+            schema: schema.to_vec(),
+            null_bitmap,
+            data,
+        })
+    }
+}
+
 // ──────────────────────────────────────────────
 //  Unit tests
 // ──────────────────────────────────────────────
@@ -737,5 +880,58 @@ mod tests {
         let b = DataValue::SmallInt(5);
         assert_eq!(compare_nullable(Some(&a), Some(&b)).unwrap(), Some(Ordering::Equal));
         assert_eq!(nullable_equals(Some(&a), Some(&b)).unwrap(), Some(true));
+    }
+
+    #[test]
+    fn row_set_get_and_null() {
+        let schema = vec![DataType::Int, DataType::Varchar(16), DataType::Date];
+        let mut row = Row::new(schema);
+
+        row.set_value(0, &DataValue::Int(99)).unwrap();
+        row.set_value(1, &DataValue::Varchar("alice".to_string()))
+            .unwrap();
+        row.set_value(
+            2,
+            &DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(row.get_value(0).unwrap(), Some(DataValue::Int(99)));
+        assert_eq!(
+            row.get_value(1).unwrap(),
+            Some(DataValue::Varchar("alice".to_string()))
+        );
+
+        row.set_null(1).unwrap();
+        assert_eq!(row.get_value(1).unwrap(), None);
+    }
+
+    #[test]
+    fn row_serialize_deserialize_roundtrip() {
+        let schema = vec![DataType::SmallInt, DataType::Varchar(8), DataType::Date];
+        let mut row = Row::new(schema.clone());
+        row.set_value(0, &DataValue::SmallInt(-5)).unwrap();
+        row.set_value(1, &DataValue::Varchar("rook".to_string()))
+            .unwrap();
+        row.set_null(2).unwrap();
+
+        let bytes = row.serialize();
+        let restored = Row::deserialize(&schema, &bytes).unwrap();
+
+        assert_eq!(restored.get_value(0).unwrap(), Some(DataValue::SmallInt(-5)));
+        assert_eq!(
+            restored.get_value(1).unwrap(),
+            Some(DataValue::Varchar("rook".to_string()))
+        );
+        assert_eq!(restored.get_value(2).unwrap(), None);
+    }
+
+    #[test]
+    fn row_set_value_type_mismatch_is_error() {
+        let schema = vec![DataType::Int];
+        let mut row = Row::new(schema);
+        assert!(row
+            .set_value(0, &DataValue::Varchar("oops".to_string()))
+            .is_err());
     }
 }
