@@ -193,7 +193,10 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     }
 
     // Insert table metadata into catalog
-    let new_table = Table { columns };
+    let new_table = Table {
+        columns,
+        schema_version: Some(2),
+    };
     database.tables.insert(table_name.to_string(), new_table);
 
     // Persist catalog changes
