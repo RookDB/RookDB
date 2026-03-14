@@ -1,6 +1,3 @@
-//! Handles the interactive command-line menu and routes user input
-//! to the appropriate operations.
-
 use std::io::{self, Write};
 
 // Core storage manager components
@@ -31,21 +28,31 @@ pub fn run() -> io::Result<()> {
     let mut current_db: Option<String> = None;
 
     loop {
-        println!("\n=============================");
-        println!("Choose an option:");
-        println!("1. Show Databases");
-        println!("2. Create Database");
-        println!("3. Select Database");
-        println!("4. Show Tables");
-        println!("5. Create Table");
-        println!("6. Load CSV");
-        println!("7. Show Tuples");
-        println!("8. Show Table Statistics");
-        println!("9. Exit");
-        println!("=============================");
+        println!("\n╔════════════════════════════════════════╗");
+        println!("║          ROOKDB MAIN MENU              ║");
+        println!("╠════════════════════════════════════════╣");
+        println!("║  Database Operations:                  ║");
+        println!("║    1. Show Databases                   ║");
+        println!("║    2. Create Database                  ║");
+        println!("║    3. Select Database                  ║");
+        println!("║                                        ║");
+        println!("║  Table Operations:                     ║");
+        println!("║    4. Show Tables                      ║");
+        println!("║    5. Create Table                     ║");
+        println!("║                                        ║");
+        println!("║  Data Operations:                      ║");
+        println!("║    6. Load CSV                         ║");
+        println!("║    7. Insert Single Tuple              ║");
+        println!("║    8. Show Tuples                      ║");
+        println!("║    9. Show Table Statistics            ║");
+        println!("║                                        ║");
+        println!("║  Maintenance:                          ║");
+        println!("║    10. Check Heap Health               ║");
+        println!("║    11. Exit                            ║");
+        println!("╚════════════════════════════════════════╝");
 
         // Read user input
-        print!("Enter your choice: ");
+        print!("\nEnter your choice (1-11): ");
         io::stdout().flush()?;
 
         let mut choice = String::new();
@@ -60,13 +67,17 @@ pub fn run() -> io::Result<()> {
             "4" => table_cmd::show_tables_cmd(&catalog, &current_db),
             "5" => table_cmd::create_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
             "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
-            "7" => data_cmd::show_tuples_cmd(&current_db)?,
-            "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
-            "9" => {
-                println!("Exiting RookDB. Goodbye!");
+            "7" => data_cmd::insert_tuple_cmd(&current_db)?,
+            "8" => data_cmd::show_tuples_cmd(&current_db)?,
+            "9" => table_cmd::show_table_statistics_cmd(&current_db)?,
+            "10" => data_cmd::check_heap_cmd(&current_db)?,
+            "11" => {
+                println!("\n╔════════════════════════════════════╗");
+                println!("║   Exiting RookDB. Goodbye!        ║");
+                println!("╚════════════════════════════════════╝\n");
                 break;
             }
-            _ => println!("Invalid option."),
+            _ => println!(" Invalid option. Please enter a number between 1 and 11."),
         }
     }
 

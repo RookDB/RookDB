@@ -5,24 +5,43 @@ use crate::disk::{create_page, read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, Page, page_free_space};
 use crate::table::{TABLE_HEADER_SIZE, page_count};
 
-/// Initialize a new table file
+pub mod types;
+pub mod heap_manager;
+
+pub use heap_manager::HeapManager;
+
+/// Initialize a new table file with HeaderMetadata.
+/// 
+/// Creates a new table file with:
+/// - Page 0: HeaderMetadata (20 bytes) + padding (remaining 8192 - 20 bytes)
+/// - Page 1: First data page (empty slotted page)
+/// 
+/// This new version uses the improved header format that tracks FSM pages
+/// and maintains a tuple counter.
+#[deprecated(
+    note = "Use HeapManager::create or open with existing file instead"
+)]
 pub fn init_table(file: &mut File) -> io::Result<()> {
-    // Move cursor to the beginning of the file
+    use crate::backend::heap::types::HeaderMetadata;
+
     file.seek(SeekFrom::Start(0))?;
 
-    // Allocate 8192 bytes
-    let mut zero_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
+    // Create initial header
+    let header = HeaderMetadata::new();
+    let header_bytes = header.serialize()?;
 
-    //  Write "1" into the first 4 bytes (little-endian u32)
-    // This can represent the total number of pages, e.g. 1
-    zero_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+    // Create header page with metadata
+    let mut header_page_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
+    header_page_buf[0..20].copy_from_slice(&header_bytes);
 
-    // Write the full buffer (header) to the file
-    file.write_all(&zero_buf)?;
+    file.write_all(&header_page_buf)?;
     file.flush()?;
     file.sync_all()?;
 
+    // Create first data page
     create_page(file)?;
+
+    println!("[init_table] New table initialized with HeaderMetadata");
 
     Ok(())
 }

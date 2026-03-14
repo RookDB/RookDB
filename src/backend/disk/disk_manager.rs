@@ -3,6 +3,7 @@ use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 
 use crate::page::{PAGE_SIZE, Page, init_page};
 use crate::table::page_count;
+use crate::heap::types::HeaderMetadata;
 
 // Create a new page on disk and return its page number
 pub fn create_page(file: &mut File) -> io::Result<u32> {
@@ -78,4 +79,52 @@ pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result
     file.write_all(&page.data)?;
 
     Ok(())
+}
+
+/// Update the header page (Page 0) with HeaderMetadata.
+/// Writes the 20-byte metadata at the start of Page 0, leaving rest of page untouched.
+/// 
+/// # Arguments
+/// * `file` - Open heap file handle  
+/// * `header` - HeaderMetadata struct to persist
+/// 
+/// # Errors
+/// Returns io::Error if seek/write fails.
+pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> io::Result<()> {
+    println!("[disk::update_header_page] Writing header metadata to page 0");
+    
+    // Serialize the header
+    let header_bytes = header.serialize()?;
+    
+    // Seek to page 0, offset 0
+    file.seek(SeekFrom::Start(0))?;
+    
+    // Write the 20-byte header
+    file.write_all(&header_bytes)?;
+    
+    println!("[disk::update_header_page] Header successfully written");
+    
+    Ok(())
+}
+
+/// Read and deserialize the header page (Page 0) into HeaderMetadata.
+/// Reads the first 20 bytes of Page 0.
+/// 
+/// # Arguments
+/// * `file` - Open heap file handle
+/// 
+/// # Returns
+/// The deserialized HeaderMetadata or io::Error
+pub fn read_header_page(file: &mut File) -> io::Result<HeaderMetadata> {
+    println!("[disk::read_header_page] Reading header metadata from page 0");
+    
+    // Seek to page 0, offset 0
+    file.seek(SeekFrom::Start(0))?;
+    
+    // Read 20 bytes
+    let mut buf = [0u8; 20];
+    file.read_exact(&mut buf)?;
+    
+    // Deserialize
+    HeaderMetadata::deserialize(&buf)
 }
