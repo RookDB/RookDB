@@ -113,6 +113,11 @@ impl BufferManager {
         let mut lines = reader.lines();
         if let Some(Ok(_)) = lines.next() {} // skip header
 
+        // Ensure first data page exists BEFORE setting the index
+        if self.pages.len() == 1 {
+            self.allocate_page();
+        }
+
         let mut inserted_rows = 0usize;
         let mut current_page_index = self.pages.len() - 1; // DATA pages start at index 1
 

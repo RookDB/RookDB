@@ -644,32 +644,32 @@ Next fsm_search_avail call will find page 45
 ```
 src/backend/
 ├── fsm/
-│   ├── mod.rs                    # Module declaration (5 lines)
-│   └── fsm.rs                    # FSMPage + FSM implementation (750 lines)
+│   ├── mod.rs                    # Module declaration
+│   └── fsm.rs                    # FSMPage + FSM implementation
 └── heap/
-    ├── heap_manager.rs           # HeapManager + HeapScanIterator (800 lines)
-    └── types.rs                  # HeaderMetadata struct (150 lines)
+    ├── heap_manager.rs           # HeapManager + HeapScanIterator 
+    └── types.rs                  # HeaderMetadata struct 
 ```
 
-**fsm/fsm.rs** (750 lines)
+**fsm/fsm.rs** 
 
 - Constants: `FSM_NODES_PER_PAGE`, `FSM_SLOTS_PER_PAGE`, `FSM_LEVELS`
 - `FSMPage` struct: binary max-tree array, `fp_next_slot`
 - `FSM` struct: `build_from_heap`, `fsm_search_avail`, `fsm_set_avail`, `fsm_vacuum_update`
 - Private helpers: `read_fsm_page`, `write_fsm_page`, `fsm_block_for`, `leaf_index`, `bubble_up`
 
-**heap/heap_manager.rs** (800 lines)
+**heap/heap_manager.rs** 
 
 - HeapManager struct, open, insert_tuple, get_tuple, scan, allocate_new_page, flush
 - HeapScanIterator implementation
 
-**heap/types.rs** (150 lines)
+**heap/types.rs** 
 
 - HeaderMetadata struct, from_page, write_to_page
 
 ### Modified Files
 
-**backend/mod.rs** (+1 line)
+**backend/mod.rs**
 
 ```rust
 pub mod fsm;
@@ -688,16 +688,10 @@ pub use types::HeaderMetadata;
 
 - Add `get_tuple_count()`, `get_slot_entry()` helper functions
 
-**backend/disk/disk_manager.rs** (+8 lines)
+**backend/disk/disk_manager.rs** 
 
 - Add `update_header_page()` function
 
-### Summary
-
-- **New files:** 4 files (~1,705 lines)
-- **Modified files:** 4 files (+74 lines)
-- **Total:** ~1,779 lines of code
-- **Sidecar files generated at runtime:** `<table>.fsm` (FSM fork, 1 byte/heap page overhead)
 
 ---
 
@@ -799,7 +793,7 @@ mod tests {
 
 ---
 
-## Conclusion
+## Conclusion 
 
 This design implements RookDB's Free Space Manager and Heap File Manager (Project 6) with:
 
@@ -809,8 +803,3 @@ This design implements RookDB's Free Space Manager and Heap File Manager (Projec
 4. **Persistence**: FSM fork treated as a hint — rebuilt from heap on crash without WAL; header survives crashes
 5. **Testing**: 24 comprehensive tests covering tree invariants, search, insertion and persistence
 
-**Implementation**: ~1,700 lines of Rust code, minimal changes to existing components
-
-**Status**: Ready for Implementation  
-**Estimated Time**: 3-4 weeks (2 developers)  
-**Dependencies**: None (uses existing Disk Manager, Page, Buffer Manager)
