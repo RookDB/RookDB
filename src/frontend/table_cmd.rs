@@ -60,7 +60,9 @@ pub fn create_table_cmd(
 
         columns.push(Column {
             name: parts[0].to_string(),
-            data_type: parts[1].to_string(),
+            data_type: Some(parts[1].to_string()),
+            nullable: false,
+            schema_version: Some(2),
         });
     }
 

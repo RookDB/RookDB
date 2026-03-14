@@ -72,7 +72,8 @@ pub fn load_csv(
         let mut tuple_bytes: Vec<u8> = Vec::new();
 
         for (val, col) in values.iter().zip(columns.iter()) {
-            match col.data_type.as_str() {
+            let type_str = col.data_type.as_ref().map(|s| s.as_str()).unwrap_or("UNKNOWN");
+            match type_str {
                 "INT" => {
                     let num: i32 = val.parse().unwrap_or_default();
                     tuple_bytes.extend_from_slice(&num.to_le_bytes());
@@ -89,7 +90,7 @@ pub fn load_csv(
                 _ => {
                     println!(
                         "Unsupported column type '{}' in column '{}'",
-                        col.data_type, col.name
+                        type_str, col.name
                     );
                     continue;
                 }
