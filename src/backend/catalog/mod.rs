@@ -1,5 +1,7 @@
 pub mod types;
+pub mod column_type;
 pub use types::{Catalog, Column, Database, Table};
+pub use column_type::{serialize_value, deserialize_value, is_variable_length};
 pub mod catalog;
 
 pub use catalog::{

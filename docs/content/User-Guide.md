@@ -50,13 +50,16 @@ column_name:data_type
 3. Press Enter on an empty line to finish
 
 Supported Types:
-- INT
-- TEXT
+- **INT** – fixed-length 4-byte integer
+- **TEXT** – variable-length string (stored as length + bytes)
+- **VARCHAR** – variable-length string, no max
+- **VARCHAR(n)** – variable-length string with max length (e.g. `VARCHAR(255)`)
 
 Example:
 ```
 id:INT
 name:TEXT
+title:VARCHAR(100)
 ```
 
 ---

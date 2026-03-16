@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 
 use crate::catalog::types::Catalog;
+use crate::catalog::serialize_value;
 use crate::heap::insert_tuple;
 
 pub fn load_csv(
@@ -68,32 +69,23 @@ pub fn load_csv(
             continue;
         }
 
-        // --- 4. Serialize row based on schema ---
+        // --- 4. Serialize row based on schema (INT fixed; TEXT/VARCHAR variable-length) ---
         let mut tuple_bytes: Vec<u8> = Vec::new();
-
+        let mut skip_row = false;
         for (val, col) in values.iter().zip(columns.iter()) {
-            match col.data_type.as_str() {
-                "INT" => {
-                    let num: i32 = val.parse().unwrap_or_default();
-                    tuple_bytes.extend_from_slice(&num.to_le_bytes());
-                }
-                "TEXT" => {
-                    let mut text_bytes = val.as_bytes().to_vec();
-                    if text_bytes.len() > 10 {
-                        text_bytes.truncate(10);
-                    } else if text_bytes.len() < 10 {
-                        text_bytes.extend(vec![b' '; 10 - text_bytes.len()]);
-                    }
-                    tuple_bytes.extend_from_slice(&text_bytes);
-                }
-                _ => {
-                    println!(
-                        "Unsupported column type '{}' in column '{}'",
-                        col.data_type, col.name
-                    );
-                    continue;
-                }
+            let bytes = serialize_value(col, val);
+            if bytes.is_empty() {
+                println!(
+                    "Unsupported column type '{}' in column '{}'",
+                    col.data_type, col.name
+                );
+                skip_row = true;
+                break;
             }
+            tuple_bytes.extend_from_slice(&bytes);
+        }
+        if skip_row {
+            continue;
         }
 
         // --- 5. Insert tuple into page system ---

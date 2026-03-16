@@ -1,4 +1,5 @@
 use crate::catalog::types::Catalog;
+use crate::catalog::serialize_value;
 use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
 
@@ -138,25 +139,19 @@ impl BufferManager {
                 continue;
             }
 
-            // Serialize tuple
+            // Serialize tuple (INT fixed; TEXT/VARCHAR variable-length)
             let mut tuple_bytes: Vec<u8> = Vec::new();
+            let mut skip_row = false;
             for (val, col) in values.iter().zip(columns.iter()) {
-                match col.data_type.as_str() {
-                    "INT" => {
-                        let num: i32 = val.parse().unwrap_or_default();
-                        tuple_bytes.extend_from_slice(&num.to_le_bytes());
-                    }
-                    "TEXT" => {
-                        let mut t = val.as_bytes().to_vec();
-                        if t.len() > 10 {
-                            t.truncate(10);
-                        } else if t.len() < 10 {
-                            t.extend(vec![b' '; 10 - t.len()]);
-                        }
-                        tuple_bytes.extend_from_slice(&t);
-                    }
-                    _ => continue,
+                let bytes = serialize_value(col, val);
+                if bytes.is_empty() {
+                    skip_row = true;
+                    break;
                 }
+                tuple_bytes.extend_from_slice(&bytes);
+            }
+            if skip_row {
+                continue;
             }
 
             let tuple_len = tuple_bytes.len() as u32;

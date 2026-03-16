@@ -26,4 +26,4 @@ Run a specific test: `cargo test --test <file_name>`
 
 ---
 
-> Note: RookDB currently supports only INT and TEXT data types. Ensure that table schemas are created using only these data types. Accordingly, the CSV file used for loading data (e.g., examples/example.csv) must contain only INT or TEXT columns. If you are running the system for the first time, it is recommended to load examples/example.csv to understand the expected format.
+> Note: RookDB supports INT (fixed-length), and TEXT and VARCHAR (variable-length) data types. Use `INT`, `TEXT`, `VARCHAR`, or `VARCHAR(n)` (e.g. `VARCHAR(255)`) when creating columns. TEXT and VARCHAR store a 2-byte length prefix followed by the string bytes, so row size varies with content. Ensure CSV files match the table schema. For first-time use, try loading examples/example.csv to see the expected format.

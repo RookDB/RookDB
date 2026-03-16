@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self};
 
 use crate::catalog::types::Catalog;
+use crate::catalog::deserialize_value;
 use crate::disk::read_page;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
@@ -30,11 +31,10 @@ pub fn show_tuples(
     let columns = &table.columns;
 
     // 2. Read total number of pages
-    let mut total_pages = page_count(file)?; // total pages currently in file
+    let total_pages = page_count(file)?; // total pages currently in file
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
-    total_pages = total_pages;
 
     // 3. Loop through each page
     for page_num in 1..total_pages {
@@ -58,30 +58,13 @@ pub fn show_tuples(
 
             print!("Tuple {}: ", i + 1);
 
-            // 5. Decode each column
+            // 5. Decode each column (INT fixed; TEXT/VARCHAR variable-length)
             let mut cursor = 0usize;
             for col in columns {
-                match col.data_type.as_str() {
-                    "INT" => {
-                        if cursor + 4 <= tuple_data.len() {
-                            let val = i32::from_le_bytes(
-                                tuple_data[cursor..cursor + 4].try_into().unwrap(),
-                            );
-                            print!("{}={} ", col.name, val);
-                            cursor += 4;
-                        }
-                    }
-                    "TEXT" => {
-                        if cursor + 10 <= tuple_data.len() {
-                            let text_bytes = &tuple_data[cursor..cursor + 10];
-                            let text = String::from_utf8_lossy(text_bytes).trim().to_string();
-                            print!("{}='{}' ", col.name, text);
-                            cursor += 10;
-                        }
-                    }
-                    _ => {
-                        print!("{}=<unsupported> ", col.name);
-                    }
+                if let Some(display) = deserialize_value(col, tuple_data, &mut cursor) {
+                    print!("{}={} ", col.name, display);
+                } else {
+                    print!("{}=<invalid> ", col.name);
                 }
             }
             println!();
