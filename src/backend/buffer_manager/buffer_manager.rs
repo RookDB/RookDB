@@ -1,6 +1,9 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
 use crate::executor::json_utils::validate_json;
+use crate::executor::jsonb::JsonbSerializer;
+use crate::executor::udt::UdtSerializer;
+use crate::executor::xml_utils::XmlValidator;
 use crate::page::{init_page, page_free_space, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
 
 use std::fs::File;
@@ -177,6 +180,50 @@ impl BufferManager {
                             break;
                         }
                         serialize_variable_length(&mut tuple_bytes, val.as_bytes());
+                    }
+                    "JSONB" => {
+                        let jsonb_value = match JsonbSerializer::parse(val) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                println!("Skipping row: {}", e);
+                                skip_row = true;
+                                break;
+                            }
+                        };
+                        let binary = JsonbSerializer::to_binary(&jsonb_value);
+                        serialize_variable_length(&mut tuple_bytes, &binary);
+                    }
+                    "XML" => {
+                        if let Err(e) = XmlValidator::validate(val) {
+                            println!("Skipping row: {}", e);
+                            skip_row = true;
+                            break;
+                        }
+                        serialize_variable_length(&mut tuple_bytes, val.as_bytes());
+                    }
+                    dt if dt.starts_with("UDT:") => {
+                        let udt_name = &dt[4..];
+                        let udt_def = match db.types.get(udt_name) {
+                            Some(d) => d,
+                            None => {
+                                println!(
+                                    "Skipping row: UDT '{}' not found in database",
+                                    udt_name
+                                );
+                                skip_row = true;
+                                break;
+                            }
+                        };
+                        let field_values: Vec<&str> = val.split(',').collect();
+                        let udt_bytes = match UdtSerializer::serialize(udt_def, &field_values) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                println!("Skipping row: {}", e);
+                                skip_row = true;
+                                break;
+                            }
+                        };
+                        serialize_variable_length(&mut tuple_bytes, &udt_bytes);
                     }
                     _ => continue,
                 }

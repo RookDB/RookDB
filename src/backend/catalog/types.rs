@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Represents a column within a table.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Column {
     pub name: String,
     pub data_type: String,
@@ -17,10 +17,18 @@ pub struct Table {
     pub columns: Vec<Column>,
 }
 
+/// Represents a user-defined composite type definition stored in the catalog.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UdtDefinition {
+    pub fields: Vec<Column>,
+}
+
 /// Represents a database containing multiple tables.
 #[derive(Serialize, Deserialize)]
 pub struct Database {
     pub tables: HashMap<String, Table>,
+    #[serde(default)]
+    pub types: HashMap<String, UdtDefinition>,
 }
 
 /// Represents the top-level catalog holding all databases.

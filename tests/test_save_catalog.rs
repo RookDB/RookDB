@@ -22,6 +22,7 @@ fn test_save_catalog() {
             db_name.to_string(),
             Database {
                 tables: Default::default(),
+                types: Default::default(),
             },
         );
     }

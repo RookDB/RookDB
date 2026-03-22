@@ -3,6 +3,8 @@ use std::io::{self};
 
 use crate::catalog::types::Catalog;
 use crate::disk::read_page;
+use crate::executor::jsonb::JsonbSerializer;
+use crate::executor::udt::UdtSerializer;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
 
@@ -91,6 +93,41 @@ pub fn show_tuples(
                             deserialize_variable_length(tuple_data, cursor);
                         let json = String::from_utf8_lossy(&json_bytes).to_string();
                         print!("{}={} ", col.name, json);
+                        cursor = new_cursor;
+                    }
+                    "JSONB" => {
+                        let (jsonb_bytes, new_cursor) =
+                            deserialize_variable_length(tuple_data, cursor);
+                        match JsonbSerializer::from_binary(&jsonb_bytes) {
+                            Ok((value, _)) => {
+                                let display = JsonbSerializer::to_display_string(&value);
+                                print!("{}={} ", col.name, display);
+                            }
+                            Err(e) => {
+                                print!("{}=<JSONB error: {}> ", col.name, e);
+                            }
+                        }
+                        cursor = new_cursor;
+                    }
+                    "XML" => {
+                        let (xml_bytes, new_cursor) =
+                            deserialize_variable_length(tuple_data, cursor);
+                        let xml = String::from_utf8_lossy(&xml_bytes).to_string();
+                        print!("{}={} ", col.name, xml);
+                        cursor = new_cursor;
+                    }
+                    dt if dt.starts_with("UDT:") => {
+                        let udt_name = &dt[4..];
+                        let (udt_bytes, new_cursor) =
+                            deserialize_variable_length(tuple_data, cursor);
+                        if let Some(udt_def) = db.types.get(udt_name) {
+                            match UdtSerializer::to_display_string(udt_def, &udt_bytes) {
+                                Ok(display) => print!("{}={} ", col.name, display),
+                                Err(e) => print!("{}=<UDT error: {}> ", col.name, e),
+                            }
+                        } else {
+                            print!("{}=<UDT '{}' not found> ", col.name, udt_name);
+                        }
                         cursor = new_cursor;
                     }
                     _ => {

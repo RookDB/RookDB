@@ -135,6 +135,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
         db_name.to_string(),
         Database {
             tables: HashMap::new(),
+            types: HashMap::new(),
         },
     );
 
@@ -192,6 +193,19 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
         return;
     }
 
+    // Validate UDT column references
+    for col in &columns {
+        if let Some(udt_name) = col.data_type.strip_prefix("UDT:") {
+            if !database.types.contains_key(udt_name) {
+                println!(
+                    "Error: UDT '{}' not found in database '{}'. Create the type first.",
+                    udt_name, db_name
+                );
+                return;
+            }
+        }
+    }
+
     // Insert table metadata into catalog
     let new_table = Table { columns };
     database.tables.insert(table_name.to_string(), new_table);
@@ -239,6 +253,60 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
         "Table '{}' created successfully in database '{}' and saved to catalog.",
         table_name, db_name
     );
+}
+
+/// Registers a new user-defined type in the catalog for a given database.
+pub fn create_type(
+    catalog: &mut Catalog,
+    db_name: &str,
+    type_name: &str,
+    fields: Vec<Column>,
+) -> Result<(), String> {
+    let database = catalog
+        .databases
+        .get_mut(db_name)
+        .ok_or_else(|| format!("Database '{}' not found", db_name))?;
+
+    if database.types.contains_key(type_name) {
+        return Err(format!(
+            "Type '{}' already exists in database '{}'",
+            type_name, db_name
+        ));
+    }
+
+    database
+        .types
+        .insert(type_name.to_string(), UdtDefinition { fields });
+
+    save_catalog(catalog);
+    println!("Type '{}' created successfully.", type_name);
+    Ok(())
+}
+
+/// Lists all user-defined types in the specified database.
+pub fn show_types(catalog: &Catalog, db_name: &str) {
+    println!("--------------------------");
+    println!("Types in Database: {}", db_name);
+    println!("--------------------------");
+
+    if let Some(database) = catalog.databases.get(db_name) {
+        if database.types.is_empty() {
+            println!("No types found in '{}'.\n", db_name);
+            return;
+        }
+
+        for (type_name, udt_def) in &database.types {
+            let fields_str: Vec<String> = udt_def
+                .fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name, f.data_type))
+                .collect();
+            println!("  {}({})", type_name, fields_str.join(", "));
+        }
+        println!();
+    } else {
+        println!("Database '{}' not found.\n", db_name);
+    }
 }
 
 /// Lists all tables in the specified database.

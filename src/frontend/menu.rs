@@ -8,7 +8,7 @@ use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{init_catalog, load_catalog};
 
 // Frontend command handlers
-use crate::frontend::{data_cmd, database_cmd, table_cmd};
+use crate::frontend::{data_cmd, database_cmd, table_cmd, type_cmd};
 
 /// Runs the main interactive menu loop
 pub fn run() -> io::Result<()> {
@@ -41,7 +41,9 @@ pub fn run() -> io::Result<()> {
         println!("6. Load CSV");
         println!("7. Show Tuples");
         println!("8. Show Table Statistics");
-        println!("9. Exit");
+        println!("9. Create Type");
+        println!("10. Show Types");
+        println!("11. Exit");
         println!("=============================");
 
         // Read user input
@@ -62,7 +64,9 @@ pub fn run() -> io::Result<()> {
             "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
-            "9" => {
+            "9" => type_cmd::create_type_cmd(&mut catalog, &current_db)?,
+            "10" => type_cmd::show_types_cmd(&catalog, &current_db),
+            "11" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }
