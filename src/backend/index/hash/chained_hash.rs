@@ -102,6 +102,44 @@ impl IndexTrait for ChainedHashIndex {
     fn index_type_name(&self) -> &'static str {
         "chained_hash"
     }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        let mut out = Vec::new();
+        for bucket in &self.buckets {
+            for entry in bucket {
+                for rid in &entry.records {
+                    out.push((entry.key.clone(), rid.clone()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        if self.bucket_count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chained_hash: bucket_count must be > 0",
+            ));
+        }
+        if self.bucket_count != self.buckets.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chained_hash: bucket_count does not match buckets length",
+            ));
+        }
+        for bucket in &self.buckets {
+            for entry in bucket {
+                if entry.records.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "chained_hash: found entry with empty record list",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl HashBasedIndex for ChainedHashIndex {

@@ -118,6 +118,14 @@ pub trait IndexTrait {
     fn save(&self, path: &str) -> io::Result<()>;
     fn entry_count(&self) -> usize;
     fn index_type_name(&self) -> &'static str;
+
+    /// Return all key -> RID entries stored in this index.
+    ///
+    /// This is used by offline validation and consistency checking.
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>>;
+
+    /// Validate algorithm-specific structural invariants.
+    fn validate_structure(&self) -> io::Result<()>;
 }
 
 pub trait TreeBasedIndex: IndexTrait {

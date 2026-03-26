@@ -178,6 +178,39 @@ Steps:
 1. Enter table name
 2. Enter index name
 
+What is validated:
+- Internal index structure invariants (algorithm-specific)
+- Exact key/RID agreement between heap tuples and index contents
+- Missing entries and stale entries
+- Index entry count consistency
+
+---
+
+## Clustered Index Maintenance After CSV Load
+
+When a table has a clustered index, RookDB automatically re-applies clustered physical ordering after CSV ingestion and index rebuild.
+
+Behavior:
+1. CSV rows are loaded into heap pages
+2. Indexes are rebuilt
+3. If a clustered index exists, table tuples are physically reordered by clustered key
+4. Indexes are rebuilt again over the clustered layout
+
+This keeps clustered metadata and on-disk tuple layout aligned.
+
+---
+
+## Secondary Index Routing By Column
+
+RookDB supports index-based tuple fetch by column through `index_scan_by_column`.
+
+Behavior:
+- Finds an index on the requested column
+- Prefers clustered index if more than one index exists for that column
+- Performs point lookup and fetches matching tuples
+
+This is useful when queries are specified by column semantics rather than index name.
+
 ---
 
 ## Exit

@@ -167,6 +167,75 @@ impl IndexTrait for StaticHashIndex {
     fn index_type_name(&self) -> &'static str {
         "static_hash"
     }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        let mut out = Vec::new();
+        for bucket in &self.buckets {
+            for entry in &bucket.entries {
+                for rid in &entry.records {
+                    out.push((entry.key.clone(), rid.clone()));
+                }
+            }
+            for seg in &bucket.overflow {
+                for entry in &seg.entries {
+                    for rid in &entry.records {
+                        out.push((entry.key.clone(), rid.clone()));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        if self.num_buckets == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "static_hash: num_buckets must be > 0",
+            ));
+        }
+        if self.num_buckets != self.buckets.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "static_hash: num_buckets does not match buckets length",
+            ));
+        }
+
+        for bucket in &self.buckets {
+            if bucket.entries.len() > STATIC_HASH_BUCKET_CAPACITY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "static_hash: primary bucket exceeds configured capacity",
+                ));
+            }
+            for entry in &bucket.entries {
+                if entry.records.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "static_hash: found entry with empty record list",
+                    ));
+                }
+            }
+            for seg in &bucket.overflow {
+                if seg.entries.is_empty() || seg.entries.len() > STATIC_HASH_BUCKET_CAPACITY {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "static_hash: invalid overflow segment size",
+                    ));
+                }
+                for entry in &seg.entries {
+                    if entry.records.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "static_hash: found overflow entry with empty record list",
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl HashBasedIndex for StaticHashIndex {

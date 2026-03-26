@@ -286,6 +286,83 @@ impl IndexTrait for LinearHashIndex {
     fn index_type_name(&self) -> &'static str {
         "linear_hash"
     }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        let mut out = Vec::new();
+        for bucket in &self.buckets {
+            for entry in &bucket.entries {
+                for rid in &entry.records {
+                    out.push((entry.key.clone(), rid.clone()));
+                }
+            }
+            for seg in &bucket.overflow {
+                for entry in &seg.entries {
+                    for rid in &entry.records {
+                        out.push((entry.key.clone(), rid.clone()));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        if self.initial_buckets == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "linear_hash: initial_buckets must be > 0",
+            ));
+        }
+        if self.buckets.len() < self.initial_buckets {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "linear_hash: bucket array smaller than initial_buckets",
+            ));
+        }
+
+        let round_size = self.initial_buckets.checked_shl(self.level).unwrap_or(0);
+        if round_size == 0 || self.split_ptr >= round_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "linear_hash: split pointer is out of range for current level",
+            ));
+        }
+
+        for bucket in &self.buckets {
+            if bucket.entries.len() > STATIC_HASH_BUCKET_CAPACITY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "linear_hash: primary bucket exceeds configured capacity",
+                ));
+            }
+            for entry in &bucket.entries {
+                if entry.records.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "linear_hash: found entry with empty record list",
+                    ));
+                }
+            }
+            for seg in &bucket.overflow {
+                if seg.entries.is_empty() || seg.entries.len() > STATIC_HASH_BUCKET_CAPACITY {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "linear_hash: invalid overflow segment size",
+                    ));
+                }
+                for entry in &seg.entries {
+                    if entry.records.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "linear_hash: found overflow entry with empty record list",
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl HashBasedIndex for LinearHashIndex {

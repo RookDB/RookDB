@@ -233,6 +233,68 @@ impl IndexTrait for ExtendibleHashIndex {
     fn index_type_name(&self) -> &'static str {
         "extendible_hash"
     }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        let mut out = Vec::new();
+        for bucket in &self.buckets {
+            for entry in &bucket.entries {
+                for rid in &entry.records {
+                    out.push((entry.key.clone(), rid.clone()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        let expected_dir_len = 1usize.checked_shl(self.global_depth).unwrap_or(0);
+        if expected_dir_len == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "extendible_hash: invalid global depth",
+            ));
+        }
+        if self.directory.len() != expected_dir_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "extendible_hash: directory length does not match global depth",
+            ));
+        }
+
+        for &bucket_idx in &self.directory {
+            if bucket_idx >= self.buckets.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "extendible_hash: directory points to invalid bucket index",
+                ));
+            }
+        }
+
+        for bucket in &self.buckets {
+            if bucket.local_depth > self.global_depth {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "extendible_hash: bucket local depth exceeds global depth",
+                ));
+            }
+            if bucket.entries.len() > EXTENDIBLE_HASH_BUCKET_CAPACITY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "extendible_hash: bucket exceeds configured capacity",
+                ));
+            }
+            for entry in &bucket.entries {
+                if entry.records.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "extendible_hash: found entry with empty record list",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl HashBasedIndex for ExtendibleHashIndex {

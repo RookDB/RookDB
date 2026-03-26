@@ -25,6 +25,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::collections::HashMap;
 
 use crate::catalog::types::{Catalog, Column, IndexAlgorithm};
 use crate::index::config::{DEFAULT_HASH_INDEX, DEFAULT_TREE_INDEX, HashIndexType, TreeIndexType};
@@ -205,6 +206,34 @@ impl AnyIndex {
             Self::RadixTree(i) => i.index_type_name(),
             Self::SkipList(i) => i.index_type_name(),
             Self::LsmTree(i) => i.index_type_name(),
+        }
+    }
+
+    pub fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        match self {
+            Self::StaticHash(i) => i.all_entries(),
+            Self::ChainedHash(i) => i.all_entries(),
+            Self::ExtendibleHash(i) => i.all_entries(),
+            Self::LinearHash(i) => i.all_entries(),
+            Self::BTree(i) => i.all_entries(),
+            Self::BPlusTree(i) => i.all_entries(),
+            Self::RadixTree(i) => i.all_entries(),
+            Self::SkipList(i) => i.all_entries(),
+            Self::LsmTree(i) => i.all_entries(),
+        }
+    }
+
+    pub fn validate_structure(&self) -> io::Result<()> {
+        match self {
+            Self::StaticHash(i) => i.validate_structure(),
+            Self::ChainedHash(i) => i.validate_structure(),
+            Self::ExtendibleHash(i) => i.validate_structure(),
+            Self::LinearHash(i) => i.validate_structure(),
+            Self::BTree(i) => i.validate_structure(),
+            Self::BPlusTree(i) => i.validate_structure(),
+            Self::RadixTree(i) => i.validate_structure(),
+            Self::SkipList(i) => i.validate_structure(),
+            Self::LsmTree(i) => i.validate_structure(),
         }
     }
 
@@ -454,6 +483,52 @@ pub fn rebuild_table_indexes(catalog: &Catalog, db_name: &str, table_name: &str)
     Ok(table.indexes.len())
 }
 
+pub fn maintain_clustered_index_layout(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<bool> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    if let Some(clustered) = table.indexes.iter().find(|idx| idx.is_clustered) {
+        cluster_table_by_index(catalog, db_name, table_name, &clustered.index_name)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+pub fn validate_all_table_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<usize> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    for idx in &table.indexes {
+        validate_index_consistency(catalog, db_name, table_name, &idx.index_name)?;
+    }
+    Ok(table.indexes.len())
+}
+
 pub fn add_tuple_to_all_indexes(
     catalog: &Catalog,
     db_name: &str,
@@ -599,21 +674,75 @@ pub fn validate_index_consistency(
     let index_path = index_file_path(db_name, table_name, index_name);
     let index = AnyIndex::load(&index_path, &entry.algorithm)?;
 
+    index.validate_structure()?;
+
+    let mut expected: HashMap<IndexKey, Vec<RecordId>> = HashMap::new();
     for (rid, tuple) in scan_live_tuples(db_name, table_name)? {
         let key = key_from_tuple(&tuple, &table.columns, &entry.column_name)?;
-        let refs = index.search(&key)?;
-        if !refs.contains(&rid) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "index '{}' missing RID {}:{} for key '{}'",
-                    index_name, rid.page_no, rid.item_id, key
-                ),
-            ));
-        }
+        expected.entry(key).or_default().push(rid);
+    }
+
+    let mut actual: HashMap<IndexKey, Vec<RecordId>> = HashMap::new();
+    for (key, rid) in index.all_entries()? {
+        actual.entry(key).or_default().push(rid);
+    }
+
+    normalize_entry_map(&mut expected);
+    normalize_entry_map(&mut actual);
+
+    if expected != actual {
+        let missing = collect_map_diff(&expected, &actual);
+        let stale = collect_map_diff(&actual, &expected);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "index '{}' consistency failed: {} missing entries, {} stale entries",
+                index_name,
+                missing,
+                stale,
+            ),
+        ));
+    }
+
+    let expected_entry_count: usize = expected.values().map(|rids| rids.len()).sum();
+    if index.entry_count() != expected_entry_count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "index '{}' entry_count mismatch: index={}, expected={}",
+                index_name,
+                index.entry_count(),
+                expected_entry_count,
+            ),
+        ));
     }
 
     Ok(())
+}
+
+fn normalize_entry_map(map: &mut HashMap<IndexKey, Vec<RecordId>>) {
+    for rids in map.values_mut() {
+        rids.sort_by_key(|rid| (rid.page_no, rid.item_id));
+        rids.dedup();
+    }
+}
+
+fn collect_map_diff(
+    a: &HashMap<IndexKey, Vec<RecordId>>,
+    b: &HashMap<IndexKey, Vec<RecordId>>,
+) -> usize {
+    let mut count = 0usize;
+    for (key, a_rids) in a {
+        match b.get(key) {
+            Some(b_rids) => {
+                count += a_rids.iter().filter(|rid| !b_rids.contains(rid)).count();
+            }
+            None => {
+                count += a_rids.len();
+            }
+        }
+    }
+    count
 }
 
 fn scan_live_tuples(db_name: &str, table_name: &str) -> io::Result<Vec<(RecordId, Vec<u8>)>> {

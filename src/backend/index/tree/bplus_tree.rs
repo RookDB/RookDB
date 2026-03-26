@@ -105,6 +105,117 @@ impl BPlusTree {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
+    fn collect_entries(&self) -> Vec<(IndexKey, RecordId)> {
+        let mut out = Vec::new();
+        let mut leaf_idx = self.leftmost_leaf();
+
+        loop {
+            let leaf = &self.nodes[leaf_idx];
+            if leaf.dead {
+                break;
+            }
+            for (k, rids) in leaf.keys.iter().zip(leaf.values.iter()) {
+                for rid in rids {
+                    out.push((k.clone(), rid.clone()));
+                }
+            }
+            match leaf.next_leaf {
+                Some(next) => leaf_idx = next,
+                None => break,
+            }
+        }
+
+        out
+    }
+
+    fn validate_subtree(&self, node_idx: usize, seen: &mut [bool]) -> io::Result<()> {
+        if node_idx >= self.nodes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bplus_tree: child pointer out of bounds",
+            ));
+        }
+        if seen[node_idx] {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bplus_tree: cycle detected in node graph",
+            ));
+        }
+        seen[node_idx] = true;
+
+        let node = &self.nodes[node_idx];
+        if node.dead {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bplus_tree: reachable node is marked dead",
+            ));
+        }
+        for window in node.keys.windows(2) {
+            if window[0] >= window[1] {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bplus_tree: keys are not strictly sorted",
+                ));
+            }
+        }
+
+        if node.is_leaf {
+            if node.values.len() != node.keys.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bplus_tree: leaf values length does not match keys length",
+                ));
+            }
+            if !node.children.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bplus_tree: leaf node contains child pointers",
+                ));
+            }
+            for rids in &node.values {
+                if rids.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "bplus_tree: leaf contains key with empty record list",
+                    ));
+                }
+            }
+            if let Some(next) = node.next_leaf {
+                if next >= self.nodes.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "bplus_tree: next_leaf pointer out of bounds",
+                    ));
+                }
+                if !self.nodes[next].is_leaf {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "bplus_tree: next_leaf points to a non-leaf node",
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
+        if !node.values.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bplus_tree: internal nodes must not store record lists",
+            ));
+        }
+        if node.children.len() != node.keys.len() + 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bplus_tree: internal child count must be keys + 1",
+            ));
+        }
+
+        for &child_idx in &node.children {
+            self.validate_subtree(child_idx, seen)?;
+        }
+        Ok(())
+    }
+
     // ─── Navigation ──────────────────────────────────────────────────────────
 
     /// Descend from `start_node` to the leaf that should contain `key`,
@@ -494,6 +605,60 @@ impl IndexTrait for BPlusTree {
 
     fn index_type_name(&self) -> &'static str {
         "bplus_tree"
+    }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        Ok(self.collect_entries())
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        if self.t < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bplus_tree: minimum degree must be >= 2",
+            ));
+        }
+        if self.root >= self.nodes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bplus_tree: root index out of bounds",
+            ));
+        }
+        if self.nodes[self.root].dead {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bplus_tree: root is marked dead",
+            ));
+        }
+
+        let mut seen = vec![false; self.nodes.len()];
+        self.validate_subtree(self.root, &mut seen)?;
+
+        // Verify leaf chain has no cycle.
+        let mut chain_seen = vec![false; self.nodes.len()];
+        let mut leaf_idx = self.leftmost_leaf();
+        loop {
+            if chain_seen[leaf_idx] {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bplus_tree: cycle detected in leaf chain",
+                ));
+            }
+            chain_seen[leaf_idx] = true;
+            let node = &self.nodes[leaf_idx];
+            if !node.is_leaf {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bplus_tree: non-leaf found in leaf chain",
+                ));
+            }
+            match node.next_leaf {
+                Some(next) => leaf_idx = next,
+                None => break,
+            }
+        }
+
+        Ok(())
     }
 }
 

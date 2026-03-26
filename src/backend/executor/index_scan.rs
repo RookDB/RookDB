@@ -43,7 +43,12 @@ pub fn index_scan(
 
     let index_path = index_file_path(db_name, table_name, index_name);
     let index = AnyIndex::load(&index_path, &entry.algorithm)?;
-    let record_ids = index.search(key)?;
+    let mut record_ids = index.search(key)?;
+
+    // Clustered indexes should be read in physical RID order for page locality.
+    if entry.is_clustered {
+        record_ids.sort_by_key(|rid| (rid.page_no, rid.item_id));
+    }
 
     if record_ids.is_empty() {
         return Ok(Vec::new());
@@ -73,6 +78,45 @@ pub fn index_scan(
     }
 
     Ok(tuples)
+}
+
+/// Fetch tuples by probing a secondary index for the given column.
+///
+/// If multiple indexes exist on the same column, a clustered index is preferred.
+pub fn index_scan_by_column(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    column_name: &str,
+    key: &IndexKey,
+) -> io::Result<Vec<Vec<u8>>> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    let entry = table
+        .indexes
+        .iter()
+        .filter(|idx| idx.column_name == column_name)
+        .max_by_key(|idx| idx.is_clustered)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "no index found on column '{}' for table '{}.{}'",
+                    column_name, db_name, table_name
+                ),
+            )
+        })?;
+
+    index_scan(catalog, db_name, table_name, &entry.index_name, key)
 }
 
 fn read_tuple_from_page(page: &Page, item_id: u32) -> io::Result<Option<Vec<u8>>> {

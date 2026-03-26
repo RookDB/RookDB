@@ -29,6 +29,9 @@
 25. Index Scan (Fetch Tuples)
 26. Cluster Table By Index
 27. Validate Index Consistency
+28. Maintain Clustered Index Layout
+29. Validate All Table Indexes
+30. Index Scan By Column
 ---
 
 ## API Descriptions
@@ -258,6 +261,68 @@ pub fn write_page(file: &mut File, page: &mut Page, page_num: u32)
 `file:` file to write, 
 `page:` memory page to copy from, 
 `page_num:` page number to write
+
+---
+
+### 28. **maintain_clustered_index_layout** API
+
+**Description:**
+Re-applies clustered physical ordering when a table has a clustered index. This is used after bulk loads to keep heap ordering aligned with clustered metadata.
+
+**Function:**
+```rust
+pub fn maintain_clustered_index_layout(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<bool>
+```
+
+**Output:**
+- `Ok(true)` if clustered reordering was applied.
+- `Ok(false)` if no clustered index exists on the table.
+
+---
+
+### 29. **validate_all_table_indexes** API
+
+**Description:**
+Validates every index registered on a table by running full structure + consistency verification.
+
+**Function:**
+```rust
+pub fn validate_all_table_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<usize>
+```
+
+**Output:**
+- Returns number of indexes validated on success.
+- Returns an error on first validation failure.
+
+---
+
+### 30. **index_scan_by_column** API
+
+**Description:**
+Fetches tuples through an index lookup routed by column name. If multiple indexes exist on the same column, clustered index is preferred.
+
+**Function:**
+```rust
+pub fn index_scan_by_column(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    column_name: &str,
+    key: &IndexKey,
+) -> io::Result<Vec<Vec<u8>>>
+```
+
+**Output:**
+- Returns matching tuple bytes.
+- Returns `NotFound` if no index exists for the column.
 
 **Output:** 
 Writes the contents of the given memory page to the file at the specified page offset.

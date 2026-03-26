@@ -149,6 +149,45 @@ impl IndexTrait for LsmTreeIndex {
     fn index_type_name(&self) -> &'static str {
         "lsm_tree"
     }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        let merged = self.merged_view();
+        let mut out = Vec::new();
+        for (k, rids) in merged {
+            for rid in rids {
+                out.push((k.clone(), rid));
+            }
+        }
+        Ok(out)
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        if self.memtable_limit == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "lsm_tree: memtable_limit must be > 0",
+            ));
+        }
+        for rids in self.memtable.values() {
+            if rids.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lsm_tree: found memtable key with empty record list",
+                ));
+            }
+        }
+        for run in &self.runs {
+            for rids in run.entries.values() {
+                if rids.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "lsm_tree: found run key with empty record list",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl TreeBasedIndex for LsmTreeIndex {

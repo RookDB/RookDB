@@ -19,9 +19,11 @@ database/
   │   └── catalog.json
   └── base/
       ├── db1/
-      │   └── {table}.dat
+  │   ├── {table}.dat
+  │   └── {table}_{index}.idx
       ├── db2/
-      │   └── {table}.dat
+  │   ├── {table}.dat
+  │   └── {table}_{index}.idx
 ```
 
 ### Directory Descriptions
@@ -43,6 +45,32 @@ database/
 
 - **`{table}.dat`**  
   Physical file corresponding to a table, containing both table metadata and tuple data.
+
+- **`{table}_{index}.idx`**
+  Physical file for an index (hash/tree variants), serialized as JSON.
+
+## Index Metadata in Catalog
+
+Each table stores index metadata in `indexes` with:
+
+- `index_name`
+- `column_name`
+- `algorithm`
+- `is_clustered`
+- `include_columns`
+
+Clustered constraints:
+- At most one clustered index per table.
+- Clustered index triggers physical tuple reordering by indexed key.
+
+## Index Consistency Guarantees
+
+RookDB provides consistency APIs that compare index contents against live heap tuples:
+
+- Per-index validation: `validate_index_consistency`
+- Per-table validation: `validate_all_table_indexes`
+
+Validation includes structural checks plus exact `(key, RID)` set equality against heap-derived expectations.
 
 
 ## Catalog File Structure

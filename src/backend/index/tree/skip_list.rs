@@ -68,6 +68,28 @@ impl IndexTrait for SkipListIndex {
     fn index_type_name(&self) -> &'static str {
         "skip_list"
     }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        let mut out = Vec::new();
+        for (k, rids) in &self.entries {
+            for rid in rids {
+                out.push((k.clone(), rid.clone()));
+            }
+        }
+        Ok(out)
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        for rids in self.entries.values() {
+            if rids.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "skip_list: found key with empty record list",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl TreeBasedIndex for SkipListIndex {

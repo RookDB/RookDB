@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader};
 
 use crate::catalog::types::Catalog;
 use crate::heap::insert_tuple;
-use crate::index::rebuild_table_indexes;
+use crate::index::{maintain_clustered_index_layout, rebuild_table_indexes};
 
 pub fn load_csv(
     catalog: &Catalog,
@@ -99,5 +99,6 @@ pub fn load_csv(
     }
     println!("Total Number of rows inserted: {}", inserted);
     rebuild_table_indexes(catalog, db_name, table_name)?;
+    let _ = maintain_clustered_index_layout(catalog, db_name, table_name)?;
     Ok(())
 }

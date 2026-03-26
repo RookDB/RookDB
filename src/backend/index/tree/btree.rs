@@ -103,6 +103,101 @@ impl BTree {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
+    fn collect_entries_from_node(&self, node_idx: usize, out: &mut Vec<(IndexKey, RecordId)>) {
+        let node = &self.nodes[node_idx];
+        if node.dead {
+            return;
+        }
+
+        if node.is_leaf {
+            for (key, rids) in node.keys.iter().zip(node.values.iter()) {
+                for rid in rids {
+                    out.push((key.clone(), rid.clone()));
+                }
+            }
+            return;
+        }
+
+        for i in 0..node.keys.len() {
+            self.collect_entries_from_node(node.children[i], out);
+            for rid in &node.values[i] {
+                out.push((node.keys[i].clone(), rid.clone()));
+            }
+        }
+        self.collect_entries_from_node(*node.children.last().unwrap(), out);
+    }
+
+    fn validate_subtree(&self, node_idx: usize, seen: &mut [bool]) -> io::Result<()> {
+        if node_idx >= self.nodes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "btree: child pointer out of bounds",
+            ));
+        }
+
+        if seen[node_idx] {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "btree: cycle detected in node graph",
+            ));
+        }
+        seen[node_idx] = true;
+
+        let node = &self.nodes[node_idx];
+        if node.dead {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "btree: reachable node is marked dead",
+            ));
+        }
+
+        if node.values.len() != node.keys.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "btree: values length does not match keys length",
+            ));
+        }
+        for window in node.keys.windows(2) {
+            if window[0] >= window[1] {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "btree: keys are not strictly sorted",
+                ));
+            }
+        }
+        for rids in &node.values {
+            if rids.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "btree: found key with empty record list",
+                ));
+            }
+        }
+
+        if node.is_leaf {
+            if !node.children.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "btree: leaf node contains child pointers",
+                ));
+            }
+            return Ok(());
+        }
+
+        if node.children.len() != node.keys.len() + 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "btree: internal node child count must be keys + 1",
+            ));
+        }
+
+        for &child_idx in &node.children {
+            self.validate_subtree(child_idx, seen)?;
+        }
+
+        Ok(())
+    }
+
     // ─── Search ──────────────────────────────────────────────────────────────
 
     fn search_node(&self, node_idx: usize, key: &IndexKey) -> Vec<RecordId> {
@@ -553,6 +648,36 @@ impl IndexTrait for BTree {
 
     fn index_type_name(&self) -> &'static str {
         "btree"
+    }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        let mut out = Vec::new();
+        self.collect_entries_from_node(self.root, &mut out);
+        Ok(out)
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        if self.t < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "btree: minimum degree must be >= 2",
+            ));
+        }
+        if self.root >= self.nodes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "btree: root index out of bounds",
+            ));
+        }
+        if self.nodes[self.root].dead {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "btree: root is marked dead",
+            ));
+        }
+
+        let mut seen = vec![false; self.nodes.len()];
+        self.validate_subtree(self.root, &mut seen)
     }
 }
 

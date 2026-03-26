@@ -263,6 +263,47 @@ impl RadixNode {
         let below: usize = self.children.values().map(|c| c.count()).sum();
         here + below
     }
+
+    fn collect_entries(&self, out: &mut Vec<(IndexKey, RecordId)>) {
+        if let Some((k, rids)) = &self.terminal {
+            for rid in rids {
+                out.push((k.clone(), rid.clone()));
+            }
+        }
+        for child in self.children.values() {
+            child.collect_entries(out);
+        }
+    }
+
+    fn validate_node(&self, is_root: bool) -> io::Result<()> {
+        if !is_root && self.prefix.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "radix_tree: non-root node has empty prefix",
+            ));
+        }
+
+        if let Some((_, rids)) = &self.terminal {
+            if rids.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "radix_tree: terminal node has empty record list",
+                ));
+            }
+        }
+
+        for (edge_byte, child) in &self.children {
+            if child.prefix.is_empty() || child.prefix[0] != *edge_byte {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "radix_tree: child prefix does not match edge label",
+                ));
+            }
+            child.validate_node(false)?;
+        }
+
+        Ok(())
+    }
 }
 
 // ─── Public index type ────────────────────────────────────────────────────────
@@ -337,6 +378,16 @@ impl IndexTrait for RadixTree {
 
     fn index_type_name(&self) -> &'static str {
         "radix_tree"
+    }
+
+    fn all_entries(&self) -> io::Result<Vec<(IndexKey, RecordId)>> {
+        let mut out = Vec::new();
+        self.root.collect_entries(&mut out);
+        Ok(out)
+    }
+
+    fn validate_structure(&self) -> io::Result<()> {
+        self.root.validate_node(true)
     }
 }
 

@@ -45,6 +45,8 @@ fn test_index_rebuild_on_csv() {
             index_name: index_name.to_string(),
             column_name: "id".to_string(),
             algorithm: IndexAlgorithm::BPlusTree,
+            is_clustered: false,
+            include_columns: Vec::new(),
         }],
     };
 
