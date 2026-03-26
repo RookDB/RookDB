@@ -77,7 +77,7 @@ pub fn load_csv_cmd(
                 println!("   3. Each row has the correct number of columns");
             } else {
                 println!("\nSuccessfully inserted {} rows from CSV", inserted_count);
-                println!("\n✓ FSM fork file has been created/updated");
+                println!("\n FSM fork file has been created/updated");
             }
         }
         Err(e) => {
@@ -174,7 +174,7 @@ pub fn insert_tuple_cmd(
         Ok(success) => {
             if success {
                 println!("Tuple inserted successfully!");
-                println!("✓ FSM fork file updated");
+                println!(" FSM fork file updated");
             } else {
                 println!("Failed to insert tuple. Please check your data types and values.");
             }

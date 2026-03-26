@@ -48,7 +48,7 @@ impl DataType {
         match self {
             DataType::Integer => {
                 if value.parse::<i32>().is_ok() {
-                    debug_print_validation(&format!("✓ Valid INT value: '{}'", value));
+                    debug_print_validation(&format!(" Valid INT value: '{}'", value));
                     Ok(())
                 } else {
                     let msg = format!(

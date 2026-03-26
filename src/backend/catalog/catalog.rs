@@ -19,7 +19,7 @@ pub fn init_catalog() {
         if !parent.exists() {
             match fs::create_dir_all(parent) {
                 Ok(_) => {
-                    debug_print_catalog(&format!("✓ Created catalog directory: {}", parent.display()));
+                    debug_print_catalog(&format!(" Created catalog directory: {}", parent.display()));
                 }
                 Err(e) => {
                     eprintln!("Failed to create catalog directory: {}", e);
@@ -62,7 +62,7 @@ pub fn init_catalog() {
             Ok(_) => {
                 debug_print_catalog(&format!("Created new catalog file: {}", catalog_path.display()));
                 println!(
-                    "✓ Catalog file created at {}",
+                    " Catalog file created at {}",
                     catalog_path.display()
                 );
             }
@@ -249,11 +249,11 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
         }
         debug_print_catalog(&format!("Created database directory: {}", db_path.display()));
     } else {
-        println!("✓ Database directory already exists at {}", db_path.display());
+        println!(" Database directory already exists at {}", db_path.display());
         debug_print_catalog(&format!("Directory already exists: {}", db_path.display()));
     }
 
-    println!("✓ Database '{}' created successfully", db_name);
+    println!("Database '{}' created successfully", db_name);
     debug_print_catalog(&format!("Database '{}' created successfully", db_name));
     true
 }
