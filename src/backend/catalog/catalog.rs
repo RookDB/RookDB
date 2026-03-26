@@ -253,6 +253,8 @@ pub fn create_index(
     index_name: &str,
     column_name: &str,
     algorithm: crate::catalog::types::IndexAlgorithm,
+    is_clustered: bool,
+    include_columns: Vec<String>,
 ) -> bool {
     use crate::catalog::types::IndexEntry;
 
@@ -274,14 +276,32 @@ pub fn create_index(
         println!("Column '{}' not found in table '{}'.", column_name, table_name);
         return false;
     }
+    for include_col in &include_columns {
+        if !table.columns.iter().any(|c| c.name == *include_col) {
+            println!(
+                "Include column '{}' not found in table '{}'.",
+                include_col, table_name
+            );
+            return false;
+        }
+    }
     if table.indexes.iter().any(|i| i.index_name == index_name) {
         println!("Index '{}' already exists on table '{}'.", index_name, table_name);
+        return false;
+    }
+    if is_clustered && table.indexes.iter().any(|i| i.is_clustered) {
+        println!(
+            "Table '{}' already has a clustered index; only one is allowed.",
+            table_name
+        );
         return false;
     }
     table.indexes.push(IndexEntry {
         index_name: index_name.to_string(),
         column_name: column_name.to_string(),
         algorithm,
+        is_clustered,
+        include_columns,
     });
     save_catalog(catalog);
     true

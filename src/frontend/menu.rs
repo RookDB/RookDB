@@ -34,7 +34,9 @@ pub fn run() -> io::Result<()> {
         println!("11. List Indexes");
         println!("12. Search by Index");
         println!("13. Range Scan (tree indexes only)");
-        println!("14. Exit");
+        println!("14. Index Scan (fetch tuples)");
+        println!("15. Validate Index Consistency");
+        println!("16. Exit");
         println!("=============================");
 
         print!("Enter your choice: ");
@@ -65,7 +67,9 @@ pub fn run() -> io::Result<()> {
             "11" => index_cmd::list_indexes_cmd(&current_db)?,
             "12" => index_cmd::search_index_cmd(&current_db)?,
             "13" => index_cmd::range_scan_cmd(&current_db)?,
-            "14" => {
+            "14" => index_cmd::index_scan_cmd(&current_db)?,
+            "15" => index_cmd::validate_index_cmd(&current_db)?,
+            "16" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }

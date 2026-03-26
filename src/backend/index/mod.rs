@@ -12,6 +12,6 @@ pub use config::{
 };
 pub use index_trait::{HashBasedIndex, IndexKey, IndexTrait, RecordId, TreeBasedIndex};
 pub use manager::{
-    AnyIndex, add_tuple_to_all_indexes, index_file_path, rebuild_table_indexes,
-    remove_tuple_from_all_indexes,
+    AnyIndex, add_tuple_to_all_indexes, cluster_table_by_index, index_file_path,
+    rebuild_table_indexes, remove_tuple_from_all_indexes, validate_index_consistency,
 };

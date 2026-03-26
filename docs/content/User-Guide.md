@@ -101,12 +101,19 @@ Steps:
 Example algorithms:
 ```
 static_hash
+chained_hash
 extendible_hash
 linear_hash
 btree
 bplus_tree
 radix_tree
+skip_list
+lsm_tree
 ```
+
+You can also choose:
+- Clustered index mode (one per table)
+- Include columns (comma-separated) for covering metadata
 
 ---
 
@@ -149,6 +156,27 @@ Steps:
 2. Enter index name
 3. Enter start value (inclusive)
 4. Enter end value (inclusive)
+
+---
+
+## Index Scan (fetch tuples)
+
+Fetches full tuples for an exact-match index lookup.
+
+Steps:
+1. Enter table name
+2. Enter index name
+3. Enter search value
+
+---
+
+## Validate Index Consistency
+
+Validates that index entries remain consistent with table heap tuples.
+
+Steps:
+1. Enter table name
+2. Enter index name
 
 ---
 

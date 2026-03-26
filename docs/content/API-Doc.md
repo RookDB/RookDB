@@ -26,6 +26,9 @@
 22. Index Insert Maintenance  
 23. Index Delete Maintenance  
 24. Rebuild Indexes
+25. Index Scan (Fetch Tuples)
+26. Cluster Table By Index
+27. Validate Index Consistency
 ---
 
 ## API Descriptions
@@ -327,6 +330,8 @@ pub fn create_index(
     index_name: &str,
     column_name: &str,
     algorithm: IndexAlgorithm,
+    is_clustered: bool,
+    include_columns: Vec<String>,
 ) -> bool
 ```
 
@@ -337,6 +342,10 @@ Returns true on success, false if the database/table/column/index is invalid.
 1. Validate database, table, and column.
 2. Append the `IndexEntry` to `table.indexes`.
 3. Save the catalog to disk.
+
+**Constraints:**
+1. Only one clustered index is allowed per table.
+2. Include columns must belong to the same table schema.
 
 ---
 
@@ -488,6 +497,68 @@ pub fn rebuild_table_indexes(
 
 **Output:**  
 Returns the number of indexes rebuilt.
+
+---
+
+### 25. **index_scan** API
+
+**Description:**  
+Fetches full tuples from a table using an index point lookup.
+
+**Function:**  
+```rust
+pub fn index_scan(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+    key: &IndexKey,
+) -> io::Result<Vec<Vec<u8>>>
+```
+
+**Output:**  
+Returns a list of raw tuple byte buffers for matching keys.
+
+**Implementation:**
+1. Load index metadata from the catalog.
+2. Load the index file and search for `key`.
+3. For each `(page_no, item_id)`, read the tuple from the table file.
+4. Return the list of tuple buffers.
+
+---
+
+### 26. **cluster_table_by_index** API
+
+**Description:**
+Physically reorders table tuples by the indexed key and rebuilds all indexes.
+
+**Function:**
+```rust
+pub fn cluster_table_by_index(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> io::Result<()>
+```
+
+---
+
+### 27. **validate_index_consistency** API
+
+**Description:**
+Verifies that each live tuple in the heap has a matching `(key, RecordId)`
+entry in the selected index.
+
+**Function:**
+```rust
+pub fn validate_index_consistency(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> io::Result<()>
+```
 
 
 * [Code Documentation](https://hemanth-sunkireddy.github.io/Storage-Manager/storage_manager/all.html)

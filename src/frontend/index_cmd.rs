@@ -6,11 +6,12 @@
 use std::fs;
 use std::io::{self, Write};
 
-use storage_manager::catalog::{
-    create_index, drop_index, list_indexes, load_catalog,
+use storage_manager::catalog::{create_index, drop_index, list_indexes, load_catalog};
+use storage_manager::catalog::types::{Column, IndexAlgorithm};
+use storage_manager::executor::index_scan;
+use storage_manager::index::{
+    AnyIndex, IndexKey, cluster_table_by_index, index_file_path, validate_index_consistency,
 };
-use storage_manager::catalog::types::IndexAlgorithm;
-use storage_manager::index::{AnyIndex, IndexKey, index_file_path};
 
 // ─── Create index ─────────────────────────────────────────────────────────────
 
@@ -43,8 +44,8 @@ pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
     let index_name = index_name.trim().to_string();
 
     println!("Algorithm options:");
-    println!("  Hash-based : static_hash | extendible_hash | linear_hash");
-    println!("  Tree-based : btree | bplus_tree | radix_tree");
+    println!("  Hash-based : static_hash | chained_hash | extendible_hash | linear_hash");
+    println!("  Tree-based : btree | bplus_tree | radix_tree | skip_list | lsm_tree");
     print!("Algorithm [bplus_tree]: ");
     io::stdout().flush()?;
     let mut algo_str = String::new();
@@ -60,6 +61,24 @@ pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
         }
     };
 
+    print!("Clustered index? [y/N]: ");
+    io::stdout().flush()?;
+    let mut clustered_str = String::new();
+    io::stdin().read_line(&mut clustered_str)?;
+    let is_clustered = matches!(clustered_str.trim().to_lowercase().as_str(), "y" | "yes");
+
+    print!("Include columns (comma-separated, optional): ");
+    io::stdout().flush()?;
+    let mut include_cols_str = String::new();
+    io::stdin().read_line(&mut include_cols_str)?;
+    let include_columns: Vec<String> = include_cols_str
+        .trim()
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
     let mut catalog = load_catalog();
 
     // Register in catalog first.
@@ -70,6 +89,8 @@ pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
         &index_name,
         &column_name,
         algorithm.clone(),
+        is_clustered,
+        include_columns,
     );
     if !registered {
         return Ok(());
@@ -87,6 +108,14 @@ pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
                 idx.entry_count(),
                 path
             );
+
+            if is_clustered {
+                cluster_table_by_index(&catalog, &db_name, &table_name, &index_name)?;
+                println!(
+                    "Table '{}.{}' reordered by clustered index '{}'.",
+                    db_name, table_name, index_name
+                );
+            }
         }
         Err(e) => {
             eprintln!("Failed to build index: {}", e);
@@ -158,14 +187,23 @@ pub fn list_indexes_cmd(current_db: &Option<String>) -> io::Result<()> {
     match list_indexes(&catalog, &db_name, &table_name) {
         Some(indexes) if !indexes.is_empty() => {
             println!("\nIndexes on '{}.{}':", db_name, table_name);
-            println!("{:<20} {:<20} {}", "Index Name", "Column", "Algorithm");
-            println!("{}", "-".repeat(60));
+            println!(
+                "{:<20} {:<20} {:<12} {:<10} {}",
+                "Index Name", "Column", "Algorithm", "Clustered", "Include"
+            );
+            println!("{}", "-".repeat(90));
             for idx in indexes {
                 println!(
-                    "{:<20} {:<20} {}",
+                    "{:<20} {:<20} {:<12} {:<10} {}",
                     idx.index_name,
                     idx.column_name,
-                    idx.algorithm.display_name()
+                    idx.algorithm.display_name(),
+                    if idx.is_clustered { "yes" } else { "no" },
+                    if idx.include_columns.is_empty() {
+                        "-".to_string()
+                    } else {
+                        idx.include_columns.join(",")
+                    }
                 );
             }
             println!();
@@ -175,6 +213,33 @@ pub fn list_indexes_cmd(current_db: &Option<String>) -> io::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+pub fn validate_index_cmd(current_db: &Option<String>) -> io::Result<()> {
+    let db_name = match current_db {
+        Some(db) => db.clone(),
+        None => {
+            println!("No database selected.");
+            return Ok(());
+        }
+    };
+
+    print!("Table name: ");
+    io::stdout().flush()?;
+    let mut table_name = String::new();
+    io::stdin().read_line(&mut table_name)?;
+    let table_name = table_name.trim().to_string();
+
+    print!("Index name: ");
+    io::stdout().flush()?;
+    let mut index_name = String::new();
+    io::stdin().read_line(&mut index_name)?;
+    let index_name = index_name.trim().to_string();
+
+    let catalog = load_catalog();
+    validate_index_consistency(&catalog, &db_name, &table_name, &index_name)?;
+    println!("Index '{}.{}.{}' is consistent.", db_name, table_name, index_name);
     Ok(())
 }
 
@@ -343,6 +408,78 @@ pub fn range_scan_cmd(current_db: &Option<String>) -> io::Result<()> {
     Ok(())
 }
 
+// ─── Index scan ──────────────────────────────────────────────────────────────
+
+/// Prompt for a point lookup and display the matching tuples.
+pub fn index_scan_cmd(current_db: &Option<String>) -> io::Result<()> {
+    let db_name = match current_db {
+        Some(db) => db.clone(),
+        None => {
+            println!("No database selected.");
+            return Ok(());
+        }
+    };
+
+    print!("Table name: ");
+    io::stdout().flush()?;
+    let mut table_name = String::new();
+    io::stdin().read_line(&mut table_name)?;
+    let table_name = table_name.trim().to_string();
+
+    print!("Index name: ");
+    io::stdout().flush()?;
+    let mut index_name = String::new();
+    io::stdin().read_line(&mut index_name)?;
+    let index_name = index_name.trim().to_string();
+
+    print!("Search value: ");
+    io::stdout().flush()?;
+    let mut value_str = String::new();
+    io::stdin().read_line(&mut value_str)?;
+    let value_str = value_str.trim().to_string();
+
+    let catalog = load_catalog();
+    let indexes = match list_indexes(&catalog, &db_name, &table_name) {
+        Some(v) => v,
+        None => {
+            println!("Table '{}' not found.", table_name);
+            return Ok(());
+        }
+    };
+    let entry = match indexes.iter().find(|i| i.index_name == index_name) {
+        Some(e) => e,
+        None => {
+            println!("Index '{}' not found.", index_name);
+            return Ok(());
+        }
+    };
+
+    let db = catalog.databases.get(&db_name).unwrap();
+    let table = db.tables.get(&table_name).unwrap();
+    let col_type = table
+        .columns
+        .iter()
+        .find(|c| c.name == entry.column_name)
+        .map(|c| c.data_type.as_str())
+        .unwrap_or("TEXT");
+
+    let search_key = parse_key(&value_str, col_type);
+    let tuples = index_scan(&catalog, &db_name, &table_name, &index_name, &search_key)?;
+
+    if tuples.is_empty() {
+        println!("No tuples found for key '{}'.", value_str);
+        return Ok(());
+    }
+
+    println!("Found {} tuple(s):", tuples.len());
+    for (i, tuple) in tuples.iter().enumerate() {
+        let formatted = format_tuple(tuple, &table.columns);
+        println!("  {}. {}", i + 1, formatted);
+    }
+
+    Ok(())
+}
+
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
 /// Parse a user-supplied string into an `IndexKey` based on the column type.
@@ -351,4 +488,47 @@ fn parse_key(s: &str, col_type: &str) -> IndexKey {
         "INT" => IndexKey::Int(s.parse::<i64>().unwrap_or(0)),
         _ => IndexKey::Text(s.to_string()),
     }
+}
+
+fn format_tuple(tuple: &[u8], columns: &[Column]) -> String {
+    let mut parts = Vec::new();
+    let mut cursor = 0usize;
+
+    for col in columns {
+        match col.data_type.as_str() {
+            "INT" => {
+                if cursor + 4 <= tuple.len() {
+                    let val = i32::from_le_bytes(tuple[cursor..cursor + 4].try_into().unwrap());
+                    parts.push(format!("{}={}", col.name, val));
+                } else {
+                    parts.push(format!("{}=<out of bounds>", col.name));
+                }
+                cursor += 4;
+            }
+            "TEXT" => {
+                if cursor + 10 <= tuple.len() {
+                    let text_bytes = &tuple[cursor..cursor + 10];
+                    let text = String::from_utf8_lossy(text_bytes).trim().to_string();
+                    parts.push(format!("{}='{}'", col.name, text));
+                } else {
+                    parts.push(format!("{}=<out of bounds>", col.name));
+                }
+                cursor += 10;
+            }
+            "BOOL" | "BOOLEAN" => {
+                if cursor + 1 <= tuple.len() {
+                    let val = tuple[cursor] != 0;
+                    parts.push(format!("{}={}", col.name, if val { "true" } else { "false" }));
+                } else {
+                    parts.push(format!("{}=<out of bounds>", col.name));
+                }
+                cursor += 1;
+            }
+            _ => {
+                parts.push(format!("{}=<unsupported>", col.name));
+            }
+        }
+    }
+
+    parts.join(" ")
 }

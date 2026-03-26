@@ -67,7 +67,7 @@ The Buffer Manager Layer maintains an in-memory cache of pages to minimize disk 
 
 The Index Layer provides secondary indexes over table columns to accelerate point lookups and range scans.  Each index is stored as a separate file alongside its table file and is described in the catalog via an `IndexEntry` (index name, column name, algorithm).
 
-Supported algorithms include Static Hash, Extendible Hash, Linear Hash, B-Tree, B+ Tree, and Radix Tree.  The index layer uses a type-erased `AnyIndex` wrapper so all algorithms share a common interface.
+Supported algorithms include Static Hash, Chained Hash, Extendible Hash, Linear Hash, B-Tree, B+ Tree, Radix Tree, Skip List, and LSM Tree. The index layer uses a type-erased `AnyIndex` wrapper so all algorithms share a common interface.
 
 Index maintenance is handled in two ways:
 - **Bulk rebuilds**: CSV ingestion triggers a full rebuild of every index on the table.

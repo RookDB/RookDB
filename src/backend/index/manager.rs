@@ -6,7 +6,7 @@
 //! Rust trait objects (`Box<dyn IndexTrait>`) cannot easily include the static
 //! `load(path) -> Self` constructor (which needs a concrete type).  An enum
 //! wrapper solves this by enumerating every concrete index type and forwarding
-//! method calls to the inner value.  All six index algorithms are covered.
+//! method calls to the inner value.
 //!
 //! # Usage
 //!
@@ -28,9 +28,10 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::catalog::types::{Catalog, Column, IndexAlgorithm};
 use crate::index::config::{DEFAULT_HASH_INDEX, DEFAULT_TREE_INDEX, HashIndexType, TreeIndexType};
-use crate::index::hash::{ExtendibleHashIndex, LinearHashIndex, StaticHashIndex};
+use crate::heap::{init_table, insert_tuple};
+use crate::index::hash::{ChainedHashIndex, ExtendibleHashIndex, LinearHashIndex, StaticHashIndex};
 use crate::index::index_trait::{HashBasedIndex, IndexKey, IndexTrait, RecordId, TreeBasedIndex};
-use crate::index::tree::{BPlusTree, BTree, RadixTree};
+use crate::index::tree::{BPlusTree, BTree, LsmTreeIndex, RadixTree, SkipListIndex};
 use crate::layout::TABLE_FILE_TEMPLATE;
 use crate::page::{PAGE_HEADER_SIZE, ITEM_ID_SIZE};
 use crate::table::page_count;
@@ -44,11 +45,14 @@ use crate::table::page_count;
 /// `AnyIndex::range_scan`.
 pub enum AnyIndex {
     StaticHash(StaticHashIndex),
+    ChainedHash(ChainedHashIndex),
     ExtendibleHash(ExtendibleHashIndex),
     LinearHash(LinearHashIndex),
     BTree(BTree),
     BPlusTree(BPlusTree),
     RadixTree(RadixTree),
+    SkipList(SkipListIndex),
+    LsmTree(LsmTreeIndex),
 }
 
 impl AnyIndex {
@@ -58,6 +62,7 @@ impl AnyIndex {
     pub fn new_empty(algorithm: &IndexAlgorithm) -> Self {
         match algorithm {
             IndexAlgorithm::StaticHash => Self::StaticHash(StaticHashIndex::with_defaults()),
+            IndexAlgorithm::ChainedHash => Self::ChainedHash(ChainedHashIndex::with_defaults()),
             IndexAlgorithm::ExtendibleHash => {
                 Self::ExtendibleHash(ExtendibleHashIndex::with_defaults())
             }
@@ -65,6 +70,8 @@ impl AnyIndex {
             IndexAlgorithm::BTree => Self::BTree(BTree::with_defaults()),
             IndexAlgorithm::BPlusTree => Self::BPlusTree(BPlusTree::with_defaults()),
             IndexAlgorithm::RadixTree => Self::RadixTree(RadixTree::new()),
+            IndexAlgorithm::SkipList => Self::SkipList(SkipListIndex::new()),
+            IndexAlgorithm::LsmTree => Self::LsmTree(LsmTreeIndex::with_defaults()),
         }
     }
 
@@ -98,6 +105,9 @@ impl AnyIndex {
             IndexAlgorithm::StaticHash => {
                 Ok(Self::StaticHash(StaticHashIndex::load(path)?))
             }
+            IndexAlgorithm::ChainedHash => {
+                Ok(Self::ChainedHash(ChainedHashIndex::load(path)?))
+            }
             IndexAlgorithm::ExtendibleHash => {
                 Ok(Self::ExtendibleHash(ExtendibleHashIndex::load(path)?))
             }
@@ -107,6 +117,8 @@ impl AnyIndex {
             IndexAlgorithm::BTree => Ok(Self::BTree(BTree::load(path)?)),
             IndexAlgorithm::BPlusTree => Ok(Self::BPlusTree(BPlusTree::load(path)?)),
             IndexAlgorithm::RadixTree => Ok(Self::RadixTree(RadixTree::load(path)?)),
+            IndexAlgorithm::SkipList => Ok(Self::SkipList(SkipListIndex::load(path)?)),
+            IndexAlgorithm::LsmTree => Ok(Self::LsmTree(LsmTreeIndex::load(path)?)),
         }
     }
 
@@ -115,66 +127,84 @@ impl AnyIndex {
     pub fn insert(&mut self, key: IndexKey, record_id: RecordId) -> io::Result<()> {
         match self {
             Self::StaticHash(i) => i.insert(key, record_id),
+            Self::ChainedHash(i) => i.insert(key, record_id),
             Self::ExtendibleHash(i) => i.insert(key, record_id),
             Self::LinearHash(i) => i.insert(key, record_id),
             Self::BTree(i) => i.insert(key, record_id),
             Self::BPlusTree(i) => i.insert(key, record_id),
             Self::RadixTree(i) => i.insert(key, record_id),
+            Self::SkipList(i) => i.insert(key, record_id),
+            Self::LsmTree(i) => i.insert(key, record_id),
         }
     }
 
     pub fn search(&self, key: &IndexKey) -> io::Result<Vec<RecordId>> {
         match self {
             Self::StaticHash(i) => i.search(key),
+            Self::ChainedHash(i) => i.search(key),
             Self::ExtendibleHash(i) => i.search(key),
             Self::LinearHash(i) => i.search(key),
             Self::BTree(i) => i.search(key),
             Self::BPlusTree(i) => i.search(key),
             Self::RadixTree(i) => i.search(key),
+            Self::SkipList(i) => i.search(key),
+            Self::LsmTree(i) => i.search(key),
         }
     }
 
     pub fn delete(&mut self, key: &IndexKey, record_id: &RecordId) -> io::Result<bool> {
         match self {
             Self::StaticHash(i) => i.delete(key, record_id),
+            Self::ChainedHash(i) => i.delete(key, record_id),
             Self::ExtendibleHash(i) => i.delete(key, record_id),
             Self::LinearHash(i) => i.delete(key, record_id),
             Self::BTree(i) => i.delete(key, record_id),
             Self::BPlusTree(i) => i.delete(key, record_id),
             Self::RadixTree(i) => i.delete(key, record_id),
+            Self::SkipList(i) => i.delete(key, record_id),
+            Self::LsmTree(i) => i.delete(key, record_id),
         }
     }
 
     pub fn save(&self, path: &str) -> io::Result<()> {
         match self {
             Self::StaticHash(i) => i.save(path),
+            Self::ChainedHash(i) => i.save(path),
             Self::ExtendibleHash(i) => i.save(path),
             Self::LinearHash(i) => i.save(path),
             Self::BTree(i) => i.save(path),
             Self::BPlusTree(i) => i.save(path),
             Self::RadixTree(i) => i.save(path),
+            Self::SkipList(i) => i.save(path),
+            Self::LsmTree(i) => i.save(path),
         }
     }
 
     pub fn entry_count(&self) -> usize {
         match self {
             Self::StaticHash(i) => i.entry_count(),
+            Self::ChainedHash(i) => i.entry_count(),
             Self::ExtendibleHash(i) => i.entry_count(),
             Self::LinearHash(i) => i.entry_count(),
             Self::BTree(i) => i.entry_count(),
             Self::BPlusTree(i) => i.entry_count(),
             Self::RadixTree(i) => i.entry_count(),
+            Self::SkipList(i) => i.entry_count(),
+            Self::LsmTree(i) => i.entry_count(),
         }
     }
 
     pub fn index_type_name(&self) -> &'static str {
         match self {
             Self::StaticHash(i) => i.index_type_name(),
+            Self::ChainedHash(i) => i.index_type_name(),
             Self::ExtendibleHash(i) => i.index_type_name(),
             Self::LinearHash(i) => i.index_type_name(),
             Self::BTree(i) => i.index_type_name(),
             Self::BPlusTree(i) => i.index_type_name(),
             Self::RadixTree(i) => i.index_type_name(),
+            Self::SkipList(i) => i.index_type_name(),
+            Self::LsmTree(i) => i.index_type_name(),
         }
     }
 
@@ -193,6 +223,8 @@ impl AnyIndex {
             Self::BTree(i) => i.range_scan(start, end),
             Self::BPlusTree(i) => i.range_scan(start, end),
             Self::RadixTree(i) => i.range_scan(start, end),
+            Self::SkipList(i) => i.range_scan(start, end),
+            Self::LsmTree(i) => i.range_scan(start, end),
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
@@ -205,7 +237,14 @@ impl AnyIndex {
 
     /// `true` if this index supports ordered range scans.
     pub fn supports_range_scan(&self) -> bool {
-        matches!(self, Self::BTree(_) | Self::BPlusTree(_) | Self::RadixTree(_))
+        matches!(
+            self,
+            Self::BTree(_)
+                | Self::BPlusTree(_)
+                | Self::RadixTree(_)
+                | Self::SkipList(_)
+                | Self::LsmTree(_)
+        )
     }
 
     // ─── Hash-only statistics ─────────────────────────────────────────────────
@@ -214,6 +253,7 @@ impl AnyIndex {
     pub fn load_factor(&self) -> Option<f64> {
         match self {
             Self::StaticHash(i) => Some(i.load_factor()),
+            Self::ChainedHash(i) => Some(i.load_factor()),
             Self::ExtendibleHash(i) => Some(i.load_factor()),
             Self::LinearHash(i) => Some(i.load_factor()),
             _ => None,
@@ -470,4 +510,150 @@ pub fn remove_tuple_from_all_indexes(
     }
 
     Ok(table.indexes.len())
+}
+
+pub fn cluster_table_by_index(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> io::Result<()> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    let index_entry = table
+        .indexes
+        .iter()
+        .find(|i| i.index_name == index_name)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("index '{}' not found", index_name),
+            )
+        })?;
+
+    let mut tuples = scan_live_tuples(db_name, table_name)?;
+    tuples.sort_by(|a, b| {
+        let ka = key_from_tuple(&a.1, &table.columns, &index_entry.column_name)
+            .unwrap_or(IndexKey::Text(String::new()));
+        let kb = key_from_tuple(&b.1, &table.columns, &index_entry.column_name)
+            .unwrap_or(IndexKey::Text(String::new()));
+        ka.cmp(&kb)
+    });
+
+    let table_path = TABLE_FILE_TEMPLATE
+        .replace("{database}", db_name)
+        .replace("{table}", table_name);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&table_path)?;
+    init_table(&mut file)?;
+
+    for (_, tuple) in tuples {
+        insert_tuple(&mut file, &tuple)?;
+    }
+
+    rebuild_table_indexes(catalog, db_name, table_name)?;
+    Ok(())
+}
+
+pub fn validate_index_consistency(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> io::Result<()> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    let entry = table
+        .indexes
+        .iter()
+        .find(|i| i.index_name == index_name)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("index '{}' not found", index_name),
+            )
+        })?;
+
+    let index_path = index_file_path(db_name, table_name, index_name);
+    let index = AnyIndex::load(&index_path, &entry.algorithm)?;
+
+    for (rid, tuple) in scan_live_tuples(db_name, table_name)? {
+        let key = key_from_tuple(&tuple, &table.columns, &entry.column_name)?;
+        let refs = index.search(&key)?;
+        if !refs.contains(&rid) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "index '{}' missing RID {}:{} for key '{}'",
+                    index_name, rid.page_no, rid.item_id, key
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn scan_live_tuples(db_name: &str, table_name: &str) -> io::Result<Vec<(RecordId, Vec<u8>)>> {
+    let table_path = TABLE_FILE_TEMPLATE
+        .replace("{database}", db_name)
+        .replace("{table}", table_name);
+
+    let mut file = OpenOptions::new().read(true).open(&table_path)?;
+    let total_pages = page_count(&mut file)?;
+    let mut tuples = Vec::new();
+
+    for page_num in 1..total_pages {
+        let page_offset = page_num as u64 * crate::page::PAGE_SIZE as u64;
+        file.seek(SeekFrom::Start(page_offset))?;
+
+        let mut page_bytes = vec![0u8; crate::page::PAGE_SIZE];
+        file.read_exact(&mut page_bytes)?;
+
+        let lower = u32::from_le_bytes(page_bytes[0..4].try_into().unwrap()) as usize;
+        let num_items = (lower - PAGE_HEADER_SIZE as usize) / ITEM_ID_SIZE as usize;
+
+        for item_id in 0..num_items as u32 {
+            let slot_base = PAGE_HEADER_SIZE as usize + item_id as usize * ITEM_ID_SIZE as usize;
+            let tuple_offset =
+                u32::from_le_bytes(page_bytes[slot_base..slot_base + 4].try_into().unwrap())
+                    as usize;
+            let tuple_len = u32::from_le_bytes(
+                page_bytes[slot_base + 4..slot_base + 8].try_into().unwrap(),
+            ) as usize;
+
+            if tuple_len == 0 || tuple_offset + tuple_len > page_bytes.len() {
+                continue;
+            }
+
+            tuples.push((
+                RecordId::new(page_num, item_id),
+                page_bytes[tuple_offset..tuple_offset + tuple_len].to_vec(),
+            ));
+        }
+    }
+
+    Ok(tuples)
 }
