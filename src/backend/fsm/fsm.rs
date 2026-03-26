@@ -449,15 +449,6 @@ impl FSM {
             min_category
         );
 
-        // For now, implement a simplified search that:
-        // 1. Checks root value
-        // 2. If sufficient, returns the first page that could have space
-        // Full implementation would traverse the tree level-by-level
-        
-        // Simplified: assume we have space if root >= min_category
-        // In a real implementation, we'd traverse the tree structure
-        // For MVP, just return a simple heuristic
-        
         // Try to read FSM root (Level 2, page 0)
         let root_page = self.read_fsm_page(2, 0, 0)?;
         
@@ -471,23 +462,106 @@ impl FSM {
             println!("[FSM::fsm_search_avail] Root < min_category, returning None");
             return Ok(None);
         }
+
+        // Traverse tree from root to find a leaf with sufficient free space
+        // Start at Level 2 root
+        let result = self.search_tree_for_available_page(2, 0, min_category)?;
         
-        // Simple search: return the first Level 0 page with sufficient space
-        // Real implementation would use fp_next_slot and traverse carefully
-        // For now, return page 1 (first data page) as a placeholder
-        Ok(Some(1))
+        if let Some(page_id) = result {
+            println!(
+                "[FSM::fsm_search_avail] Found page with sufficient space: page_id={}",
+                page_id
+            );
+            Ok(Some(page_id))
+        } else {
+            println!("[FSM::fsm_search_avail] No page found with sufficient space");
+            Ok(None)
+        }
     }
 
-    /// Update free-space category for one heap page and bubble changes up the tree.
-    /// 
-    /// # Arguments
-    /// * `heap_page_id` - Heap page number to update
-    /// * `new_free_bytes` - New free space in bytes (will be converted to category)
-    /// 
-    /// # Returns
-    /// Ok(()) or error
-    /// 
-    /// # Steps
+    /// Recursively search FSM tree for a page with free space >= min_category
+    /// Returns Ok(Option<u32>) where u32 is the page_id, or None if not found
+    fn search_tree_for_available_page(
+        &mut self,
+        level: u32,
+        page_no: u32,
+        min_category: u8,
+    ) -> io::Result<Option<u32>> {
+        if level == 0 {
+            // Leaf level: this FSM page's tree array contains heap page categories
+            let fsm_page = self.read_fsm_page(0, page_no, 0)?;
+            
+            // Get the starting heap page ID for this FSM page
+            let start_heap_page = page_no * FSM_SLOTS_PER_PAGE;
+            
+            println!("[FSM::search_tree] Level 0 (page_no={}): Searching {} leaf slots starting from heap_page={}",
+                page_no, FSM_SLOTS_PER_PAGE, start_heap_page);
+            
+            // Search through leaves (right half of tree array)
+            for slot in 0..FSM_SLOTS_PER_PAGE {
+                let heap_page_id = start_heap_page + slot;
+                
+                // IMPORTANT: Skip heap page 0 - it's the header page, not a data page!
+                if heap_page_id == 0 {
+                    continue;
+                }
+                
+                let leaf_index = FSM_NODES_PER_PAGE / 2 + slot as usize;
+                if leaf_index >= FSM_NODES_PER_PAGE {
+                    break;
+                }
+                
+                let category = fsm_page.tree[leaf_index];
+                
+                // DEBUG: Only print details for pages with category > 0
+                if category > 0 && slot < 10 {
+                    println!("[FSM::search_tree] heap_page {} has category {}", heap_page_id, category);
+                }
+                
+                if category >= min_category {
+                    println!(
+                        "[FSM::search_tree] Found heap page {} with category {} >= {}",
+                        heap_page_id, category, min_category
+                    );
+                    return Ok(Some(heap_page_id));
+                }
+            }
+            
+            println!("[FSM::search_tree] No suitable leaf found in Level 0 page_no={}", page_no);
+            Ok(None)
+        } else {
+            // Internal level: traverse child FSM pages
+            let fsm_page = self.read_fsm_page(level, page_no, 0)?;
+            
+            println!("[FSM::search_tree] Level {} (page_no={}): Searching internal nodes", level, page_no);
+            
+            // Search internal nodes to find a child with space
+            let num_children = FSM_NODES_PER_PAGE / 2; // Internal nodes in first half
+            
+            for child_idx in 0..num_children {
+                let child_category = fsm_page.tree[child_idx];
+                if child_category >= min_category {
+                    println!("[FSM::search_tree] Child {} has category {} >= {}, recursing", 
+                        child_idx, child_category, min_category);
+                    // This child subtree may have sufficient space, recurse
+                    if let Some(result) = self.search_tree_for_available_page(
+                        level - 1,
+                        child_idx as u32,
+                        min_category,
+                    )? {
+                        return Ok(Some(result));
+                    }
+                }
+            }
+            
+            println!("[FSM::search_tree] No suitable child found in Level {} page_no={}", level, page_no);
+            Ok(None)
+        }
+    }
+
+    /// Update FSM to reflect new available space for a heap page
+    ///
+    /// Properly implements the full tree update:
     /// 1. Locate Level 0 FSM page containing this heap page
     /// 2. Update the leaf node with new category
     /// 3. Bubble-up changes within Level 0 FSM page
@@ -505,26 +579,116 @@ impl FSM {
             category
         );
 
-        // For MVP: just update the root FSM hint
-        // Full implementation would:
-        // 1. Locate correct Level 0 FSM page
-        // 2. Update leaf node in binary tree
-        // 3. Bubble changes up through parent nodes
-        // 4. Propagate to Level 1 and Level 2
+        // Find which Level 0 FSM page contains this heap_page_id
+        // Each Level 0 FSM page tracks FSM_SLOTS_PER_PAGE heap pages
+        let fsm_page_no = (heap_page_id / FSM_SLOTS_PER_PAGE) as u32;
+        let slot_within_page = (heap_page_id % FSM_SLOTS_PER_PAGE) as usize;
 
-        // Simplified: update root page (Level 2) with new max value
-        if let Ok(mut root_page) = self.read_fsm_page(2, 0, 0) {
-            // Update with max of current and new values
-            let current_root = root_page.root_value();
-            let new_root = current_root.max(category);
+        println!(
+            "[FSM::fsm_set_avail] Heap page {} → FSM Level 0 page {}, slot {}",
+            heap_page_id, fsm_page_no, slot_within_page
+        );
+
+        // Step 1: Update the leaf in Level 0 FSM page
+        let mut leaf_page = self.read_fsm_page(0, fsm_page_no, 0)?;
+        let leaf_index = FSM_NODES_PER_PAGE / 2 + slot_within_page;
+
+        println!(
+            "[FSM::fsm_set_avail] Updating leaf at index {} from {} to {}",
+            leaf_index, leaf_page.tree[leaf_index], category
+        );
+
+        leaf_page.tree[leaf_index] = category;
+
+        // Step 2: Update internal nodes within the Level 0 page (bubble-up)
+        // Binary tree max-tree: internal nodes store max of their children
+        // In a standard binary heap with array storage:
+        // - Node at index i has children at 2*i+1 and 2*i+2
+        // - Parent of node i is at (i-1)/2
+        
+        // Start from the parent of the just-updated leaf
+        let mut idx = leaf_index;
+        while idx > 0 {
+            let parent_idx = (idx - 1) / 2;
+            let left_child = 2 * parent_idx + 1;
+            let right_child = 2 * parent_idx + 2;
             
-            if new_root != current_root {
-                println!(
-                    "[FSM::fsm_set_avail] Updating root from {} to {}",
-                    current_root, new_root
-                );
-                root_page.set_root_value(new_root);
-                self.write_fsm_page(2, 0, 0, &root_page)?;
+            let new_value = if right_child < FSM_NODES_PER_PAGE {
+                leaf_page.tree[left_child].max(leaf_page.tree[right_child])
+            } else if left_child < FSM_NODES_PER_PAGE {
+                leaf_page.tree[left_child]
+            } else {
+                0
+            };
+            
+            if leaf_page.tree[parent_idx] != new_value {
+                leaf_page.tree[parent_idx] = new_value;
+                idx = parent_idx;
+            } else {
+                break; // No change, no need to bubble further
+            }
+        }
+
+        // Write updated Level 0 page
+        self.write_fsm_page(0, fsm_page_no, 0, &leaf_page)?;
+        
+        let new_level0_root = leaf_page.root_value();
+        println!(
+            "[FSM::fsm_set_avail] Level 0 page root is now: {}",
+            new_level0_root
+        );
+
+        // Step 3: Propagate changes up to Level 1
+        // Each Level 1 FSM page has 2040 nodes representing children at Level 0
+        if fsm_page_no < (FSM_NODES_PER_PAGE / 2) as u32 {
+            let mut level1_page = self.read_fsm_page(1, 0, 0)?;
+            
+            // Correct: use leaf index in level1, not direct fsm_page_no
+            // Leaves in level 1 start at FSM_NODES_PER_PAGE/2
+            let level1_leaf_index = (FSM_NODES_PER_PAGE / 2) + (fsm_page_no as usize);
+            
+            if level1_page.tree[level1_leaf_index] != new_level0_root {
+                level1_page.tree[level1_leaf_index] = new_level0_root;
+                
+                // Bubble up within Level 1 using correct parent formula
+                let mut idx = level1_leaf_index;
+                while idx > 0 {
+                    let parent_idx = (idx - 1) / 2;
+                    let left_child = 2 * parent_idx + 1;
+                    let right_child = 2 * parent_idx + 2;
+                    
+                    let new_val = if right_child < FSM_NODES_PER_PAGE {
+                        level1_page.tree[left_child].max(level1_page.tree[right_child])
+                    } else if left_child < FSM_NODES_PER_PAGE {
+                        level1_page.tree[left_child]
+                    } else {
+                        0
+                    };
+                    
+                    if level1_page.tree[parent_idx] != new_val {
+                        level1_page.tree[parent_idx] = new_val;
+                        idx = parent_idx;
+                    } else {
+                        break;
+                    }
+                }
+                
+                self.write_fsm_page(1, 0, 0, &level1_page)?;
+                
+                // Step 4: Update Level 2 root
+                let new_level1_root = level1_page.root_value();
+                let mut root_page = self.read_fsm_page(2, 0, 0)?;
+                
+                if root_page.tree[0] != new_level1_root {
+                    root_page.tree[0] = new_level1_root;
+                    root_page.set_root_value(new_level1_root);
+                    self.write_fsm_page(2, 0, 0, &root_page)?;
+                    
+                    println!(
+                        "[FSM::fsm_set_avail] Updated root to {}",
+                        new_level1_root
+                    );
+                }
             }
         }
 

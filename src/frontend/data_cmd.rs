@@ -294,10 +294,13 @@ pub fn check_heap_cmd(current_db: &Option<String>) -> io::Result<()> {
                                     .as_secs() - header.last_vacuum as u64) 
                              });
                     
-                    // Calculate average free per page if tuples are present
+                    // Calculate average tuple size if tuples are present
                     if header.page_count > 1 && header.total_tuples > 0 {
-                        let avg_tuple_size = (8192 - 8) / (header.total_tuples.max(1) / (header.page_count as u64));
-                        println!("Est. Avg Tuple:    {} bytes", avg_tuple_size);
+                        let tuples_per_page = (header.total_tuples as f64) / (header.page_count as f64);
+                        if tuples_per_page > 0.0 {
+                            let avg_tuple_size = (8184.0 / tuples_per_page) as u32;
+                            println!("Est. Avg Tuple:    {} bytes", avg_tuple_size);
+                        }
                     }
                     
                     println!("\nHeap is healthy and accessible");

@@ -351,30 +351,47 @@ impl HeapManager {
             min_category
         );
 
+        // Track pages that failed insertion to avoid retrying them
+        let mut failed_pages = Vec::new();
+
         // Try up to 3 times to find or allocate a suitable page
         for attempt in 0..3 {
             println!("[HeapManager::insert_tuple] Attempt {}/3", attempt + 1);
             
             // Get a page to try
-            let page_id = if attempt == 0 {
-                // First attempt: use FSM search
-                match self.fsm.fsm_search_avail(min_category)? {
-                    Some(pid) => {
+            let page_id = match self.fsm.fsm_search_avail(min_category)? {
+                Some(pid) => {
+                    // Check if this page failed before
+                    if failed_pages.contains(&pid) {
+                        println!(
+                            "[HeapManager::insert_tuple] Page {} previously failed for this insert, allocating new",
+                            pid
+                        );
+                        // This page failed before, don't try it again
+                        if attempt < 2 {
+                            println!("[HeapManager::insert_tuple] Retrying with fresh search");
+                            continue;
+                        } else {
+                            println!("[HeapManager::insert_tuple] Final attempt: allocating new page");
+                            self.allocate_new_page()?
+                        }
+                    } else {
                         println!(
                             "[HeapManager::insert_tuple] FSM search returned page: {}",
                             pid
                         );
                         pid
                     }
-                    None => {
-                        println!("[HeapManager::insert_tuple] FSM search returned None, allocating new");
+                }
+                None => {
+                    if attempt < 2 {
+                        println!("[HeapManager::insert_tuple] FSM returned None, will retry");
+                        continue;
+                    } else {
+                        println!("[HeapManager::insert_tuple] Final attempt: allocating new page");
                         self.allocate_new_page()?
                     }
                 }
-            } else {
-                // Subsequent attempts: always allocate a new page
-                println!("[HeapManager::insert_tuple] Allocating new page for retry");
-                self.allocate_new_page()?
             };
 
             // Verify page_id is valid
@@ -407,7 +424,9 @@ impl HeapManager {
                     "[HeapManager::insert_tuple] Page {} has only {} bytes free, needs {} - will retry with new page",
                     page_id, current_free, required_bytes
                 );
-                // Page doesn't have space, loop will allocate new page on next iteration
+                // Track that this page failed for this insert attempt
+                failed_pages.push(page_id);
+                // Page doesn't have space, loop will try next page on next iteration
                 continue;
             }
 
@@ -625,9 +644,18 @@ impl HeapManager {
     }
 
     /// Convert free bytes to free-space category (0-255).
-    /// Formula: category = floor(free_bytes × 255 / PAGE_SIZE)
+    /// For tuple sizing (min_category): use CEILING to ensure pages with at least that much free space
+    /// For page reporting (current free bytes): use FLOOR
+    /// If sizing_for_tuple is true, rounds UP so a 22-byte tuple doesn't match a page with 0 bytes free
     fn bytes_to_category(free_bytes: u32) -> u8 {
-        let category = (free_bytes as f64 * 255.0 / PAGE_SIZE as f64).floor() as u8;
+        // Use ceiling division for better granularity at small sizes
+        // This ensures that a request for 22 bytes gets min_category that only matches pages with real free space
+        let category = if free_bytes == 0 {
+            0
+        } else {
+            // Ceiling division: (a + b - 1) / b instead of a / b
+            ((free_bytes as f64 * 255.0 + PAGE_SIZE as f64 - 1.0) / PAGE_SIZE as f64).floor() as u8
+        };
         println!(
             "[HeapManager::bytes_to_category] {} bytes → category {}",
             free_bytes, category
