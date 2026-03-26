@@ -15,7 +15,7 @@ pub enum TriValue {
 
 /// Internal type representation for type checking at planning time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum DataType {
+pub enum DataType {
     Int,
     Float,
     Text,
@@ -199,6 +199,26 @@ impl<'a> TupleAccessor<'a> {
         Ok(accessor)
     }
 
+    /// Fast constructor that skips validation (use only when tuple is known to be valid).
+    pub fn new_unchecked(tuple: &'a [u8], num_columns: usize) -> Self {
+        let tuple_length = u32::from_le_bytes([tuple[0], tuple[1], tuple[2], tuple[3]]);
+
+        let null_bitmap_start = 8;
+        let null_bitmap_len = (num_columns + 7) / 8;
+        let offset_array_start = null_bitmap_start + null_bitmap_len;
+        let field_data_start = offset_array_start + ((num_columns + 1) * 4);
+
+        TupleAccessor {
+            tuple,
+            tuple_length,
+            num_columns,
+            null_bitmap_start,
+            null_bitmap_len,
+            offset_array_start,
+            field_data_start,
+        }
+    }
+
     /// Validates offset array: monotonicity and bounds.
     fn validate_offsets(&self) -> Result<(), TupleError> {
         let mut prev_offset = 0u32;
@@ -261,14 +281,28 @@ impl<'a> TupleAccessor<'a> {
             return Ok(&[]);
         }
 
-        let relative_start = self.get_offset(col_idx)? as usize;
-        let relative_end = self.get_offset(col_idx + 1)? as usize;
-        
-        let start_offset = self.field_data_start + relative_start;
-        let end_offset = self.field_data_start + relative_end;
+        // Read offsets only once
+        let relative_start = self.get_offset(col_idx)?;
+        let relative_end = self.get_offset(col_idx + 1)?;
 
-        if end_offset > self.tuple_length as usize || start_offset > end_offset {
+        let start_offset = self.field_data_start + relative_start as usize;
+        let end_offset = self.field_data_start + relative_end as usize;
+
+        let tuple_len = self.tuple.len();
+
+        // Check start_offset within bounds
+        if start_offset > tuple_len {
             return Err(TupleError::FieldRegionOutOfBounds);
+        }
+
+        // Check end_offset within bounds
+        if end_offset > tuple_len {
+            return Err(TupleError::FieldRegionOutOfBounds);
+        }
+
+        // Ensure offsets are monotonic
+        if start_offset > end_offset {
+            return Err(TupleError::OffsetNotMonotonic);
         }
 
         Ok(&self.tuple[start_offset..end_offset])
@@ -300,17 +334,63 @@ impl<'a> TupleAccessor<'a> {
                 }
             }
             "DATE" => {
-                let text = String::from_utf8_lossy(field_bytes).to_string();
-                Ok(Value::Date(text))
+                let text = std::str::from_utf8(field_bytes)
+                    .map_err(|_| TupleError::FieldRegionOutOfBounds)?;
+                Ok(Value::Date(text.to_owned()))
             }
             "TEXT" | "STRING" => {
-                let text = String::from_utf8_lossy(field_bytes).to_string();
-                Ok(Value::Text(text))
+                let text = std::str::from_utf8(field_bytes)
+                    .map_err(|_| TupleError::FieldRegionOutOfBounds)?;
+                Ok(Value::Text(text.to_owned()))
             }
             _ => {
-                let text = String::from_utf8_lossy(field_bytes).to_string();
-                Ok(Value::Text(text))
+                let text = std::str::from_utf8(field_bytes)
+                    .map_err(|_| TupleError::FieldRegionOutOfBounds)?;
+                Ok(Value::Text(text.to_owned()))
             }
+        }
+    }
+
+    /// Fast value deserializer using enum-based type matching (avoids string comparisons).
+    pub fn get_value_fast(
+        &self,
+        col_idx: usize,
+        data_type: &DataType,
+    ) -> Result<Value, TupleError> {
+        if self.is_null(col_idx)? {
+            return Ok(Value::Null);
+        }
+
+        let field_bytes = self.get_field_bytes(col_idx)?;
+
+        match data_type {
+            DataType::Int => {
+                if field_bytes.len() == 4 {
+                    let val = i32::from_le_bytes(field_bytes.try_into().unwrap());
+                    Ok(Value::Int(val))
+                } else {
+                    Err(TupleError::FieldRegionOutOfBounds)
+                }
+            }
+            DataType::Float => {
+                if field_bytes.len() == 8 {
+                    let val = f64::from_le_bytes(field_bytes.try_into().unwrap());
+                    Ok(Value::Float(val))
+                } else {
+                    Err(TupleError::FieldRegionOutOfBounds)
+                }
+            }
+            DataType::Date => {
+                let text = std::str::from_utf8(field_bytes)
+                    .map_err(|_| TupleError::FieldRegionOutOfBounds)?;
+                Ok(Value::Date(text.to_owned()))
+            }
+            DataType::Text => {
+                let text = std::str::from_utf8(field_bytes)
+                    .map_err(|_| TupleError::FieldRegionOutOfBounds)?;
+                Ok(Value::Text(text.to_owned()))
+            }
+            DataType::Null => Ok(Value::Null),
         }
     }
 
@@ -370,6 +450,7 @@ fn infer_expr_type(expr: &Expr, schema: &Table) -> Result<DataType, String> {
 pub struct SelectionExecutor {
     predicate: Predicate,
     schema: Table,
+    column_types: Vec<DataType>,
 }
 
 impl SelectionExecutor {
@@ -378,8 +459,25 @@ impl SelectionExecutor {
         Self::normalize_predicate(&mut predicate);
         Self::resolve_columns(&mut predicate, &schema)?;
 
+        // Pre-parse column types once for fast access
+        let column_types = schema
+            .columns
+            .iter()
+            .map(|c| match c.data_type.as_str() {
+                "INT" => DataType::Int,
+                "FLOAT" => DataType::Float,
+                "TEXT" | "STRING" => DataType::Text,
+                "DATE" => DataType::Date,
+                _ => DataType::Null,
+            })
+            .collect();
+
         // All column references are resolved during initialization; runtime assumes validity.
-        Ok(SelectionExecutor { predicate, schema })
+        Ok(SelectionExecutor {
+            predicate,
+            schema,
+            column_types,
+        })
     }
 
     /// Preprocessing step for initialization optimization.
@@ -719,8 +817,7 @@ impl SelectionExecutor {
 
     /// Evaluates predicate against tuple, returning three-valued logic result.
     pub fn evaluate_tuple(&self, tuple: &[u8]) -> Result<TriValue, String> {
-        let accessor = TupleAccessor::new(tuple, self.schema.columns.len())
-            .map_err(|e| format!("Tuple parsing error: {:?}", e))?;
+        let accessor = TupleAccessor::new_unchecked(tuple, self.schema.columns.len());
 
         self.evaluate_predicate(&self.predicate, &accessor)
     }
@@ -852,8 +949,9 @@ impl SelectionExecutor {
         match expr {
             Expr::Column(col_ref) => {
                 let idx = col_ref.column_index.ok_or("Unresolved column")?;
-                let dtype = &self.schema.columns[idx].data_type;
-                accessor.get_value(idx, dtype).map_err(|e| format!("{:?}", e))
+                accessor
+                    .get_value_fast(idx, &self.column_types[idx])
+                    .map_err(|e| format!("{:?}", e))
             }
             Expr::Constant(c) => Ok(constant_to_value(c)),
 
