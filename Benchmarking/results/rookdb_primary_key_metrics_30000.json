@@ -1,27 +1,27 @@
 {
-  "input_csv": "/Users/gr/Desktop/RookDB/Benchmarking/data/synthetic_orders_20000.csv",
-  "total_rows": 20000,
-  "primary_key_unique_count": 20000,
+  "input_csv": "/Users/gr/Desktop/RookDB/Benchmarking/data/synthetic_orders_30000.csv",
+  "total_rows": 30000,
+  "primary_key_unique_count": 30000,
   "algorithms": [
     {
       "algorithm": "Static Hash",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 11.834000000000001,
-        "avg_us": 0.214383450000015,
-        "p50_us": 0.20800000000000002,
-        "p95_us": 0.334,
-        "p99_us": 0.417
+        "max_us": 54.917,
+        "avg_us": 0.3923273000000244,
+        "p50_us": 0.375,
+        "p95_us": 0.625,
+        "p99_us": 1.417
       },
       "search_latency": {
-        "min_us": 0.0,
-        "max_us": 27.875,
-        "avg_us": 0.1994391500000143,
-        "p50_us": 0.20800000000000002,
-        "p95_us": 0.29200000000000004,
-        "p99_us": 0.334
+        "min_us": 0.041,
+        "max_us": 19.208,
+        "avg_us": 0.3540250666666609,
+        "p50_us": 0.334,
+        "p95_us": 0.541,
+        "p99_us": 0.6659999999999999
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,
@@ -31,21 +31,21 @@
       "algorithm": "Chained Hash",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 40.625,
-        "avg_us": 0.24761960000000763,
+        "max_us": 18.875,
+        "avg_us": 0.27771500000000304,
         "p50_us": 0.25,
-        "p95_us": 0.375,
-        "p99_us": 0.5
+        "p95_us": 0.459,
+        "p99_us": 0.5840000000000001
       },
       "search_latency": {
-        "min_us": 0.0,
-        "max_us": 18.541,
-        "avg_us": 0.19535345000001514,
-        "p50_us": 0.20800000000000002,
-        "p95_us": 0.33299999999999996,
-        "p99_us": 0.334
+        "min_us": 0.041,
+        "max_us": 16.666,
+        "avg_us": 0.2693868333333425,
+        "p50_us": 0.25,
+        "p95_us": 0.458,
+        "p99_us": 0.459
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,
@@ -55,21 +55,21 @@
       "algorithm": "Extendible Hash",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 252.0,
-        "avg_us": 12.571094800000003,
+        "max_us": 328.54200000000003,
+        "avg_us": 18.47930810000013,
         "p50_us": 0.20800000000000002,
-        "p95_us": 49.75,
-        "p99_us": 85.084
+        "p95_us": 84.208,
+        "p99_us": 114.042
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 7.209,
-        "avg_us": 0.07540709999998453,
-        "p50_us": 0.041999999999999996,
-        "p95_us": 0.167,
-        "p99_us": 0.291
+        "max_us": 5.542,
+        "avg_us": 0.08535213333335197,
+        "p50_us": 0.083,
+        "p95_us": 0.125,
+        "p99_us": 0.167
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,
@@ -78,22 +78,22 @@
     {
       "algorithm": "Linear Hash",
       "insert_latency": {
-        "min_us": 0.041,
-        "max_us": 104.16600000000001,
-        "avg_us": 8.053452800000017,
-        "p50_us": 8.0,
-        "p95_us": 15.291999999999998,
-        "p99_us": 20.665999999999997
+        "min_us": 0.041999999999999996,
+        "max_us": 1216.958,
+        "avg_us": 11.839678500000023,
+        "p50_us": 11.834000000000001,
+        "p95_us": 22.458000000000002,
+        "p99_us": 25.041999999999998
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 13.417,
-        "avg_us": 0.08001640000000235,
+        "max_us": 5.083,
+        "avg_us": 0.07554536666668075,
         "p50_us": 0.083,
         "p95_us": 0.125,
         "p99_us": 0.125
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,
@@ -103,21 +103,21 @@
       "algorithm": "B-Tree",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 45.583,
-        "avg_us": 0.21354519999998983,
+        "max_us": 14.792,
+        "avg_us": 0.21148993333331687,
         "p50_us": 0.166,
         "p95_us": 0.458,
-        "p99_us": 1.291
+        "p99_us": 1.25
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 11.5,
-        "avg_us": 0.07969775000000574,
+        "max_us": 3.0,
+        "avg_us": 0.07982880000002347,
         "p50_us": 0.083,
         "p95_us": 0.125,
-        "p99_us": 0.125
+        "p99_us": 0.167
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,
@@ -127,21 +127,21 @@
       "algorithm": "B+ Tree",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 13.332999999999998,
-        "avg_us": 0.21138869999999696,
+        "max_us": 21.041999999999998,
+        "avg_us": 0.208438799999993,
         "p50_us": 0.167,
         "p95_us": 0.33299999999999996,
-        "p99_us": 0.5
+        "p99_us": 0.417
       },
       "search_latency": {
         "min_us": 0.083,
-        "max_us": 25.292,
-        "avg_us": 0.17225364999995937,
-        "p50_us": 0.167,
-        "p95_us": 0.20800000000000002,
-        "p99_us": 0.29200000000000004
+        "max_us": 9.125,
+        "avg_us": 0.15478326666665934,
+        "p50_us": 0.166,
+        "p95_us": 0.167,
+        "p99_us": 0.20900000000000002
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,
@@ -150,22 +150,22 @@
     {
       "algorithm": "Radix Tree",
       "insert_latency": {
-        "min_us": 0.041,
-        "max_us": 30.625,
-        "avg_us": 0.14690374999999511,
+        "min_us": 0.041999999999999996,
+        "max_us": 15.708,
+        "avg_us": 0.1436887999999998,
         "p50_us": 0.125,
         "p95_us": 0.167,
-        "p99_us": 0.25
+        "p99_us": 0.20900000000000002
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 10.332999999999998,
-        "avg_us": 0.06810795000000175,
+        "max_us": 0.291,
+        "avg_us": 0.06957146666668615,
         "p50_us": 0.083,
         "p95_us": 0.08399999999999999,
         "p99_us": 0.08399999999999999
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,
@@ -175,21 +175,21 @@
       "algorithm": "Skip List",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 53.291999999999994,
-        "avg_us": 0.09530090000000095,
+        "max_us": 14.458,
+        "avg_us": 0.09280026666668831,
         "p50_us": 0.083,
         "p95_us": 0.125,
-        "p99_us": 0.20900000000000002
+        "p99_us": 0.20800000000000002
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 12.875,
-        "avg_us": 0.04400264999999449,
+        "max_us": 0.5419999999999999,
+        "avg_us": 0.04603506666668446,
         "p50_us": 0.041999999999999996,
         "p95_us": 0.083,
         "p99_us": 0.08399999999999999
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,
@@ -199,21 +199,21 @@
       "algorithm": "LSM Tree",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 1804.333,
-        "avg_us": 0.1983407499999808,
+        "max_us": 2380.416,
+        "avg_us": 0.2218007333333459,
         "p50_us": 0.041999999999999996,
         "p95_us": 0.125,
-        "p99_us": 0.20800000000000002
+        "p99_us": 0.167
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 4.542,
-        "avg_us": 0.07600145000000766,
+        "max_us": 2.625,
+        "avg_us": 0.08873923333335199,
         "p50_us": 0.083,
-        "p95_us": 0.08399999999999999,
+        "p95_us": 0.125,
         "p99_us": 0.125
       },
-      "total_keys": 20000,
+      "total_keys": 30000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "miss_checks_ok": true,

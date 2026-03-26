@@ -1,17 +1,17 @@
 # RookDB Primary-Key Benchmark (SQLite Baseline)
 
 ## Dataset
-- Rows: 20000
+- Rows: 50000
 - Seed: 42
 - Data: controlled synthetic orders with heavy-tail customers, skewed categories, and bursty timestamps
 
 ## SQLite Baseline (Measured)
-- Total rows: 20000
-- Unique primary keys: 20000
-- Search p95 latency: 6.292015 us
-- Search p99 latency: 15.166996 us
-- Search avg latency: 5.812285 us
-- Search throughput: 172049.37 ops/s
+- Total rows: 50000
+- Unique primary keys: 50000
+- Search p95 latency: 4.625006 us
+- Search p99 latency: 4.917005 us
+- Search avg latency: 4.562153 us
+- Search throughput: 219194.74 ops/s
 
 ## Correctness Cross-Verification
 - Overall status: PASS

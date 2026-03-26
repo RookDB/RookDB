@@ -1,9 +1,9 @@
 {
   "overall_ok": true,
-  "sqlite_total_rows": 20000,
-  "sqlite_unique_primary_keys": 20000,
-  "rookdb_total_rows": 20000,
-  "rookdb_unique_primary_keys": 20000,
+  "sqlite_total_rows": 50000,
+  "sqlite_unique_primary_keys": 50000,
+  "rookdb_total_rows": 50000,
+  "rookdb_unique_primary_keys": 50000,
   "sqlite_miss_checks_ok": true,
   "algorithm_checks": [
     {
