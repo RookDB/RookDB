@@ -10,3 +10,7 @@ code/.DS_Store
 .DS_Store
 design.pdf
 proposal.pdf
+
+# ignore any .venv anywhere
+.venv/
+**/.venv/

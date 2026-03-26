@@ -1,27 +1,27 @@
 {
-  "input_csv": "/Users/gr/Desktop/RookDB/Benchmarking/data/synthetic_orders_30000.csv",
-  "total_rows": 30000,
-  "primary_key_unique_count": 30000,
+  "input_csv": "/Users/gr/Desktop/RookDB/Benchmarking/data/synthetic_orders_5000.csv",
+  "total_rows": 5000,
+  "primary_key_unique_count": 5000,
   "algorithms": [
     {
       "algorithm": "Static Hash",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 25.584,
-        "avg_us": 0.46439539999999546,
-        "p50_us": 0.5419999999999999,
-        "p95_us": 0.875,
-        "p99_us": 0.9590000000000001
+        "max_us": 11.125,
+        "avg_us": 0.1055779999999987,
+        "p50_us": 0.08399999999999999,
+        "p95_us": 0.167,
+        "p99_us": 0.20900000000000002
       },
       "search_latency": {
-        "min_us": 0.041,
-        "max_us": 3.125,
-        "avg_us": 0.41519260000002917,
-        "p50_us": 0.417,
-        "p95_us": 0.667,
-        "p99_us": 0.709
+        "min_us": 0.0,
+        "max_us": 1.166,
+        "avg_us": 0.08225940000000019,
+        "p50_us": 0.083,
+        "p95_us": 0.125,
+        "p99_us": 0.125
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,
@@ -40,21 +40,21 @@
       "algorithm": "Chained Hash",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 18.375,
-        "avg_us": 0.3296161666666413,
-        "p50_us": 0.33299999999999996,
-        "p95_us": 0.5,
-        "p99_us": 0.5419999999999999
+        "max_us": 5.125,
+        "avg_us": 0.11404539999999959,
+        "p50_us": 0.08399999999999999,
+        "p95_us": 0.166,
+        "p99_us": 1.125
       },
       "search_latency": {
-        "min_us": 0.041,
-        "max_us": 18.75,
-        "avg_us": 0.28551446666667685,
-        "p50_us": 0.29200000000000004,
-        "p95_us": 0.459,
-        "p99_us": 0.5
+        "min_us": 0.0,
+        "max_us": 0.25,
+        "avg_us": 0.07898240000000024,
+        "p50_us": 0.083,
+        "p95_us": 0.125,
+        "p99_us": 0.125
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,
@@ -73,21 +73,21 @@
       "algorithm": "Extendible Hash",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 329.042,
-        "avg_us": 18.103105833333483,
-        "p50_us": 0.167,
-        "p95_us": 81.834,
-        "p99_us": 90.042
+        "max_us": 112.333,
+        "avg_us": 4.207815399999994,
+        "p50_us": 0.08399999999999999,
+        "p95_us": 25.084,
+        "p99_us": 29.75
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 7.417000000000001,
-        "avg_us": 0.06636556666667894,
+        "max_us": 1.7910000000000001,
+        "avg_us": 0.06460160000000041,
         "p50_us": 0.041999999999999996,
         "p95_us": 0.08399999999999999,
-        "p99_us": 0.20800000000000002
+        "p99_us": 0.167
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,
@@ -105,22 +105,22 @@
     {
       "algorithm": "Linear Hash",
       "insert_latency": {
-        "min_us": 0.041,
-        "max_us": 141.584,
-        "avg_us": 13.55654153333328,
-        "p50_us": 11.333,
-        "p95_us": 32.417,
-        "p99_us": 38.583
+        "min_us": 0.083,
+        "max_us": 23.209,
+        "avg_us": 2.1032325999999943,
+        "p50_us": 2.041,
+        "p95_us": 4.042,
+        "p99_us": 5.709
       },
       "search_latency": {
-        "min_us": 0.0,
-        "max_us": 3.667,
-        "avg_us": 0.06623140000001328,
+        "min_us": 0.041,
+        "max_us": 0.625,
+        "avg_us": 0.07137060000000028,
         "p50_us": 0.083,
         "p95_us": 0.08399999999999999,
         "p99_us": 0.125
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,
@@ -139,21 +139,21 @@
       "algorithm": "B-Tree",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 53.291999999999994,
-        "avg_us": 0.224305633333309,
+        "max_us": 21.792,
+        "avg_us": 0.2289717999999952,
         "p50_us": 0.166,
-        "p95_us": 0.459,
-        "p99_us": 1.417
+        "p95_us": 0.5,
+        "p99_us": 1.333
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 8.5,
-        "avg_us": 0.083698100000021,
+        "max_us": 12.292,
+        "avg_us": 0.08618299999999984,
         "p50_us": 0.083,
-        "p95_us": 0.125,
-        "p99_us": 0.20800000000000002
+        "p95_us": 0.167,
+        "p99_us": 0.291
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,
@@ -171,22 +171,22 @@
     {
       "algorithm": "B+ Tree",
       "insert_latency": {
-        "min_us": 0.0,
-        "max_us": 22.709,
-        "avg_us": 0.22971403333335322,
-        "p50_us": 0.20800000000000002,
+        "min_us": 0.041,
+        "max_us": 8.042,
+        "avg_us": 0.21664239999999976,
+        "p50_us": 0.167,
         "p95_us": 0.33299999999999996,
-        "p99_us": 0.458
+        "p99_us": 1.333
       },
       "search_latency": {
-        "min_us": 0.125,
-        "max_us": 5.167,
-        "avg_us": 0.1771288333332464,
+        "min_us": 0.083,
+        "max_us": 7.75,
+        "avg_us": 0.16486680000000167,
         "p50_us": 0.167,
-        "p95_us": 0.20900000000000002,
-        "p99_us": 0.20900000000000002
+        "p95_us": 0.167,
+        "p99_us": 0.291
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,
@@ -205,21 +205,21 @@
       "algorithm": "Radix Tree",
       "insert_latency": {
         "min_us": 0.083,
-        "max_us": 15.834000000000001,
-        "avg_us": 0.1561848333333301,
+        "max_us": 5.208,
+        "avg_us": 0.15661520000000426,
         "p50_us": 0.125,
         "p95_us": 0.167,
-        "p99_us": 0.29200000000000004
+        "p99_us": 0.33299999999999996
       },
       "search_latency": {
-        "min_us": 0.0,
-        "max_us": 0.25,
-        "avg_us": 0.08139903333334259,
+        "min_us": 0.041,
+        "max_us": 0.291,
+        "avg_us": 0.08012520000000026,
         "p50_us": 0.083,
         "p95_us": 0.08399999999999999,
         "p99_us": 0.125
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,
@@ -237,22 +237,22 @@
     {
       "algorithm": "Skip List",
       "insert_latency": {
-        "min_us": 0.0,
-        "max_us": 17.25,
-        "avg_us": 0.09474313333335571,
+        "min_us": 0.041,
+        "max_us": 2.458,
+        "avg_us": 0.08792640000000013,
         "p50_us": 0.083,
         "p95_us": 0.125,
-        "p99_us": 0.20900000000000002
+        "p99_us": 0.20800000000000002
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 7.875,
-        "avg_us": 0.05267830000001897,
+        "max_us": 0.20800000000000002,
+        "avg_us": 0.05649740000000057,
         "p50_us": 0.041999999999999996,
         "p95_us": 0.08399999999999999,
         "p99_us": 0.08399999999999999
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,
@@ -271,21 +271,21 @@
       "algorithm": "LSM Tree",
       "insert_latency": {
         "min_us": 0.0,
-        "max_us": 2438.417,
-        "avg_us": 0.2322322666666761,
+        "max_us": 1.5,
+        "avg_us": 0.07252120000000041,
         "p50_us": 0.083,
         "p95_us": 0.125,
-        "p99_us": 0.167
+        "p99_us": 0.20800000000000002
       },
       "search_latency": {
         "min_us": 0.0,
-        "max_us": 0.29200000000000004,
-        "avg_us": 0.09003420000001852,
+        "max_us": 7.458,
+        "avg_us": 0.06523080000000045,
         "p50_us": 0.083,
-        "p95_us": 0.125,
+        "p95_us": 0.08399999999999999,
         "p99_us": 0.125
       },
-      "total_keys": 30000,
+      "total_keys": 5000,
       "missing_keys": 0,
       "duplicate_hits": 0,
       "wrong_record_ids": 0,

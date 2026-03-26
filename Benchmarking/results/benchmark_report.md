@@ -8,10 +8,10 @@
 ## SQLite Baseline (Measured)
 - Total rows: 50000
 - Unique primary keys: 50000
-- Search p95 latency: 4.625006 us
-- Search p99 latency: 4.917005 us
-- Search avg latency: 4.562153 us
-- Search throughput: 219194.74 ops/s
+- Search p95 latency: 4.749978 us
+- Search p99 latency: 6.125018 us
+- Search avg latency: 4.645425 us
+- Search throughput: 215265.55 ops/s
 
 ## Correctness Cross-Verification
 - Overall status: PASS
