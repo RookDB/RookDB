@@ -1,124 +1,71 @@
-# Benchmarking
+# Benchmarking (Rebuilt)
 
-This folder contains the Python-driven benchmarking pipeline for RookDB index performance testing.
+This benchmark stack uses measured systems only (no hardcoded comparison vectors)
+and generates reproducible benchmarking + correctness artifacts.
 
-## Workloads
+## Pipeline
 
-- Insert-heavy workload
-- Read-heavy workload
-- Mixed workload
-- Range query workload
+1. Generate controlled synthetic data (`synthetic_orders.csv`)
+2. Load and benchmark SQLite primary-key index baseline
+3. Run RookDB Rust index benchmark on same data
+4. Cross-verify correctness between SQLite and RookDB outputs
+5. Run scalability sweep across multiple row counts
+6. Generate matplotlib charts and report
 
-## Baseline Comparison Against Existing Benchmarks
+## Run
 
-The framework includes a measured reference-system comparison engine.
-
-- Comparison engine: `Benchmarking/standards_compare_engine.py`
-- Measured references:
-	- SQLite (B-tree)
-	- SortedContainers (tree-like ordered structure)
-	- Python dict (hash-like structure)
-- Output report: `Benchmarking/results/standards_comparison.md`
-- Output graph: `Benchmarking/results/charts/standards_latency_baseline_compare.svg`
-- Raw p95 graph: `Benchmarking/results/charts/standards_raw_p95_by_workload.svg`
-
-The engine reports both normalized comparison and raw p95 latency values.
-
-## Independent .dat Correctness Validation
-
-Reusable validator APIs and CLI are included:
-
-- Reusable APIs: `Benchmarking/dat_validator.py`
-- CLI validator: `Benchmarking/validate_dat_files.py`
-
-What it validates:
-
-- Header page count consistency vs actual file pages
-- Slotted-page lower/upper bounds per page
-- Slot directory integrity and tuple boundaries
-- Tombstone semantics (`len=0`)
-
-Index behavior validation is also available (all index algorithms):
-
-- Write (insert)
-- Read (load/save)
-- Search (point lookup)
-- Range search (tree indexes, unsupported check for hash indexes)
-- Corruption detection (intentionally invalid index file load)
-
-Dummy-data assurance checks are built in:
-
-- `dummy_valid.dat` must pass
-- `dummy_corrupt.dat` must fail
-
-## Metrics Collected
-
-- Query latency: min, max, avg, p50, p95, p99
-- Logical I/O operations count
-- Index size on disk
-- Build time measurement
-
-## Architecture
-
-- Rust benchmark runner: `src/bin/index_benchmark.rs`
-- Python orchestrator and visualization: `Benchmarking/run_benchmarks.py`
-
-The Python script runs all index algorithms, stores raw data, computes summaries, and generates visualizations.
-
-## Setup
+From repository root (uv workflow):
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r Benchmarking/requirements.txt
+uv python install 3.12
+uv venv --python 3.12 .venv-bench
+uv pip install --python .venv-bench/bin/python -r Benchmarking/requirements.txt
 ```
 
-`requirements.txt` includes analysis dependencies and ordered-structure support.
-
-## Run Benchmarks
+Run benchmark:
 
 ```bash
-python Benchmarking/run_benchmarks.py --cargo-profile release
+.venv-bench/bin/python Benchmarking/run_benchmarks.py --rows 50000 --seed 42
 ```
 
-Optional parameters:
+Optional:
 
-- `--preload <int>`: preloaded rows per benchmark scenario (default 20000)
-- `--ops <int>`: operations per workload (default 8000)
-- `--range-width <int>`: key width used in range scans (default 64)
-- `--seed <int>`: deterministic seed (default 7)
-- `--skip-run`: skip Rust execution and only post-process existing raw JSON
-- `--validate-dat`: run independent `.dat` validation and dummy-data checks
-- `--validate-index`: run index read/write/search/range validation and corruption checks
+```bash
+.venv-bench/bin/python Benchmarking/run_benchmarks.py --rows 50000 --seed 42 --scales 10000,30000,50000
+```
 
 ## Output
 
-Generated under `Benchmarking/results/`:
-
-- `raw_results.json`
-- `summary_by_index.csv`
-- `summary_by_workload.csv`
-- `analysis_report.md`
-- `standards_comparison.csv`
-- `standards_comparison.md`
-- `dat_validation_report.json`
-- `index_validation_report.json`
-- `charts/*.svg`
+- `Benchmarking/data/synthetic_orders.csv`
+- `Benchmarking/results/sqlite_baseline.db`
+- `Benchmarking/results/rookdb_primary_key_metrics.json`
+- `Benchmarking/results/latency_comparison.csv`
+- `Benchmarking/results/scalability_summary.csv`
+- `Benchmarking/results/correctness_verification.json`
+- `Benchmarking/results/benchmark_report.md`
+- `Benchmarking/results/charts/search_p95_comparison.png`
+- `Benchmarking/results/charts/rookdb_insert_p95.png`
+- `Benchmarking/results/charts/scalability_search_p95.png`
 
 ## Notes
 
-- Hash indexes do not support ordered range queries and are expected to be skipped in range workload.
-- I/O operation count is tracked as a logical metric for benchmarked operations plus save/load operations.
-- Generated temporary index snapshots are written to `Benchmarking/results/index_files/` and ignored from version control.
+- No hardcoded comparison JSON vectors are used.
+- Benchmarking currently focuses on primary-key index latency and correctness.
+- All RookDB index algorithms are tested for primary-key operations.
 
-## Run Only .dat Validation
+## Evaluation Coverage
 
-```bash
-python Benchmarking/validate_dat_files.py --root database/base --output Benchmarking/results/dat_validation_report.json
-```
+- Correctness: SQLite vs RookDB cross-verification + per-algorithm correctness
+- Benchmarking: p50/p95/p99 + throughput
+- Testing: multi-scale runs via `--scales`
+- Robustness: miss-key checks and strict subprocess failure handling
+- Documentation quality: generated markdown + chart artifacts
 
-## Run Only Index Validation
+## Research Metric Context
 
-```bash
-cargo run --release --bin index_validation
-```
+The benchmark emphasizes latency percentiles and throughput, aligned with
+common service-benchmark reporting practice (for example YCSB-style metrics).
+
+Reference:
+
+- Cooper et al. (2010), Benchmarking Cloud Serving Systems with YCSB.

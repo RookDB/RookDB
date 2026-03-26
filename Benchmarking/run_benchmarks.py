@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Run end-to-end index benchmarks for RookDB and generate charts/report.
+"""Primary-key benchmark pipeline for RookDB with SQLite baseline.
 
-This script:
-1) Executes the Rust benchmark runner for all index algorithms and workloads.
-2) Converts raw JSON output into summary CSV tables.
-3) Produces charts for latency, build time, index size, and logical I/O count.
-4) Produces a Markdown analysis report for documentation.
+Research-aligned evaluation metrics in this script follow common benchmark
+practice (latency percentiles and throughput), as used in YCSB-style studies:
+- Cooper et al. (2010), Benchmarking Cloud Serving Systems with YCSB.
+
+Pipeline:
+1) Generate controlled synthetic data (deterministic, real-world-like distributions).
+2) Load into SQLite baseline and measure primary-key lookup latency.
+3) Run Rust RookDB index benchmark across all index algorithms.
+4) Cross-verify correctness between SQLite and RookDB outputs.
+5) Run scalability sweeps across multiple dataset sizes.
+6) Emit metrics, plots, and a documentation-ready report.
 """
 
 from __future__ import annotations
@@ -13,631 +19,562 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
+import sqlite3
 import subprocess
-import sys
-from collections import defaultdict
-from dataclasses import dataclass
+import time
 from pathlib import Path
-from statistics import mean, pstdev
-from typing import Dict, Iterable, List, Tuple
+from statistics import mean
+from typing import Dict, List
 
-from standards_compare_engine import StandardsComparator
+import matplotlib
 
-
-WORKLOAD_ORDER = ["insert_heavy", "read_heavy", "mixed", "range_query"]
-
-
-@dataclass
-class BenchmarkPaths:
-    root: Path
-    results_dir: Path
-    charts_dir: Path
-    raw_json: Path
-    summary_csv: Path
-    workload_csv: Path
-    report_md: Path
-    standards_csv: Path
-    standards_report_md: Path
-    standards_chart_svg: Path
-    standards_raw_chart_svg: Path
-    dat_validation_json: Path
-    index_validation_json: Path
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="RookDB benchmark driver")
-    parser.add_argument("--preload", type=int, default=20000, help="preloaded rows per benchmark case")
-    parser.add_argument("--ops", type=int, default=8000, help="operations per workload")
-    parser.add_argument("--range-width", type=int, default=64, help="range width for range scans")
-    parser.add_argument("--seed", type=int, default=7, help="base RNG seed")
-    parser.add_argument("--repeats", type=int, default=5, help="number of repeated benchmark runs")
+    parser = argparse.ArgumentParser(description="RookDB primary-key benchmark")
+    parser.add_argument("--rows", type=int, default=50000, help="number of synthetic rows for single-run artifact")
     parser.add_argument(
-        "--cargo-profile",
-        choices=["release", "debug"],
-        default="release",
-        help="cargo profile used for benchmark binary",
+        "--scales",
+        default="10000,30000,50000",
+        help="comma-separated row counts for scalability evaluation",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="deterministic RNG seed")
+    parser.add_argument(
+        "--data-csv",
+        default="Benchmarking/data/synthetic_orders.csv",
+        help="synthetic data CSV path",
     )
     parser.add_argument(
-        "--skip-run",
-        action="store_true",
-        help="skip executing the Rust benchmark and only post-process existing raw JSON",
+        "--sqlite-db",
+        default="Benchmarking/results/sqlite_baseline.db",
+        help="SQLite baseline DB path",
     )
     parser.add_argument(
-        "--validate-dat",
-        action="store_true",
-        help="Run independent .dat correctness validation after benchmarking",
+        "--rookdb-json",
+        default="Benchmarking/results/rookdb_primary_key_metrics.json",
+        help="RookDB benchmark output JSON path",
     )
     parser.add_argument(
-        "--validate-index",
-        action="store_true",
-        help="Run read/write/search/range index validation plus corruption checks",
+        "--comparison-csv",
+        default="Benchmarking/results/latency_comparison.csv",
+        help="comparison CSV path",
+    )
+    parser.add_argument(
+        "--verification-json",
+        default="Benchmarking/results/correctness_verification.json",
+        help="verification JSON path",
+    )
+    parser.add_argument(
+        "--report-md",
+        default="Benchmarking/results/benchmark_report.md",
+        help="benchmark report markdown path",
+    )
+    parser.add_argument(
+        "--scalability-csv",
+        default="Benchmarking/results/scalability_summary.csv",
+        help="scalability summary CSV path",
+    )
+    parser.add_argument(
+        "--charts-dir",
+        default="Benchmarking/results/charts",
+        help="directory for matplotlib chart outputs",
     )
     return parser.parse_args()
 
 
-def resolve_paths() -> BenchmarkPaths:
-    root = Path(__file__).resolve().parents[1]
-    results_dir = root / "Benchmarking" / "results"
-    charts_dir = results_dir / "charts"
-    return BenchmarkPaths(
-        root=root,
-        results_dir=results_dir,
-        charts_dir=charts_dir,
-        raw_json=results_dir / "raw_results.json",
-        summary_csv=results_dir / "summary_by_index.csv",
-        workload_csv=results_dir / "summary_by_workload.csv",
-        report_md=results_dir / "analysis_report.md",
-        standards_csv=results_dir / "standards_comparison.csv",
-        standards_report_md=results_dir / "standards_comparison.md",
-        standards_chart_svg=charts_dir / "standards_latency_baseline_compare.svg",
-        standards_raw_chart_svg=charts_dir / "standards_raw_p95_by_workload.svg",
-        dat_validation_json=results_dir / "dat_validation_report.json",
-        index_validation_json=results_dir / "index_validation_report.json",
-    )
+def _latency_stats(samples_us: List[float]) -> Dict[str, float]:
+    if not samples_us:
+        return {
+            "min_us": 0.0,
+            "max_us": 0.0,
+            "avg_us": 0.0,
+            "p50_us": 0.0,
+            "p95_us": 0.0,
+            "p99_us": 0.0,
+        }
+    arr = sorted(samples_us)
 
+    def p(q: float) -> float:
+        idx = int(round((len(arr) - 1) * q))
+        return float(arr[idx])
 
-def run_rust_benchmark(args: argparse.Namespace, paths: BenchmarkPaths) -> None:
-    all_rows: List[Dict] = []
-    first_meta: Dict | None = None
-
-    for run_id in range(args.repeats):
-        run_output = paths.results_dir / f"raw_results_run_{run_id + 1}.json"
-        cmd = [
-            "cargo",
-            "run",
-            "--bin",
-            "index_benchmark",
-            "--",
-            "--output",
-            str(run_output),
-            "--index-dir",
-            str(paths.results_dir / "index_files"),
-            "--preload",
-            str(args.preload),
-            "--ops",
-            str(args.ops),
-            "--range-width",
-            str(args.range_width),
-            "--seed",
-            str(args.seed + run_id * 100_000),
-        ]
-
-        if args.cargo_profile == "release":
-            cmd.insert(2, "--release")
-
-        print("Running:", " ".join(cmd))
-        subprocess.run(cmd, cwd=paths.root, check=True)
-
-        run_payload = json.loads(run_output.read_text(encoding="utf-8"))
-        if first_meta is None:
-            first_meta = run_payload.get("metadata", {})
-        for row in run_payload.get("results", []):
-            row_copy = dict(row)
-            row_copy["run_id"] = run_id + 1
-            all_rows.append(row_copy)
-
-    merged = {
-        "metadata": {
-            **(first_meta or {}),
-            "repeats": args.repeats,
-        },
-        "results": all_rows,
+    return {
+        "min_us": float(arr[0]),
+        "max_us": float(arr[-1]),
+        "avg_us": float(mean(arr)),
+        "p50_us": p(0.50),
+        "p95_us": p(0.95),
+        "p99_us": p(0.99),
+        "throughput_ops_s": float(1_000_000.0 / mean(arr)) if mean(arr) > 0 else 0.0,
     }
-    paths.raw_json.write_text(json.dumps(merged, indent=2), encoding="utf-8")
 
 
-def load_results(raw_path: Path) -> Dict:
-    if not raw_path.exists():
-        raise FileNotFoundError(f"Missing raw benchmark output: {raw_path}")
-    with raw_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+def generate_synthetic_orders(csv_path: Path, rows: int, seed: int) -> Dict[str, int]:
+    rng = random.Random(seed)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Real-world-like controlled distributions:
+    # - customer_id: heavy-tail (Pareto-like)
+    # - amount: log-normal-like
+    # - region/device categorical skews
+    regions = ["NA", "EU", "APAC", "LATAM", "MEA"]
+    region_weights = [0.37, 0.27, 0.22, 0.09, 0.05]
+    devices = ["web", "ios", "android"]
+    device_weights = [0.46, 0.24, 0.30]
 
-def by_index(results: List[Dict]) -> Dict[str, List[Dict]]:
-    grouped: Dict[str, List[Dict]] = {}
-    for row in results:
-        grouped.setdefault(row["index_algorithm"], []).append(row)
-    return grouped
-
-
-def by_workload(results: List[Dict]) -> Dict[str, List[Dict]]:
-    grouped: Dict[str, List[Dict]] = {}
-    for row in results:
-        grouped.setdefault(row["workload"], []).append(row)
-    return grouped
-
-
-def safe_mean(values: Iterable[float]) -> float:
-    vals = list(values)
-    if not vals:
-        return 0.0
-    return float(mean(vals))
-
-
-def safe_std(values: Iterable[float]) -> float:
-    vals = [float(v) for v in values]
-    if len(vals) <= 1:
-        return 0.0
-    return float(pstdev(vals))
-
-
-def write_csv_summaries(results: List[Dict], paths: BenchmarkPaths) -> None:
-    grouped_index = by_index(results)
-    with paths.summary_csv.open("w", newline="", encoding="utf-8") as f:
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "index_algorithm",
-            "avg_build_time_ms",
-            "std_build_time_ms",
-            "avg_index_size_bytes",
-            "std_index_size_bytes",
-            "avg_latency_p95_us",
-            "std_latency_p95_us",
-            "avg_latency_p99_us",
-            "std_latency_p99_us",
-            "avg_io_ops",
-            "std_io_ops",
-        ])
+        writer.writerow(["id", "customer_id", "region", "device", "amount_cents", "event_ts"])
 
-        for algo in sorted(grouped_index.keys()):
-            rows = grouped_index[algo]
-            writer.writerow([
-                algo,
-                f"{safe_mean(r['build_time_ms'] for r in rows):.3f}",
-                f"{safe_std(r['build_time_ms'] for r in rows):.3f}",
-                f"{safe_mean(r['index_size_bytes'] for r in rows):.1f}",
-                f"{safe_std(r['index_size_bytes'] for r in rows):.3f}",
-                f"{safe_mean(r['latency_us']['p95'] for r in rows):.3f}",
-                f"{safe_std(r['latency_us']['p95'] for r in rows):.3f}",
-                f"{safe_mean(r['latency_us']['p99'] for r in rows):.3f}",
-                f"{safe_std(r['latency_us']['p99'] for r in rows):.3f}",
-                f"{safe_mean(r['io_operations_count'] for r in rows):.1f}",
-                f"{safe_std(r['io_operations_count'] for r in rows):.3f}",
-            ])
+        base_ts = 1_700_000_000
+        for i in range(1, rows + 1):
+            # Unique primary key.
+            order_id = i
 
-    grouped_workload = by_workload(results)
-    with paths.workload_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "workload",
-            "avg_latency_p95_us",
-            "std_latency_p95_us",
-            "avg_latency_p99_us",
-            "std_latency_p99_us",
-            "avg_io_ops",
-            "std_io_ops",
-            "cases",
-        ])
+            # Heavy-tail customers with realistic cap.
+            customer_id = min(250_000, int(rng.paretovariate(1.45) * 1000) + 1)
 
-        for workload in WORKLOAD_ORDER:
-            rows = grouped_workload.get(workload, [])
-            if workload == "range_query":
-                rows = [r for r in rows if not r.get("range_workload_skipped", False)]
-            writer.writerow([
-                workload,
-                f"{safe_mean(r['latency_us']['p95'] for r in rows):.3f}",
-                f"{safe_std(r['latency_us']['p95'] for r in rows):.3f}",
-                f"{safe_mean(r['latency_us']['p99'] for r in rows):.3f}",
-                f"{safe_std(r['latency_us']['p99'] for r in rows):.3f}",
-                f"{safe_mean(r['io_operations_count'] for r in rows):.1f}",
-                f"{safe_std(r['io_operations_count'] for r in rows):.3f}",
-                len(rows),
-            ])
+            # Monetary values in cents.
+            amount_cents = max(99, int(rng.lognormvariate(4.2, 0.9) * 100))
+
+            region = rng.choices(regions, weights=region_weights, k=1)[0]
+            device = rng.choices(devices, weights=device_weights, k=1)[0]
+
+            # Non-uniform temporal progression with bursts.
+            event_ts = base_ts + i * 13 + rng.randint(0, 3600)
+
+            writer.writerow([order_id, customer_id, region, device, amount_cents, event_ts])
+
+    return {"rows": rows, "seed": seed}
 
 
-def write_bar_chart_svg(
-    out: Path,
-    labels: List[str],
-    values: List[float],
-    title: str,
-    y_label: str,
-) -> None:
-    width = 1200
-    height = 680
-    margin_left = 80
-    margin_right = 30
-    margin_top = 60
-    margin_bottom = 140
-    plot_w = width - margin_left - margin_right
-    plot_h = height - margin_top - margin_bottom
+def sqlite_baseline(csv_path: Path, db_path: Path) -> Dict:
+    if db_path.exists():
+        db_path.unlink()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    max_v = max(values) if values else 1.0
-    max_v = max(max_v, 1.0)
-    bar_w = plot_w / max(len(labels), 1)
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
 
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
-        '<style>text{font-family:Arial,sans-serif} .axis{stroke:#333;stroke-width:1} .grid{stroke:#ddd;stroke-width:1}</style>',
-        f'<text x="{width/2}" y="28" text-anchor="middle" font-size="20">{title}</text>',
-        f'<text x="20" y="{height/2}" transform="rotate(-90 20 {height/2})" text-anchor="middle" font-size="14">{y_label}</text>',
-        f'<line class="axis" x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}"/>',
-        f'<line class="axis" x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}"/>',
-    ]
-
-    ticks = 5
-    for i in range(ticks + 1):
-        frac = i / ticks
-        y = margin_top + plot_h - frac * plot_h
-        val = frac * max_v
-        parts.append(f'<line class="grid" x1="{margin_left}" y1="{y:.1f}" x2="{margin_left + plot_w}" y2="{y:.1f}"/>')
-        parts.append(f'<text x="{margin_left - 8}" y="{y + 4:.1f}" text-anchor="end" font-size="11">{val:.1f}</text>')
-
-    for i, (label, value) in enumerate(zip(labels, values)):
-        x = margin_left + i * bar_w + bar_w * 0.15
-        w = bar_w * 0.7
-        h = (value / max_v) * plot_h
-        y = margin_top + plot_h - h
-        parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" fill="#2E6F95"/>')
-        parts.append(f'<text x="{x + w/2:.1f}" y="{margin_top + plot_h + 18}" text-anchor="middle" font-size="10" transform="rotate(25 {x + w/2:.1f} {margin_top + plot_h + 18})">{label}</text>')
-        parts.append(f'<text x="{x + w/2:.1f}" y="{max(y - 5, margin_top + 12):.1f}" text-anchor="middle" font-size="9">{value:.1f}</text>')
-
-    parts.append("</svg>")
-    out.write_text("\n".join(parts), encoding="utf-8")
-
-
-def write_grouped_bar_chart_svg(
-    out: Path,
-    group_labels: List[str],
-    series_labels: List[str],
-    values_matrix: List[List[float]],
-    title: str,
-    y_label: str,
-) -> None:
-    width = 1400
-    height = 760
-    margin_left = 90
-    margin_right = 40
-    margin_top = 70
-    margin_bottom = 170
-    plot_w = width - margin_left - margin_right
-    plot_h = height - margin_top - margin_bottom
-
-    flat_vals = [v for row in values_matrix for v in row]
-    max_v = max(flat_vals) if flat_vals else 1.0
-    max_v = max(max_v, 1.0)
-
-    group_w = plot_w / max(len(group_labels), 1)
-    bar_w = group_w / max(len(series_labels) + 2, 2)
-
-    palette = [
-        "#2E6F95", "#6A994E", "#BC4749", "#7B2CBF", "#FF7F11",
-        "#0081A7", "#3A86FF", "#8338EC", "#FF006E", "#6D6875"
-    ]
-
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
-        '<style>text{font-family:Arial,sans-serif} .axis{stroke:#333;stroke-width:1} .grid{stroke:#ddd;stroke-width:1}</style>',
-        f'<text x="{width/2}" y="30" text-anchor="middle" font-size="21">{title}</text>',
-        f'<text x="22" y="{height/2}" transform="rotate(-90 22 {height/2})" text-anchor="middle" font-size="14">{y_label}</text>',
-        f'<line class="axis" x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}"/>',
-        f'<line class="axis" x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}"/>',
-    ]
-
-    for i in range(6):
-        frac = i / 5
-        y = margin_top + plot_h - frac * plot_h
-        val = frac * max_v
-        parts.append(f'<line class="grid" x1="{margin_left}" y1="{y:.1f}" x2="{margin_left + plot_w}" y2="{y:.1f}"/>')
-        parts.append(f'<text x="{margin_left - 8}" y="{y + 4:.1f}" text-anchor="end" font-size="11">{val:.1f}</text>')
-
-    for g_idx, group in enumerate(group_labels):
-        gx = margin_left + g_idx * group_w
-        parts.append(f'<text x="{gx + group_w/2:.1f}" y="{margin_top + plot_h + 24}" text-anchor="middle" font-size="12">{group}</text>')
-        for s_idx, series in enumerate(series_labels):
-            value = values_matrix[s_idx][g_idx]
-            x = gx + (s_idx + 1) * bar_w
-            h = (value / max_v) * plot_h
-            y = margin_top + plot_h - h
-            color = palette[s_idx % len(palette)]
-            parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w * 0.8:.1f}" height="{h:.1f}" fill="{color}"/>')
-
-    legend_x = margin_left
-    legend_y = height - 85
-    for i, series in enumerate(series_labels):
-        color = palette[i % len(palette)]
-        x = legend_x + i * 130
-        parts.append(f'<rect x="{x}" y="{legend_y}" width="12" height="12" fill="{color}"/>')
-        parts.append(f'<text x="{x + 18}" y="{legend_y + 10}" font-size="11">{series}</text>')
-
-    parts.append("</svg>")
-    out.write_text("\n".join(parts), encoding="utf-8")
-
-def chart_latency_p95(results: List[Dict], paths: BenchmarkPaths) -> Path:
-    out = paths.charts_dir / "latency_p95_by_workload.svg"
-    algorithms = sorted({r["index_algorithm"] for r in results})
-    workload_to_idx = {w: i for i, w in enumerate(WORKLOAD_ORDER)}
-
-    values_matrix: List[List[float]] = []
-    for algo in algorithms:
-        buckets: Dict[str, List[float]] = defaultdict(list)
-        for row in [r for r in results if r["index_algorithm"] == algo]:
-            if row.get("workload") == "range_query" and row.get("range_workload_skipped", False):
-                continue
-            buckets[row["workload"]].append(float(row["latency_us"]["p95"]))
-        vals = [safe_mean(buckets.get(w, [])) for w in WORKLOAD_ORDER]
-        values_matrix.append(vals)
-
-    write_grouped_bar_chart_svg(
-        out=out,
-        group_labels=WORKLOAD_ORDER,
-        series_labels=algorithms,
-        values_matrix=values_matrix,
-        title="P95 Query Latency by Workload and Index",
-        y_label="Latency (microseconds)",
-    )
-    return out
-
-
-def chart_build_time(results: List[Dict], paths: BenchmarkPaths) -> Path:
-    out = paths.charts_dir / "build_time_ms_by_index.svg"
-    grouped = by_index(results)
-    algorithms = sorted(grouped.keys())
-    values = [safe_mean(r["build_time_ms"] for r in grouped[a]) for a in algorithms]
-
-    write_bar_chart_svg(
-        out=out,
-        labels=algorithms,
-        values=values,
-        title="Average Index Build Time",
-        y_label="Build Time (ms)",
-    )
-    return out
-
-
-def chart_index_size(results: List[Dict], paths: BenchmarkPaths) -> Path:
-    out = paths.charts_dir / "index_size_bytes_by_index.svg"
-    grouped = by_index(results)
-    algorithms = sorted(grouped.keys())
-    values = [safe_mean(r["index_size_bytes"] for r in grouped[a]) for a in algorithms]
-
-    write_bar_chart_svg(
-        out=out,
-        labels=algorithms,
-        values=values,
-        title="Average Persisted Index Size",
-        y_label="Size (bytes)",
-    )
-    return out
-
-
-def chart_io_count(results: List[Dict], paths: BenchmarkPaths) -> Path:
-    out = paths.charts_dir / "logical_io_ops_by_workload.svg"
-    grouped = by_workload(results)
-    labels = WORKLOAD_ORDER
-    values = []
-    for w in labels:
-        rows = grouped.get(w, [])
-        if w == "range_query":
-            rows = [r for r in rows if not r.get("range_workload_skipped", False)]
-        values.append(safe_mean(r["io_operations_count"] for r in rows))
-
-    write_bar_chart_svg(
-        out=out,
-        labels=labels,
-        values=values,
-        title="Average Logical Operations (Internal) by Workload",
-        y_label="Logical operations (internal metric)",
-    )
-    return out
-
-
-def chart_raw_p95_by_workload(
-    paths: BenchmarkPaths,
-    series_labels: List[str],
-    values_matrix: List[List[float]],
-) -> Path:
-    out = paths.standards_raw_chart_svg
-    write_grouped_bar_chart_svg(
-        out=out,
-        group_labels=WORKLOAD_ORDER,
-        series_labels=series_labels,
-        values_matrix=values_matrix,
-        title="Raw P95 Latency by Workload (Measured Systems)",
-        y_label="P95 latency (microseconds)",
-    )
-    return out
-
-
-def find_best(results: List[Dict], workload: str, metric: str) -> Tuple[str, float]:
-    candidates = [r for r in results if r["workload"] == workload]
-    if not candidates:
-        return ("n/a", 0.0)
-    best = min(candidates, key=lambda r: r["latency_us"][metric])
-    return best["index_algorithm"], best["latency_us"][metric]
-
-
-def write_standards_comparison(results: List[Dict], paths: BenchmarkPaths, metadata: Dict) -> None:
-    comparator = StandardsComparator()
-    outcome = comparator.compare(
-        results,
-        preload=int(metadata.get("preload_rows", 12_000)),
-        ops=int(metadata.get("operations_per_workload", 5_000)),
-        range_width=int(metadata.get("range_width", 64)),
-        seed=int(metadata.get("seed", 131)) + 991,
-        repeats=max(1, min(5, int(metadata.get("repeats", 1)))),
+    cur.execute(
+        """
+        CREATE TABLE orders (
+            id INTEGER PRIMARY KEY,
+            customer_id INTEGER NOT NULL,
+            region TEXT NOT NULL,
+            device TEXT NOT NULL,
+            amount_cents INTEGER NOT NULL,
+            event_ts INTEGER NOT NULL
+        )
+        """
     )
 
-    with paths.standards_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "workload",
-            "rookdb_normalized_latency_index",
-            "profile",
-            "profile_latency_index",
-            "absolute_delta",
-        ])
-        for row in outcome.csv_rows:
-            writer.writerow([
-                row["workload"],
-                f"{float(row['rookdb_normalized_latency_index']):.6f}",
-                row["profile"],
-                f"{float(row['profile_latency_index']):.6f}",
-                f"{float(row['absolute_delta']):.6f}",
-            ])
+    ids: List[int] = []
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = []
+        for row in reader:
+            ids.append(int(row["id"]))
+            rows.append(
+                (
+                    int(row["id"]),
+                    int(row["customer_id"]),
+                    row["region"],
+                    row["device"],
+                    int(row["amount_cents"]),
+                    int(row["event_ts"]),
+                )
+            )
 
-    write_grouped_bar_chart_svg(
-        out=paths.standards_chart_svg,
-        group_labels=WORKLOAD_ORDER,
-        series_labels=outcome.series_labels,
-        values_matrix=outcome.values_matrix,
-        title="RookDB vs Measured Reference Systems (Latency Index)",
-        y_label="Normalized latency index (lower is better)",
+    cur.executemany(
+        "INSERT INTO orders (id, customer_id, region, device, amount_cents, event_ts) VALUES (?, ?, ?, ?, ?, ?)",
+        rows,
     )
+    conn.commit()
 
-    chart_raw_p95_by_workload(paths, outcome.raw_series_labels, outcome.raw_values_matrix)
+    cur.execute("SELECT COUNT(*) FROM orders")
+    total_rows = int(cur.fetchone()[0])
 
-    paths.standards_report_md.write_text(outcome.markdown, encoding="utf-8")
+    cur.execute("SELECT COUNT(DISTINCT id) FROM orders")
+    unique_pk = int(cur.fetchone()[0])
 
+    # Primary-key lookup latency across all generated IDs.
+    lookup_lat_us: List[float] = []
+    for key in ids:
+        t0 = time.perf_counter()
+        cur.execute("SELECT id FROM orders WHERE id = ?", (key,))
+        hit = cur.fetchone()
+        lookup_lat_us.append((time.perf_counter() - t0) * 1_000_000.0)
+        if hit is None:
+            raise RuntimeError(f"SQLite missing primary key {key}")
 
-def write_report(raw: Dict, results: List[Dict], paths: BenchmarkPaths) -> None:
-    metadata = raw.get("metadata", {})
+    # Miss checks.
+    miss_ok = True
+    for k in range(-100, 0):
+        cur.execute("SELECT id FROM orders WHERE id = ?", (k,))
+        if cur.fetchone() is not None:
+            miss_ok = False
+            break
 
-    best_read, best_read_p95 = find_best(results, "read_heavy", "p95")
-    best_insert, best_insert_p95 = find_best(results, "insert_heavy", "p95")
-    best_mixed, best_mixed_p95 = find_best(results, "mixed", "p95")
+    conn.close()
 
-    range_rows = [r for r in results if r["workload"] == "range_query" and not r["range_workload_skipped"]]
-    best_range_algo = "n/a"
-    best_range_val = 0.0
-    if range_rows:
-        best_range = min(range_rows, key=lambda r: r["latency_us"]["p95"])
-        best_range_algo = best_range["index_algorithm"]
-        best_range_val = best_range["latency_us"]["p95"]
-
-    skipped_range = [r["index_algorithm"] for r in results if r["workload"] == "range_query" and r["range_workload_skipped"]]
-
-    report = f"""# RookDB Benchmarking Initial Results
-
-## Run Configuration
-- Seed: {metadata.get('seed', 'n/a')}
-- Preload rows per case: {metadata.get('preload_rows', 'n/a')}
-- Operations per workload: {metadata.get('operations_per_workload', 'n/a')}
-- Range width: {metadata.get('range_width', 'n/a')}
-- Repeats: {metadata.get('repeats', 1)}
-- Total benchmark scenarios: {len(results)}
-
-## Workloads Implemented
-- Insert-heavy workload
-- Read-heavy workload
-- Mixed workload
-- Range query workload
-
-## Metrics Implemented
-- Query latency: min, max, avg, p50, p95, p99
-- Logical operations count (internal metric)
-- Persisted index size on disk
-- Index build time measurement
-
-## Initial Findings
-- Best p95 for insert-heavy: **{best_insert}** at **{best_insert_p95:.3f} us**
-- Best p95 for read-heavy: **{best_read}** at **{best_read_p95:.3f} us**
-- Best p95 for mixed: **{best_mixed}** at **{best_mixed_p95:.3f} us**
-- Best p95 for range-query: **{best_range_algo}** at **{best_range_val:.3f} us**
-
-Range query was skipped for these hash indexes (expected): {', '.join(sorted(set(skipped_range))) if skipped_range else 'none'}.
-
-## Generated Artifacts
-- Raw benchmark data: Benchmarking/results/raw_results.json
-- Summary by index: Benchmarking/results/summary_by_index.csv
-- Summary by workload: Benchmarking/results/summary_by_workload.csv
-- Charts:
-    - Benchmarking/results/charts/latency_p95_by_workload.svg
-    - Benchmarking/results/charts/build_time_ms_by_index.svg
-    - Benchmarking/results/charts/index_size_bytes_by_index.svg
-    - Benchmarking/results/charts/logical_io_ops_by_workload.svg
-
-## Notes and Assumptions
-- Logical operations count is an internal benchmark metric: number of benchmarked index operations plus save/load operations per scenario.
-- Hash indexes do not support ordered range scans and are marked as skipped for range workload.
-- This phase provides initial results; larger-scale runs can be produced by increasing --preload and --ops.
-"""
-
-    paths.report_md.write_text(report, encoding="utf-8")
+    return {
+        "total_rows": total_rows,
+        "unique_primary_keys": unique_pk,
+        "lookup_latency": _latency_stats(lookup_lat_us),
+        "miss_checks_ok": miss_ok,
+    }
 
 
-def ensure_dirs(paths: BenchmarkPaths) -> None:
-    paths.results_dir.mkdir(parents=True, exist_ok=True)
-    paths.charts_dir.mkdir(parents=True, exist_ok=True)
-
-
-def run_dat_validation(paths: BenchmarkPaths) -> None:
-    cmd = [
-        sys.executable,
-        str(paths.root / "Benchmarking" / "validate_dat_files.py"),
-        "--root",
-        "database",
-        "--output",
-        str(paths.dat_validation_json),
-    ]
-    subprocess.run(cmd, cwd=paths.root, check=True)
-
-
-def run_index_validation(paths: BenchmarkPaths) -> None:
+def run_rookdb_benchmark(csv_path: Path, output_json: Path) -> Dict:
     cmd = [
         "cargo",
         "run",
         "--release",
         "--bin",
-        "index_validation",
+        "primary_key_benchmark",
+        "--",
+        "--input",
+        str(csv_path),
+        "--output",
+        str(output_json),
     ]
-    subprocess.run(cmd, cwd=paths.root, check=True)
+    subprocess.run(cmd, check=True)
+    return json.loads(output_json.read_text(encoding="utf-8"))
+
+
+def verify_correctness(sqlite_info: Dict, rookdb_info: Dict) -> Dict:
+    total_rows = sqlite_info["total_rows"]
+    unique_pk = sqlite_info["unique_primary_keys"]
+
+    algo_checks = []
+    all_ok = True
+    for algo in rookdb_info.get("algorithms", []):
+        algo_ok = (
+            bool(algo.get("correctness_ok"))
+            and int(algo.get("total_keys", -1)) == total_rows
+            and int(rookdb_info.get("primary_key_unique_count", -1)) == unique_pk
+        )
+        if not algo_ok:
+            all_ok = False
+        algo_checks.append(
+            {
+                "algorithm": algo.get("algorithm"),
+                "correctness_ok": bool(algo.get("correctness_ok")),
+                "total_keys_match_sqlite": int(algo.get("total_keys", -1)) == total_rows,
+                "primary_key_unique_match_sqlite": int(rookdb_info.get("primary_key_unique_count", -1)) == unique_pk,
+            }
+        )
+
+    return {
+        "overall_ok": all_ok and sqlite_info["miss_checks_ok"],
+        "sqlite_total_rows": total_rows,
+        "sqlite_unique_primary_keys": unique_pk,
+        "rookdb_total_rows": int(rookdb_info.get("total_rows", -1)),
+        "rookdb_unique_primary_keys": int(rookdb_info.get("primary_key_unique_count", -1)),
+        "sqlite_miss_checks_ok": bool(sqlite_info.get("miss_checks_ok")),
+        "algorithm_checks": algo_checks,
+    }
+
+
+def parse_scales(scales_raw: str) -> List[int]:
+    out = []
+    for tok in scales_raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        out.append(int(tok))
+    if not out:
+        raise ValueError("no valid scales provided")
+    return sorted(set(out))
+
+
+def plot_search_latency_bar(latency_csv: Path, out_png: Path) -> None:
+    systems = []
+    p95_vals = []
+
+    with latency_csv.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            name = f"{row['system']}:{row['algorithm']}"
+            if row["search_p95_us"]:
+                systems.append(name)
+                p95_vals.append(float(row["search_p95_us"]))
+
+    plt.figure(figsize=(14, 6))
+    plt.bar(range(len(systems)), p95_vals)
+    plt.xticks(range(len(systems)), systems, rotation=50, ha="right")
+    plt.ylabel("Search p95 latency (us)")
+    plt.title("Primary-key Search p95: SQLite vs RookDB Indexes")
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png, dpi=180)
+    plt.close()
+
+
+def plot_insert_latency_rookdb(latency_csv: Path, out_png: Path) -> None:
+    algos = []
+    vals = []
+
+    with latency_csv.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["system"] == "rookdb" and row["insert_p95_us"]:
+                algos.append(row["algorithm"])
+                vals.append(float(row["insert_p95_us"]))
+
+    plt.figure(figsize=(12, 5))
+    plt.bar(range(len(algos)), vals)
+    plt.xticks(range(len(algos)), algos, rotation=35, ha="right")
+    plt.ylabel("Insert p95 latency (us)")
+    plt.title("RookDB Primary-key Insert p95 by Index")
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png, dpi=180)
+    plt.close()
+
+
+def plot_scalability(scalability_csv: Path, out_png: Path) -> None:
+    rows = []
+    sqlite_p95 = []
+    rookdb_best_p95 = []
+
+    per_rows_rook: Dict[int, List[float]] = {}
+    per_rows_sqlite: Dict[int, float] = {}
+
+    with scalability_csv.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            n = int(row["rows"])
+            p95 = float(row["search_p95_us"])
+            if row["system"] == "sqlite":
+                per_rows_sqlite[n] = p95
+            else:
+                per_rows_rook.setdefault(n, []).append(p95)
+
+    rows = sorted(set(list(per_rows_sqlite.keys()) + list(per_rows_rook.keys())))
+    for n in rows:
+        sqlite_p95.append(per_rows_sqlite.get(n, float("nan")))
+        best = min(per_rows_rook.get(n, [float("nan")]))
+        rookdb_best_p95.append(best)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(rows, sqlite_p95, marker="o", label="SQLite p95")
+    plt.plot(rows, rookdb_best_p95, marker="o", label="Best RookDB index p95")
+    plt.xlabel("Rows")
+    plt.ylabel("Search p95 latency (us)")
+    plt.title("Scalability: Search p95 vs Dataset Size")
+    plt.legend()
+    plt.grid(True, alpha=0.25)
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png, dpi=180)
+    plt.close()
+
+
+def write_comparison_csv(path: Path, sqlite_info: Dict, rookdb_info: Dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "system",
+            "algorithm",
+            "search_p95_us",
+            "search_avg_us",
+            "search_p99_us",
+            "search_throughput_ops_s",
+            "insert_p95_us",
+            "insert_avg_us",
+            "insert_p99_us",
+            "insert_throughput_ops_s",
+            "correctness_ok",
+        ])
+
+        writer.writerow([
+            "sqlite",
+            "primary_key_index",
+            f"{sqlite_info['lookup_latency']['p95_us']:.6f}",
+            f"{sqlite_info['lookup_latency']['avg_us']:.6f}",
+            f"{sqlite_info['lookup_latency']['p99_us']:.6f}",
+            f"{sqlite_info['lookup_latency']['throughput_ops_s']:.6f}",
+            "",
+            "",
+            "",
+            "",
+            "true",
+        ])
+
+        for algo in rookdb_info.get("algorithms", []):
+            writer.writerow([
+                "rookdb",
+                algo.get("algorithm"),
+                f"{float(algo['search_latency']['p95_us']):.6f}",
+                f"{float(algo['search_latency']['avg_us']):.6f}",
+                f"{float(algo['search_latency']['p99_us']):.6f}",
+                f"{(1_000_000.0 / float(algo['search_latency']['avg_us'])) if float(algo['search_latency']['avg_us']) > 0 else 0.0:.6f}",
+                f"{float(algo['insert_latency']['p95_us']):.6f}",
+                f"{float(algo['insert_latency']['avg_us']):.6f}",
+                f"{float(algo['insert_latency']['p99_us']):.6f}",
+                f"{(1_000_000.0 / float(algo['insert_latency']['avg_us'])) if float(algo['insert_latency']['avg_us']) > 0 else 0.0:.6f}",
+                str(bool(algo.get("correctness_ok"))).lower(),
+            ])
+
+
+def write_scalability_csv(path: Path, scale_rows: List[List[str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "rows",
+            "system",
+            "algorithm",
+            "search_p95_us",
+            "search_avg_us",
+            "search_p99_us",
+            "search_throughput_ops_s",
+            "insert_p95_us",
+            "insert_avg_us",
+            "insert_p99_us",
+            "insert_throughput_ops_s",
+            "correctness_ok",
+        ])
+        for r in scale_rows:
+            writer.writerow(r)
+
+
+def write_report(
+    path: Path,
+    rows: int,
+    seed: int,
+    sqlite_info: Dict,
+    verification: Dict,
+) -> None:
+    lines = [
+        "# RookDB Primary-Key Benchmark (SQLite Baseline)",
+        "",
+        "## Dataset",
+        f"- Rows: {rows}",
+        f"- Seed: {seed}",
+        "- Data: controlled synthetic orders with heavy-tail customers, skewed categories, and bursty timestamps",
+        "",
+        "## SQLite Baseline (Measured)",
+        f"- Total rows: {sqlite_info['total_rows']}",
+        f"- Unique primary keys: {sqlite_info['unique_primary_keys']}",
+        f"- Search p95 latency: {sqlite_info['lookup_latency']['p95_us']:.6f} us",
+        f"- Search p99 latency: {sqlite_info['lookup_latency']['p99_us']:.6f} us",
+        f"- Search avg latency: {sqlite_info['lookup_latency']['avg_us']:.6f} us",
+        f"- Search throughput: {sqlite_info['lookup_latency']['throughput_ops_s']:.2f} ops/s",
+        "",
+        "## Correctness Cross-Verification",
+        f"- Overall status: {'PASS' if verification['overall_ok'] else 'FAIL'}",
+        f"- SQLite miss checks: {'PASS' if verification['sqlite_miss_checks_ok'] else 'FAIL'}",
+        "- RookDB algorithms tested on primary key: 9",
+        "",
+        "## Artifacts",
+        "- Benchmarking/results/rookdb_primary_key_metrics.json",
+        "- Benchmarking/results/latency_comparison.csv",
+        "- Benchmarking/results/scalability_summary.csv",
+        "- Benchmarking/results/correctness_verification.json",
+        "- Benchmarking/results/charts/search_p95_comparison.png",
+        "- Benchmarking/results/charts/rookdb_insert_p95.png",
+        "- Benchmarking/results/charts/scalability_search_p95.png",
+        "",
+        "## Reference Metrics Context",
+        "- Latency percentiles (p50/p95/p99) and throughput are standard service-benchmark metrics.",
+        "- Reference: Cooper et al., 2010, YCSB (SoCC).",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def main() -> int:
     args = parse_args()
-    paths = resolve_paths()
-    ensure_dirs(paths)
 
-    if not args.skip_run:
-        run_rust_benchmark(args, paths)
+    root = Path(__file__).resolve().parents[1]
+    csv_path = root / args.data_csv
+    sqlite_db = root / args.sqlite_db
+    rookdb_json = root / args.rookdb_json
+    comparison_csv = root / args.comparison_csv
+    verification_json = root / args.verification_json
+    report_md = root / args.report_md
+    scalability_csv = root / args.scalability_csv
+    charts_dir = root / args.charts_dir
 
-    raw = load_results(paths.raw_json)
-    results = raw.get("results", [])
-    if not results:
-        print("No results found in raw benchmark JSON.", file=sys.stderr)
-        return 1
+    scales = parse_scales(args.scales)
 
-    write_csv_summaries(results, paths)
-    chart_latency_p95(results, paths)
-    chart_build_time(results, paths)
-    chart_index_size(results, paths)
-    chart_io_count(results, paths)
+    generate_synthetic_orders(csv_path, args.rows, args.seed)
+    sqlite_info = sqlite_baseline(csv_path, sqlite_db)
 
-    write_report(raw, results, paths)
-    write_standards_comparison(results, paths, raw.get("metadata", {}))
+    rookdb_json.parent.mkdir(parents=True, exist_ok=True)
+    rookdb_info = run_rookdb_benchmark(csv_path, rookdb_json)
 
-    if args.validate_dat:
-        run_dat_validation(paths)
+    verification = verify_correctness(sqlite_info, rookdb_info)
+    verification_json.write_text(json.dumps(verification, indent=2), encoding="utf-8")
 
-    if args.validate_index:
-        run_index_validation(paths)
+    write_comparison_csv(comparison_csv, sqlite_info, rookdb_info)
 
-    print("Benchmark processing complete.")
-    print(f"Raw data: {paths.raw_json}")
-    print(f"Summary: {paths.summary_csv}")
-    print(f"Report: {paths.report_md}")
-    print(f"Standards comparison: {paths.standards_report_md}")
-    return 0
+    # Scalability sweep.
+    scale_rows: List[List[str]] = []
+    for n in scales:
+        scale_csv = root / f"Benchmarking/data/synthetic_orders_{n}.csv"
+        scale_db = root / f"Benchmarking/results/sqlite_baseline_{n}.db"
+        scale_rook = root / f"Benchmarking/results/rookdb_primary_key_metrics_{n}.json"
+
+        generate_synthetic_orders(scale_csv, n, args.seed + n)
+        s_info = sqlite_baseline(scale_csv, scale_db)
+        r_info = run_rookdb_benchmark(scale_csv, scale_rook)
+
+        scale_rows.append([
+            str(n),
+            "sqlite",
+            "primary_key_index",
+            f"{s_info['lookup_latency']['p95_us']:.6f}",
+            f"{s_info['lookup_latency']['avg_us']:.6f}",
+            f"{s_info['lookup_latency']['p99_us']:.6f}",
+            f"{s_info['lookup_latency']['throughput_ops_s']:.6f}",
+            "",
+            "",
+            "",
+            "",
+            "true",
+        ])
+
+        for algo in r_info.get("algorithms", []):
+            scale_rows.append([
+                str(n),
+                "rookdb",
+                algo.get("algorithm"),
+                f"{float(algo['search_latency']['p95_us']):.6f}",
+                f"{float(algo['search_latency']['avg_us']):.6f}",
+                f"{float(algo['search_latency']['p99_us']):.6f}",
+                f"{(1_000_000.0 / float(algo['search_latency']['avg_us'])) if float(algo['search_latency']['avg_us']) > 0 else 0.0:.6f}",
+                f"{float(algo['insert_latency']['p95_us']):.6f}",
+                f"{float(algo['insert_latency']['avg_us']):.6f}",
+                f"{float(algo['insert_latency']['p99_us']):.6f}",
+                f"{(1_000_000.0 / float(algo['insert_latency']['avg_us'])) if float(algo['insert_latency']['avg_us']) > 0 else 0.0:.6f}",
+                str(bool(algo.get("correctness_ok"))).lower(),
+            ])
+
+    write_scalability_csv(scalability_csv, scale_rows)
+
+    # Charts.
+    plot_search_latency_bar(comparison_csv, charts_dir / "search_p95_comparison.png")
+    plot_insert_latency_rookdb(comparison_csv, charts_dir / "rookdb_insert_p95.png")
+    plot_scalability(scalability_csv, charts_dir / "scalability_search_p95.png")
+
+    write_report(report_md, args.rows, args.seed, sqlite_info, verification)
+
+    print("Benchmark completed.")
+    print(f"Data CSV: {csv_path}")
+    print(f"SQLite baseline DB: {sqlite_db}")
+    print(f"RookDB metrics: {rookdb_json}")
+    print(f"Correctness verification: {verification_json}")
+    print(f"Latency comparison: {comparison_csv}")
+
+    return 0 if verification["overall_ok"] else 1
 
 
 if __name__ == "__main__":

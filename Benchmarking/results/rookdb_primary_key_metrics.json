@@ -1,0 +1,223 @@
+{
+  "input_csv": "/Users/gr/Desktop/RookDB/Benchmarking/data/synthetic_orders.csv",
+  "total_rows": 20000,
+  "primary_key_unique_count": 20000,
+  "algorithms": [
+    {
+      "algorithm": "Static Hash",
+      "insert_latency": {
+        "min_us": 0.0,
+        "max_us": 11.084,
+        "avg_us": 0.27709080000001923,
+        "p50_us": 0.20900000000000002,
+        "p95_us": 0.541,
+        "p99_us": 0.5840000000000001
+      },
+      "search_latency": {
+        "min_us": 0.041,
+        "max_us": 19.25,
+        "avg_us": 0.28557350000001036,
+        "p50_us": 0.25,
+        "p95_us": 0.458,
+        "p99_us": 0.583
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    },
+    {
+      "algorithm": "Chained Hash",
+      "insert_latency": {
+        "min_us": 0.0,
+        "max_us": 35.25,
+        "avg_us": 0.24703130000001283,
+        "p50_us": 0.20900000000000002,
+        "p95_us": 0.375,
+        "p99_us": 0.5840000000000001
+      },
+      "search_latency": {
+        "min_us": 0.0,
+        "max_us": 33.875,
+        "avg_us": 0.21741220000001327,
+        "p50_us": 0.20900000000000002,
+        "p95_us": 0.334,
+        "p99_us": 0.375
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    },
+    {
+      "algorithm": "Extendible Hash",
+      "insert_latency": {
+        "min_us": 0.0,
+        "max_us": 248.91600000000003,
+        "avg_us": 12.578753950000003,
+        "p50_us": 0.20800000000000002,
+        "p95_us": 49.833999999999996,
+        "p99_us": 85.416
+      },
+      "search_latency": {
+        "min_us": 0.0,
+        "max_us": 12.291,
+        "avg_us": 0.0633281999999867,
+        "p50_us": 0.041999999999999996,
+        "p95_us": 0.166,
+        "p99_us": 0.25
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    },
+    {
+      "algorithm": "Linear Hash",
+      "insert_latency": {
+        "min_us": 0.041999999999999996,
+        "max_us": 123.292,
+        "avg_us": 7.985858850000029,
+        "p50_us": 7.791999999999999,
+        "p95_us": 15.083,
+        "p99_us": 19.25
+      },
+      "search_latency": {
+        "min_us": 0.0,
+        "max_us": 5.75,
+        "avg_us": 0.07272770000000184,
+        "p50_us": 0.083,
+        "p95_us": 0.125,
+        "p99_us": 0.125
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    },
+    {
+      "algorithm": "B-Tree",
+      "insert_latency": {
+        "min_us": 0.0,
+        "max_us": 32.084,
+        "avg_us": 0.2158054999999895,
+        "p50_us": 0.166,
+        "p95_us": 0.458,
+        "p99_us": 1.25
+      },
+      "search_latency": {
+        "min_us": 0.0,
+        "max_us": 13.332999999999998,
+        "avg_us": 0.10911664999999816,
+        "p50_us": 0.083,
+        "p95_us": 0.167,
+        "p99_us": 0.417
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    },
+    {
+      "algorithm": "B+ Tree",
+      "insert_latency": {
+        "min_us": 0.0,
+        "max_us": 19.709,
+        "avg_us": 0.21482549999999792,
+        "p50_us": 0.167,
+        "p95_us": 0.33299999999999996,
+        "p99_us": 0.5419999999999999
+      },
+      "search_latency": {
+        "min_us": 0.083,
+        "max_us": 16.667,
+        "avg_us": 0.1668252499999586,
+        "p50_us": 0.166,
+        "p95_us": 0.167,
+        "p99_us": 0.29200000000000004
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    },
+    {
+      "algorithm": "Radix Tree",
+      "insert_latency": {
+        "min_us": 0.041,
+        "max_us": 59.5,
+        "avg_us": 0.149724349999992,
+        "p50_us": 0.125,
+        "p95_us": 0.167,
+        "p99_us": 0.29200000000000004
+      },
+      "search_latency": {
+        "min_us": 0.0,
+        "max_us": 2.0,
+        "avg_us": 0.07078785000000679,
+        "p50_us": 0.083,
+        "p95_us": 0.08399999999999999,
+        "p99_us": 0.125
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    },
+    {
+      "algorithm": "Skip List",
+      "insert_latency": {
+        "min_us": 0.0,
+        "max_us": 12.25,
+        "avg_us": 0.08981140000000112,
+        "p50_us": 0.083,
+        "p95_us": 0.125,
+        "p99_us": 0.20900000000000002
+      },
+      "search_latency": {
+        "min_us": 0.0,
+        "max_us": 13.792,
+        "avg_us": 0.04638539999999369,
+        "p50_us": 0.041999999999999996,
+        "p95_us": 0.083,
+        "p99_us": 0.08399999999999999
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    },
+    {
+      "algorithm": "LSM Tree",
+      "insert_latency": {
+        "min_us": 0.0,
+        "max_us": 1623.125,
+        "avg_us": 0.18621579999998125,
+        "p50_us": 0.041999999999999996,
+        "p95_us": 0.125,
+        "p99_us": 0.167
+      },
+      "search_latency": {
+        "min_us": 0.0,
+        "max_us": 19.292,
+        "avg_us": 0.07819305000000809,
+        "p50_us": 0.083,
+        "p95_us": 0.08399999999999999,
+        "p99_us": 0.125
+      },
+      "total_keys": 20000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    }
+  ]
+}

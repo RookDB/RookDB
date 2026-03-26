@@ -1,2 +1,1 @@
-numpy==2.2.4
-sortedcontainers==2.4.0
+matplotlib>=3.9

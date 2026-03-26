@@ -1,0 +1,64 @@
+{
+  "overall_ok": true,
+  "sqlite_total_rows": 20000,
+  "sqlite_unique_primary_keys": 20000,
+  "rookdb_total_rows": 20000,
+  "rookdb_unique_primary_keys": 20000,
+  "sqlite_miss_checks_ok": true,
+  "algorithm_checks": [
+    {
+      "algorithm": "Static Hash",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    },
+    {
+      "algorithm": "Chained Hash",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    },
+    {
+      "algorithm": "Extendible Hash",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    },
+    {
+      "algorithm": "Linear Hash",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    },
+    {
+      "algorithm": "B-Tree",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    },
+    {
+      "algorithm": "B+ Tree",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    },
+    {
+      "algorithm": "Radix Tree",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    },
+    {
+      "algorithm": "Skip List",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    },
+    {
+      "algorithm": "LSM Tree",
+      "correctness_ok": true,
+      "total_keys_match_sqlite": true,
+      "primary_key_unique_match_sqlite": true
+    }
+  ]
+}
