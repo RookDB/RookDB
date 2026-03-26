@@ -1,0 +1,29 @@
+{
+  "name": "YCSB-inspired baseline profiles",
+  "notes": "Values are normalized latency index numbers where lower is better. They are not absolute latencies and are used for workload-shape comparison only.",
+  "references": [
+    "Cooper et al. (2010), Benchmarking Cloud Serving Systems with YCSB, SoCC.",
+    "YCSB project documentation: https://github.com/brianfrankcooper/YCSB",
+    "Lim et al. (2021), A Comprehensive Evaluation of Key-Value Stores for Cloud Data-Intensive Applications."
+  ],
+  "workload_mapping": {
+    "insert_heavy": "YCSB-A/F style write-intensive mix",
+    "read_heavy": "YCSB-C style read-mostly",
+    "mixed": "YCSB-B style read/update mix",
+    "range_query": "Scan-heavy profile analogous to YCSB scan workloads"
+  },
+  "profiles": {
+    "BTree_Engine_Baseline": {
+      "insert_heavy": 1.45,
+      "read_heavy": 0.88,
+      "mixed": 1.0,
+      "range_query": 0.92
+    },
+    "LSM_Engine_Baseline": {
+      "insert_heavy": 0.82,
+      "read_heavy": 1.18,
+      "mixed": 1.0,
+      "range_query": 1.35
+    }
+  }
+}

@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="760">
+<style>text{font-family:Arial,sans-serif} .axis{stroke:#333;stroke-width:1} .grid{stroke:#ddd;stroke-width:1}</style>
+<text x="700.0" y="30" text-anchor="middle" font-size="21">P95 Query Latency by Workload and Index</text>
+<text x="22" y="380.0" transform="rotate(-90 22 380.0)" text-anchor="middle" font-size="14">Latency (microseconds)</text>
+<line class="axis" x1="90" y1="590" x2="1360" y2="590"/>
+<line class="axis" x1="90" y1="70" x2="90" y2="590"/>
+<line class="grid" x1="90" y1="590.0" x2="1360" y2="590.0"/>
+<text x="82" y="594.0" text-anchor="end" font-size="11">0.0</text>
+<line class="grid" x1="90" y1="486.0" x2="1360" y2="486.0"/>
+<text x="82" y="490.0" text-anchor="end" font-size="11">458.9</text>
+<line class="grid" x1="90" y1="382.0" x2="1360" y2="382.0"/>
+<text x="82" y="386.0" text-anchor="end" font-size="11">917.8</text>
+<line class="grid" x1="90" y1="278.0" x2="1360" y2="278.0"/>
+<text x="82" y="282.0" text-anchor="end" font-size="11">1376.7</text>
+<line class="grid" x1="90" y1="174.0" x2="1360" y2="174.0"/>
+<text x="82" y="178.0" text-anchor="end" font-size="11">1835.6</text>
+<line class="grid" x1="90" y1="70.0" x2="1360" y2="70.0"/>
+<text x="82" y="74.0" text-anchor="end" font-size="11">2294.5</text>
+<text x="248.8" y="614" text-anchor="middle" font-size="12">insert_heavy</text>
+<rect x="118.9" y="589.9" width="23.1" height="0.1" fill="#2E6F95"/>
+<rect x="147.7" y="589.9" width="23.1" height="0.1" fill="#6A994E"/>
+<rect x="176.6" y="589.9" width="23.1" height="0.1" fill="#BC4749"/>
+<rect x="205.5" y="570.0" width="23.1" height="20.0" fill="#7B2CBF"/>
+<rect x="234.3" y="589.9" width="23.1" height="0.1" fill="#FF7F11"/>
+<rect x="263.2" y="583.3" width="23.1" height="6.7" fill="#0081A7"/>
+<rect x="292.0" y="589.9" width="23.1" height="0.1" fill="#3A86FF"/>
+<rect x="320.9" y="590.0" width="23.1" height="0.0" fill="#8338EC"/>
+<rect x="349.8" y="589.8" width="23.1" height="0.2" fill="#FF006E"/>
+<text x="566.2" y="614" text-anchor="middle" font-size="12">read_heavy</text>
+<rect x="436.4" y="589.9" width="23.1" height="0.1" fill="#2E6F95"/>
+<rect x="465.2" y="589.9" width="23.1" height="0.1" fill="#6A994E"/>
+<rect x="494.1" y="589.9" width="23.1" height="0.1" fill="#BC4749"/>
+<rect x="523.0" y="589.8" width="23.1" height="0.2" fill="#7B2CBF"/>
+<rect x="551.8" y="589.9" width="23.1" height="0.1" fill="#FF7F11"/>
+<rect x="580.7" y="586.5" width="23.1" height="3.5" fill="#0081A7"/>
+<rect x="609.5" y="589.9" width="23.1" height="0.1" fill="#3A86FF"/>
+<rect x="638.4" y="590.0" width="23.1" height="0.0" fill="#8338EC"/>
+<rect x="667.3" y="589.9" width="23.1" height="0.1" fill="#FF006E"/>
+<text x="883.8" y="614" text-anchor="middle" font-size="12">mixed</text>
+<rect x="753.9" y="589.9" width="23.1" height="0.1" fill="#2E6F95"/>
+<rect x="782.7" y="589.9" width="23.1" height="0.1" fill="#6A994E"/>
+<rect x="811.6" y="589.9" width="23.1" height="0.1" fill="#BC4749"/>
+<rect x="840.5" y="570.2" width="23.1" height="19.8" fill="#7B2CBF"/>
+<rect x="869.3" y="589.9" width="23.1" height="0.1" fill="#FF7F11"/>
+<rect x="898.2" y="584.8" width="23.1" height="5.2" fill="#0081A7"/>
+<rect x="927.0" y="589.9" width="23.1" height="0.1" fill="#3A86FF"/>
+<rect x="955.9" y="590.0" width="23.1" height="0.0" fill="#8338EC"/>
+<rect x="984.8" y="589.9" width="23.1" height="0.1" fill="#FF006E"/>
+<text x="1201.2" y="614" text-anchor="middle" font-size="12">range_query</text>
+<rect x="1071.4" y="590.0" width="23.1" height="0.0" fill="#2E6F95"/>
+<rect x="1100.2" y="589.7" width="23.1" height="0.3" fill="#6A994E"/>
+<rect x="1129.1" y="590.0" width="23.1" height="0.0" fill="#BC4749"/>
+<rect x="1158.0" y="590.0" width="23.1" height="0.0" fill="#7B2CBF"/>
+<rect x="1186.8" y="70.0" width="23.1" height="520.0" fill="#FF7F11"/>
+<rect x="1215.7" y="590.0" width="23.1" height="0.0" fill="#0081A7"/>
+<rect x="1244.5" y="279.7" width="23.1" height="310.3" fill="#3A86FF"/>
+<rect x="1273.4" y="590.0" width="23.1" height="0.0" fill="#8338EC"/>
+<rect x="1302.3" y="590.0" width="23.1" height="0.0" fill="#FF006E"/>
+<rect x="90" y="675" width="12" height="12" fill="#2E6F95"/>
+<text x="108" y="685" font-size="11">B+ Tree</text>
+<rect x="220" y="675" width="12" height="12" fill="#6A994E"/>
+<text x="238" y="685" font-size="11">B-Tree</text>
+<rect x="350" y="675" width="12" height="12" fill="#BC4749"/>
+<text x="368" y="685" font-size="11">Chained Hash</text>
+<rect x="480" y="675" width="12" height="12" fill="#7B2CBF"/>
+<text x="498" y="685" font-size="11">Extendible Hash</text>
+<rect x="610" y="675" width="12" height="12" fill="#FF7F11"/>
+<text x="628" y="685" font-size="11">LSM Tree</text>
+<rect x="740" y="675" width="12" height="12" fill="#0081A7"/>
+<text x="758" y="685" font-size="11">Linear Hash</text>
+<rect x="870" y="675" width="12" height="12" fill="#3A86FF"/>
+<text x="888" y="685" font-size="11">Radix Tree</text>
+<rect x="1000" y="675" width="12" height="12" fill="#8338EC"/>
+<text x="1018" y="685" font-size="11">Skip List</text>
+<rect x="1130" y="675" width="12" height="12" fill="#FF006E"/>
+<text x="1148" y="685" font-size="11">Static Hash</text>
+</svg>

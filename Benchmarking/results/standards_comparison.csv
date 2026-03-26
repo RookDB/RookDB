@@ -1,0 +1,9 @@
+workload,rookdb_avg_p95_us,rookdb_normalized_latency_index,profile,profile_latency_index
+insert_heavy,13.495,6.536,BTree_Engine_Baseline,1.450
+insert_heavy,13.495,6.536,LSM_Engine_Baseline,0.820
+read_heavy,2.065,1.000,BTree_Engine_Baseline,0.880
+read_heavy,2.065,1.000,LSM_Engine_Baseline,1.180
+mixed,12.583,6.095,BTree_Engine_Baseline,1.000
+mixed,12.583,6.095,LSM_Engine_Baseline,1.000
+range_query,407.222,197.234,BTree_Engine_Baseline,0.920
+range_query,407.222,197.234,LSM_Engine_Baseline,1.350

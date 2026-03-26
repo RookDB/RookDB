@@ -1,0 +1,5 @@
+workload,avg_latency_p95_us,avg_latency_p99_us,avg_io_ops,cases
+insert_heavy,13.495,24.296,8002.0,9
+read_heavy,2.065,7.880,8002.0,9
+mixed,12.583,22.671,8002.0,9
+range_query,407.222,434.134,4446.4,9
