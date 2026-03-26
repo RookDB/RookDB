@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::index::index_trait::{IndexKey, IndexTrait, RecordId, TreeBasedIndex};
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedSkipListIndex {
+    entries: Vec<(IndexKey, Vec<RecordId>)>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct SkipListIndex {
     // Deterministic ordered map backend; preserves skip-list semantics for
@@ -20,9 +25,27 @@ impl SkipListIndex {
         }
     }
 
+    fn to_persisted(&self) -> PersistedSkipListIndex {
+        PersistedSkipListIndex {
+            entries: self
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }
+    }
+
+    fn from_persisted(data: PersistedSkipListIndex) -> Self {
+        Self {
+            entries: data.entries.into_iter().collect(),
+        }
+    }
+
     pub fn load(path: &str) -> io::Result<Self> {
         let data = fs::read_to_string(path)?;
-        serde_json::from_str(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let persisted: PersistedSkipListIndex = serde_json::from_str(&data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(Self::from_persisted(persisted))
     }
 }
 
@@ -53,7 +76,7 @@ impl IndexTrait for SkipListIndex {
     }
 
     fn save(&self, path: &str) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self)
+        let json = serde_json::to_string_pretty(&self.to_persisted())
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         if let Some(parent) = std::path::Path::new(path).parent() {
             fs::create_dir_all(parent)?;

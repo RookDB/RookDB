@@ -14,6 +14,18 @@ struct LsmRun {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct PersistedLsmRun {
+    entries: Vec<(IndexKey, Vec<RecordId>)>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedLsmTreeIndex {
+    memtable: Vec<(IndexKey, Vec<RecordId>)>,
+    runs: Vec<PersistedLsmRun>,
+    memtable_limit: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LsmTreeIndex {
     memtable: BTreeMap<IndexKey, Vec<RecordId>>,
     runs: Vec<LsmRun>,
@@ -33,9 +45,50 @@ impl LsmTreeIndex {
         Self::new(DEFAULT_MEMTABLE_LIMIT)
     }
 
+    fn to_persisted(&self) -> PersistedLsmTreeIndex {
+        PersistedLsmTreeIndex {
+            memtable: self
+                .memtable
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            runs: self
+                .runs
+                .iter()
+                .map(|run| PersistedLsmRun {
+                    entries: run
+                        .entries
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                })
+                .collect(),
+            memtable_limit: self.memtable_limit,
+        }
+    }
+
+    fn from_persisted(data: PersistedLsmTreeIndex) -> Self {
+        let memtable = data.memtable.into_iter().collect();
+        let runs = data
+            .runs
+            .into_iter()
+            .map(|run| LsmRun {
+                entries: run.entries.into_iter().collect(),
+            })
+            .collect();
+
+        Self {
+            memtable,
+            runs,
+            memtable_limit: data.memtable_limit,
+        }
+    }
+
     pub fn load(path: &str) -> io::Result<Self> {
         let data = fs::read_to_string(path)?;
-        serde_json::from_str(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let persisted: PersistedLsmTreeIndex = serde_json::from_str(&data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(Self::from_persisted(persisted))
     }
 
     fn maybe_flush(&mut self) {
@@ -134,7 +187,7 @@ impl IndexTrait for LsmTreeIndex {
     }
 
     fn save(&self, path: &str) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self)
+        let json = serde_json::to_string_pretty(&self.to_persisted())
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         if let Some(parent) = std::path::Path::new(path).parent() {
             fs::create_dir_all(parent)?;
