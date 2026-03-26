@@ -547,6 +547,7 @@ Core integration files:
 - Host sample: Linux 6.6.87.2-microsoft-standard-WSL2 x86_64
 - Rust sample: rustc 1.94.0, cargo 1.94.0
 - Benchmark date: 2026-03-26
+- Statistical method: 5 independent runs per workload point, reporting median and population standard deviation
 
 Run benchmark workload:
 
@@ -556,40 +557,41 @@ cargo test --test test_type_benchmarks -- --nocapture --test-threads=1
 
 ### Initial Results
 
-Numeric comparison throughput:
+Numeric comparison throughput (n = 5 runs):
 
-| Operations | Scale | Seconds | Ops/sec |
+| Operations | Scale | Median Ops/sec | Std Dev |
 | ---: | :--- | ---: | ---: |
-| 100,000 | Small | 0.004022 | 24,863,245.93 |
-| 1,000,000 | Medium | 0.043570 | 22,951,709.67 |
-| 5,000,000 | Large | 0.178152 | 28,065,868.93 |
+| 100,000 | Small | 21,863,682.13 | 4,868,551.12 |
+| 1,000,000 | Medium | 27,517,651.89 | 2,836,046.93 |
+| 5,000,000 | Large | 29,889,894.89 | 3,067,642.61 |
 
 ![Numeric comparison throughput graph](/assets/types-benchmark-numeric-comparison.svg)
 
-Numeric function throughput (abs, round, floor, ceiling):
+Numeric function throughput (abs, round, floor, ceiling; n = 5 runs):
 
-| Operations | Scale | Seconds | Ops/sec |
+| Operations | Scale | Median Ops/sec | Std Dev |
 | ---: | :--- | ---: | ---: |
-| 20,000 | Small | 0.002120 | 9,432,511.79 |
-| 200,000 | Medium | 0.020727 | 9,649,435.52 |
-| 1,000,000 | Large | 0.119461 | 8,370,923.03 |
+| 20,000 | Small | 6,661,623.82 | 514,170.08 |
+| 200,000 | Medium | 9,809,413.40 | 1,120,019.35 |
+| 1,000,000 | Large | 10,230,426.23 | 694,868.42 |
 
 ![Numeric function throughput graph](/assets/types-benchmark-numeric-functions.svg)
 
-Typed row round-trip throughput (serialize + deserialize):
+Typed row round-trip throughput (serialize + deserialize; n = 5 runs):
 
-| Rows | Scale | Seconds | Rows/sec |
+| Rows | Scale | Median Rows/sec | Std Dev |
 | ---: | :--- | ---: | ---: |
-| 2,000 | Small | 0.120591 | 16,584.93 |
-| 20,000 | Medium | 1.166918 | 17,139.17 |
-| 100,000 | Large | 5.949959 | 16,806.84 |
+| 2,000 | Small | 18,617.94 | 694.49 |
+| 20,000 | Medium | 17,851.28 | 796.65 |
+| 100,000 | Large | 18,549.24 | 535.24 |
 
 ![Typed row round-trip throughput graph](/assets/types-benchmark-row-roundtrip.svg)
 
 ### Interpretation
 
-- Numeric compare/function workloads sustain multi-million operations/sec in this environment.
-- Row round-trip throughput stays stable across tested scales, indicating near-linear behavior for the current range.
+- Numeric comparison and numeric function workloads sustain multi-million operations/sec in this environment.
+- Row round-trip throughput remains stable across scales, with low relative variance compared with absolute throughput.
+- Reporting median plus standard deviation improves confidence by reducing single-run noise.
 - Results are environment-sensitive and should be interpreted as initial phase evidence.
 
 ### Reproducibility Evidence (Terminal Snippets)
@@ -635,6 +637,22 @@ rows,size,seconds,rows_per_sec
 100000,large,5.949959,16806.84
 
 test result: ok. 3 passed; 0 failed
+```
+
+Statistical aggregation summary (5 runs):
+
+```text
+numeric_comparison,small  median=21863682.13  stddev=4868551.12
+numeric_comparison,medium median=27517651.89  stddev=2836046.93
+numeric_comparison,large  median=29889894.89  stddev=3067642.61
+
+numeric_functions,small   median=6661623.82   stddev=514170.08
+numeric_functions,medium  median=9809413.40   stddev=1120019.35
+numeric_functions,large   median=10230426.23  stddev=694868.42
+
+row_roundtrip,small       median=18617.94     stddev=694.49
+row_roundtrip,medium      median=17851.28     stddev=796.65
+row_roundtrip,large       median=18549.24     stddev=535.24
 ```
 
 Environment snapshot used for the above benchmark run:
