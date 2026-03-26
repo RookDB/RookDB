@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 
 use crate::disk::{create_page, read_page, write_page};
-use crate::page::{ITEM_ID_SIZE, Page, page_free_space};
+use crate::page::{ITEM_ID_SIZE, Page};
 use crate::table::{TABLE_HEADER_SIZE, page_count};
 
 pub mod types;
@@ -47,38 +47,69 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
 }
 
 pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
+    
     let mut total_pages = page_count(file)?;
+    // If table is empty (only header), create first data page
+    if total_pages == 1 {
+        create_page(file)?;
+        total_pages = 2;
+    }
+    
     let mut last_page_num = total_pages - 1;
 
     let mut page = Page::new();
     read_page(file, &mut page, last_page_num)?;
 
-    let free_space = page_free_space(&page)?;
+    // Calculate required space: data length + item ID (offset + length)
     let required = data.len() as u32 + ITEM_ID_SIZE;
+    
+    // Check if current page has enough space
+    // We need to actually parse the page to get accurate free space
+    let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+    let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+    let free_space = upper.saturating_sub(lower);
 
     if required > free_space {
         create_page(file)?;
         total_pages += 1;
         last_page_num = total_pages - 1;
-        read_page(file, &mut page, last_page_num)?;
+        
+        // Initialize new page
+        page = Page::new();
+        crate::page::init_page(&mut page);
     }
 
+    // Re-read lower/upper because we might have a new page
     let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
     let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
 
+    // Write tuple data at the end of free space (growing downwards)
     let start = upper - data.len() as u32;
     page.data[start as usize..upper as usize].copy_from_slice(data);
 
-    upper = start;
-    page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-
-    page.data[lower as usize..lower as usize + 4].copy_from_slice(&start.to_le_bytes());
-    page.data[lower as usize + 4..lower as usize + 8]
+    // Update Item ID (growing upwards)
+    // Item ID struct: [offset (4 bytes), length (4 bytes)]
+    let item_id_pos = lower as usize;
+    page.data[item_id_pos..item_id_pos + 4].copy_from_slice(&start.to_le_bytes());
+    page.data[item_id_pos + 4..item_id_pos + 8]
         .copy_from_slice(&(data.len() as u32).to_le_bytes());
 
+    // Update pointers
     lower += ITEM_ID_SIZE;
+    upper = start;
+
     page.data[0..4].copy_from_slice(&lower.to_le_bytes());
+    page.data[4..8].copy_from_slice(&upper.to_le_bytes());
 
     write_page(file, &mut page, last_page_num)?;
+    
+    // Update header metadata (tuple count)
+    // Synchronize disk header state
+    if let Ok(mut latest_header) = crate::disk::read_header_page(file) {
+        latest_header.total_tuples += 1;
+        latest_header.page_count = total_pages; 
+        crate::disk::update_header_page(file, &latest_header)?;
+    }
+    
     Ok(())
 }

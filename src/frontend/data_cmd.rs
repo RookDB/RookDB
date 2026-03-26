@@ -2,15 +2,12 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{PathBuf, Path};
 
-use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::load_catalog;
 use storage_manager::executor::{show_tuples, load_csv, insert_single_tuple};
-use storage_manager::table::page_count;
 use storage_manager::backend::disk::read_header_page;
 
 /// Gracefully load CSV file with comprehensive validation and error handling
 pub fn load_csv_cmd(
-    buffer_manager: &mut BufferManager,
     current_db: &Option<String>,
 ) -> io::Result<()> {
     println!("\n[CSV LOAD COMMAND] Starting CSV load operation");
@@ -64,35 +61,13 @@ pub fn load_csv_cmd(
 
     println!("CSV file verified successfully: '{}'", csv_path);
 
-    // Load existing table state first 
-    print!("\n[CSV LOAD COMMAND] Loading existing table state...");
-    io::stdout().flush()?;
-    
-    if let Err(e) = buffer_manager.load_table_from_disk(&db, &table) {
-        println!("Could not load existing table (might be new): {}", e);
-        println!("   Proceeding with fresh table...");
-    } else {
-        println!("Successfully loaded existing table");
-    }
-
     // Load catalog and insert data using the improved load_csv function
     let catalog = load_catalog();
     
-    // Open table file for writing
-    let table_path = format!("database/base/{}/{}.dat", db, table);
-    let mut file = match OpenOptions::new().read(true).write(true).open(&table_path) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("Failed to open table file: {}", e);
-            println!("Make sure the table exists. Try creating the table first.");
-            return Ok(());
-        }
-    };
-
     println!("\n[CSV LOAD COMMAND] Starting data insertion...\n");
 
-    // Use the improved load_csv function with validation
-    match load_csv(&catalog, &db, &table, &mut file, csv_path) {
+    // Use the improved load_csv function with validation (HeapManager handles FSM)
+    match load_csv(&catalog, &db, &table, csv_path) {
         Ok(inserted_count) => {
             if inserted_count == 0 {
                 println!("\nWARNING: No data was inserted from the CSV file.");
@@ -102,16 +77,7 @@ pub fn load_csv_cmd(
                 println!("   3. Each row has the correct number of columns");
             } else {
                 println!("\nSuccessfully inserted {} rows from CSV", inserted_count);
-            }
-
-            // Display page count after insertion
-            match page_count(&mut file) {
-                Ok(pages) => {
-                    println!("Table now has {} page(s)", pages);
-                }
-                Err(e) => {
-                    println!("Could not verify page count: {}", e);
-                }
+                println!("\n✓ FSM fork file has been created/updated");
             }
         }
         Err(e) => {
@@ -199,25 +165,16 @@ pub fn insert_tuple_cmd(
         values.push(value.trim().to_string());
     }
 
-    // Open table file
-    let table_path = format!("database/base/{}/{}.dat", db, table);
-    let mut file = match OpenOptions::new().read(true).write(true).open(&table_path) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("Failed to open table file: {}", e);
-            return Ok(());
-        }
-    };
-
     // Convert to string references
     let value_refs: Vec<&str> = values.iter().map(|v| v.as_str()).collect();
 
-    // Insert tuple
+    // Insert tuple using HSM-aware insert (with FSM)
     println!("\n[INSERT TUPLE COMMAND] Inserting tuple...");
-    match insert_single_tuple(&catalog, &db, table, &mut file, &value_refs) {
+    match insert_single_tuple(&catalog, &db, table, &value_refs) {
         Ok(success) => {
             if success {
                 println!("Tuple inserted successfully!");
+                println!("✓ FSM fork file updated");
             } else {
                 println!("Failed to insert tuple. Please check your data types and values.");
             }
@@ -283,18 +240,8 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
 }
 
 /// Check heap health and display FSM statistics for a table.
-/// 
-/// Displays:
-/// - Total heap pages
-/// - FSM fork pages
-/// - Total tuples
-/// - FSM root value / free space estimate
-/// - Average free space per page
 pub fn check_heap_cmd(current_db: &Option<String>) -> io::Result<()> {
-    println!("\n╔════════════════════════════════════════╗");
-    println!("║         HEAP DIAGNOSTICS");
-    println!("╚════════════════════════════════════════╝");
-    
+
     let db = match current_db {
         Some(db) => db.clone(),
         None => {
@@ -317,8 +264,13 @@ pub fn check_heap_cmd(current_db: &Option<String>) -> io::Result<()> {
         return Ok(());
     }
 
+    println!("\n╔════════════════════════════════════════╗");
+    println!("║         HEAP DIAGNOSTICS");
+    println!("╚════════════════════════════════════════╝");
+    
+
     println!("\nHeap Info: {}.{}", db, table);
-    println!("════════════════════════════════════════");
+    // println!("════════════════════════════════════════");
 
     // Try to read header
     match OpenOptions::new()

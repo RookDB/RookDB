@@ -1,7 +1,3 @@
-//! Manages catalog metadata including databases, tables, and columns.
-//! Handles persistence of catalog state and creation of physical
-//! database and table structures on disk.
-
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
@@ -12,8 +8,7 @@ use crate::catalog::types::*;
 use crate::heap::init_table;
 use crate::layout::*;
 
-/// Initializes the catalog and required directory structure on disk.
-/// Creates the catalog file if it does not already exist.
+
 pub fn init_catalog() {
     let catalog_path = Path::new(CATALOG_FILE);
 

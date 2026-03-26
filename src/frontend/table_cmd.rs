@@ -1,6 +1,3 @@
-//! Handles table-related user commands such as listing tables,
-//! creating tables, and displaying table statistics.
-
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;

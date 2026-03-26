@@ -1,23 +1,24 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
+use std::path::PathBuf;
 
 use crate::catalog::types::Catalog;
-use crate::heap::insert_tuple;
+use crate::backend::heap::HeapManager;
 use crate::backend::types_validator::DataType;
 
-/// Load CSV file with full validation and error handling.
+/// Load CSV file with full validation and error handling using HeapManager.
 ///
 /// Before loading any data:
 /// 1. Validates that all column data types are supported
 /// 2. Checks that CSV file is readable
 /// 3. Performs row-by-row validation and type checking
+/// 4. Uses HeapManager for FSM-aware insertion
 ///
 /// Returns count of successfully inserted rows on success.
 pub fn load_csv(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
-    file: &mut File,
     csv_path: &str,
 ) -> io::Result<u32> {
     println!("\n[CSV LOADER] Starting CSV load operation");
@@ -93,6 +94,19 @@ pub fn load_csv(
     if let Some(Ok(header)) = lines.next() {
         println!("[CSV LOADER] Header: {}", header);
     }
+
+    // --- 3a. Open HeapManager for FSM-aware insertion ---
+    let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+    let mut heap_manager = match HeapManager::open(table_path.clone()) {
+        Ok(hm) => {
+            println!("[CSV LOADER] Opened HeapManager (FSM will be created/updated)");
+            hm
+        }
+        Err(e) => {
+            println!("[CSV LOADER] CRITICAL: Failed to open HeapManager: {}", e);
+            return Err(e);
+        }
+    };
 
     // --- 4. Iterate through rows with detailed validation ---
     let mut inserted = 0u32;
@@ -191,14 +205,17 @@ pub fn load_csv(
             continue;
         }
 
-        // --- 7. Insert tuple into page system ---
-        if let Err(e) = insert_tuple(file, &tuple_bytes) {
-            println!("[CSV LOADER] Line {}: Failed to insert row: {}", line_idx, e);
-            failed += 1;
-        } else {
-            inserted += 1;
-            if inserted % 100 == 0 {
-                println!("[CSV LOADER] Inserted {} rows so far...", inserted);
+        // --- 7. Insert tuple using HeapManager (FSM-aware) ---
+        match heap_manager.insert_tuple(&tuple_bytes) {
+            Ok(_page_slot) => {
+                inserted += 1;
+                if inserted % 100 == 0 {
+                    println!("[CSV LOADER] Inserted {} rows so far...", inserted);
+                }
+            }
+            Err(e) => {
+                println!("[CSV LOADER] Line {}: Failed to insert row: {}", line_idx, e);
+                failed += 1;
             }
         }
     }
@@ -218,12 +235,11 @@ pub fn load_csv(
     Ok(inserted)
 }
 
-/// Insert a single tuple directly (useful for manual data entry)
+/// Insert a single tuple manually using HeapManager (FSM-aware)
 pub fn insert_single_tuple(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
-    file: &mut File,
     values: &[&str],
 ) -> io::Result<bool> {
     println!("\n[TUPLE INSERT] Starting single tuple insertion");
@@ -285,14 +301,24 @@ pub fn insert_single_tuple(
         }
     }
 
-    // Insert tuple
-    match insert_tuple(file, &tuple_bytes) {
-        Ok(_) => {
-            println!("[TUPLE INSERT] Successfully inserted tuple");
-            Ok(true)
+    // Open HeapManager and insert tuple
+    let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+    
+    match HeapManager::open(table_path) {
+        Ok(mut heap_manager) => {
+            match heap_manager.insert_tuple(&tuple_bytes) {
+                Ok((page_id, slot_id)) => {
+                    println!("[TUPLE INSERT] Successfully inserted at (page={}, slot={})", page_id, slot_id);
+                    Ok(true)
+                }
+                Err(e) => {
+                    println!("[TUPLE INSERT] Failed to insert tuple: {}", e);
+                    Ok(false)
+                }
+            }
         }
         Err(e) => {
-            println!("[TUPLE INSERT] Failed to insert tuple: {}", e);
+            println!("[TUPLE INSERT] Failed to open HeapManager: {}", e);
             Ok(false)
         }
     }

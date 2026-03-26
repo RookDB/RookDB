@@ -1,6 +1,3 @@
-//! Handles database-related user commands such as listing, creating,
-//! and selecting databases from the catalog.
-
 use std::io::{self, Write};
 use storage_manager::catalog::{Catalog, create_database, show_databases};
 

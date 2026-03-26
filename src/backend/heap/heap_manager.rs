@@ -257,20 +257,40 @@ impl HeapManager {
             .open(&file_path)?;
 
         // Read header
-        let header = read_header_page(&mut file_handle)?;
+        let mut header = read_header_page(&mut file_handle)?;
         println!(
             "[HeapManager::open] Read header: page_count={}, fsm_page_count={}, total_tuples={}",
             header.page_count, header.fsm_page_count, header.total_tuples
         );
 
-        // Derive FSM path
-        let fsm_path = PathBuf::from(format!(
-            "{}.fsm",
-            file_path.to_string_lossy()
-        ));
+        // Derive FSM path 
+        // Note: We use .fsm suffix directly. 
+        // If file_path is "table.dat", fsm_path is "table.dat.fsm"
+        let mut fsm_path = file_path.to_string_lossy().into_owned();
+        if !fsm_path.ends_with(".fsm") {
+            fsm_path.push_str(".fsm");
+        }
+        let fsm_path = PathBuf::from(fsm_path);
 
         // Open/rebuild FSM
         let fsm = FSM::open(fsm_path.clone(), header.page_count)?;
+        
+        // ===== SYNC FSM PAGE COUNT TO HEADER =====
+        // Calculate actual FSM page count based on current heap size
+        let calculated_fsm_pages = FSM::calculate_fsm_page_count(header.page_count);
+        
+        // Only update if different
+        if header.fsm_page_count != calculated_fsm_pages {
+            println!(
+                "[HeapManager::open] FSM page count mismatch: header={}, calculated={}. Updating...",
+                header.fsm_page_count, calculated_fsm_pages
+            );
+            header.fsm_page_count = calculated_fsm_pages;
+            
+            // Persist updated header to disk
+            update_header_page(&mut file_handle, &header)?;
+            println!("[HeapManager::open] Updated and persisted fsm_page_count to {}", calculated_fsm_pages);
+        }
 
         println!("[HeapManager::open] Successfully opened HeapManager");
 
@@ -405,6 +425,12 @@ impl HeapManager {
 
             // Increment tuple counter
             self.header.total_tuples += 1;
+            
+            // Sync updated header to disk
+            match update_header_page(&mut self.file_handle, &self.header) {
+                Ok(_) => println!("[HeapManager::insert_tuple] Header updated on disk"),
+                Err(e) => eprintln!("[WARN] Failed to update header on disk: {}", e),
+            }
 
             println!(
                 "[HeapManager::insert_tuple] Successfully inserted at (page={}, slot={}); total_tuples={}",
