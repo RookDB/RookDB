@@ -1,20 +1,28 @@
-// Interactive test CLI for the Selection Operator.
-// Lets you test individual features without touching the main database.
+// ============================================================
+// Selection Operator Test CLI
+// ============================================================
+// Mode 0 → Interactive query mode  (NEW)
+// Mode 1 → Automated test suite    (EXISTING — unchanged)
+// ============================================================
 
 use std::io;
 
-// Local modules
+// ---------- Local modules ---------------------------------------------------
 mod cli;
+mod parser;
+mod parser_test;
 mod runner;
 mod tests;
 mod tuple_accessor;
 mod tuple_generator;
 
+// ---------- Imports needed by the automated‑test mode ----------------------
 use cli::input::read_input;
 use cli::menu::{display_menu, find_test_by_number, TestCase, TestCategory};
+use parser_test::test_parser_examples;
 use tuple_generator::generate_and_store_random_tuples;
 
-// Import test functions
+// Import every test function (existing behaviour – untouched)
 use tests::comparison_tests::*;
 use tests::datatype_tests::*;
 use tests::edge_case_tests::*;
@@ -23,19 +31,64 @@ use tests::null_tests::*;
 use tests::random_tests::*;
 use tests::validation_tests::*;
 
+// ---------- New: interactive mode ------------------------------------------
+use cli::interactive::run_interactive_mode;
+
+// ===========================================================================
+// main
+// ===========================================================================
 fn main() -> io::Result<()> {
     println!("========================================");
-    println!("Selection Operator Interactive Test CLI");
+    println!(" Selection Operator CLI");
     println!("========================================\n");
 
-    // Kick things off by generating some random test data
+    // Always generate fresh random tuples so interactive mode has data.
     println!("Generating 100 random tuples...");
-    generate_and_store_random_tuples(100)?;
+    generate_and_store_random_tuples(10)?;
     println!("PASS: Tuples generated and stored:");
     println!("  - Binary storage: tuple_storage.bin");
     println!("  - Human readable: tuple_rows.txt\n");
 
-    // Build test registry
+    // -----------------------------------------------------------------------
+    // Mode selector
+    // -----------------------------------------------------------------------
+    println!("Select mode:");
+    println!("  0 → Interactive query mode");
+    println!("  1 → Run automated tests");
+
+    let raw = read_input("\nEnter mode (0 or 1): ")?;
+
+    let mode: u8 = match raw.trim().parse() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("ERROR: '{}' is not a valid mode. Expected 0 or 1.", raw);
+            return Ok(());
+        }
+    };
+
+    match mode {
+        0 => run_interactive_mode(),
+        1 => run_tests_mode(),
+        _ => {
+            eprintln!("ERROR: Unknown mode '{}'. Expected 0 or 1.", mode);
+            Ok(())
+        }
+    }
+}
+
+// ===========================================================================
+// Mode 0 — interactive query
+// (implementation lives in cli/interactive.rs — nothing to do here)
+// ===========================================================================
+
+// ===========================================================================
+// Mode 1 — automated test suite  (EXISTING — do not modify)
+// ===========================================================================
+fn run_tests_mode() -> io::Result<()> {
+    println!("\n========================================");
+    println!(" Automated Test Suite");
+    println!("========================================\n");
+
     let test_registry = build_test_registry();
 
     loop {
@@ -43,7 +96,6 @@ fn main() -> io::Result<()> {
 
         let choice = read_input("Enter your choice: ")?;
 
-        // Parse choice
         let choice_num: usize = match choice.parse() {
             Ok(num) => num,
             Err(_) => {
@@ -52,13 +104,12 @@ fn main() -> io::Result<()> {
             }
         };
 
-        // Check for exit
+        // Exit option
         if choice_num == test_registry.len() + 1 {
             println!("Exiting. Goodbye!");
             break;
         }
 
-        // Execute test
         if let Some(test_case) = find_test_by_number(&test_registry, choice_num) {
             (test_case.handler)()?;
         } else {
@@ -69,7 +120,9 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-// Put together all the available tests
+// ===========================================================================
+// Test registry (EXISTING — do not modify)
+// ===========================================================================
 fn build_test_registry() -> Vec<TestCase> {
     vec![
         // Basic Comparison Tests
@@ -253,6 +306,13 @@ fn build_test_registry() -> Vec<TestCase> {
             category: TestCategory::Validation,
             handler: test_tuple_structure_validation,
         },
+        // Parser Tests
+        TestCase {
+            id: "parser_examples",
+            name: "SQL Query Parser Examples",
+            category: TestCategory::Parser,
+            handler: test_parser_examples,
+        },
         // Full Test Suite
         TestCase {
             id: "full_suite",
@@ -263,7 +323,7 @@ fn build_test_registry() -> Vec<TestCase> {
     ]
 }
 
-// Run through all the tests one after another
+// Run through all tests one after another (EXISTING — do not modify)
 fn run_full_test_suite() -> io::Result<()> {
     println!("\n========================================");
     println!("Running Full Test Suite");

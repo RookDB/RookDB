@@ -1,0 +1,13 @@
+Generated 10 random tuples:
+Schema: (id INT, amount FLOAT, name STRING, date DATE)
+
+Tuple 1: id=386, amount=NULL, name=Diana, date=NULL
+Tuple 2: id=635, amount=416.11, name=NULL, date=2024-01-15
+Tuple 3: id=52, amount=83.88, name=Charlie, date=2024-12-31
+Tuple 4: id=897, amount=512.64, name=Charlie, date=2024-04-05
+Tuple 5: id=283, amount=7.06, name=Emma, date=2024-06-15
+Tuple 6: id=190, amount=41.38, name=Charlie, date=2024-02-20
+Tuple 7: id=857, amount=515.86, name=Charlie, date=2024-10-22
+Tuple 8: id=115, amount=691.81, name=Emma, date=2024-06-15
+Tuple 9: id=766, amount=736.57, name=Alice, date=2024-08-12
+Tuple 10: id=744, amount=258.52, name=Alice, date=2024-01-15

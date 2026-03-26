@@ -1,5 +1,5 @@
 // Simulates how the Access Operator streams tuples.
-// This is the bridge between storage and query execution.
+// Bridge between storage and query execution.
 
 use std::fs::File;
 use std::io::{self, Read};

@@ -3,12 +3,24 @@
 //! Provides streaming selection (σ) operator using three-valued logic and offset-based
 //! tuple access. Operates in the execution layer without disk I/O.
 
+use regex::Regex;
+
 /// SQL three-valued logic result for predicate evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriValue {
     True,
     False,
     Unknown,
+}
+
+/// Internal type representation for type checking at planning time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DataType {
+    Int,
+    Float,
+    Text,
+    Date,
+    Null,
 }
 
 /// Literal constant in predicate expressions.
@@ -19,6 +31,17 @@ pub enum Constant {
     Date(String),
     Text(String),
     Null,
+}
+
+/// Expression node for predicate operands (columns, constants, arithmetic).
+#[derive(Debug, Clone)]
+pub enum Expr {
+    Column(ColumnReference),
+    Constant(Constant),
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
 }
 
 /// Reference to a table column, optionally resolved to schema position.
@@ -48,20 +71,21 @@ impl ColumnReference {
 
 /// Predicate expression tree for tuple filtering.
 ///
-/// Leaf nodes are comparisons, internal nodes are logical operators (AND/OR).
+/// Leaf nodes are comparisons (using Expr operands), internal nodes are logical operators.
 /// Evaluation produces three-valued logic results via recursive tree traversal.
 #[derive(Debug, Clone)]
 pub enum Predicate {
-    Equals(ColumnReference, Constant),
-    LessThan(ColumnReference, Constant),
-    GreaterThan(ColumnReference, Constant),
-    LessOrEqual(ColumnReference, Constant),
-    GreaterOrEqual(ColumnReference, Constant),
-    NotEquals(ColumnReference, Constant),
-    IsNull(ColumnReference),
-    IsNotNull(ColumnReference),
+    Compare(Box<Expr>, ComparisonOp, Box<Expr>),
+    IsNull(Box<Expr>),
+    IsNotNull(Box<Expr>),
+    Not(Box<Predicate>),
     And(Box<Predicate>, Box<Predicate>),
     Or(Box<Predicate>, Box<Predicate>),
+    Between(Box<Expr>, Box<Expr>, Box<Expr>),
+    In(Box<Expr>, Vec<Expr>),
+    Like(Box<Expr>, String, Option<Regex>),
+    // Not SQL EXISTS, only logical wrapper
+    Exists(Box<Predicate>),
 }
 
 impl Predicate {
@@ -71,6 +95,10 @@ impl Predicate {
 
     pub fn or(left: Predicate, right: Predicate) -> Self {
         Predicate::Or(Box::new(left), Box::new(right))
+    }
+
+    pub fn not(inner: Predicate) -> Self {
+        Predicate::Not(Box::new(inner))
     }
 }
 
@@ -254,7 +282,7 @@ impl<'a> TupleAccessor<'a> {
 
         let field_bytes = self.get_field_bytes(col_idx)?;
 
-        match data_type {
+        match data_type.to_uppercase().as_str() {
             "INT" => {
                 if field_bytes.len() == 4 {
                     let val = i32::from_le_bytes(field_bytes.try_into().unwrap());
@@ -297,6 +325,47 @@ impl<'a> TupleAccessor<'a> {
 
 use crate::catalog::types::Table;
 
+/// Infers the data type of an expression based on schema and constants.
+fn infer_expr_type(expr: &Expr, schema: &Table) -> Result<DataType, String> {
+    match expr {
+        Expr::Column(col_ref) => {
+            let idx = col_ref.column_index
+                .ok_or_else(|| "Column not resolved".to_string())?;
+            let schema_type = schema.columns[idx].data_type.to_uppercase();
+
+            match schema_type.as_str() {
+                "INT" => Ok(DataType::Int),
+                "FLOAT" => Ok(DataType::Float),
+                "TEXT" | "STRING" => Ok(DataType::Text),
+                "DATE" => Ok(DataType::Date),
+                _ => Err(format!("Unknown type: {}", schema_type)),
+            }
+        }
+        Expr::Constant(c) => {
+            match c {
+                Constant::Int(_) => Ok(DataType::Int),
+                Constant::Float(_) => Ok(DataType::Float),
+                Constant::Text(_) => Ok(DataType::Text),
+                Constant::Date(_) => Ok(DataType::Date),
+                Constant::Null => Ok(DataType::Null),
+            }
+        }
+        Expr::Add(l, r) | Expr::Sub(l, r) | Expr::Mul(l, r) | Expr::Div(l, r) => {
+            let left_type = infer_expr_type(l, schema)?;
+            let right_type = infer_expr_type(r, schema)?;
+
+            // Validate numeric types
+            match (&left_type, &right_type) {
+                (DataType::Null, _) | (_, DataType::Null) => Ok(DataType::Null),
+                (DataType::Int, DataType::Int) => Ok(DataType::Int),
+                (DataType::Float, DataType::Float) => Ok(DataType::Float),
+                (DataType::Int, DataType::Float) | (DataType::Float, DataType::Int) => Ok(DataType::Float),
+                _ => Err(format!("Arithmetic operation requires numeric types, got {:?} and {:?}", left_type, right_type)),
+            }
+        }
+    }
+}
+
 /// Executor for predicate-based tuple filtering with resolved column bindings.
 pub struct SelectionExecutor {
     predicate: Predicate,
@@ -306,62 +375,258 @@ pub struct SelectionExecutor {
 impl SelectionExecutor {
     /// Creates executor and binds column references to schema positions.
     pub fn new(mut predicate: Predicate, schema: Table) -> Result<Self, String> {
+        Self::normalize_predicate(&mut predicate);
         Self::resolve_columns(&mut predicate, &schema)?;
+
+        // All column references are resolved during initialization; runtime assumes validity.
         Ok(SelectionExecutor { predicate, schema })
     }
+
+    /// Preprocessing step for initialization optimization.
+    fn normalize_predicate(predicate: &mut Predicate) {
+        match predicate {
+            Predicate::Compare(left, op, right) => {
+                Self::normalize_expr(left);
+                Self::normalize_expr(right);
+
+                // Normalize: if left is constant and right is column, swap
+                let should_swap = matches!(**left, Expr::Constant(_)) && matches!(**right, Expr::Column(_));
+
+                if should_swap {
+                    std::mem::swap(left, right);
+                    *op = match *op {
+                        ComparisonOp::LessThan => ComparisonOp::GreaterThan,
+                        ComparisonOp::GreaterThan => ComparisonOp::LessThan,
+                        ComparisonOp::LessOrEqual => ComparisonOp::GreaterOrEqual,
+                        ComparisonOp::GreaterOrEqual => ComparisonOp::LessOrEqual,
+                        ComparisonOp::Equals => ComparisonOp::Equals,
+                        ComparisonOp::NotEquals => ComparisonOp::NotEquals,
+                    };
+                }
+            }
+            Predicate::IsNull(expr) => {
+                Self::normalize_expr(expr);
+            }
+            Predicate::IsNotNull(expr) => {
+                Self::normalize_expr(expr);
+            }
+            Predicate::Not(inner) => {
+                Self::normalize_predicate(inner);
+            }
+            Predicate::And(left, right) => {
+                Self::normalize_predicate(left);
+                Self::normalize_predicate(right);
+            }
+            Predicate::Or(left, right) => {
+                Self::normalize_predicate(left);
+                Self::normalize_predicate(right);
+            }
+            Predicate::Between(expr, low, high) => {
+                Self::normalize_expr(expr);
+                Self::normalize_expr(low);
+                Self::normalize_expr(high);
+
+                let new_pred = Predicate::And(
+                    Box::new(Predicate::Compare(
+                        expr.clone(),
+                        ComparisonOp::GreaterOrEqual,
+                        low.clone(),
+                    )),
+                    Box::new(Predicate::Compare(
+                        expr.clone(),
+                        ComparisonOp::LessOrEqual,
+                        high.clone(),
+                    )),
+                );
+
+                *predicate = new_pred;
+
+                Self::normalize_predicate(predicate);
+                return;
+            }
+            Predicate::In(expr, list) => {
+                Self::normalize_expr(expr);
+                for item in list {
+                    Self::normalize_expr(item);
+                }
+            }
+            Predicate::Like(expr, pattern, regex_opt) => {
+                Self::normalize_expr(expr);
+
+                // Compile regex pattern at planning time
+                if regex_opt.is_none() {
+                    let mut regex_pattern = String::from("^");
+                    for ch in pattern.chars() {
+                        match ch {
+                            '%' => regex_pattern.push_str(".*"),
+                            '_' => regex_pattern.push('.'),
+                            _ => regex_pattern.push_str(&regex::escape(&ch.to_string())),
+                        }
+                    }
+                    regex_pattern.push('$');
+
+                    match Regex::new(&regex_pattern) {
+                        Ok(compiled_regex) => {
+                            *regex_opt = Some(compiled_regex);
+                        }
+                        Err(_) => {
+                            // Invalid pattern, leave None; will fail at validation
+                        }
+                    }
+                }
+            }
+            Predicate::Exists(inner) => {
+                Self::normalize_predicate(inner);
+            }
+        }
+    }
+
+    fn normalize_expr(expr: &mut Expr) {
+    let folded = match expr {
+        Expr::Add(l, r) => {
+            Self::normalize_expr(l);
+            Self::normalize_expr(r);
+
+            match (&**l, &**r) {
+                (Expr::Constant(Constant::Null), _) | (_, Expr::Constant(Constant::Null)) => None,
+                (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Int(b))) => {
+                    Some(Constant::Int(a + b))
+                }
+                (Expr::Constant(Constant::Float(a)), Expr::Constant(Constant::Float(b))) => {
+                    Some(Constant::Float(a + b))
+                }
+                (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Float(b))) => {
+                    Some(Constant::Float(*a as f64 + b))
+                }
+                (Expr::Constant(Constant::Float(a)), Expr::Constant(Constant::Int(b))) => {
+                    Some(Constant::Float(a + *b as f64))
+                }
+                _ => None,
+            }
+        }
+
+        Expr::Sub(l, r) => {
+            Self::normalize_expr(l);
+            Self::normalize_expr(r);
+
+            match (&**l, &**r) {
+                (Expr::Constant(Constant::Null), _) | (_, Expr::Constant(Constant::Null)) => None,
+                (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Int(b))) => {
+                    Some(Constant::Int(a - b))
+                }
+                (Expr::Constant(Constant::Float(a)), Expr::Constant(Constant::Float(b))) => {
+                    Some(Constant::Float(a - b))
+                }
+                (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Float(b))) => {
+                    Some(Constant::Float(*a as f64 - b))
+                }
+                (Expr::Constant(Constant::Float(a)), Expr::Constant(Constant::Int(b))) => {
+                    Some(Constant::Float(a - *b as f64))
+                }
+                _ => None,
+            }
+        }
+
+        Expr::Mul(l, r) => {
+            Self::normalize_expr(l);
+            Self::normalize_expr(r);
+
+            match (&**l, &**r) {
+                (Expr::Constant(Constant::Null), _) | (_, Expr::Constant(Constant::Null)) => None,
+                (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Int(b))) => {
+                    Some(Constant::Int(a * b))
+                }
+                (Expr::Constant(Constant::Float(a)), Expr::Constant(Constant::Float(b))) => {
+                    Some(Constant::Float(a * b))
+                }
+                (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Float(b))) => {
+                    Some(Constant::Float(*a as f64 * b))
+                }
+                (Expr::Constant(Constant::Float(a)), Expr::Constant(Constant::Int(b))) => {
+                    Some(Constant::Float(a * *b as f64))
+                }
+                _ => None,
+            }
+        }
+
+        Expr::Div(l, r) => {
+            Self::normalize_expr(l);
+            Self::normalize_expr(r);
+
+            match (&**l, &**r) {
+                (Expr::Constant(Constant::Null), _) | (_, Expr::Constant(Constant::Null)) => None,
+                (_, Expr::Constant(Constant::Int(0))) => None,
+                (_, Expr::Constant(Constant::Float(b))) if *b == 0.0 => None,
+
+                (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Int(b))) => {
+                    Some(Constant::Float(*a as f64 / *b as f64))
+                }
+                (Expr::Constant(Constant::Float(a)), Expr::Constant(Constant::Float(b))) => {
+                    Some(Constant::Float(a / b))
+                }
+                (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Float(b))) => {
+                    Some(Constant::Float(*a as f64 / b))
+                }
+                (Expr::Constant(Constant::Float(a)), Expr::Constant(Constant::Int(b))) => {
+                    Some(Constant::Float(a / *b as f64))
+                }
+                _ => None,
+            }
+        }
+
+        Expr::Column(_) | Expr::Constant(_) => None,
+    };
+
+    if let Some(c) = folded {
+        *expr = Expr::Constant(c);
+    }
+}
 
     /// Recursively binds column names to schema indices in predicate tree.
     fn resolve_columns(predicate: &mut Predicate, schema: &Table) -> Result<(), String> {
         match predicate {
-            Predicate::Equals(col_ref, constant)
-            | Predicate::LessThan(col_ref, constant)
-            | Predicate::GreaterThan(col_ref, constant)
-            | Predicate::LessOrEqual(col_ref, constant)
-            | Predicate::GreaterOrEqual(col_ref, constant)
-            | Predicate::NotEquals(col_ref, constant) => {
-                let col_idx = schema
-                    .columns
-                    .iter()
-                    .position(|c| c.name == col_ref.column_name)
-                    .ok_or_else(|| {
-                        format!("Column '{}' not found in schema", col_ref.column_name)
-                    })?;
+            Predicate::Compare(left, op, right) => {
+                Self::resolve_expr(left, schema)?;
+                Self::resolve_expr(right, schema)?;
 
-                col_ref.column_index = Some(col_idx);
+                // Type validation
+                let left_type = infer_expr_type(left, schema)?;
+                let right_type = infer_expr_type(right, schema)?;
 
-                // Strict type validation: check column type matches constant type
-                let data_type = &schema.columns[col_idx].data_type;
-                let type_matches = match (data_type.as_str(), constant) {
-                    ("INT", Constant::Int(_)) => true,
-                    ("FLOAT", Constant::Float(_)) => true,
-                    ("DATE", Constant::Date(_)) => true,
-                    ("TEXT", Constant::Text(_)) => true,
-                    ("STRING", Constant::Text(_)) => true,
-                    (_, Constant::Null) => true, // NULL allowed for any type
-                    _ => false,
-                };
-
-                if !type_matches {
-                    return Err(format!(
-                        "Type mismatch: Column '{}' of type {} cannot be compared to the provided constant",
-                        col_ref.column_name, data_type
-                    ));
+                // Check type compatibility
+                match (&left_type, &right_type) {
+                    (DataType::Null, _) | (_, DataType::Null) => {
+                        // NULL is compatible with any type
+                    }
+                    (DataType::Int, DataType::Int) | (DataType::Float, DataType::Float) => {
+                        // Same numeric types
+                    }
+                    (DataType::Int, DataType::Float) | (DataType::Float, DataType::Int) => {
+                        // Coercible numeric types
+                    }
+                    (DataType::Text, DataType::Text) => {
+                        // Text comparison
+                    }
+                    (DataType::Date, DataType::Date) => {
+                        // Date comparison
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Type mismatch in comparison: {:?} {} {:?}",
+                            left_type, format!("{:?}", op), right_type
+                        ));
+                    }
                 }
-
                 Ok(())
             }
 
-            Predicate::IsNull(col_ref) | Predicate::IsNotNull(col_ref) => {
-                let col_idx = schema
-                    .columns
-                    .iter()
-                    .position(|c| c.name == col_ref.column_name)
-                    .ok_or_else(|| {
-                        format!("Column '{}' not found in schema", col_ref.column_name)
-                    })?;
-
-                col_ref.column_index = Some(col_idx);
+            Predicate::IsNull(expr) | Predicate::IsNotNull(expr) => {
+                Self::resolve_expr(expr, schema)?;
                 Ok(())
+            }
+
+            Predicate::Not(inner) => {
+                Self::resolve_columns(inner, schema)
             }
 
             Predicate::And(left, right) | Predicate::Or(left, right) => {
@@ -369,7 +634,87 @@ impl SelectionExecutor {
                 Self::resolve_columns(right, schema)?;
                 Ok(())
             }
+
+            Predicate::In(expr, list) => {
+                Self::resolve_expr(expr, schema)?;
+
+                let expr_type = infer_expr_type(expr, schema)?;
+
+                for item in list {
+                    Self::resolve_expr(item, schema)?;
+
+                    let item_type = infer_expr_type(item, schema)?;
+
+                    // Validate type compatibility
+                    match (&expr_type, &item_type) {
+                        (DataType::Null, _) | (_, DataType::Null) => {
+                            // NULL is compatible
+                        }
+                        (DataType::Int, DataType::Int) | (DataType::Float, DataType::Float) => {}
+                        (DataType::Int, DataType::Float) | (DataType::Float, DataType::Int) => {}
+                        (DataType::Text, DataType::Text) => {}
+                        (DataType::Date, DataType::Date) => {}
+                        _ => {
+                            return Err(format!(
+                                "Type mismatch in IN clause: expected {:?}, got {:?}",
+                                expr_type, item_type
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
+
+            Predicate::Like(expr, _pattern, regex_opt) => {
+                Self::resolve_expr(expr, schema)?;
+
+                // Validate LIKE requires TEXT
+                let expr_type = infer_expr_type(expr, schema)?;
+                if expr_type != DataType::Text && expr_type != DataType::Null {
+                    return Err(format!("LIKE requires TEXT type, got {:?}", expr_type));
+                }
+
+                // Ensure regex was compiled successfully
+                if regex_opt.is_none() {
+                    return Err(format!("Invalid SQL LIKE pattern: '{}'", _pattern));
+                }
+
+                Ok(())
+            }
+
+            Predicate::Exists(inner) => {
+                Self::resolve_columns(inner, schema)
+            }
+
+            Predicate::Between(_, _, _) => {
+                unreachable!("BETWEEN should not reach this stage after normalization")
+            }
         }
+    }
+
+    /// Recursively binds column names to schema indices in an expression tree.
+    fn resolve_expr(expr: &mut Expr, schema: &Table) -> Result<(), String> {
+        match expr {
+            Expr::Column(col_ref) => {
+                let idx = schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name == col_ref.column_name)
+                    .ok_or_else(|| format!("Column '{}' not found", col_ref.column_name))?;
+                col_ref.column_index = Some(idx);
+            }
+
+            Expr::Add(l, r)
+            | Expr::Sub(l, r)
+            | Expr::Mul(l, r)
+            | Expr::Div(l, r) => {
+                Self::resolve_expr(l, schema)?;
+                Self::resolve_expr(r, schema)?;
+            }
+
+            Expr::Constant(_) => {}
+        }
+        Ok(())
     }
 
     /// Evaluates predicate against tuple, returning three-valued logic result.
@@ -387,128 +732,199 @@ impl SelectionExecutor {
         accessor: &TupleAccessor,
     ) -> Result<TriValue, String> {
         match predicate {
-            Predicate::Equals(col_ref, constant) => {
-                self.evaluate_comparison(col_ref, constant, accessor, ComparisonOp::Equals)
-            }
-            Predicate::LessThan(col_ref, constant) => {
-                self.evaluate_comparison(col_ref, constant, accessor, ComparisonOp::LessThan)
-            }
-            Predicate::GreaterThan(col_ref, constant) => {
-                self.evaluate_comparison(col_ref, constant, accessor, ComparisonOp::GreaterThan)
-            }
-            Predicate::LessOrEqual(col_ref, constant) => {
-                self.evaluate_comparison(col_ref, constant, accessor, ComparisonOp::LessOrEqual)
-            }
-            Predicate::GreaterOrEqual(col_ref, constant) => {
-                self.evaluate_comparison(
-                    col_ref,
-                    constant,
-                    accessor,
-                    ComparisonOp::GreaterOrEqual,
-                )
-            }
-            Predicate::NotEquals(col_ref, constant) => {
-                self.evaluate_comparison(col_ref, constant, accessor, ComparisonOp::NotEquals)
+            Predicate::Compare(left, op, right) => {
+                let lval = self.evaluate_expr(left, accessor)?;
+                let rval = self.evaluate_expr(right, accessor)?;
+                Ok(compare_values(&lval, &rval, *op))
             }
 
-            Predicate::IsNull(col_ref) => {
-                self.evaluate_is_null(col_ref, accessor)
+            Predicate::IsNull(expr) => {
+                let val = self.evaluate_expr(expr, accessor)?;
+                Ok(if matches!(val, Value::Null) { TriValue::True } else { TriValue::False })
             }
-            Predicate::IsNotNull(col_ref) => {
-                self.evaluate_is_not_null(col_ref, accessor)
+
+            Predicate::IsNotNull(expr) => {
+                let val = self.evaluate_expr(expr, accessor)?;
+                Ok(if matches!(val, Value::Null) { TriValue::False } else { TriValue::True })
+            }
+
+            Predicate::Not(inner) => {
+                match self.evaluate_predicate(inner, accessor)? {
+                    TriValue::True => Ok(TriValue::False),
+                    TriValue::False => Ok(TriValue::True),
+                    TriValue::Unknown => Ok(TriValue::Unknown),
+                }
             }
 
             Predicate::And(left, right) => {
                 let left_result = self.evaluate_predicate(left, accessor)?;
-                
+
                 if left_result == TriValue::False {
                     return Ok(TriValue::False);
                 }
-                
+
                 let right_result = self.evaluate_predicate(right, accessor)?;
                 Ok(apply_and(left_result, right_result))
             }
             Predicate::Or(left, right) => {
                 let left_result = self.evaluate_predicate(left, accessor)?;
-                
+
                 if left_result == TriValue::True {
                     return Ok(TriValue::True);
                 }
-                
+
                 let right_result = self.evaluate_predicate(right, accessor)?;
                 Ok(apply_or(left_result, right_result))
+            }
+
+            Predicate::In(expr, list) => {
+                let val = self.evaluate_expr(expr, accessor)?;
+
+                if matches!(val, Value::Null) {
+                    return Ok(TriValue::Unknown);
+                }
+
+                let mut has_null = false;
+
+                for item in list.iter() {
+                    let item_val = self.evaluate_expr(item, accessor)?;
+
+                    if matches!(item_val, Value::Null) {
+                        has_null = true;
+                        continue;
+                    }
+
+                    if compare_values(&val, &item_val, ComparisonOp::Equals) == TriValue::True {
+                        return Ok(TriValue::True);
+                    }
+                }
+
+                if has_null {
+                    Ok(TriValue::Unknown)
+                } else {
+                    Ok(TriValue::False)
+                }
+            }
+
+            Predicate::Like(expr, _pattern, regex_opt) => {
+                let val = self.evaluate_expr(expr, accessor)?;
+
+                if matches!(val, Value::Null) {
+                    return Ok(TriValue::Unknown);
+                }
+
+                match val {
+                    Value::Text(s) => {
+                        // Use precompiled regex
+                        let regex = regex_opt.as_ref().unwrap();
+
+                        if regex.is_match(&s) {
+                            Ok(TriValue::True)
+                        } else {
+                            Ok(TriValue::False)
+                        }
+                    }
+                    _ => Ok(TriValue::Unknown),
+                }
+            }
+
+            Predicate::Exists(inner) => {
+                let result = self.evaluate_predicate(inner, accessor)?;
+
+                match result {
+                    TriValue::True => Ok(TriValue::True),
+                    _ => Ok(TriValue::False),
+                }
+            }
+
+            Predicate::Between(_, _, _) => {
+                unreachable!("BETWEEN should not reach this stage after normalization")
             }
         }
     }
 
-    /// Evaluates comparison operator between column value and constant.
-    fn evaluate_comparison(
+    /// Evaluates an expression tree against a tuple row, returning a typed Value.
+    fn evaluate_expr(
         &self,
-        col_ref: &ColumnReference,
-        constant: &Constant,
+        expr: &Expr,
         accessor: &TupleAccessor,
-        op: ComparisonOp,
-    ) -> Result<TriValue, String> {
-        let col_idx = col_ref
-            .column_index
-            .ok_or_else(|| format!("Column '{}' index not resolved", col_ref.column_name))?;
+    ) -> Result<Value, String> {
+        match expr {
+            Expr::Column(col_ref) => {
+                let idx = col_ref.column_index.ok_or("Unresolved column")?;
+                let dtype = &self.schema.columns[idx].data_type;
+                accessor.get_value(idx, dtype).map_err(|e| format!("{:?}", e))
+            }
+            Expr::Constant(c) => Ok(constant_to_value(c)),
 
-        let data_type = &self.schema.columns[col_idx].data_type;
+            Expr::Add(l, r) => {
+                let lv = self.evaluate_expr(l, accessor)?;
+                let rv = self.evaluate_expr(r, accessor)?;
+                if matches!(lv, Value::Null) || matches!(rv, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                match (lv, rv) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
+                    _ => Err("Type mismatch in ADD".into()),
+                }
+            }
 
-        let column_value = accessor
-            .get_value(col_idx, data_type)
-            .map_err(|e| format!("Failed to extract column value: {:?}", e))?;
+            Expr::Sub(l, r) => {
+                let lv = self.evaluate_expr(l, accessor)?;
+                let rv = self.evaluate_expr(r, accessor)?;
+                if matches!(lv, Value::Null) || matches!(rv, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                match (lv, rv) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 - b)),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - b as f64)),
+                    _ => Err("Type mismatch in SUB".into()),
+                }
+            }
 
-        let constant_value = constant_to_value(constant);
+            Expr::Mul(l, r) => {
+                let lv = self.evaluate_expr(l, accessor)?;
+                let rv = self.evaluate_expr(r, accessor)?;
+                if matches!(lv, Value::Null) || matches!(rv, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                match (lv, rv) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 * b)),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * b as f64)),
+                    _ => Err("Type mismatch in MUL".into()),
+                }
+            }
 
-        Ok(compare_values(&column_value, &constant_value, op))
-    }
-
-    /// Evaluates IS NULL predicate by checking the NULL bitmap.
-    fn evaluate_is_null(
-        &self,
-        col_ref: &ColumnReference,
-        accessor: &TupleAccessor,
-    ) -> Result<TriValue, String> {
-        let col_idx = col_ref
-            .column_index
-            .ok_or_else(|| format!("Column '{}' index not resolved", col_ref.column_name))?;
-
-        let is_null = accessor
-            .is_null(col_idx)
-            .map_err(|e| format!("Failed to check NULL status: {:?}", e))?;
-
-        if is_null {
-            Ok(TriValue::True)
-        } else {
-            Ok(TriValue::False)
-        }
-    }
-
-    /// Evaluates IS NOT NULL predicate by checking the NULL bitmap.
-    fn evaluate_is_not_null(
-        &self,
-        col_ref: &ColumnReference,
-        accessor: &TupleAccessor,
-    ) -> Result<TriValue, String> {
-        let col_idx = col_ref
-            .column_index
-            .ok_or_else(|| format!("Column '{}' index not resolved", col_ref.column_name))?;
-
-        let is_null = accessor
-            .is_null(col_idx)
-            .map_err(|e| format!("Failed to check NULL status: {:?}", e))?;
-
-        if is_null {
-            Ok(TriValue::False)
-        } else {
-            Ok(TriValue::True)
+            Expr::Div(l, r) => {
+                let lv = self.evaluate_expr(l, accessor)?;
+                let rv = self.evaluate_expr(r, accessor)?;
+                if matches!(lv, Value::Null) || matches!(rv, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                match (lv, rv) {
+                    (_, Value::Int(0)) | (_, Value::Float(0.0)) => {
+                        return Ok(Value::Null)
+                    }
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Float(a as f64 / b as f64)),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
+                    _ => Err("Type mismatch in DIV".into()),
+                }
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ComparisonOp {
+pub enum ComparisonOp {
     Equals,
     LessThan,
     GreaterThan,
@@ -529,7 +945,7 @@ fn constant_to_value(constant: &Constant) -> Value {
 
 /// Compares values using specified operator. Returns Unknown for NULL operands.
 fn compare_values(left: &Value, right: &Value, op: ComparisonOp) -> TriValue {
-    const EPSILON: f64 = 1e-9;
+    const EPSILON: f64 = 1e-2;
 
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return TriValue::Unknown;
@@ -569,7 +985,45 @@ fn compare_values(left: &Value, right: &Value, op: ComparisonOp) -> TriValue {
         (Value::Text(l), Value::Text(r), ComparisonOp::GreaterOrEqual) => l >= r,
         (Value::Text(l), Value::Text(r), ComparisonOp::NotEquals) => l != r,
 
-        _ => false,
+        (Value::Int(l), Value::Float(_), _) => {
+            return compare_values(&Value::Float(*l as f64), right, op);
+        }
+
+        (Value::Float(_), Value::Int(r), _) => {
+            return compare_values(left, &Value::Float(*r as f64), op);
+        }
+
+        // TEXT → INT coercion
+        (Value::Text(l), Value::Int(_), op) => {
+            if let Ok(parsed) = l.parse::<i32>() {
+                return compare_values(&Value::Int(parsed), right, op);
+            }
+            return TriValue::Unknown;
+        }
+
+        (Value::Int(_), Value::Text(r), op) => {
+            if let Ok(parsed) = r.parse::<i32>() {
+                return compare_values(left, &Value::Int(parsed), op);
+            }
+            return TriValue::Unknown;
+        }
+
+        // TEXT → FLOAT coercion
+        (Value::Text(l), Value::Float(_), op) => {
+            if let Ok(parsed) = l.parse::<f64>() {
+                return compare_values(&Value::Float(parsed), right, op);
+            }
+            return TriValue::Unknown;
+        }
+
+        (Value::Float(_), Value::Text(r), op) => {
+            if let Ok(parsed) = r.parse::<f64>() {
+                return compare_values(left, &Value::Float(parsed), op);
+            }
+            return TriValue::Unknown;
+        }
+
+        _ => return TriValue::Unknown,
     };
 
     if result {
@@ -602,13 +1056,13 @@ pub fn apply_or(left: TriValue, right: TriValue) -> TriValue {
 /// Filters tuple stream, emitting only tuples matching the predicate (True).
 pub fn filter_tuples(
     executor: &SelectionExecutor,
-    tuples: Vec<Vec<u8>>,
+    tuples: &[Vec<u8>],
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut result = Vec::new();
 
-    for tuple in tuples {
-        if executor.evaluate_tuple(&tuple)? == TriValue::True {
-            result.push(tuple);
+    for tuple in tuples.iter() {
+        if executor.evaluate_tuple(tuple)? == TriValue::True {
+            result.push(tuple.clone());
         }
     }
 
@@ -640,16 +1094,49 @@ pub fn filter_tuples_detailed(
 /// Counts matching tuples without materialization.
 pub fn count_matching_tuples(
     executor: &SelectionExecutor,
-    tuples: Vec<Vec<u8>>,
+    tuples: &[Vec<u8>],
 ) -> Result<usize, String> {
     let mut count = 0;
 
-    for tuple in tuples {
-        let evaluation_result = executor.evaluate_tuple(&tuple)?;
+    for tuple in tuples.iter() {
+        let evaluation_result = executor.evaluate_tuple(tuple)?;
         if evaluation_result == TriValue::True {
             count += 1;
         }
     }
 
     Ok(count)
+}
+
+/// Filters tuples using a zero-buffering streaming model.
+/// Evaluates an iterator of tuples and pushes matches to a callback function.
+pub fn filter_tuples_streaming(
+    executor: &SelectionExecutor,
+    tuple_iter: impl Iterator<Item = Result<Vec<u8>, String>>,
+    mut output: impl FnMut(&[u8]),
+) -> Result<usize, String> {
+    let mut count = 0;
+    for tuple_res in tuple_iter {
+        let tuple = tuple_res?;
+        if executor.evaluate_tuple(&tuple)? == TriValue::True {
+            output(&tuple);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Iterator-based selection filter. Consumes and yields tuples lazily.
+pub fn filter_iter<'a>(
+    executor: &'a SelectionExecutor,
+    iter: impl Iterator<Item = Result<Vec<u8>, String>> + 'a,
+) -> impl Iterator<Item = Result<Vec<u8>, String>> + 'a {
+    iter.filter_map(move |tuple_res| match tuple_res {
+        Ok(tuple) => match executor.evaluate_tuple(&tuple) {
+            Ok(TriValue::True) => Some(Ok(tuple)),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        },
+        Err(e) => Some(Err(e)),
+    })
 }

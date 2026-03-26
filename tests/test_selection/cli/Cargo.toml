@@ -8,5 +8,9 @@ name = "selection_test"
 path = "main.rs"
 
 [dependencies]
-storage_manager = { path = "../../.." }
+storage_manager = { path = "../../../" }
 rand = "0.8"
+lalrpop-util = { version = "0.20", features = ["lexer"] }
+
+[build-dependencies]
+lalrpop = "0.20"

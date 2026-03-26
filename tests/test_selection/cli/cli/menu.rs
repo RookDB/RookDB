@@ -19,6 +19,7 @@ pub enum TestCategory {
     RandomData,
     EdgeCase,
     Validation,
+    Parser,
     FullSuite,
 }
 
@@ -32,6 +33,7 @@ impl TestCategory {
             TestCategory::RandomData => "Random Tuple Tests",
             TestCategory::EdgeCase => "Edge Case Tests",
             TestCategory::Validation => "Internal Validation Tests",
+            TestCategory::Parser => "SQL Parser Tests",
             TestCategory::FullSuite => "Full Test Suite",
         }
     }

@@ -1,0 +1,8 @@
+[package]
+name = "selection_benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+storage_manager = { path = "../../.." }
+rand = "0.8"

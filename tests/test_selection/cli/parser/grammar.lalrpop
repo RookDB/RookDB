@@ -1,0 +1,128 @@
+grammar;
+
+use storage_manager::backend::executor::selection::{
+    Predicate, Expr, Constant, ColumnReference, ComparisonOp
+};
+
+pub PredicateParser: Predicate = {
+    <p:OrExpr> => p
+};
+
+OrExpr: Predicate = {
+    <l:OrExpr> "OR" <r:AndExpr> => Predicate::Or(Box::new(l), Box::new(r)),
+    <a:AndExpr> => a
+};
+
+AndExpr: Predicate = {
+    <l:AndExpr> "AND" <r:NotExpr> => Predicate::And(Box::new(l), Box::new(r)),
+    <n:NotExpr> => n
+};
+
+NotExpr: Predicate = {
+    "NOT" <p:PrimaryPred> => Predicate::Not(Box::new(p)),
+    <p:PrimaryPred> => p
+};
+
+PrimaryPred: Predicate = {
+    <l:Expr> <op:CompOp> <r:Expr> => Predicate::Compare(Box::new(l), op, Box::new(r)),
+    <e:Expr> "IS" "NULL" => Predicate::IsNull(Box::new(e)),
+    <e:Expr> "IS" "NOT" "NULL" => Predicate::IsNotNull(Box::new(e)),
+    <e:Expr> "NOT" "IN" "(" <list:ExprList> ")" => Predicate::Not(Box::new(Predicate::In(Box::new(e), list))),
+    <e:Expr> "IN" "(" <list:ExprList> ")" => Predicate::In(Box::new(e), list),
+    <e:Expr> "NOT" "BETWEEN" <low:Expr> "AND" <high:Expr> => Predicate::Not(Box::new(Predicate::Between(Box::new(e), Box::new(low), Box::new(high)))),
+    <e:Expr> "BETWEEN" <low:Expr> "AND" <high:Expr> => Predicate::Between(Box::new(e), Box::new(low), Box::new(high)),
+    <e:Expr> "LIKE" <s:StringLit> => Predicate::Like(Box::new(e), s),
+    "EXISTS" "(" <p:PredicateParser> ")" => Predicate::Exists(Box::new(p)),
+    "(" <p:PredicateParser> ")" => p
+};
+
+CompOp: ComparisonOp = {
+    "="  => ComparisonOp::Equals,
+    "!=" => ComparisonOp::NotEquals,
+    "<"  => ComparisonOp::LessThan,
+    ">"  => ComparisonOp::GreaterThan,
+    "<=" => ComparisonOp::LessOrEqual,
+    ">=" => ComparisonOp::GreaterOrEqual,
+};
+
+Expr: Expr = {
+    <t:Term> <rest:ExprTail*> => {
+        let mut result = t;
+        for (op, term) in rest {
+            result = match op.as_str() {
+                "+" => Expr::Add(Box::new(result), Box::new(term)),
+                "-" => Expr::Sub(Box::new(result), Box::new(term)),
+                _ => unreachable!(),
+            };
+        }
+        result
+    }
+};
+
+ExprTail: (String, Expr) = {
+    "+" <t:Term> => ("+".to_string(), t),
+    "-" <t:Term> => ("-".to_string(), t),
+};
+
+Term: Expr = {
+    <f:Factor> <rest:TermTail*> => {
+        let mut result = f;
+        for (op, factor) in rest {
+            result = match op.as_str() {
+                "*" => Expr::Mul(Box::new(result), Box::new(factor)),
+                "/" => Expr::Div(Box::new(result), Box::new(factor)),
+                _ => unreachable!(),
+            };
+        }
+        result
+    }
+};
+
+TermTail: (String, Expr) = {
+    "*" <f:Factor> => ("*".to_string(), f),
+    "/" <f:Factor> => ("/".to_string(), f),
+};
+
+Factor: Expr = {
+    <n:Number> => Expr::Constant(n),
+
+    // Detect DATE format (YYYY-MM-DD) vs plain TEXT
+    <s:StringLit> => {
+        if s.len() == 10 &&
+           s.chars().nth(4) == Some('-') &&
+           s.chars().nth(7) == Some('-') &&
+           s.chars().take(4).all(|c| c.is_ascii_digit()) &&
+           s.chars().skip(5).take(2).all(|c| c.is_ascii_digit()) &&
+           s.chars().skip(8).take(2).all(|c| c.is_ascii_digit()) {
+            Expr::Constant(Constant::Date(s))
+        } else {
+            Expr::Constant(Constant::Text(s))
+        }
+    },
+
+    "NULL" => Expr::Constant(Constant::Null),
+    <id:Ident> => Expr::Column(ColumnReference::new(id)),
+    "(" <e:Expr> ")" => e
+};
+
+Number: Constant = {
+    <f:r"[0-9]+\.[0-9]+"> => Constant::Float(f.parse().unwrap()),
+    <i:r"[0-9]+"> => Constant::Int(i.parse().unwrap()),
+};
+
+StringLit: String = {
+    <s:r#""[^"]*""#> => s[1..s.len()-1].to_string()
+};
+
+Ident: String = {
+    <id:r"[a-zA-Z_][a-zA-Z0-9_]*"> => id.to_string()
+};
+
+ExprList: Vec<Expr> = {
+    <e:Expr> "," <rest:ExprList> => {
+        let mut v = vec![e];
+        v.extend(rest);
+        v
+    },
+    <e:Expr> => vec![e]
+};
