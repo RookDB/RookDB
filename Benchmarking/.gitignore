@@ -1,2 +1,4 @@
 results/index_files/*.idx
+results/index_validation_files/*.idx
 tmp/
+__pycache__/

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680">
 <style>text{font-family:Arial,sans-serif} .axis{stroke:#333;stroke-width:1} .grid{stroke:#ddd;stroke-width:1}</style>
-<text x="600.0" y="28" text-anchor="middle" font-size="20">Average Logical I/O Operations Count by Workload</text>
-<text x="20" y="340.0" transform="rotate(-90 20 340.0)" text-anchor="middle" font-size="14">Logical I/O count</text>
+<text x="600.0" y="28" text-anchor="middle" font-size="20">Average Logical Operations (Internal) by Workload</text>
+<text x="20" y="340.0" transform="rotate(-90 20 340.0)" text-anchor="middle" font-size="14">Logical operations (internal metric)</text>
 <line class="axis" x1="80" y1="540" x2="1170" y2="540"/>
 <line class="axis" x1="80" y1="60" x2="80" y2="540"/>
 <line class="grid" x1="80" y1="540.0" x2="1170" y2="540.0"/>
@@ -25,7 +25,7 @@
 <rect x="665.9" y="60.0" width="190.8" height="480.0" fill="#2E6F95"/>
 <text x="761.2" y="558" text-anchor="middle" font-size="10" transform="rotate(25 761.2 558)">mixed</text>
 <text x="761.2" y="72.0" text-anchor="middle" font-size="9">8002.0</text>
-<rect x="938.4" y="273.3" width="190.8" height="266.7" fill="#2E6F95"/>
+<rect x="938.4" y="60.0" width="190.8" height="480.0" fill="#2E6F95"/>
 <text x="1033.8" y="558" text-anchor="middle" font-size="10" transform="rotate(25 1033.8 558)">range_query</text>
-<text x="1033.8" y="268.3" text-anchor="middle" font-size="9">4446.4</text>
+<text x="1033.8" y="72.0" text-anchor="middle" font-size="9">8002.0</text>
 </svg>

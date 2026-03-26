@@ -15,10 +15,13 @@ import csv
 import json
 import subprocess
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
+from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Tuple
+
+from standards_compare_engine import StandardsComparator
 
 
 WORKLOAD_ORDER = ["insert_heavy", "read_heavy", "mixed", "range_query"]
@@ -36,6 +39,7 @@ class BenchmarkPaths:
     standards_csv: Path
     standards_report_md: Path
     standards_chart_svg: Path
+    standards_raw_chart_svg: Path
     dat_validation_json: Path
     index_validation_json: Path
 
@@ -46,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ops", type=int, default=8000, help="operations per workload")
     parser.add_argument("--range-width", type=int, default=64, help="range width for range scans")
     parser.add_argument("--seed", type=int, default=7, help="base RNG seed")
+    parser.add_argument("--repeats", type=int, default=5, help="number of repeated benchmark runs")
     parser.add_argument(
         "--cargo-profile",
         choices=["release", "debug"],
@@ -56,11 +61,6 @@ def parse_args() -> argparse.Namespace:
         "--skip-run",
         action="store_true",
         help="skip executing the Rust benchmark and only post-process existing raw JSON",
-    )
-    parser.add_argument(
-        "--baseline-file",
-        default="Benchmarking/benchmark_standards_baseline.json",
-        help="Path to benchmark standards baseline JSON",
     )
     parser.add_argument(
         "--validate-dat",
@@ -90,37 +90,60 @@ def resolve_paths() -> BenchmarkPaths:
         standards_csv=results_dir / "standards_comparison.csv",
         standards_report_md=results_dir / "standards_comparison.md",
         standards_chart_svg=charts_dir / "standards_latency_baseline_compare.svg",
+        standards_raw_chart_svg=charts_dir / "standards_raw_p95_by_workload.svg",
         dat_validation_json=results_dir / "dat_validation_report.json",
         index_validation_json=results_dir / "index_validation_report.json",
     )
 
 
 def run_rust_benchmark(args: argparse.Namespace, paths: BenchmarkPaths) -> None:
-    cmd = [
-        "cargo",
-        "run",
-        "--bin",
-        "index_benchmark",
-        "--",
-        "--output",
-        str(paths.raw_json),
-        "--index-dir",
-        str(paths.results_dir / "index_files"),
-        "--preload",
-        str(args.preload),
-        "--ops",
-        str(args.ops),
-        "--range-width",
-        str(args.range_width),
-        "--seed",
-        str(args.seed),
-    ]
+    all_rows: List[Dict] = []
+    first_meta: Dict | None = None
 
-    if args.cargo_profile == "release":
-        cmd.insert(2, "--release")
+    for run_id in range(args.repeats):
+        run_output = paths.results_dir / f"raw_results_run_{run_id + 1}.json"
+        cmd = [
+            "cargo",
+            "run",
+            "--bin",
+            "index_benchmark",
+            "--",
+            "--output",
+            str(run_output),
+            "--index-dir",
+            str(paths.results_dir / "index_files"),
+            "--preload",
+            str(args.preload),
+            "--ops",
+            str(args.ops),
+            "--range-width",
+            str(args.range_width),
+            "--seed",
+            str(args.seed + run_id * 100_000),
+        ]
 
-    print("Running:", " ".join(cmd))
-    subprocess.run(cmd, cwd=paths.root, check=True)
+        if args.cargo_profile == "release":
+            cmd.insert(2, "--release")
+
+        print("Running:", " ".join(cmd))
+        subprocess.run(cmd, cwd=paths.root, check=True)
+
+        run_payload = json.loads(run_output.read_text(encoding="utf-8"))
+        if first_meta is None:
+            first_meta = run_payload.get("metadata", {})
+        for row in run_payload.get("results", []):
+            row_copy = dict(row)
+            row_copy["run_id"] = run_id + 1
+            all_rows.append(row_copy)
+
+    merged = {
+        "metadata": {
+            **(first_meta or {}),
+            "repeats": args.repeats,
+        },
+        "results": all_rows,
+    }
+    paths.raw_json.write_text(json.dumps(merged, indent=2), encoding="utf-8")
 
 
 def load_results(raw_path: Path) -> Dict:
@@ -151,6 +174,13 @@ def safe_mean(values: Iterable[float]) -> float:
     return float(mean(vals))
 
 
+def safe_std(values: Iterable[float]) -> float:
+    vals = [float(v) for v in values]
+    if len(vals) <= 1:
+        return 0.0
+    return float(pstdev(vals))
+
+
 def write_csv_summaries(results: List[Dict], paths: BenchmarkPaths) -> None:
     grouped_index = by_index(results)
     with paths.summary_csv.open("w", newline="", encoding="utf-8") as f:
@@ -158,10 +188,15 @@ def write_csv_summaries(results: List[Dict], paths: BenchmarkPaths) -> None:
         writer.writerow([
             "index_algorithm",
             "avg_build_time_ms",
+            "std_build_time_ms",
             "avg_index_size_bytes",
+            "std_index_size_bytes",
             "avg_latency_p95_us",
+            "std_latency_p95_us",
             "avg_latency_p99_us",
+            "std_latency_p99_us",
             "avg_io_ops",
+            "std_io_ops",
         ])
 
         for algo in sorted(grouped_index.keys()):
@@ -169,10 +204,15 @@ def write_csv_summaries(results: List[Dict], paths: BenchmarkPaths) -> None:
             writer.writerow([
                 algo,
                 f"{safe_mean(r['build_time_ms'] for r in rows):.3f}",
+                f"{safe_std(r['build_time_ms'] for r in rows):.3f}",
                 f"{safe_mean(r['index_size_bytes'] for r in rows):.1f}",
+                f"{safe_std(r['index_size_bytes'] for r in rows):.3f}",
                 f"{safe_mean(r['latency_us']['p95'] for r in rows):.3f}",
+                f"{safe_std(r['latency_us']['p95'] for r in rows):.3f}",
                 f"{safe_mean(r['latency_us']['p99'] for r in rows):.3f}",
+                f"{safe_std(r['latency_us']['p99'] for r in rows):.3f}",
                 f"{safe_mean(r['io_operations_count'] for r in rows):.1f}",
+                f"{safe_std(r['io_operations_count'] for r in rows):.3f}",
             ])
 
     grouped_workload = by_workload(results)
@@ -181,18 +221,26 @@ def write_csv_summaries(results: List[Dict], paths: BenchmarkPaths) -> None:
         writer.writerow([
             "workload",
             "avg_latency_p95_us",
+            "std_latency_p95_us",
             "avg_latency_p99_us",
+            "std_latency_p99_us",
             "avg_io_ops",
+            "std_io_ops",
             "cases",
         ])
 
         for workload in WORKLOAD_ORDER:
             rows = grouped_workload.get(workload, [])
+            if workload == "range_query":
+                rows = [r for r in rows if not r.get("range_workload_skipped", False)]
             writer.writerow([
                 workload,
                 f"{safe_mean(r['latency_us']['p95'] for r in rows):.3f}",
+                f"{safe_std(r['latency_us']['p95'] for r in rows):.3f}",
                 f"{safe_mean(r['latency_us']['p99'] for r in rows):.3f}",
+                f"{safe_std(r['latency_us']['p99'] for r in rows):.3f}",
                 f"{safe_mean(r['io_operations_count'] for r in rows):.1f}",
+                f"{safe_std(r['io_operations_count'] for r in rows):.3f}",
                 len(rows),
             ])
 
@@ -321,9 +369,12 @@ def chart_latency_p95(results: List[Dict], paths: BenchmarkPaths) -> Path:
 
     values_matrix: List[List[float]] = []
     for algo in algorithms:
-        vals = [0.0] * len(WORKLOAD_ORDER)
+        buckets: Dict[str, List[float]] = defaultdict(list)
         for row in [r for r in results if r["index_algorithm"] == algo]:
-            vals[workload_to_idx[row["workload"]]] = row["latency_us"]["p95"]
+            if row.get("workload") == "range_query" and row.get("range_workload_skipped", False):
+                continue
+            buckets[row["workload"]].append(float(row["latency_us"]["p95"]))
+        vals = [safe_mean(buckets.get(w, [])) for w in WORKLOAD_ORDER]
         values_matrix.append(vals)
 
     write_grouped_bar_chart_svg(
@@ -373,14 +424,36 @@ def chart_io_count(results: List[Dict], paths: BenchmarkPaths) -> Path:
     out = paths.charts_dir / "logical_io_ops_by_workload.svg"
     grouped = by_workload(results)
     labels = WORKLOAD_ORDER
-    values = [safe_mean(r["io_operations_count"] for r in grouped.get(w, [])) for w in labels]
+    values = []
+    for w in labels:
+        rows = grouped.get(w, [])
+        if w == "range_query":
+            rows = [r for r in rows if not r.get("range_workload_skipped", False)]
+        values.append(safe_mean(r["io_operations_count"] for r in rows))
 
     write_bar_chart_svg(
         out=out,
         labels=labels,
         values=values,
-        title="Average Logical I/O Operations Count by Workload",
-        y_label="Logical I/O count",
+        title="Average Logical Operations (Internal) by Workload",
+        y_label="Logical operations (internal metric)",
+    )
+    return out
+
+
+def chart_raw_p95_by_workload(
+    paths: BenchmarkPaths,
+    series_labels: List[str],
+    values_matrix: List[List[float]],
+) -> Path:
+    out = paths.standards_raw_chart_svg
+    write_grouped_bar_chart_svg(
+        out=out,
+        group_labels=WORKLOAD_ORDER,
+        series_labels=series_labels,
+        values_matrix=values_matrix,
+        title="Raw P95 Latency by Workload (Measured Systems)",
+        y_label="P95 latency (microseconds)",
     )
     return out
 
@@ -393,108 +466,47 @@ def find_best(results: List[Dict], workload: str, metric: str) -> Tuple[str, flo
     return best["index_algorithm"], best["latency_us"][metric]
 
 
-def write_standards_comparison(args: argparse.Namespace, results: List[Dict], paths: BenchmarkPaths) -> None:
-    baseline_path = (paths.root / args.baseline_file).resolve()
-    if not baseline_path.exists():
-        return
-
-    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    profiles: Dict[str, Dict[str, float]] = baseline.get("profiles", {})
-    references: List[str] = baseline.get("references", [])
-
-    workload_rows = by_workload(results)
-    rookdb_workload_p95: Dict[str, float] = {
-        w: safe_mean(r["latency_us"]["p95"] for r in workload_rows.get(w, []))
-        for w in WORKLOAD_ORDER
-    }
-
-    positive_vals = [v for v in rookdb_workload_p95.values() if v > 0]
-    norm_base = min(positive_vals) if positive_vals else 1.0
-    rookdb_norm = {
-        w: (rookdb_workload_p95[w] / norm_base if rookdb_workload_p95[w] > 0 else 0.0)
-        for w in WORKLOAD_ORDER
-    }
+def write_standards_comparison(results: List[Dict], paths: BenchmarkPaths, metadata: Dict) -> None:
+    comparator = StandardsComparator()
+    outcome = comparator.compare(
+        results,
+        preload=int(metadata.get("preload_rows", 12_000)),
+        ops=int(metadata.get("operations_per_workload", 5_000)),
+        range_width=int(metadata.get("range_width", 64)),
+        seed=int(metadata.get("seed", 131)) + 991,
+        repeats=max(1, min(5, int(metadata.get("repeats", 1)))),
+    )
 
     with paths.standards_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
             "workload",
-            "rookdb_avg_p95_us",
             "rookdb_normalized_latency_index",
             "profile",
             "profile_latency_index",
+            "absolute_delta",
         ])
-        for workload in WORKLOAD_ORDER:
-            if not profiles:
-                writer.writerow([
-                    workload,
-                    f"{rookdb_workload_p95[workload]:.3f}",
-                    f"{rookdb_norm[workload]:.3f}",
-                    "n/a",
-                    "n/a",
-                ])
-                continue
-            for profile_name, profile_vals in profiles.items():
-                writer.writerow([
-                    workload,
-                    f"{rookdb_workload_p95[workload]:.3f}",
-                    f"{rookdb_norm[workload]:.3f}",
-                    profile_name,
-                    f"{float(profile_vals.get(workload, 0.0)):.3f}",
-                ])
-
-    series_labels = ["RookDB (normalized p95)"] + list(profiles.keys())
-    values_matrix: List[List[float]] = []
-    values_matrix.append([rookdb_norm[w] for w in WORKLOAD_ORDER])
-    for _, profile_vals in profiles.items():
-        values_matrix.append([float(profile_vals.get(w, 0.0)) for w in WORKLOAD_ORDER])
+        for row in outcome.csv_rows:
+            writer.writerow([
+                row["workload"],
+                f"{float(row['rookdb_normalized_latency_index']):.6f}",
+                row["profile"],
+                f"{float(row['profile_latency_index']):.6f}",
+                f"{float(row['absolute_delta']):.6f}",
+            ])
 
     write_grouped_bar_chart_svg(
         out=paths.standards_chart_svg,
         group_labels=WORKLOAD_ORDER,
-        series_labels=series_labels,
-        values_matrix=values_matrix,
-        title="RookDB vs Existing Benchmark Baselines (Latency Index)",
+        series_labels=outcome.series_labels,
+        values_matrix=outcome.values_matrix,
+        title="RookDB vs Measured Reference Systems (Latency Index)",
         y_label="Normalized latency index (lower is better)",
     )
 
-    mapping = baseline.get("workload_mapping", {})
-    map_lines = "\n".join(
-        [f"- {w}: {mapping.get(w, 'n/a')}" for w in WORKLOAD_ORDER]
-    )
-    ref_lines = "\n".join([f"- {r}" for r in references]) if references else "- n/a"
-    profile_lines = "\n".join([f"- {name}" for name in profiles.keys()]) if profiles else "- n/a"
+    chart_raw_p95_by_workload(paths, outcome.raw_series_labels, outcome.raw_values_matrix)
 
-    report = f"""# Benchmark Standards Comparison
-
-## Method
-- RookDB values use average p95 latency per workload from this run.
-- Existing benchmark standards are represented by normalized latency-index profiles from `Benchmarking/benchmark_standards_baseline.json`.
-- Comparison is pattern-oriented baseline matching, not absolute latency equivalence.
-
-## Profiles Compared
-{profile_lines}
-
-## Workload Mapping
-{map_lines}
-
-## RookDB Normalized Workload Shape
-"""
-
-    for w in WORKLOAD_ORDER:
-        report += f"- {w}: avg p95 = {rookdb_workload_p95[w]:.3f} us, normalized index = {rookdb_norm[w]:.3f}\n"
-
-    report += """
-
-## Artifacts
-- CSV: Benchmarking/results/standards_comparison.csv
-- Graph: Benchmarking/results/charts/standards_latency_baseline_compare.svg
-
-## References
-"""
-    report += ref_lines + "\n"
-
-    paths.standards_report_md.write_text(report, encoding="utf-8")
+    paths.standards_report_md.write_text(outcome.markdown, encoding="utf-8")
 
 
 def write_report(raw: Dict, results: List[Dict], paths: BenchmarkPaths) -> None:
@@ -521,6 +533,7 @@ def write_report(raw: Dict, results: List[Dict], paths: BenchmarkPaths) -> None:
 - Preload rows per case: {metadata.get('preload_rows', 'n/a')}
 - Operations per workload: {metadata.get('operations_per_workload', 'n/a')}
 - Range width: {metadata.get('range_width', 'n/a')}
+- Repeats: {metadata.get('repeats', 1)}
 - Total benchmark scenarios: {len(results)}
 
 ## Workloads Implemented
@@ -531,7 +544,7 @@ def write_report(raw: Dict, results: List[Dict], paths: BenchmarkPaths) -> None:
 
 ## Metrics Implemented
 - Query latency: min, max, avg, p50, p95, p99
-- Logical I/O operations count
+- Logical operations count (internal metric)
 - Persisted index size on disk
 - Index build time measurement
 
@@ -554,7 +567,7 @@ Range query was skipped for these hash indexes (expected): {', '.join(sorted(set
     - Benchmarking/results/charts/logical_io_ops_by_workload.svg
 
 ## Notes and Assumptions
-- I/O operations count is a logical benchmark metric: number of benchmarked index operations plus save/load operations per scenario.
+- Logical operations count is an internal benchmark metric: number of benchmarked index operations plus save/load operations per scenario.
 - Hash indexes do not support ordered range scans and are marked as skipped for range workload.
 - This phase provides initial results; larger-scale runs can be produced by increasing --preload and --ops.
 """
@@ -576,7 +589,7 @@ def run_dat_validation(paths: BenchmarkPaths) -> None:
         "--output",
         str(paths.dat_validation_json),
     ]
-    subprocess.run(cmd, cwd=paths.root, check=False)
+    subprocess.run(cmd, cwd=paths.root, check=True)
 
 
 def run_index_validation(paths: BenchmarkPaths) -> None:
@@ -587,7 +600,7 @@ def run_index_validation(paths: BenchmarkPaths) -> None:
         "--bin",
         "index_validation",
     ]
-    subprocess.run(cmd, cwd=paths.root, check=False)
+    subprocess.run(cmd, cwd=paths.root, check=True)
 
 
 def main() -> int:
@@ -609,8 +622,9 @@ def main() -> int:
     chart_build_time(results, paths)
     chart_index_size(results, paths)
     chart_io_count(results, paths)
+
     write_report(raw, results, paths)
-    write_standards_comparison(args, results, paths)
+    write_standards_comparison(results, paths, raw.get("metadata", {}))
 
     if args.validate_dat:
         run_dat_validation(paths)

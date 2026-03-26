@@ -5,6 +5,7 @@
 - Preload rows per case: 20000
 - Operations per workload: 8000
 - Range width: 64
+- Repeats: 1
 - Total benchmark scenarios: 36
 
 ## Workloads Implemented
@@ -15,7 +16,7 @@
 
 ## Metrics Implemented
 - Query latency: min, max, avg, p50, p95, p99
-- Logical I/O operations count
+- Logical operations count (internal metric)
 - Persisted index size on disk
 - Index build time measurement
 
@@ -38,6 +39,6 @@ Range query was skipped for these hash indexes (expected): Chained Hash, Extendi
     - Benchmarking/results/charts/logical_io_ops_by_workload.svg
 
 ## Notes and Assumptions
-- I/O operations count is a logical benchmark metric: number of benchmarked index operations plus save/load operations per scenario.
+- Logical operations count is an internal benchmark metric: number of benchmarked index operations plus save/load operations per scenario.
 - Hash indexes do not support ordered range scans and are marked as skipped for range workload.
 - This phase provides initial results; larger-scale runs can be produced by increasing --preload and --ops.

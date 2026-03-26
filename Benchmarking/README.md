@@ -11,16 +11,18 @@ This folder contains the Python-driven benchmarking pipeline for RookDB index pe
 
 ## Baseline Comparison Against Existing Benchmarks
 
-The framework includes a standards comparison layer using YCSB-inspired workload
-profiles as normalized baselines.
+The framework includes a measured reference-system comparison engine.
 
-- Baseline config: `Benchmarking/benchmark_standards_baseline.json`
+- Comparison engine: `Benchmarking/standards_compare_engine.py`
+- Measured references:
+	- SQLite (B-tree)
+	- SortedContainers (tree-like ordered structure)
+	- Python dict (hash-like structure)
 - Output report: `Benchmarking/results/standards_comparison.md`
 - Output graph: `Benchmarking/results/charts/standards_latency_baseline_compare.svg`
+- Raw p95 graph: `Benchmarking/results/charts/standards_raw_p95_by_workload.svg`
 
-This comparison is intentionally **pattern-oriented** (normalized latency index)
-instead of absolute latency matching, because hardware/setup differences make
-absolute cross-system latency comparisons misleading.
+The engine reports both normalized comparison and raw p95 latency values.
 
 ## Independent .dat Correctness Validation
 
@@ -71,7 +73,7 @@ source .venv/bin/activate
 pip install -r Benchmarking/requirements.txt
 ```
 
-`requirements.txt` is intentionally minimal because chart generation uses pure-Python SVG output.
+`requirements.txt` includes analysis dependencies and ordered-structure support.
 
 ## Run Benchmarks
 

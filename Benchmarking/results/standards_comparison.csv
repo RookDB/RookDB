@@ -1,9 +1,13 @@
-workload,rookdb_avg_p95_us,rookdb_normalized_latency_index,profile,profile_latency_index
-insert_heavy,13.495,6.536,BTree_Engine_Baseline,1.450
-insert_heavy,13.495,6.536,LSM_Engine_Baseline,0.820
-read_heavy,2.065,1.000,BTree_Engine_Baseline,0.880
-read_heavy,2.065,1.000,LSM_Engine_Baseline,1.180
-mixed,12.583,6.095,BTree_Engine_Baseline,1.000
-mixed,12.583,6.095,LSM_Engine_Baseline,1.000
-range_query,407.222,197.234,BTree_Engine_Baseline,0.920
-range_query,407.222,197.234,LSM_Engine_Baseline,1.350
+workload,rookdb_normalized_latency_index,profile,profile_latency_index,absolute_delta
+insert_heavy,107.962733,SQLite (B-tree),29.999767,77.962966
+read_heavy,16.517208,SQLite (B-tree),17.999767,1.482560
+mixed,100.666789,SQLite (B-tree),18.999767,81.667022
+range_query,5863.956949,SQLite (B-tree),11.335972,5852.620977
+insert_heavy,107.962733,SortedContainers (tree-like),9.328056,98.634678
+read_heavy,16.517208,SortedContainers (tree-like),6.000000,10.517208
+mixed,100.666789,SortedContainers (tree-like),25.335972,75.330817
+range_query,5863.956949,SortedContainers (tree-like),13.335972,5850.620977
+insert_heavy,107.962733,Python dict (hash-like),1.335972,106.626761
+read_heavy,16.517208,Python dict (hash-like),1.000000,15.517208
+mixed,100.666789,Python dict (hash-like),1.000000,99.666789
+range_query,5863.956949,Python dict (hash-like),nan,nan

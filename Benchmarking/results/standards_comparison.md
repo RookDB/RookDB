@@ -1,32 +1,35 @@
-# Benchmark Standards Comparison
+# Reference Systems Comparison
 
 ## Method
-- RookDB values use average p95 latency per workload from this run.
-- Existing benchmark standards are represented by normalized latency-index profiles from `Benchmarking/benchmark_standards_baseline.json`.
-- Comparison is pattern-oriented baseline matching, not absolute latency equivalence.
+- Comparison engine: `Benchmarking/standards_compare_engine.py`
+- Reference systems are measured, not hardcoded:
+  - SQLite (B-tree)
+  - SortedContainers (tree-like ordered structure)
+  - Python dict (hash-like structure)
+- Similarity metrics are computed on consistently normalized vectors.
+- Raw p95 values are also reported to preserve absolute performance meaning.
 
-## Profiles Compared
-- BTree_Engine_Baseline
-- LSM_Engine_Baseline
+## Caveat
+- This is still a lightweight proxy benchmark, not a full cross-DBMS publication-grade study.
 
-## Workload Mapping
-- insert_heavy: YCSB-A/F style write-intensive mix
-- read_heavy: YCSB-C style read-mostly
-- mixed: YCSB-B style read/update mix
-- range_query: Scan-heavy profile analogous to YCSB scan workloads
+## RookDB Workload Summary
+- insert_heavy: avg p95=13.495 us, std=28.004 us
+- read_heavy: avg p95=2.065 us, std=4.722 us
+- mixed: avg p95=12.583 us, std=27.372 us
+- range_query: avg p95=733.000 us, std=943.637 us
 
-## RookDB Normalized Workload Shape
-- insert_heavy: avg p95 = 13.495 us, normalized index = 6.536
-- read_heavy: avg p95 = 2.065 us, normalized index = 1.000
-- mixed: avg p95 = 12.583 us, normalized index = 6.095
-- range_query: avg p95 = 407.222 us, normalized index = 197.234
-
+## Similarity Scores (Normalized)
+- Python dict (hash-like): cosine=0.9047, rmse=84.7418, mae=73.9369
+- SortedContainers (tree-like): cosine=0.4545, rmse=2925.9733, mae=1508.7759
+- SQLite (B-tree): cosine=0.2962, rmse=2926.8551, mae=1503.4334
 
 ## Artifacts
 - CSV: Benchmarking/results/standards_comparison.csv
-- Graph: Benchmarking/results/charts/standards_latency_baseline_compare.svg
+- Normalized graph: Benchmarking/results/charts/standards_latency_baseline_compare.svg
+- Raw graph: Benchmarking/results/charts/standards_raw_p95_by_workload.svg
 
 ## References
 - Cooper et al. (2010), Benchmarking Cloud Serving Systems with YCSB, SoCC.
 - YCSB project documentation: https://github.com/brianfrankcooper/YCSB
-- Lim et al. (2021), A Comprehensive Evaluation of Key-Value Stores for Cloud Data-Intensive Applications.
+- SQLite documentation: https://www.sqlite.org/docs.html
+- SortedContainers documentation: https://grantjenks.com/docs/sortedcontainers/
