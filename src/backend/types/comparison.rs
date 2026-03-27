@@ -73,7 +73,7 @@ impl Comparable for DataValue {
                 Ok(ordering)
             }
             (DataValue::Bool(a), DataValue::Bool(b)) => Ok(a.cmp(b)),
-            (DataValue::Char(a), DataValue::Char(b)) => Ok(a.cmp(b)),
+            (DataValue::Char(a), DataValue::Char(b)) => Ok(a.trim_end().cmp(b.trim_end())),
             (DataValue::Varchar(a), DataValue::Varchar(b)) => Ok(a.cmp(b)),
             (DataValue::Date(a), DataValue::Date(b)) => Ok(a.cmp(b)),
             (DataValue::Time(a), DataValue::Time(b)) => Ok(a.cmp(b)),
