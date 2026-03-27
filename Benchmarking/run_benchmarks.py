@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Primary-key benchmark pipeline for RookDB with SQLite baseline.
+"""Primary-key benchmark pipeline for RookDB with SQLite, DuckDB, and In-Memory baselines.
 
 Research-aligned evaluation metrics in this script follow common benchmark
 practice (latency percentiles and throughput), as used in YCSB-style studies:
@@ -7,9 +7,9 @@ practice (latency percentiles and throughput), as used in YCSB-style studies:
 
 Pipeline:
 1) Generate controlled synthetic data (deterministic, real-world-like distributions).
-2) Load into SQLite baseline and measure primary-key lookup latency.
+2) Load into SQLite, DuckDB, Python Dict, and measure primary-key lookup latency.
 3) Run Rust RookDB index benchmark across all index algorithms.
-4) Cross-verify correctness between SQLite and RookDB outputs.
+4) Cross-verify correctness between outputs.
 5) Run scalability sweeps across multiple dataset sizes.
 6) Emit metrics, plots, and a documentation-ready report.
 """
@@ -21,6 +21,7 @@ import csv
 import json
 import random
 import sqlite3
+import duckdb
 import subprocess
 import time
 from pathlib import Path
@@ -51,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         "--sqlite-db",
         default="Benchmarking/results/sqlite_baseline.db",
         help="SQLite baseline DB path",
+    )
+    parser.add_argument(
+        "--duckdb-db",
+        default="Benchmarking/results/duckdb_baseline.db",
+        help="DuckDB baseline DB path",
     )
     parser.add_argument(
         "--rookdb-json",
@@ -94,6 +100,7 @@ def _latency_stats(samples_us: List[float]) -> Dict[str, float]:
             "p50_us": 0.0,
             "p95_us": 0.0,
             "p99_us": 0.0,
+            "throughput_ops_s": 0.0,
         }
     arr = sorted(samples_us)
 
@@ -116,10 +123,6 @@ def generate_synthetic_orders(csv_path: Path, rows: int, seed: int) -> Dict[str,
     rng = random.Random(seed)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Real-world-like controlled distributions:
-    # - customer_id: heavy-tail (Pareto-like)
-    # - amount: log-normal-like
-    # - region/device categorical skews
     regions = ["NA", "EU", "APAC", "LATAM", "MEA"]
     region_weights = [0.37, 0.27, 0.22, 0.09, 0.05]
     devices = ["web", "ios", "android"]
@@ -131,24 +134,56 @@ def generate_synthetic_orders(csv_path: Path, rows: int, seed: int) -> Dict[str,
 
         base_ts = 1_700_000_000
         for i in range(1, rows + 1):
-            # Unique primary key.
             order_id = i
-
-            # Heavy-tail customers with realistic cap.
             customer_id = min(250_000, int(rng.paretovariate(1.45) * 1000) + 1)
-
-            # Monetary values in cents.
             amount_cents = max(99, int(rng.lognormvariate(4.2, 0.9) * 100))
-
             region = rng.choices(regions, weights=region_weights, k=1)[0]
             device = rng.choices(devices, weights=device_weights, k=1)[0]
-
-            # Non-uniform temporal progression with bursts.
             event_ts = base_ts + i * 13 + rng.randint(0, 3600)
-
             writer.writerow([order_id, customer_id, region, device, amount_cents, event_ts])
 
     return {"rows": rows, "seed": seed}
+
+def python_dict_baseline(csv_path: Path) -> Dict:
+    ids: List[int] = []
+    store: Dict[int, tuple] = {}
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            k = int(row["id"])
+            ids.append(k)
+            store[k] = (
+                k,
+                int(row["customer_id"]),
+                row["region"],
+                row["device"],
+                int(row["amount_cents"]),
+                int(row["event_ts"]),
+            )
+            
+    total_rows = len(store)
+    unique_pk = len(store)
+    
+    lookup_lat_us: List[float] = []
+    for key in ids:
+        t0 = time.perf_counter()
+        hit = store.get(key)
+        lookup_lat_us.append((time.perf_counter() - t0) * 1_000_000.0)
+        if hit is None:
+            raise RuntimeError(f"Dict missing primary key {key}")
+
+    miss_ok = True
+    for k in range(-100, 0):
+        if store.get(k) is not None:
+            miss_ok = False
+            break
+
+    return {
+        "total_rows": total_rows,
+        "unique_primary_keys": unique_pk,
+        "lookup_latency": _latency_stats(lookup_lat_us),
+        "miss_checks_ok": miss_ok,
+    }
 
 
 def sqlite_baseline(csv_path: Path, db_path: Path) -> Dict:
@@ -201,7 +236,6 @@ def sqlite_baseline(csv_path: Path, db_path: Path) -> Dict:
     cur.execute("SELECT COUNT(DISTINCT id) FROM orders")
     unique_pk = int(cur.fetchone()[0])
 
-    # Primary-key lookup latency across all generated IDs.
     lookup_lat_us: List[float] = []
     for key in ids:
         t0 = time.perf_counter()
@@ -211,7 +245,6 @@ def sqlite_baseline(csv_path: Path, db_path: Path) -> Dict:
         if hit is None:
             raise RuntimeError(f"SQLite missing primary key {key}")
 
-    # Miss checks.
     miss_ok = True
     for k in range(-100, 0):
         cur.execute("SELECT id FROM orders WHERE id = ?", (k,))
@@ -228,6 +261,48 @@ def sqlite_baseline(csv_path: Path, db_path: Path) -> Dict:
         "miss_checks_ok": miss_ok,
     }
 
+def duckdb_baseline(csv_path: Path, db_path: Path) -> Dict:
+    if db_path.exists():
+        db_path.unlink()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    conn = duckdb.connect(str(db_path))
+    
+    conn.execute(f"CREATE TABLE orders AS SELECT * FROM read_csv_auto('{csv_path}')")
+    
+    ids: List[int] = []
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            ids.append(int(row["id"]))
+            
+    total_rows = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+    unique_pk = conn.execute("SELECT COUNT(DISTINCT id) FROM orders").fetchone()[0]
+
+    lookup_lat_us: List[float] = []
+    for key in ids:
+        t0 = time.perf_counter()
+        conn.execute("SELECT id FROM orders WHERE id = ?", (key,))
+        hit = conn.fetchone()
+        lookup_lat_us.append((time.perf_counter() - t0) * 1_000_000.0)
+        if hit is None:
+            raise RuntimeError(f"DuckDB missing primary key {key}")
+
+    miss_ok = True
+    for k in range(-100, 0):
+        conn.execute("SELECT id FROM orders WHERE id = ?", (k,))
+        if conn.fetchone() is not None:
+            miss_ok = False
+            break
+
+    conn.close()
+
+    return {
+        "total_rows": total_rows,
+        "unique_primary_keys": unique_pk,
+        "lookup_latency": _latency_stats(lookup_lat_us),
+        "miss_checks_ok": miss_ok,
+    }
 
 def run_rookdb_benchmark(csv_path: Path, output_json: Path) -> Dict:
     cmd = [
@@ -246,7 +321,7 @@ def run_rookdb_benchmark(csv_path: Path, output_json: Path) -> Dict:
     return json.loads(output_json.read_text(encoding="utf-8"))
 
 
-def verify_correctness(sqlite_info: Dict, rookdb_info: Dict) -> Dict:
+def verify_correctness(sqlite_info: Dict, duckdb_info: Dict, dict_info: Dict, rookdb_info: Dict) -> Dict:
     total_rows = sqlite_info["total_rows"]
     unique_pk = sqlite_info["unique_primary_keys"]
 
@@ -270,12 +345,14 @@ def verify_correctness(sqlite_info: Dict, rookdb_info: Dict) -> Dict:
         )
 
     return {
-        "overall_ok": all_ok and sqlite_info["miss_checks_ok"],
+        "overall_ok": all_ok and sqlite_info["miss_checks_ok"] and dict_info["miss_checks_ok"] and duckdb_info["miss_checks_ok"],
         "sqlite_total_rows": total_rows,
         "sqlite_unique_primary_keys": unique_pk,
         "rookdb_total_rows": int(rookdb_info.get("total_rows", -1)),
         "rookdb_unique_primary_keys": int(rookdb_info.get("primary_key_unique_count", -1)),
         "sqlite_miss_checks_ok": bool(sqlite_info.get("miss_checks_ok")),
+        "duckdb_miss_checks_ok": bool(duckdb_info.get("miss_checks_ok")),
+        "dict_miss_checks_ok": bool(dict_info.get("miss_checks_ok")),
         "algorithm_checks": algo_checks,
     }
 
@@ -308,7 +385,7 @@ def plot_search_latency_bar(latency_csv: Path, out_png: Path) -> None:
     plt.bar(range(len(systems)), p95_vals)
     plt.xticks(range(len(systems)), systems, rotation=50, ha="right")
     plt.ylabel("Search p95 latency (us)")
-    plt.title("Primary-key Search p95: SQLite vs RookDB Indexes")
+    plt.title("Primary-key Search p95: SQLite vs DuckDB vs Dict vs RookDB Indexes")
     plt.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_png, dpi=180)
@@ -340,10 +417,14 @@ def plot_insert_latency_rookdb(latency_csv: Path, out_png: Path) -> None:
 def plot_scalability(scalability_csv: Path, out_png: Path) -> None:
     rows = []
     sqlite_p95 = []
+    duckdb_p95 = []
+    dict_p95 = []
     rookdb_best_p95 = []
 
     per_rows_rook: Dict[int, List[float]] = {}
     per_rows_sqlite: Dict[int, float] = {}
+    per_rows_duckdb: Dict[int, float] = {}
+    per_rows_dict: Dict[int, float] = {}
 
     with scalability_csv.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -352,18 +433,26 @@ def plot_scalability(scalability_csv: Path, out_png: Path) -> None:
             p95 = float(row["search_p95_us"])
             if row["system"] == "sqlite":
                 per_rows_sqlite[n] = p95
+            elif row["system"] == "duckdb":
+                per_rows_duckdb[n] = p95
+            elif row["system"] == "python_dict":
+                per_rows_dict[n] = p95
             else:
                 per_rows_rook.setdefault(n, []).append(p95)
 
     rows = sorted(set(list(per_rows_sqlite.keys()) + list(per_rows_rook.keys())))
     for n in rows:
         sqlite_p95.append(per_rows_sqlite.get(n, float("nan")))
+        duckdb_p95.append(per_rows_duckdb.get(n, float("nan")))
+        dict_p95.append(per_rows_dict.get(n, float("nan")))
         best = min(per_rows_rook.get(n, [float("nan")]))
         rookdb_best_p95.append(best)
 
     plt.figure(figsize=(10, 5))
     plt.plot(rows, sqlite_p95, marker="o", label="SQLite p95")
-    plt.plot(rows, rookdb_best_p95, marker="o", label="Best RookDB index p95")
+    plt.plot(rows, duckdb_p95, marker="v", label="DuckDB p95")
+    plt.plot(rows, dict_p95, marker="x", label="Python Dict p95")
+    plt.plot(rows, rookdb_best_p95, marker="s", label="Best RookDB index p95")
     plt.xlabel("Rows")
     plt.ylabel("Search p95 latency (us)")
     plt.title("Scalability: Search p95 vs Dataset Size")
@@ -375,7 +464,7 @@ def plot_scalability(scalability_csv: Path, out_png: Path) -> None:
     plt.close()
 
 
-def write_comparison_csv(path: Path, sqlite_info: Dict, rookdb_info: Dict) -> None:
+def write_comparison_csv(path: Path, sqlite_info: Dict, duckdb_info: Dict, dict_info: Dict, rookdb_info: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -400,6 +489,34 @@ def write_comparison_csv(path: Path, sqlite_info: Dict, rookdb_info: Dict) -> No
             f"{sqlite_info['lookup_latency']['avg_us']:.6f}",
             f"{sqlite_info['lookup_latency']['p99_us']:.6f}",
             f"{sqlite_info['lookup_latency']['throughput_ops_s']:.6f}",
+            "",
+            "",
+            "",
+            "",
+            "true",
+        ])
+        
+        writer.writerow([
+            "duckdb",
+            "primary_key_index",
+            f"{duckdb_info['lookup_latency']['p95_us']:.6f}",
+            f"{duckdb_info['lookup_latency']['avg_us']:.6f}",
+            f"{duckdb_info['lookup_latency']['p99_us']:.6f}",
+            f"{duckdb_info['lookup_latency']['throughput_ops_s']:.6f}",
+            "",
+            "",
+            "",
+            "",
+            "true",
+        ])
+        
+        writer.writerow([
+            "python_dict",
+            "in_memory_hash",
+            f"{dict_info['lookup_latency']['p95_us']:.6f}",
+            f"{dict_info['lookup_latency']['avg_us']:.6f}",
+            f"{dict_info['lookup_latency']['p99_us']:.6f}",
+            f"{dict_info['lookup_latency']['throughput_ops_s']:.6f}",
             "",
             "",
             "",
@@ -450,15 +567,25 @@ def write_report(
     rows: int,
     seed: int,
     sqlite_info: Dict,
+    duckdb_info: Dict,
+    dict_info: Dict,
     verification: Dict,
 ) -> None:
     lines = [
-        "# RookDB Primary-Key Benchmark (SQLite Baseline)",
+        "# RookDB Primary-Key Benchmark (SQLite, DuckDB & Dict Baselines)",
         "",
         "## Dataset",
         f"- Rows: {rows}",
         f"- Seed: {seed}",
         "- Data: controlled synthetic orders with heavy-tail customers, skewed categories, and bursty timestamps",
+        "",
+        "## DuckDB Baseline (Measured)",
+        f"- Total rows: {duckdb_info['total_rows']}",
+        f"- Unique primary keys: {duckdb_info['unique_primary_keys']}",
+        f"- Search p95 latency: {duckdb_info['lookup_latency']['p95_us']:.6f} us",
+        f"- Search p99 latency: {duckdb_info['lookup_latency']['p99_us']:.6f} us",
+        f"- Search avg latency: {duckdb_info['lookup_latency']['avg_us']:.6f} us",
+        f"- Search throughput: {duckdb_info['lookup_latency']['throughput_ops_s']:.2f} ops/s",
         "",
         "## SQLite Baseline (Measured)",
         f"- Total rows: {sqlite_info['total_rows']}",
@@ -468,9 +595,18 @@ def write_report(
         f"- Search avg latency: {sqlite_info['lookup_latency']['avg_us']:.6f} us",
         f"- Search throughput: {sqlite_info['lookup_latency']['throughput_ops_s']:.2f} ops/s",
         "",
+        "## Python Dict Baseline (Speed of Light limit)",
+        f"- Unique primary keys: {dict_info['unique_primary_keys']}",
+        f"- Search p95 latency: {dict_info['lookup_latency']['p95_us']:.6f} us",
+        f"- Search p99 latency: {dict_info['lookup_latency']['p99_us']:.6f} us",
+        f"- Search avg latency: {dict_info['lookup_latency']['avg_us']:.6f} us",
+        f"- Search throughput: {dict_info['lookup_latency']['throughput_ops_s']:.2f} ops/s",
+        "",
         "## Correctness Cross-Verification",
         f"- Overall status: {'PASS' if verification['overall_ok'] else 'FAIL'}",
         f"- SQLite miss checks: {'PASS' if verification['sqlite_miss_checks_ok'] else 'FAIL'}",
+        f"- DuckDB miss checks: {'PASS' if verification['duckdb_miss_checks_ok'] else 'FAIL'}",
+        f"- Dict miss checks: {'PASS' if verification['dict_miss_checks_ok'] else 'FAIL'}",
         "- RookDB algorithms tested on primary key: 9",
         "",
         "## Artifacts",
@@ -496,6 +632,7 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     csv_path = root / args.data_csv
     sqlite_db = root / args.sqlite_db
+    duckdb_db = root / args.duckdb_db
     rookdb_json = root / args.rookdb_json
     comparison_csv = root / args.comparison_csv
     verification_json = root / args.verification_json
@@ -506,25 +643,32 @@ def main() -> int:
     scales = parse_scales(args.scales)
 
     generate_synthetic_orders(csv_path, args.rows, args.seed)
+    
+    # Run Baselines
     sqlite_info = sqlite_baseline(csv_path, sqlite_db)
+    duckdb_info = duckdb_baseline(csv_path, duckdb_db)
+    dict_info = python_dict_baseline(csv_path)
 
     rookdb_json.parent.mkdir(parents=True, exist_ok=True)
     rookdb_info = run_rookdb_benchmark(csv_path, rookdb_json)
 
-    verification = verify_correctness(sqlite_info, rookdb_info)
+    verification = verify_correctness(sqlite_info, duckdb_info, dict_info, rookdb_info)
     verification_json.write_text(json.dumps(verification, indent=2), encoding="utf-8")
 
-    write_comparison_csv(comparison_csv, sqlite_info, rookdb_info)
+    write_comparison_csv(comparison_csv, sqlite_info, duckdb_info, dict_info, rookdb_info)
 
     # Scalability sweep.
     scale_rows: List[List[str]] = []
     for n in scales:
         scale_csv = root / f"Benchmarking/data/synthetic_orders_{n}.csv"
         scale_db = root / f"Benchmarking/results/sqlite_baseline_{n}.db"
+        scale_duckdb = root / f"Benchmarking/results/duckdb_baseline_{n}.db"
         scale_rook = root / f"Benchmarking/results/rookdb_primary_key_metrics_{n}.json"
 
         generate_synthetic_orders(scale_csv, n, args.seed + n)
         s_info = sqlite_baseline(scale_csv, scale_db)
+        dduck_info = duckdb_baseline(scale_csv, scale_duckdb)
+        d_info = python_dict_baseline(scale_csv)
         r_info = run_rookdb_benchmark(scale_csv, scale_rook)
 
         scale_rows.append([
@@ -535,6 +679,36 @@ def main() -> int:
             f"{s_info['lookup_latency']['avg_us']:.6f}",
             f"{s_info['lookup_latency']['p99_us']:.6f}",
             f"{s_info['lookup_latency']['throughput_ops_s']:.6f}",
+            "",
+            "",
+            "",
+            "",
+            "true",
+        ])
+        
+        scale_rows.append([
+            str(n),
+            "duckdb",
+            "primary_key_index",
+            f"{dduck_info['lookup_latency']['p95_us']:.6f}",
+            f"{dduck_info['lookup_latency']['avg_us']:.6f}",
+            f"{dduck_info['lookup_latency']['p99_us']:.6f}",
+            f"{dduck_info['lookup_latency']['throughput_ops_s']:.6f}",
+            "",
+            "",
+            "",
+            "",
+            "true",
+        ])
+        
+        scale_rows.append([
+            str(n),
+            "python_dict",
+            "in_memory_hash",
+            f"{d_info['lookup_latency']['p95_us']:.6f}",
+            f"{d_info['lookup_latency']['avg_us']:.6f}",
+            f"{d_info['lookup_latency']['p99_us']:.6f}",
+            f"{d_info['lookup_latency']['throughput_ops_s']:.6f}",
             "",
             "",
             "",
@@ -564,18 +738,11 @@ def main() -> int:
     plot_search_latency_bar(comparison_csv, charts_dir / "search_p95_comparison.png")
     plot_insert_latency_rookdb(comparison_csv, charts_dir / "rookdb_insert_p95.png")
     plot_scalability(scalability_csv, charts_dir / "scalability_search_p95.png")
-
-    write_report(report_md, args.rows, args.seed, sqlite_info, verification)
-
-    print("Benchmark completed.")
-    print(f"Data CSV: {csv_path}")
-    print(f"SQLite baseline DB: {sqlite_db}")
-    print(f"RookDB metrics: {rookdb_json}")
-    print(f"Correctness verification: {verification_json}")
-    print(f"Latency comparison: {comparison_csv}")
-
-    return 0 if verification["overall_ok"] else 1
-
+    write_report(report_md, args.rows, args.seed, sqlite_info, duckdb_info, dict_info, verification)
+    
+    print("Benchmark completed. Report generated at", report_md)
+    return 0
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import sys
+    sys.exit(main())

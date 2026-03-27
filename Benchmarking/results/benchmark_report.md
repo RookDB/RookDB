@@ -1,21 +1,38 @@
-# RookDB Primary-Key Benchmark (SQLite Baseline)
+# RookDB Primary-Key Benchmark (SQLite, DuckDB & Dict Baselines)
 
 ## Dataset
 - Rows: 50000
 - Seed: 42
 - Data: controlled synthetic orders with heavy-tail customers, skewed categories, and bursty timestamps
 
+## DuckDB Baseline (Measured)
+- Total rows: 50000
+- Unique primary keys: 50000
+- Search p95 latency: 640.814000 us
+- Search p99 latency: 910.599000 us
+- Search avg latency: 496.775240 us
+- Search throughput: 2012.98 ops/s
+
 ## SQLite Baseline (Measured)
 - Total rows: 50000
 - Unique primary keys: 50000
-- Search p95 latency: 4.749978 us
-- Search p99 latency: 6.125018 us
-- Search avg latency: 4.645425 us
-- Search throughput: 215265.55 ops/s
+- Search p95 latency: 14.869000 us
+- Search p99 latency: 16.772000 us
+- Search avg latency: 11.018893 us
+- Search throughput: 90753.22 ops/s
+
+## Python Dict Baseline (Speed of Light limit)
+- Unique primary keys: 50000
+- Search p95 latency: 0.161000 us
+- Search p99 latency: 0.411000 us
+- Search avg latency: 0.142150 us
+- Search throughput: 7034847.08 ops/s
 
 ## Correctness Cross-Verification
 - Overall status: PASS
 - SQLite miss checks: PASS
+- DuckDB miss checks: PASS
+- Dict miss checks: PASS
 - RookDB algorithms tested on primary key: 9
 
 ## Artifacts

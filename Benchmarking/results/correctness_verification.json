@@ -5,6 +5,8 @@
   "rookdb_total_rows": 50000,
   "rookdb_unique_primary_keys": 50000,
   "sqlite_miss_checks_ok": true,
+  "duckdb_miss_checks_ok": true,
+  "dict_miss_checks_ok": true,
   "algorithm_checks": [
     {
       "algorithm": "Static Hash",
