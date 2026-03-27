@@ -213,6 +213,7 @@ impl FSM {
 
         // Create or truncate FSM file
         let mut fsm_file = OpenOptions::new()
+            .read(true) // NEEDED to be able to read from it later
             .write(true)
             .create(true)
             .truncate(true)

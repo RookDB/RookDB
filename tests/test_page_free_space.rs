@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use storage_manager::disk::{create_page, read_page};
-use storage_manager::heap::init_table;
+use storage_manager::heap::heap_manager::HeapManager;
 use storage_manager::page::{PAGE_HEADER_SIZE, PAGE_SIZE, Page, page_free_space};
 use storage_manager::table::page_count;
 
@@ -8,17 +8,16 @@ use storage_manager::table::page_count;
 fn test_page_free_space() {
     // Create a temporary file for testing
     let file_path = "test_page_free_space.bin";
+
+    // --- Step 0: Initialize the table header (Table metadata region)
+    let _hm = HeapManager::create(std::path::PathBuf::from(file_path)).expect("Failed to create heap manager");
+    println!("Table initialized successfully.");
+
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(true)
         .open(file_path)
-        .expect("Failed to create or open test file");
-
-    // --- Step 0: Initialize the table header (Table metadata region)
-    init_table(&mut file).expect("Failed to initialize table header");
-    println!("✅ Table initialized successfully.");
+        .expect("Failed to open test file");
 
     // --- Step 1: Create first page (reserved for table header metadata)
     let _header_page = create_page(&mut file).expect("Failed to create header page");
@@ -74,4 +73,5 @@ fn test_page_free_space() {
 
     // --- Step 7: Cleanup
     std::fs::remove_file(file_path).unwrap();
+    std::fs::remove_file(format!("{}.fsm", file_path)).ok();
 }

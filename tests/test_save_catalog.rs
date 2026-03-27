@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
@@ -48,7 +47,7 @@ fn test_save_catalog() {
     db.tables.insert("users".to_string(), test_table);
 
     // Step 5: Save catalog back to disk
-    save_catalog(&catalog);
+    let _ = save_catalog(&catalog);
 
     // Step 6: Reload catalog from disk and verify it contains the database and table
     let reloaded_catalog = load_catalog();
@@ -74,8 +73,4 @@ fn test_save_catalog() {
         "Expected 3 columns in 'users' table"
     );
 
-    // Step 7: Clean up (optional)
-    if Path::new(CATALOG_FILE).exists() {
-        fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
-    }
 }
