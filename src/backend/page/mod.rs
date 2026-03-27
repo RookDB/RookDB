@@ -1,3 +1,5 @@
+pub mod tuple;
+
 // Page size in bytes (8 KB)
 pub const PAGE_SIZE: usize = 8192;
 
@@ -9,12 +11,10 @@ pub const ITEM_ID_SIZE: u32 = 8;
 
 // Represents a single database page
 pub struct Page {
-    // Raw page bytes
     pub data: Vec<u8>,
 }
 
 impl Page {
-    // Create an empty page
     pub fn new() -> Self {
         Self {
             data: vec![0; PAGE_SIZE],
@@ -24,10 +24,7 @@ impl Page {
 
 // Initialize page header pointers
 pub fn init_page(page: &mut Page) {
-    // Lower starts after header
     page.data[0..4].copy_from_slice(&PAGE_HEADER_SIZE.to_le_bytes());
-
-    // Upper starts at page end
     page.data[4..8].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
 }
 

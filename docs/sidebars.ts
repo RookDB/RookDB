@@ -7,6 +7,7 @@ const sidebars: SidebarsConfig = {
     'API-Doc',
     'database-doc',
     'design-doc',
+    'User-Guide',
     
     // Manually configured Projects section
     {

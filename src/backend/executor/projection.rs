@@ -1,221 +1,289 @@
-use std::collections::HashMap;
-use std::fs::File;
+//! Unified projection engine: single entry-point `project()`.
+//!
+//! Pipeline: load_rows → filter_rows → eval_projection_list → apply_distinct → ResultTable
+
+use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
 use std::io;
 
-use crate::catalog::types::Catalog;
+use crate::catalog::types::{Catalog, Column, DataType};
 use crate::disk::read_page;
+use crate::executor::expr::{eval_expr, Expr, Row};
+use crate::executor::tuple_codec::decode_tuple;
+use crate::executor::value::Value;
+use crate::layout::TABLE_FILE_TEMPLATE;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
 
+// ─── Public types ───────────────────────────────────────────────────────────
+
+/// Metadata for a single column of the result.
 #[derive(Debug, Clone)]
-pub enum ProjectionRequest {
-    /// Equivalent to SELECT *
-    All,
-    /// Equivalent to SELECT col1, col2, ...
-    List(Vec<String>),
+pub struct OutputColumn {
+    pub name: String,
+    pub data_type: DataType,
 }
 
+/// The result of a projection: schema + rows.
 #[derive(Debug, Clone)]
-pub struct ProjectionSpec {
-    /// Column indices in the base schema, in the output order requested by user
-    pub col_idxs: Vec<usize>,
-    /// Output names in the same order (for printing)
-    pub col_names: Vec<String>,
+pub struct ResultTable {
+    pub columns: Vec<OutputColumn>,
+    pub rows: Vec<Row>,
 }
 
-fn build_projection_spec(
-    columns: &[crate::catalog::types::Column],
-    req: ProjectionRequest,
-) -> io::Result<ProjectionSpec> {
-    match req {
-        ProjectionRequest::All => {
-            let mut col_idxs = Vec::with_capacity(columns.len());
-            let mut col_names = Vec::with_capacity(columns.len());
-            for (i, c) in columns.iter().enumerate() {
-                col_idxs.push(i);
-                col_names.push(c.name.clone());
-            }
-            Ok(ProjectionSpec { col_idxs, col_names })
+impl ResultTable {
+    pub fn empty(columns: Vec<OutputColumn>) -> Self {
+        Self { columns, rows: vec![] }
+    }
+
+    /// Pretty-print the table to stdout.
+    pub fn print(&self) {
+        let headers: Vec<&str> = self.columns.iter().map(|c| c.name.as_str()).collect();
+        println!("{}", headers.join(" | "));
+        println!("{}", "-".repeat(headers.join(" | ").len()));
+        for row in &self.rows {
+            let cells: Vec<String> = row.iter().map(|v| v.to_string()).collect();
+            println!("{}", cells.join(" | "));
         }
-        ProjectionRequest::List(names) => {
-            let mut name_to_idx: HashMap<&str, usize> = HashMap::new();
-            for (i, c) in columns.iter().enumerate() {
-                name_to_idx.insert(c.name.as_str(), i);
-            }
+        println!("({} row{})", self.rows.len(), if self.rows.len() == 1 { "" } else { "s" });
+    }
+}
 
-            let mut col_idxs = Vec::with_capacity(names.len());
-            let mut col_names = Vec::with_capacity(names.len());
+/// One item in the SELECT list.
+#[derive(Debug, Clone)]
+pub enum ProjectionItem {
+    /// SELECT *
+    Star,
+    /// SELECT <expr> [AS alias]
+    Expr(Expr, String),
+}
 
-            for raw in names {
-                let name = raw.trim().to_string();
-                if name.is_empty() {
-                    continue;
-                }
-                let idx = match name_to_idx.get(name.as_str()) {
-                    Some(i) => *i,
-                    None => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Unknown column '{}' in projection", name),
-                        ))
+/// Everything the caller supplies to `project()`.
+pub struct ProjectionInput<'a> {
+    pub catalog: &'a Catalog,
+    pub db_name: &'a str,
+    pub table_name: &'a str,
+    /// SELECT list
+    pub items: Vec<ProjectionItem>,
+    /// WHERE clause – None means "no filter"
+    pub predicate: Option<Expr>,
+    /// DISTINCT flag
+    pub distinct: bool,
+    /// Pre-computed CTE tables (WITH clause).
+    /// If `table_name` matches a key here, those rows are used instead of disk.
+    pub cte_tables: HashMap<String, ResultTable>,
+}
+
+// ─── Main entry point ───────────────────────────────────────────────────────
+
+/// Execute a projection (SELECT) over a table.
+///
+/// This is the single function the SQL parser / storage manager calls.
+/// It composes all internal helpers and returns a `ResultTable`.
+pub fn project(input: ProjectionInput) -> io::Result<ResultTable> {
+    // Step 1: resolve schema
+    let (schema, is_cte) = resolve_schema(input.catalog, input.db_name, input.table_name, &input.cte_tables)?;
+
+    // Step 2: load all rows
+    let rows = if is_cte {
+        input.cte_tables[input.table_name].rows.clone()
+    } else {
+        load_rows(input.catalog, input.db_name, input.table_name)?
+    };
+
+    // Step 3: filter (WHERE)
+    let rows = filter_rows(rows, &input.predicate)?;
+
+    // Step 4: evaluate SELECT list
+    let (out_cols, rows) = eval_projection_list(rows, &input.items, &schema)?;
+
+    // Step 5: DISTINCT
+    let rows = if input.distinct {
+        apply_distinct(rows)
+    } else {
+        rows
+    };
+
+    Ok(ResultTable { columns: out_cols, rows })
+}
+
+// ─── Step 1: resolve schema ─────────────────────────────────────────────────
+
+fn resolve_schema<'a>(
+    catalog: &'a Catalog,
+    db_name: &str,
+    table_name: &str,
+    cte_tables: &HashMap<String, ResultTable>,
+) -> io::Result<(Vec<Column>, bool)> {
+    if cte_tables.contains_key(table_name) {
+        let cte = &cte_tables[table_name];
+        let cols: Vec<Column> = cte.columns.iter().map(|c| Column {
+            name: c.name.clone(),
+            data_type: c.data_type.as_legacy_str(),
+        }).collect();
+        return Ok((cols, true));
+    }
+
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+    })?;
+    Ok((table.columns.clone(), false))
+}
+
+// ─── Step 2: load rows from disk ───────────────────────────────────────────
+
+pub fn load_rows(catalog: &Catalog, db_name: &str, table_name: &str) -> io::Result<Vec<Row>> {
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+    })?;
+    let schema = &table.columns;
+
+    let path = TABLE_FILE_TEMPLATE
+        .replace("{database}", db_name)
+        .replace("{table}", table_name);
+
+    let mut file = OpenOptions::new().read(true).open(&path).map_err(|e| {
+        io::Error::new(e.kind(), format!("Cannot open table file '{}': {}", path, e))
+    })?;
+
+    let total_pages = page_count(&mut file)?;
+
+    // Empty table: only header page exists
+    if total_pages <= 1 {
+        return Ok(vec![]);
+    }
+
+    let mut rows = Vec::new();
+
+    for page_num in 1..total_pages {
+        let mut page = Page::new();
+        read_page(&mut file, &mut page, page_num)?;
+
+        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+
+        for i in 0..num_items {
+            let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
+            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+            let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap()) as usize;
+            let tuple_bytes = &page.data[offset..offset + length];
+            let row = decode_tuple(tuple_bytes, schema);
+            rows.push(row);
+        }
+    }
+
+    Ok(rows)
+}
+
+// ─── Step 3: filter rows ────────────────────────────────────────────────────
+
+pub fn filter_rows(rows: Vec<Row>, predicate: &Option<Expr>) -> io::Result<Vec<Row>> {
+    let pred = match predicate {
+        None => return Ok(rows),
+        Some(p) => p,
+    };
+
+    let mut out = Vec::new();
+    for row in rows {
+        match eval_expr(pred, &row) {
+            Ok(Value::Bool(true)) => out.push(row),
+            Ok(_) => {} // false, null, or non-bool -> filtered out
+            Err(e) => return Err(io::Error::from(e)),
+        }
+    }
+    Ok(out)
+}
+
+// ─── Step 4: evaluate SELECT list ───────────────────────────────────────────
+
+pub fn eval_projection_list(
+    rows: Vec<Row>,
+    items: &[ProjectionItem],
+    schema: &[Column],
+) -> io::Result<(Vec<OutputColumn>, Vec<Row>)> {
+    // Build output column metadata
+    let out_cols: Vec<OutputColumn> = items
+        .iter()
+        .flat_map(|item| match item {
+            ProjectionItem::Star => schema
+                .iter()
+                .map(|c| OutputColumn {
+                    name: c.name.clone(),
+                    data_type: c.parsed_type(),
+                })
+                .collect::<Vec<_>>(),
+            ProjectionItem::Expr(_, alias) => vec![OutputColumn {
+                name: alias.clone(),
+                data_type: DataType::Text, // inferred at runtime; Text is a safe default
+            }],
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return Ok((out_cols, vec![]));
+    }
+
+    let num_schema_cols = schema.len();
+    let mut out_rows: Vec<Row> = Vec::with_capacity(rows.len());
+
+    for row in &rows {
+        let mut out_row = Vec::new();
+        for item in items {
+            match item {
+                ProjectionItem::Star => {
+                    // Expand to all columns
+                    for i in 0..num_schema_cols {
+                        out_row.push(row.get(i).cloned().unwrap_or(Value::Null));
                     }
-                };
-                col_idxs.push(idx);
-                col_names.push(name);
+                }
+                ProjectionItem::Expr(expr, _) => {
+                    let v = eval_expr(expr, row).map_err(io::Error::from)?;
+                    out_row.push(v);
+                }
             }
-
-            if col_idxs.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Projection list is empty. Use * or provide at least one column.",
-                ));
-            }
-
-            Ok(ProjectionSpec { col_idxs, col_names })
         }
+        out_rows.push(out_row);
     }
+
+    Ok((out_cols, out_rows))
 }
 
-/// Decode ALL columns from tuple bytes into Vec<Option<String>> where index = schema column index.
-/// Matches the existing fixed layout: INT=4 bytes, TEXT=10 bytes.
-fn decode_full_tuple(
-    tuple_data: &[u8],
-    columns: &[crate::catalog::types::Column],
-) -> Vec<Option<String>> {
-    let mut out: Vec<Option<String>> = vec![None; columns.len()];
+// ─── Step 5: DISTINCT ───────────────────────────────────────────────────────
 
-    let mut cursor = 0usize;
-    for (i, col) in columns.iter().enumerate() {
-        match col.data_type.as_str() {
-            "INT" => {
-                if cursor + 4 <= tuple_data.len() {
-                    let val = i32::from_le_bytes(
-                        tuple_data[cursor..cursor + 4].try_into().unwrap(),
-                    );
-                    out[i] = Some(val.to_string());
-                    cursor += 4;
-                }
-            }
-            "TEXT" => {
-                if cursor + 10 <= tuple_data.len() {
-                    let text_bytes = &tuple_data[cursor..cursor + 10];
-                    let text = String::from_utf8_lossy(text_bytes).trim().to_string();
-                    out[i] = Some(text);
-                    cursor += 10;
-                }
-            }
-            _ => {
-                // Unsupported type: keep None
-            }
+pub fn apply_distinct(rows: Vec<Row>) -> Vec<Row> {
+    let mut seen: HashSet<Vec<Value>> = HashSet::new();
+    let mut out = Vec::new();
+    for row in rows {
+        if seen.insert(row.clone()) {
+            out.push(row);
         }
     }
-
     out
 }
 
-/// SELECT tuples with projection (attribute processing)
-pub fn select_tuples(
+// ─── Selection convenience wrapper ──────────────────────────────────────────
+
+/// SELECT * FROM table WHERE predicate.
+/// Convenience function that delegates to `project()`.
+pub fn select(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
-    file: &mut File,
-    projection: ProjectionRequest,
-) -> io::Result<()> {
-    // 1) Schema from catalog
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
-        )
-    })?;
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
-    let columns = &table.columns;
-
-    // 2) Build projection spec
-    let proj = build_projection_spec(columns, projection)?;
-
-    // 3) Pages
-    let total_pages = page_count(file)?;
-    println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
-    println!("Total pages: {}", total_pages);
-
-    // Print projection header
-    print!("Projection: ");
-    for (i, n) in proj.col_names.iter().enumerate() {
-        if i > 0 {
-            print!(", ");
-        }
-        print!("{}", n);
-    }
-    println!("\n");
-
-    // 4) Scan pages
-    // Page 0 is header in your system; data pages start from 1.
-    for page_num in 1..total_pages {
-        let mut page = Page::new();
-        read_page(file, &mut page, page_num)?;
-
-        println!("\n-- Page {} --", page_num);
-
-        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-
-        // Safety: skip non-slotted / invalid pages
-        if lower < PAGE_HEADER_SIZE || lower > upper {
-            println!("Skipping non-data page (lower={}, upper={})", lower, upper);
-            continue;
-        }
-
-        let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
-        println!("Lower: {}, Upper: {}, Tuples: {}", lower, upper, num_items);
-
-        // 5) For each tuple
-        for i in 0..num_items {
-            let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
-            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-            let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
-
-            // Bounds check
-            let start = offset as usize;
-            let end = (offset + length) as usize;
-            if end > page.data.len() || start >= end {
-                continue;
-            }
-
-            let tuple_data = &page.data[start..end];
-
-            // Decode full tuple, then print only projected columns in requested order
-            let decoded = decode_full_tuple(tuple_data, columns);
-
-            print!("Tuple {}: ", i + 1);
-            for (pos, col_idx) in proj.col_idxs.iter().enumerate() {
-                let col_name = &proj.col_names[pos];
-                let val_opt = decoded.get(*col_idx).cloned().unwrap_or(None);
-
-                match columns[*col_idx].data_type.as_str() {
-                    "TEXT" => {
-                        let v = val_opt.unwrap_or_else(|| "".to_string());
-                        print!("{}='{}' ", col_name, v);
-                    }
-                    "INT" => {
-                        let v = val_opt.unwrap_or_else(|| "0".to_string());
-                        print!("{}={} ", col_name, v);
-                    }
-                    _ => {
-                        let v = val_opt.unwrap_or_else(|| "".to_string());
-                        print!("{}={} ", col_name, v);
-                    }
-                }
-            }
-            println!();
-        }
-    }
-
-    println!("\n=== End of tuples ===\n");
-    Ok(())
+    predicate: Option<Expr>,
+) -> io::Result<ResultTable> {
+    project(ProjectionInput {
+        catalog,
+        db_name,
+        table_name,
+        items: vec![ProjectionItem::Star],
+        predicate,
+        distinct: false,
+        cte_tables: HashMap::new(),
+    })
 }
