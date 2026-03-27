@@ -1,0 +1,384 @@
+{
+  "input_csv": "Benchmarking/data/workload_read_heavy.csv",
+  "total_operations": 60000,
+  "algorithms": [
+    {
+      "algorithm": "StaticHash",
+      "insert_latency": {
+        "min_us": 0.07,
+        "max_us": 8.376000000000001,
+        "avg_us": 0.26371648210853077,
+        "p50_us": 0.22999999999999998,
+        "p95_us": 0.47100000000000003,
+        "p99_us": 0.782,
+        "throughput_ops_s": 3791951.083241193
+      },
+      "read_latency": {
+        "min_us": 0.08,
+        "max_us": 17.142999999999997,
+        "avg_us": 0.22795933728606993,
+        "p50_us": 0.22,
+        "p95_us": 0.38,
+        "p99_us": 0.48100000000000004,
+        "throughput_ops_s": 4386747.267759792
+      },
+      "update_latency": {
+        "min_us": 0.15,
+        "max_us": 68.131,
+        "avg_us": 0.543369953673063,
+        "p50_us": 0.47100000000000003,
+        "p95_us": 0.792,
+        "p99_us": 1.032,
+        "throughput_ops_s": 1840366.7579339214
+      },
+      "overall_latency": {
+        "min_us": 0.07,
+        "max_us": 68.131,
+        "avg_us": 0.24241439999998327,
+        "p50_us": 0.221,
+        "p95_us": 0.42,
+        "p99_us": 0.611,
+        "throughput_ops_s": 4125167.481800046
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    },
+    {
+      "algorithm": "ChainedHash",
+      "insert_latency": {
+        "min_us": 0.09,
+        "max_us": 11.041,
+        "avg_us": 0.20488844147525012,
+        "p50_us": 0.19,
+        "p95_us": 0.301,
+        "p99_us": 0.441,
+        "throughput_ops_s": 4880704.801109031
+      },
+      "read_latency": {
+        "min_us": 0.08,
+        "max_us": 9.438,
+        "avg_us": 0.1896167318447392,
+        "p50_us": 0.18,
+        "p95_us": 0.301,
+        "p99_us": 0.43,
+        "throughput_ops_s": 5273796.200742526
+      },
+      "update_latency": {
+        "min_us": 0.541,
+        "max_us": 5.931,
+        "avg_us": 0.7648239576439398,
+        "p50_us": 0.7220000000000001,
+        "p95_us": 1.122,
+        "p99_us": 1.403,
+        "throughput_ops_s": 1307490.4231302142
+      },
+      "overall_latency": {
+        "min_us": 0.08,
+        "max_us": 11.041,
+        "avg_us": 0.20688359999996175,
+        "p50_us": 0.19,
+        "p95_us": 0.351,
+        "p99_us": 0.761,
+        "throughput_ops_s": 4833635.918942752
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    },
+    {
+      "algorithm": "ExtendibleHash",
+      "insert_latency": {
+        "min_us": 0.07,
+        "max_us": 545.466,
+        "avg_us": 7.343539123272628,
+        "p50_us": 0.27099999999999996,
+        "p95_us": 42.311,
+        "p99_us": 45.978,
+        "throughput_ops_s": 136174.12302344386
+      },
+      "read_latency": {
+        "min_us": 0.06,
+        "max_us": 8.887,
+        "avg_us": 0.18719591270341393,
+        "p50_us": 0.16,
+        "p95_us": 0.351,
+        "p99_us": 0.511,
+        "throughput_ops_s": 5341996.978237243
+      },
+      "update_latency": {
+        "min_us": 0.14,
+        "max_us": 1.1820000000000002,
+        "avg_us": 0.36025082726671,
+        "p50_us": 0.33099999999999996,
+        "p95_us": 0.6010000000000001,
+        "p99_us": 0.791,
+        "throughput_ops_s": 2775843.729734602
+      },
+      "overall_latency": {
+        "min_us": 0.06,
+        "max_us": 545.466,
+        "avg_us": 1.4948433833333081,
+        "p50_us": 0.18,
+        "p95_us": 5.601,
+        "p99_us": 42.231,
+        "throughput_ops_s": 668966.4021993588
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    },
+    {
+      "algorithm": "LinearHash",
+      "insert_latency": {
+        "min_us": 0.09999999999999999,
+        "max_us": 75.094,
+        "avg_us": 7.2118192550563265,
+        "p50_us": 6.633,
+        "p95_us": 15.038,
+        "p99_us": 19.758,
+        "throughput_ops_s": 138661.26765432776
+      },
+      "read_latency": {
+        "min_us": 0.08,
+        "max_us": 8.917,
+        "avg_us": 0.1434971405743531,
+        "p50_us": 0.13,
+        "p95_us": 0.21,
+        "p99_us": 0.32099999999999995,
+        "throughput_ops_s": 6968779.977060586
+      },
+      "update_latency": {
+        "min_us": 12.714,
+        "max_us": 54.224000000000004,
+        "avg_us": 15.37469887491726,
+        "p50_us": 14.538,
+        "p95_us": 21.521,
+        "p99_us": 31.15,
+        "throughput_ops_s": 65041.92427673687
+      },
+      "overall_latency": {
+        "min_us": 0.08,
+        "max_us": 75.094,
+        "avg_us": 1.8143288333332936,
+        "p50_us": 0.14,
+        "p95_us": 13.506,
+        "p99_us": 15.7,
+        "throughput_ops_s": 551168.0030806737
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    },
+    {
+      "algorithm": "BTree",
+      "insert_latency": {
+        "min_us": 0.06,
+        "max_us": 119.64999999999999,
+        "avg_us": 0.33244760684543634,
+        "p50_us": 0.21,
+        "p95_us": 0.681,
+        "p99_us": 2.675,
+        "throughput_ops_s": 3007992.776633
+      },
+      "read_latency": {
+        "min_us": 0.06,
+        "max_us": 9.157,
+        "avg_us": 0.30487397502210767,
+        "p50_us": 0.27099999999999996,
+        "p95_us": 0.541,
+        "p99_us": 0.752,
+        "throughput_ops_s": 3280043.8277077796
+      },
+      "update_latency": {
+        "min_us": 0.48100000000000004,
+        "max_us": 8.186,
+        "avg_us": 1.3206095301125063,
+        "p50_us": 1.2020000000000002,
+        "p95_us": 2.244,
+        "p99_us": 3.256,
+        "throughput_ops_s": 757226.0968878571
+      },
+      "overall_latency": {
+        "min_us": 0.06,
+        "max_us": 119.64999999999999,
+        "avg_us": 0.3354752000000204,
+        "p50_us": 0.27,
+        "p95_us": 0.671,
+        "p99_us": 1.533,
+        "throughput_ops_s": 2980846.2741804435
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    },
+    {
+      "algorithm": "BPlusTree",
+      "insert_latency": {
+        "min_us": 0.06,
+        "max_us": 54.424,
+        "avg_us": 0.2632200054909803,
+        "p50_us": 0.22999999999999998,
+        "p95_us": 0.401,
+        "p99_us": 0.611,
+        "throughput_ops_s": 3799103.3323425213
+      },
+      "read_latency": {
+        "min_us": 0.16999999999999998,
+        "max_us": 10.26,
+        "avg_us": 0.31803139060597363,
+        "p50_us": 0.291,
+        "p95_us": 0.48,
+        "p99_us": 0.651,
+        "throughput_ops_s": 3144343.7017163956
+      },
+      "update_latency": {
+        "min_us": 0.42100000000000004,
+        "max_us": 1.624,
+        "avg_us": 0.6466300463269358,
+        "p50_us": 0.621,
+        "p95_us": 0.912,
+        "p99_us": 1.1620000000000001,
+        "throughput_ops_s": 1546479.3287604216
+      },
+      "overall_latency": {
+        "min_us": 0.06,
+        "max_us": 54.424,
+        "avg_us": 0.3163245333333148,
+        "p50_us": 0.28099999999999997,
+        "p95_us": 0.521,
+        "p99_us": 0.731,
+        "throughput_ops_s": 3161310.2830259725
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    },
+    {
+      "algorithm": "RadixTree",
+      "insert_latency": {
+        "min_us": 0.11,
+        "max_us": 8.897,
+        "avg_us": 0.1914722247643527,
+        "p50_us": 0.18,
+        "p95_us": 0.27099999999999996,
+        "p99_us": 0.39,
+        "throughput_ops_s": 5222689.615847482
+      },
+      "read_latency": {
+        "min_us": 0.07,
+        "max_us": 11.472,
+        "avg_us": 0.19632509145956878,
+        "p50_us": 0.16,
+        "p95_us": 0.381,
+        "p99_us": 0.561,
+        "throughput_ops_s": 5093592.431642596
+      },
+      "update_latency": {
+        "min_us": 0.31,
+        "max_us": 10.581000000000001,
+        "avg_us": 0.605702183984117,
+        "p50_us": 0.561,
+        "p95_us": 0.932,
+        "p99_us": 1.212,
+        "throughput_ops_s": 1650976.38153179
+      },
+      "overall_latency": {
+        "min_us": 0.07,
+        "max_us": 11.472,
+        "avg_us": 0.20575078333333427,
+        "p50_us": 0.16999999999999998,
+        "p95_us": 0.43,
+        "p99_us": 0.661,
+        "throughput_ops_s": 4860248.810717345
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    },
+    {
+      "algorithm": "SkipList",
+      "insert_latency": {
+        "min_us": 0.11,
+        "max_us": 8.104999999999999,
+        "avg_us": 0.1599753820810869,
+        "p50_us": 0.15,
+        "p95_us": 0.221,
+        "p99_us": 0.33099999999999996,
+        "throughput_ops_s": 6250961.785439768
+      },
+      "read_latency": {
+        "min_us": 0.049999999999999996,
+        "max_us": 20.339,
+        "avg_us": 0.1451065346284518,
+        "p50_us": 0.14,
+        "p95_us": 0.19999999999999998,
+        "p99_us": 0.27,
+        "throughput_ops_s": 6891488.39892373
+      },
+      "update_latency": {
+        "min_us": 0.3,
+        "max_us": 1.8539999999999999,
+        "avg_us": 0.4607511581733931,
+        "p50_us": 0.431,
+        "p95_us": 0.661,
+        "p99_us": 0.882,
+        "throughput_ops_s": 2170368.9339912045
+      },
+      "overall_latency": {
+        "min_us": 0.049999999999999996,
+        "max_us": 20.339,
+        "avg_us": 0.15576338333326192,
+        "p50_us": 0.14,
+        "p95_us": 0.22999999999999998,
+        "p99_us": 0.47,
+        "throughput_ops_s": 6419994.087188389
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    },
+    {
+      "algorithm": "LsmTree",
+      "insert_latency": {
+        "min_us": 0.08,
+        "max_us": 1187.837,
+        "avg_us": 0.26506287178548604,
+        "p50_us": 0.14,
+        "p95_us": 0.251,
+        "p99_us": 0.401,
+        "throughput_ops_s": 3772689.8273753505
+      },
+      "read_latency": {
+        "min_us": 0.04,
+        "max_us": 9.849,
+        "avg_us": 0.2589322358185234,
+        "p50_us": 0.24,
+        "p95_us": 0.441,
+        "p99_us": 0.6010000000000001,
+        "throughput_ops_s": 3862014.309801369
+      },
+      "update_latency": {
+        "min_us": 0.291,
+        "max_us": 10.61,
+        "avg_us": 0.8150542686962305,
+        "p50_us": 0.771,
+        "p95_us": 1.262,
+        "p99_us": 1.603,
+        "throughput_ops_s": 1226912.168191709
+      },
+      "overall_latency": {
+        "min_us": 0.04,
+        "max_us": 1187.837,
+        "avg_us": 0.2740537333333236,
+        "p50_us": 0.22999999999999998,
+        "p95_us": 0.49,
+        "p99_us": 0.8420000000000001,
+        "throughput_ops_s": 3648919.4576442023
+      },
+      "total_ops": 60000,
+      "successful_reads": 47562,
+      "failed_reads": 0
+    }
+  ]
+}
