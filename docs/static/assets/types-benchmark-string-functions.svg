@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <rect width="600" height="400" fill="#ffffff" rx="8" />
+  
+  <text x="300" y="40" font-family="sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="#1f2937">String Function Throughput</text>
+  <text x="300" y="60" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#6b7280">trim, upper, lower, substring, length (Ops/sec)</text>
+
+  <line x1="80" y1="80" x2="550" y2="80" stroke="#e5e7eb" stroke-width="1" />
+  <text x="70" y="85" font-family="sans-serif" font-size="12" text-anchor="end" fill="#6b7280">500,000</text>
+  <line x1="80" y1="128" x2="550" y2="128" stroke="#e5e7eb" stroke-width="1" />
+  <text x="70" y="133" font-family="sans-serif" font-size="12" text-anchor="end" fill="#6b7280">400,000</text>
+  <line x1="80" y1="176" x2="550" y2="176" stroke="#e5e7eb" stroke-width="1" />
+  <text x="70" y="181" font-family="sans-serif" font-size="12" text-anchor="end" fill="#6b7280">300,000</text>
+  <line x1="80" y1="224" x2="550" y2="224" stroke="#e5e7eb" stroke-width="1" />
+  <text x="70" y="229" font-family="sans-serif" font-size="12" text-anchor="end" fill="#6b7280">200,000</text>
+  <line x1="80" y1="272" x2="550" y2="272" stroke="#e5e7eb" stroke-width="1" />
+  <text x="70" y="277" font-family="sans-serif" font-size="12" text-anchor="end" fill="#6b7280">100,000</text>
+  <line x1="80" y1="320" x2="550" y2="320" stroke="#9ca3af" stroke-width="2" />
+  <text x="70" y="325" font-family="sans-serif" font-size="12" text-anchor="end" fill="#6b7280">0</text>
+
+  <line x1="80" y1="80" x2="80" y2="320" stroke="#9ca3af" stroke-width="2" />
+
+  <rect x="130" y="169.68" width="80" height="150.32" fill="#3b82f6" rx="4" ry="4" />
+  <text x="170" y="160" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="#1f2937">313,171</text>
+  <text x="170" y="340" font-family="sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#374151">Small</text>
+  <text x="170" y="360" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#6b7280">20,000 ops</text>
+
+  <rect x="275" y="112.49" width="80" height="207.51" fill="#10b981" rx="4" ry="4" />
+  <text x="315" y="103" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="#1f2937">432,306</text>
+  <text x="315" y="340" font-family="sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#374151">Medium</text>
+  <text x="315" y="360" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#6b7280">200,000 ops</text>
+
+  <rect x="420" y="104.76" width="80" height="215.24" fill="#8b5cf6" rx="4" ry="4" />
+  <text x="460" y="95" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="#1f2937">448,423</text>
+  <text x="460" y="340" font-family="sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#374151">Large</text>
+  <text x="460" y="360" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#6b7280">1,000,000 ops</text>
+</svg>

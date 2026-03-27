@@ -538,6 +538,12 @@ Core integration files:
 | Truncated payload decode | Return decode error | tests/test_type_serialization.rs |
 | NULL bitmap handling | Preserve NULL positions | tests/test_null_handling.rs |
 
+### Edge Case Handling
+To ensure complete SQL-99 compliance and system stability, our test suite strictly enforces several critical edge cases:
+* **IEEE 754 Floating-Point Safety:** Full parsing, validation, and SQL-compliant comparison support for `NaN`, `Infinity`, and `-Infinity` for `REAL` and `DOUBLE PRECISION` types.
+* **Temporal Accuracy:** Calendar-aware validation, including strict leap-year boundary enforcement for `DATE` and `TIMESTAMP`, along with microsecond precision limits for `TIME`.
+* **String Semantics:** SQL-standard space-padding equality for fixed-length `CHAR`/`CHARACTER` types, and strict exact-length enforcement for `BIT(n)`.
+
 ## Benchmarking and Initial Scalability Results
 
 ### Methodology
@@ -586,6 +592,16 @@ Typed row round-trip throughput (serialize + deserialize; n = 5 runs):
 | 100,000 | Large | 18,549.24 | 535.24 |
 
 ![Typed row round-trip throughput graph](/assets/types-benchmark-row-roundtrip.svg)
+
+String function throughput (trim, upper, lower, substring, length):
+
+| Workload Size | Operations | Duration (seconds) | Throughput (Ops/sec) |
+| :--- | :--- | :--- | :--- |
+| Small | 20,000 | 0.063863 | 313,171.36 |
+| Medium | 200,000 | 0.462634 | 432,306.81 |
+| Large | 1,000,000 | 2.230036 | 448,423.27 |
+
+![String function throughput graph](/assets/types-benchmark-string-functions.svg)
 
 ### Interpretation
 
