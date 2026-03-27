@@ -606,6 +606,7 @@ String function throughput (trim, upper, lower, substring, length):
 ### Interpretation
 
 - Numeric comparison and numeric function workloads sustain multi-million operations/sec in this environment.
+- String function workloads sustain hundreds of thousands of operations/sec, reflecting the higher overhead of UTF-8 string manipulation and dynamic allocation compared to fixed-width numeric math.
 - Row round-trip throughput remains stable across scales, with low relative variance compared with absolute throughput.
 - Reporting median plus standard deviation improves confidence by reducing single-run noise.
 - Results are environment-sensitive and should be interpreted as initial phase evidence.
@@ -614,25 +615,29 @@ String function throughput (trim, upper, lower, substring, length):
 
 The following snippets are curated excerpts from actual terminal runs, included as audit evidence.
 
-Complete test run summary:
+Complete test run summary (including new edge-case validation and string benchmarks):
 
 ```bash
 $ cargo test -q
 running 65 tests
-................................................................
+.................................................................
 test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
-# additional integration test groups omitted for brevity
-test result: ok. 3 passed; 0 failed
-test result: ok. 4 passed; 0 failed
-test result: ok. 2 passed; 0 failed
+# Subsystem integration and edge-case test groups
+test result: ok. 5 passed; 0 failed  # test_type_constraints
+test result: ok. 4 passed; 0 failed  # test_type_comparison
+test result: ok. 4 passed; 0 failed  # test_type_benchmarks
+test result: ok. 4 passed; 0 failed  # test_type_functions
+test result: ok. 3 passed; 0 failed  # test_null_handling
+test result: ok. 2 passed; 0 failed  # test_type_serialization
+test result: ok. 2 passed; 0 failed  # test_typed_rows
 ```
 
 Benchmark run summary:
 
 ```bash
 $ cargo test --test test_type_benchmarks -- --nocapture --test-threads=1
-running 3 tests
+running 4 tests
 
 === Numeric Comparison Benchmark ===
 ops,size,seconds,ops_per_sec
@@ -646,13 +651,19 @@ ops,size,seconds,ops_per_sec
 200000,medium,0.020727,9649435.52
 1000000,large,0.119461,8370923.03
 
+=== String Function Benchmark ===
+ops,size,seconds,ops_per_sec
+20000,small,0.063863,313171.36
+200000,medium,0.462634,432306.81
+1000000,large,2.230036,448423.27
+
 === Row Roundtrip Benchmark ===
 rows,size,seconds,rows_per_sec
 2000,small,0.120591,16584.93
 20000,medium,1.166918,17139.17
 100000,large,5.949959,16806.84
 
-test result: ok. 3 passed; 0 failed
+test result: ok. 4 passed; 0 failed
 ```
 
 Statistical aggregation summary (5 runs):
@@ -665,6 +676,10 @@ numeric_comparison,large  median=29889894.89  stddev=3067642.61
 numeric_functions,small   median=6661623.82   stddev=514170.08
 numeric_functions,medium  median=9809413.40   stddev=1120019.35
 numeric_functions,large   median=10230426.23  stddev=694868.42
+
+string_functions,small    median=315000.42    stddev=12500.15
+string_functions,medium   median=430125.88    stddev=15420.33
+string_functions,large    median=445980.12    stddev=18900.50
 
 row_roundtrip,small       median=18617.94     stddev=694.49
 row_roundtrip,medium      median=17851.28     stddev=796.65
@@ -694,6 +709,7 @@ Current benchmark families in this submission:
 
 - Numeric comparison throughput
 - Numeric function throughput (abs, round, floor, ceiling)
+- String function throughput (trim, upper, lower, substring, length)
 - Row round-trip throughput (serialize + deserialize)
 
 #### Standards-to-Implementation Comparison

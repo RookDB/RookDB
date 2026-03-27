@@ -90,8 +90,7 @@ fn nullable_comparison_returns_none_if_any_side_is_null() {
 
 #[test]
 fn team_robustness_edge_cases_comparison() {
-    // AKSHAT & SHRIANSH: CHAR(n) space-padding semantics
-    // "abc" and "abc  " must evaluate as EQUAL for fixed-length strings
+
     assert_eq!(
         DataValue::Char("abc".to_string())
             .compare(&DataValue::Char("abc  ".to_string()))
@@ -99,13 +98,13 @@ fn team_robustness_edge_cases_comparison() {
         Ordering::Equal
     );
 
-    // AKSHAT & SHRIANSH: REAL and DOUBLE PRECISION NaN/Infinity handling
     assert_eq!(
         DataValue::DoublePrecision(OrderedF64(std::f64::INFINITY))
             .compare(&DataValue::DoublePrecision(OrderedF64(999999.99)))
             .unwrap(),
         Ordering::Greater
     );
+    
     assert_eq!(
         DataValue::Real(OrderedF32(std::f32::NEG_INFINITY))
             .compare(&DataValue::Real(OrderedF32(-999999.99)))
@@ -113,7 +112,6 @@ fn team_robustness_edge_cases_comparison() {
         Ordering::Less
     );
 
-    // SHUBHADEEP: VARCHAR Lexicographic Case Sensitivity
     assert_eq!(
         DataValue::Varchar("Rook".to_string())
             .compare(&DataValue::Varchar("rook".to_string()))
