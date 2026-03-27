@@ -1,0 +1,1 @@
+SELECT length(substring(lower(upper(trim('  RookDB_User_123  '))), 1, 6));

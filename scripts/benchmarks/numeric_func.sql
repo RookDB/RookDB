@@ -1,0 +1,1 @@
+SELECT ceil(floor(round(abs(-999999.99))));
