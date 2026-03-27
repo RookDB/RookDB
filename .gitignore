@@ -14,3 +14,7 @@ proposal.pdf
 # ignore any .venv anywhere
 .venv/
 **/.venv/
+
+
+rookdb_***.pdf
+rookdb_***.txt
