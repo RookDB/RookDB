@@ -1,418 +1,597 @@
-//! Benchmarking suite for BLOB and ARRAY support in RookDB
-//! 
-//! This module provides comprehensive performance benchmarking for:
-//! - Value encoding/decoding operations
-//! - Tuple serialization/deserialization
-//! - TOAST management operations
-//! - Array handling with various sizes
+//! Credible Benchmarking Suite for BLOB and ARRAY support in RookDB
+//!
+//! This module provides statistically rigorous performance benchmarking for:
+//! - BLOB encoding/decoding at varying sizes
+//! - ARRAY encoding/decoding with varying element counts and types
+//! - TOAST management operations for large BLOBs
+//! - Tuple operations containing BLOB and ARRAY fields
 //! - Memory efficiency analysis
+//!
+//! Methodology:
+//! - Uses `std::hint::black_box()` to prevent dead-code elimination
+//! - Nanosecond-resolution timing via `Instant::elapsed().as_nanos()`
+//! - 100-iteration warmup before measurement
+//! - Reports: mean, std dev, median, p95, p99, min, max
+//! - All results collected and summarized in a final table
 
+use std::hint::black_box;
 use std::time::Instant;
+
 use storage_manager::backend::catalog::data_type::{DataType, Value};
 use storage_manager::backend::storage::row_layout::*;
 use storage_manager::backend::storage::toast::{ToastManager, TOAST_THRESHOLD};
 use storage_manager::backend::storage::tuple_codec::TupleCodec;
 use storage_manager::backend::storage::value_codec::ValueCodec;
 
-/// Performance benchmark result for a single operation
-#[derive(Debug, Clone)]
+// ═══════════════════════════════════════════════════════════════════
+//  Statistical Utilities
+// ═══════════════════════════════════════════════════════════════════
+
+/// A single benchmark result with full statistical analysis.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct BenchResult {
-    operation: String,
+    name: String,
     iterations: usize,
-    total_time_us: u128,
-    avg_time_us: f64,
-    min_time_us: u128,
-    max_time_us: u128,
-    throughput: f64, // operations per second
+    mean_ns: f64,
+    stddev_ns: f64,
+    median_ns: f64,
+    p95_ns: f64,
+    p99_ns: f64,
+    min_ns: u128,
+    max_ns: u128,
 }
 
 impl BenchResult {
-    fn print(&self) {
+    fn mean_us(&self) -> f64 {
+        self.mean_ns / 1_000.0
+    }
+
+    fn stddev_us(&self) -> f64 {
+        self.stddev_ns / 1_000.0
+    }
+
+    fn throughput(&self) -> f64 {
+        if self.mean_ns > 0.0 {
+            1_000_000_000.0 / self.mean_ns
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    fn print_row(&self) {
         println!(
-            "  {:<40} | Iters: {:>6} | Avg: {:>8.2}µs | Throughput: {:>10.0} ops/s",
-            self.operation, self.iterations, self.avg_time_us, self.throughput
+            "  {:<45} {:>9.2} µs  ±{:<8.2} µs  {:>10.0} ops/s  (p50={:.2} p95={:.2} p99={:.2} µs)",
+            self.name,
+            self.mean_us(),
+            self.stddev_us(),
+            self.throughput(),
+            self.median_ns / 1_000.0,
+            self.p95_ns / 1_000.0,
+            self.p99_ns / 1_000.0,
         );
     }
 }
 
-/// Benchmark harness for running timed operations
-fn benchmark<F>(name: &str, iterations: usize, mut f: F) -> BenchResult
+/// Compute percentile from a SORTED slice of u128 values.
+fn percentile(sorted: &[u128], pct: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = (pct / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+    let idx = idx.min(sorted.len() - 1);
+    sorted[idx] as f64
+}
+
+/// Run a benchmark with proper warmup and statistical analysis.
+fn benchmark<F>(name: &str, iterations: usize, warmup: usize, mut f: F) -> BenchResult
 where
-    F: FnMut() -> (),
+    F: FnMut(),
 {
-    // Warmup
-    for _ in 0..10 {
+    // Warmup phase — results discarded
+    for _ in 0..warmup {
         f();
     }
 
-    let mut times = Vec::new();
+    // Measurement phase
+    let mut times_ns: Vec<u128> = Vec::with_capacity(iterations);
 
     for _ in 0..iterations {
         let start = Instant::now();
         f();
-        let elapsed = start.elapsed().as_micros();
-        times.push(elapsed);
+        let elapsed_ns = start.elapsed().as_nanos();
+        times_ns.push(elapsed_ns);
     }
 
-    let total_time_us: u128 = times.iter().sum();
-    let avg_time_us = total_time_us as f64 / iterations as f64;
-    let min_time_us = *times.iter().min().unwrap_or(&0);
-    let max_time_us = *times.iter().max().unwrap_or(&0);
-    let throughput = (iterations as f64 / (total_time_us as f64 / 1_000_000.0)) as f64;
+    // Statistical analysis
+    let n = times_ns.len() as f64;
+    let sum: u128 = times_ns.iter().sum();
+    let mean_ns = sum as f64 / n;
+
+    let variance = times_ns
+        .iter()
+        .map(|&t| {
+            let diff = t as f64 - mean_ns;
+            diff * diff
+        })
+        .sum::<f64>()
+        / (n - 1.0).max(1.0);
+    let stddev_ns = variance.sqrt();
+
+    let min_ns = *times_ns.iter().min().unwrap_or(&0);
+    let max_ns = *times_ns.iter().max().unwrap_or(&0);
+
+    // Sort for percentiles
+    times_ns.sort_unstable();
+    let median_ns = percentile(&times_ns, 50.0);
+    let p95_ns = percentile(&times_ns, 95.0);
+    let p99_ns = percentile(&times_ns, 99.0);
 
     BenchResult {
-        operation: name.to_string(),
+        name: name.to_string(),
         iterations,
-        total_time_us,
-        avg_time_us,
-        min_time_us,
-        max_time_us,
-        throughput,
+        mean_ns,
+        stddev_ns,
+        median_ns,
+        p95_ns,
+        p99_ns,
+        min_ns,
+        max_ns,
     }
 }
 
-/// Benchmark primitive type encoding and decoding
-fn bench_primitive_encoding() {
-    println!("\n╔════════════════════════════════════════════════════════════════╗");
-    println!("║       BENCHMARK: Primitive Type Encoding/Decoding              ║");
-    println!("╚════════════════════════════════════════════════════════════════╝");
+// ═══════════════════════════════════════════════════════════════════
+//  BLOB Benchmarks
+// ═══════════════════════════════════════════════════════════════════
 
-    // INT32 Encoding
-    let result = benchmark("INT32 Encoding (10000x)", 10000, || {
-        let value = Value::Int32(42);
-        let _ = ValueCodec::encode(&value, &DataType::Int32);
-    });
-    result.print();
+fn bench_blob_encoding(results: &mut Vec<BenchResult>) {
+    println!("\n╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                    BLOB Encoding / Decoding Benchmarks                       ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
 
-    // INT32 Decoding
-    let encoded = ValueCodec::encode(&Value::Int32(42), &DataType::Int32).unwrap();
-    let result = benchmark("INT32 Decoding (10000x)", 10000, || {
-        let _ = ValueCodec::decode(&encoded, &DataType::Int32);
-    });
-    result.print();
+    let sizes: Vec<usize> = vec![10, 100, 1_000, 10_000, TOAST_THRESHOLD + 1000];
 
-    // BOOLEAN Encoding
-    let result = benchmark("BOOLEAN Encoding (10000x)", 10000, || {
-        let value = Value::Boolean(true);
-        let _ = ValueCodec::encode(&value, &DataType::Boolean);
-    });
-    result.print();
-
-    // BOOLEAN Decoding
-    let encoded = ValueCodec::encode(&Value::Boolean(true), &DataType::Boolean).unwrap();
-    let result = benchmark("BOOLEAN Decoding (10000x)", 10000, || {
-        let _ = ValueCodec::decode(&encoded, &DataType::Boolean);
-    });
-    result.print();
-}
-
-/// Benchmark text encoding with various sizes
-fn bench_text_encoding() {
-    println!("\n╔════════════════════════════════════════════════════════════════╗");
-    println!("║          BENCHMARK: TEXT Encoding with Varying Sizes           ║");
-    println!("╚════════════════════════════════════════════════════════════════╝");
-
-    let sizes = vec![10, 100, 1_000, 10_000];
-
-    for size in sizes {
-        let text = "x".repeat(size);
-        let value = Value::Text(text);
-
-        let result = benchmark(&format!("TEXT Encoding ({}B, 1000x)", size), 1000, || {
-            let _ = ValueCodec::encode(&value, &DataType::Text);
-        });
-        result.print();
-    }
-
-    println!("\n  TEXT Decoding:");
-
-    for size in sizes {
-        let text = "x".repeat(size);
-        let encoded = ValueCodec::encode(&Value::Text(text), &DataType::Text).unwrap();
-
-        let result = benchmark(&format!("TEXT Decoding ({}B, 1000x)", size), 1000, || {
-            let _ = ValueCodec::decode(&encoded, &DataType::Text);
-        });
-        result.print();
-    }
-}
-
-/// Benchmark BLOB encoding with various sizes
-fn bench_blob_encoding() {
-    println!("\n╔════════════════════════════════════════════════════════════════╗");
-    println!("║          BENCHMARK: BLOB Encoding with Varying Sizes           ║");
-    println!("╚════════════════════════════════════════════════════════════════╝");
-
-    let sizes = vec![10, 100, 1_000, 10_000, TOAST_THRESHOLD + 1000];
-
-    for size in sizes {
-        let blob = vec![0xAB; size];
+    // Encoding
+    println!("\n  --- BLOB Encoding ---");
+    for &size in &sizes {
+        let blob = vec![0xAB_u8; size];
         let value = Value::Blob(blob);
+        let iters = if size > 5000 { 500 } else { 2000 };
 
-        let result = benchmark(&format!("BLOB Encoding ({}B, 1000x)", size), 1000, || {
-            let _ = ValueCodec::encode(&value, &DataType::Blob);
-        });
-        result.print();
+        let r = benchmark(
+            &format!("BLOB Encode ({}B)", size),
+            iters,
+            100,
+            || {
+                let encoded = ValueCodec::encode(black_box(&value), black_box(&DataType::Blob));
+                let _ = black_box(encoded);
+            },
+        );
+        r.print_row();
+        results.push(r);
     }
 
-    println!("\n  BLOB Decoding:");
-
-    for size in sizes {
-        let blob = vec![0xAB; size];
+    // Decoding
+    println!("\n  --- BLOB Decoding ---");
+    for &size in &sizes {
+        let blob = vec![0xAB_u8; size];
         let encoded = ValueCodec::encode(&Value::Blob(blob), &DataType::Blob).unwrap();
+        let iters = if size > 5000 { 500 } else { 2000 };
 
-        let result = benchmark(&format!("BLOB Decoding ({}B, 1000x)", size), 1000, || {
-            let _ = ValueCodec::decode(&encoded, &DataType::Blob);
-        });
-        result.print();
+        let r = benchmark(
+            &format!("BLOB Decode ({}B)", size),
+            iters,
+            100,
+            || {
+                let decoded = ValueCodec::decode(black_box(&encoded), black_box(&DataType::Blob));
+                let _ = black_box(decoded);
+            },
+        );
+        r.print_row();
+        results.push(r);
     }
 }
 
-/// Benchmark array encoding with various element counts
-fn bench_array_encoding() {
-    println!("\n╔════════════════════════════════════════════════════════════════╗");
-    println!("║       BENCHMARK: ARRAY Encoding with Varying Element Counts    ║");
-    println!("╚════════════════════════════════════════════════════════════════╝");
+// ═══════════════════════════════════════════════════════════════════
+//  ARRAY Benchmarks
+// ═══════════════════════════════════════════════════════════════════
 
-    let element_counts = vec![10, 100, 1_000, 10_000];
+fn bench_array_encoding(results: &mut Vec<BenchResult>) {
+    println!("\n╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                   ARRAY Encoding / Decoding Benchmarks                       ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
 
-    println!("\n  INT Array Encoding:");
-    for count in &element_counts {
-        let values: Vec<Value> = (0..*count).map(|i| Value::Int32(i as i32)).collect();
+    let element_counts: Vec<usize> = vec![10, 100, 1_000, 10_000];
+
+    // INT Array Encoding
+    println!("\n  --- ARRAY<INT> Encoding ---");
+    for &count in &element_counts {
+        let values: Vec<Value> = (0..count).map(|i| Value::Int32(i as i32)).collect();
         let array_val = Value::Array(values);
         let array_type = DataType::Array {
             element_type: Box::new(DataType::Int32),
         };
+        let iters = if count >= 10_000 { 100 } else { 500 };
 
-        let result = benchmark(&format!("INT Array Encoding ({}x, 100 ops)", count), 100, || {
-            let _ = ValueCodec::encode(&array_val, &array_type);
-        });
-        result.print();
+        let r = benchmark(
+            &format!("ARRAY<INT> Encode ({}elem)", count),
+            iters,
+            100,
+            || {
+                let encoded = ValueCodec::encode(black_box(&array_val), black_box(&array_type));
+                let _ = black_box(encoded);
+            },
+        );
+        r.print_row();
+        results.push(r);
     }
 
-    println!("\n  INT Array Decoding:");
-    for count in &element_counts {
-        let values: Vec<Value> = (0..*count).map(|i| Value::Int32(i as i32)).collect();
+    // INT Array Decoding
+    println!("\n  --- ARRAY<INT> Decoding ---");
+    for &count in &element_counts {
+        let values: Vec<Value> = (0..count).map(|i| Value::Int32(i as i32)).collect();
         let array_val = Value::Array(values);
         let array_type = DataType::Array {
             element_type: Box::new(DataType::Int32),
         };
         let encoded = ValueCodec::encode(&array_val, &array_type).unwrap();
+        let iters = if count >= 10_000 { 100 } else { 500 };
 
-        let result = benchmark(&format!("INT Array Decoding ({}x, 100 ops)", count), 100, || {
-            let _ = ValueCodec::decode(&encoded, &array_type);
-        });
-        result.print();
+        let r = benchmark(
+            &format!("ARRAY<INT> Decode ({}elem)", count),
+            iters,
+            100,
+            || {
+                let decoded = ValueCodec::decode(black_box(&encoded), black_box(&array_type));
+                let _ = black_box(decoded);
+            },
+        );
+        r.print_row();
+        results.push(r);
     }
 
-    println!("\n  TEXT Array Encoding:");
-    for count in &element_counts {
-        let values: Vec<Value> = (0..*count)
+    // TEXT Array Encoding
+    println!("\n  --- ARRAY<TEXT> Encoding ---");
+    for &count in &[10_usize, 100, 1_000] {
+        let values: Vec<Value> = (0..count)
             .map(|i| Value::Text(format!("item_{}", i)))
             .collect();
         let array_val = Value::Array(values);
         let array_type = DataType::Array {
             element_type: Box::new(DataType::Text),
         };
+        let iters = if count >= 1_000 { 100 } else { 500 };
 
-        let result = benchmark(&format!("TEXT Array Encoding ({}x, 100 ops)", count), 100, || {
-            let _ = ValueCodec::encode(&array_val, &array_type);
-        });
-        result.print();
+        let r = benchmark(
+            &format!("ARRAY<TEXT> Encode ({}elem)", count),
+            iters,
+            100,
+            || {
+                let encoded = ValueCodec::encode(black_box(&array_val), black_box(&array_type));
+                let _ = black_box(encoded);
+            },
+        );
+        r.print_row();
+        results.push(r);
+    }
+
+    // TEXT Array Decoding
+    println!("\n  --- ARRAY<TEXT> Decoding ---");
+    for &count in &[10_usize, 100, 1_000] {
+        let values: Vec<Value> = (0..count)
+            .map(|i| Value::Text(format!("item_{}", i)))
+            .collect();
+        let array_val = Value::Array(values);
+        let array_type = DataType::Array {
+            element_type: Box::new(DataType::Text),
+        };
+        let encoded = ValueCodec::encode(&array_val, &array_type).unwrap();
+        let iters = if count >= 1_000 { 100 } else { 500 };
+
+        let r = benchmark(
+            &format!("ARRAY<TEXT> Decode ({}elem)", count),
+            iters,
+            100,
+            || {
+                let decoded = ValueCodec::decode(black_box(&encoded), black_box(&array_type));
+                let _ = black_box(decoded);
+            },
+        );
+        r.print_row();
+        results.push(r);
     }
 }
 
-/// Benchmark tuple operations with mixed field types
-fn bench_tuple_operations() {
-    println!("\n╔════════════════════════════════════════════════════════════════╗");
-    println!("║          BENCHMARK: Tuple Encoding/Decoding Operations         ║");
-    println!("╚════════════════════════════════════════════════════════════════╝");
+// ═══════════════════════════════════════════════════════════════════
+//  TOAST Benchmarks
+// ═══════════════════════════════════════════════════════════════════
 
-    // Simple tuple: (INT, BOOLEAN, TEXT)
-    println!("\n  Simple Tuple (INT, BOOLEAN, TEXT):");
-    let schema_simple = vec![
-        ("id".to_string(), DataType::Int32),
-        ("active".to_string(), DataType::Boolean),
-        ("name".to_string(), DataType::Text),
-    ];
+fn bench_toast_operations(results: &mut Vec<BenchResult>) {
+    println!("\n╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                        TOAST Manager Benchmarks                              ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
 
-    let result = benchmark("Simple Tuple Encoding (5000x)", 5000, || {
-        let values = vec![
-            Value::Int32(42),
-            Value::Boolean(true),
-            Value::Text("example".to_string()),
-        ];
-        let mut toast_manager = ToastManager::new();
-        let _ = TupleCodec::encode_tuple(&values, &schema_simple, &mut toast_manager);
-    });
-    result.print();
-
-    // Complex tuple with BLOB
-    println!("\n  Complex Tuple with BLOB (INT, BOOLEAN, TEXT, BLOB):");
-    let schema_complex = vec![
-        ("id".to_string(), DataType::Int32),
-        ("active".to_string(), DataType::Boolean),
-        ("name".to_string(), DataType::Text),
-        ("data".to_string(), DataType::Blob),
-    ];
-
-    let result = benchmark("Complex Tuple Encoding (1000x, 1KB BLOB)", 1000, || {
-        let values = vec![
-            Value::Int32(42),
-            Value::Boolean(true),
-            Value::Text("example".to_string()),
-            Value::Blob(vec![0xAB; 1024]),
-        ];
-        let mut toast_manager = ToastManager::new();
-        let _ = TupleCodec::encode_tuple(&values, &schema_complex, &mut toast_manager);
-    });
-    result.print();
-
-    // Tuple decoding
-    println!("\n  Tuple Decoding:");
-    let values_simple = vec![
-        Value::Int32(42),
-        Value::Boolean(true),
-        Value::Text("example".to_string()),
-    ];
-    let mut toast_manager = ToastManager::new();
-    let encoded_simple =
-        TupleCodec::encode_tuple(&values_simple, &schema_simple, &mut toast_manager).unwrap();
-
-    let result = benchmark("Simple Tuple Decoding (5000x)", 5000, || {
-        let _ = TupleCodec::decode_tuple(&encoded_simple, &schema_simple);
-    });
-    result.print();
-}
-
-/// Benchmark TOAST operations
-fn bench_toast_operations() {
-    println!("\n╔════════════════════════════════════════════════════════════════╗");
-    println!("║              BENCHMARK: TOAST Manager Operations               ║");
-    println!("╚════════════════════════════════════════════════════════════════╝");
-
-    // TOAST pointer serialization
-    let result = benchmark("TOAST Pointer Serialization (10000x)", 10000, || {
+    // TOAST Pointer serialization
+    let r = benchmark("TOAST Pointer to_bytes", 5000, 100, || {
         let ptr = ToastPointer {
             value_id: 12345,
             total_bytes: 100_000,
             chunk_count: 25,
         };
-        let _ = ptr.to_bytes();
+        black_box(ptr.to_bytes());
     });
-    result.print();
+    r.print_row();
+    results.push(r);
 
-    // TOAST pointer deserialization
+    // TOAST Pointer deserialization
     let ptr = ToastPointer {
         value_id: 12345,
         total_bytes: 100_000,
         chunk_count: 25,
     };
     let bytes = ptr.to_bytes();
-    let result = benchmark("TOAST Pointer Deserialization (10000x)", 10000, || {
-        let _ = ToastPointer::from_bytes(&bytes);
+    let r = benchmark("TOAST Pointer from_bytes", 5000, 100, || {
+        let p = ToastPointer::from_bytes(black_box(&bytes));
+        let _ = black_box(p);
     });
-    result.print();
+    r.print_row();
+    results.push(r);
 
-    // TOAST manager initialization and value storage
-    let result = benchmark("TOAST Manager Init (10000x)", 10000, || {
-        let _ = ToastManager::new();
+    // TOAST threshold check
+    let r = benchmark("TOAST should_use_toast check", 10000, 100, || {
+        black_box(ToastManager::should_use_toast(black_box(16384)));
     });
-    result.print();
+    r.print_row();
+    results.push(r);
 
-    // TOAST threshold detection
-    let test_sizes = vec![1000, 4096, 8192, 16384, 100_000];
-    println!("\n  TOAST Threshold Detection:");
-    for size in test_sizes {
-        let result = benchmark(
-            &format!("TOAST Threshold Check ({}B, 100000x)", size),
-            100000,
-            || {
-                let _ = ToastManager::should_use_toast(size);
-            },
-        );
-        result.print();
-    }
+    // Store large value
+    let large_payload = vec![0xAB_u8; TOAST_THRESHOLD + 5000];
+    let r = benchmark("TOAST store_large_value", 500, 50, || {
+        let mut manager = ToastManager::new();
+        let ptr = manager.store_large_value(black_box(&large_payload));
+        let _ = black_box(ptr);
+    });
+    r.print_row();
+    results.push(r);
 }
 
-/// Benchmark memory efficiency analysis
-fn bench_memory_efficiency() {
-    println!("\n╔════════════════════════════════════════════════════════════════╗");
-    println!("║              Memory Efficiency Analysis                        ║");
-    println!("╚════════════════════════════════════════════════════════════════╝");
+// ═══════════════════════════════════════════════════════════════════
+//  Tuple Benchmarks (BLOB & ARRAY focused)
+// ═══════════════════════════════════════════════════════════════════
 
-    println!("\n  Structure Sizes:");
-    println!("    TupleHeader: {} bytes", std::mem::size_of::<TupleHeader>());
-    println!("    VarFieldEntry: {} bytes", std::mem::size_of::<VarFieldEntry>());
-    println!("    ToastPointer: {} bytes", std::mem::size_of::<ToastPointer>());
-    println!("    ToastChunk: {} bytes (base, excluding data)", std::mem::size_of::<ToastChunk>());
+fn bench_tuple_operations(results: &mut Vec<BenchResult>) {
+    println!("\n╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║              Tuple Encoding/Decoding with BLOB & ARRAY                       ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
 
-    println!("\n  Encoded Value Sizes:");
+    // Tuple with BLOB
+    let schema_blob = vec![
+        ("id".to_string(), DataType::Int32),
+        ("data".to_string(), DataType::Blob),
+    ];
 
-    let test_cases = vec![
-        ("INT32", Value::Int32(42), DataType::Int32),
-        ("BOOLEAN", Value::Boolean(true), DataType::Boolean),
-        ("TEXT (10B)", Value::Text("x".repeat(10)), DataType::Text),
-        ("TEXT (1KB)", Value::Text("x".repeat(1024)), DataType::Text),
+    for &blob_size in &[100_usize, 1024, 4096] {
+        let values = vec![
+            Value::Int32(42),
+            Value::Blob(vec![0xAB; blob_size]),
+        ];
+        let r = benchmark(
+            &format!("Tuple Encode (INT + {}B BLOB)", blob_size),
+            1000,
+            100,
+            || {
+                let mut toast_mgr = ToastManager::new();
+                let _enc = TupleCodec::encode_tuple(
+                    black_box(&values),
+                    black_box(&schema_blob),
+                    &mut toast_mgr,
+                );
+                let _ = black_box(_enc);
+            },
+        );
+        r.print_row();
+        results.push(r);
+    }
+
+    // Tuple with BLOB — Decoding
+    println!();
+    for &blob_size in &[100_usize, 1024, 4096] {
+        let values = vec![
+            Value::Int32(42),
+            Value::Blob(vec![0xAB; blob_size]),
+        ];
+        let mut toast_mgr = ToastManager::new();
+        let encoded =
+            TupleCodec::encode_tuple(&values, &schema_blob, &mut toast_mgr).unwrap();
+
+        let r = benchmark(
+            &format!("Tuple Decode (INT + {}B BLOB)", blob_size),
+            1000,
+            100,
+            || {
+                let dec = TupleCodec::decode_tuple(black_box(&encoded), black_box(&schema_blob));
+                let _ = black_box(dec);
+            },
+        );
+        r.print_row();
+        results.push(r);
+    }
+
+    // Tuple with ARRAY
+    println!();
+    let schema_array = vec![
+        ("id".to_string(), DataType::Int32),
         (
-            "BLOB (1KB)",
-            Value::Blob(vec![0xAB; 1024]),
-            DataType::Blob,
-        ),
-        (
-            "BLOB (10KB)",
-            Value::Blob(vec![0xAB; 10240]),
-            DataType::Blob,
+            "scores".to_string(),
+            DataType::Array {
+                element_type: Box::new(DataType::Int32),
+            },
         ),
     ];
 
-    for (name, value, dtype) in test_cases {
-        if let Ok(encoded) = ValueCodec::encode(&value, &dtype) {
-            let overhead = encoded.len() as i32 - match &value {
-                Value::Null => 0,
-                Value::Int32(_) => 4,
-                Value::Boolean(_) => 1,
-                Value::Text(s) => s.len() as i32,
-                Value::Blob(b) => b.len() as i32,
-                _ => 0,
-            };
-            println!("    {:<20} | Encoded: {:>8} B | Overhead: {:>4} B", name, encoded.len(), overhead);
-        }
+    for &arr_size in &[10_usize, 100, 1000] {
+        let values = vec![
+            Value::Int32(1),
+            Value::Array((0..arr_size).map(|i| Value::Int32(i as i32)).collect()),
+        ];
+        let r = benchmark(
+            &format!("Tuple Encode (INT + {}elem ARRAY<INT>)", arr_size),
+            500,
+            100,
+            || {
+                let mut toast_mgr = ToastManager::new();
+                let _enc = TupleCodec::encode_tuple(
+                    black_box(&values),
+                    black_box(&schema_array),
+                    &mut toast_mgr,
+                );
+                let _ = black_box(_enc);
+            },
+        );
+        r.print_row();
+        results.push(r);
+    }
+
+    // Tuple with ARRAY — Decoding
+    println!();
+    for &arr_size in &[10_usize, 100, 1000] {
+        let values = vec![
+            Value::Int32(1),
+            Value::Array((0..arr_size).map(|i| Value::Int32(i as i32)).collect()),
+        ];
+        let mut toast_mgr = ToastManager::new();
+        let encoded =
+            TupleCodec::encode_tuple(&values, &schema_array, &mut toast_mgr).unwrap();
+
+        let r = benchmark(
+            &format!("Tuple Decode (INT + {}elem ARRAY<INT>)", arr_size),
+            500,
+            100,
+            || {
+                let dec = TupleCodec::decode_tuple(black_box(&encoded), black_box(&schema_array));
+                let _ = black_box(dec);
+            },
+        );
+        r.print_row();
+        results.push(r);
     }
 }
 
-/// Run all benchmark suites
-fn run_all_benchmarks() {
-    println!("\n");
-    println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║  RookDB BLOB/ARRAY Performance Benchmarking Suite               ║");
-    println!("║  Rust Edition 2024 | Storage Manager v0.1.0                    ║");
-    println!("╚════════════════════════════════════════════════════════════════╝");
+// ═══════════════════════════════════════════════════════════════════
+//  Memory Efficiency Analysis
+// ═══════════════════════════════════════════════════════════════════
 
-    bench_primitive_encoding();
-    bench_text_encoding();
-    bench_blob_encoding();
-    bench_array_encoding();
-    bench_tuple_operations();
-    bench_toast_operations();
-    bench_memory_efficiency();
+fn bench_memory_efficiency() {
+    println!("\n╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                       Memory Efficiency Analysis                             ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
 
-    println!("\n╔════════════════════════════════════════════════════════════════╗");
-    println!("║  Benchmarking Complete                                         ║");
-    println!("╚════════════════════════════════════════════════════════════════╝\n");
+    println!("\n  Structure Sizes (in-memory):");
+    println!("    TupleHeader:   {} bytes", std::mem::size_of::<TupleHeader>());
+    println!("    VarFieldEntry: {} bytes", std::mem::size_of::<VarFieldEntry>());
+    println!("    ToastPointer:  {} bytes", std::mem::size_of::<ToastPointer>());
+    println!(
+        "    ToastChunk:    {} bytes (base, excluding data payload)",
+        std::mem::size_of::<ToastChunk>()
+    );
+
+    println!("\n  Encoded BLOB Sizes:");
+    let blob_sizes: Vec<usize> = vec![10, 100, 1024, 10240];
+    for size in &blob_sizes {
+        let blob = Value::Blob(vec![0xAB; *size]);
+        let encoded = ValueCodec::encode(&blob, &DataType::Blob).unwrap();
+        let overhead = encoded.len() - size;
+        let efficiency = (*size as f64 / encoded.len() as f64) * 100.0;
+        println!(
+            "    BLOB ({}B):  encoded={}B  overhead={}B  efficiency={:.1}%",
+            size,
+            encoded.len(),
+            overhead,
+            efficiency,
+        );
+    }
+
+    println!("\n  Encoded ARRAY Sizes:");
+    let arr_counts = vec![10, 100, 1000];
+    for count in &arr_counts {
+        let arr = Value::Array((0..*count).map(|i| Value::Int32(i as i32)).collect());
+        let arr_type = DataType::Array {
+            element_type: Box::new(DataType::Int32),
+        };
+        let encoded = ValueCodec::encode(&arr, &arr_type).unwrap();
+        let data_bytes = count * 4; // each INT32 = 4 bytes
+        let overhead = encoded.len() - data_bytes;
+        let efficiency = (data_bytes as f64 / encoded.len() as f64) * 100.0;
+        println!(
+            "    ARRAY<INT> ({}elem):  encoded={}B  data={}B  overhead={}B  efficiency={:.1}%",
+            count,
+            encoded.len(),
+            data_bytes,
+            overhead,
+            efficiency,
+        );
+    }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  Summary Table
+// ═══════════════════════════════════════════════════════════════════
+
+fn print_summary(results: &[BenchResult]) {
+    println!("\n╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                          BENCHMARK SUMMARY TABLE                             ║");
+    println!("╠═══════════════════════════════════════════════════╦══════════╦════════╦════════╣");
+    println!("║ Operation                                        ║ Mean(µs) ║ ±StdDv ║ Ops/s  ║");
+    println!("╠═══════════════════════════════════════════════════╬══════════╬════════╬════════╣");
+
+    for r in results {
+        let name = if r.name.len() > 49 {
+            format!("{}…", &r.name[..48])
+        } else {
+            r.name.clone()
+        };
+        println!(
+            "║ {:<49} ║ {:>8.2} ║ {:>6.2} ║ {:>6.0} ║",
+            name,
+            r.mean_us(),
+            r.stddev_us(),
+            r.throughput() / 1000.0, // in K ops/s
+        );
+    }
+    println!("╚═══════════════════════════════════════════════════╩══════════╩════════╩════════╝");
+    println!("  Note: Ops/s column is in thousands (K ops/s)");
+    println!("  Methodology: black_box() DCE prevention, ns-resolution, 100-iter warmup");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Main
+// ═══════════════════════════════════════════════════════════════════
+
 fn main() {
-    run_all_benchmarks();
+    println!("\n");
+    println!("╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║          RookDB BLOB & ARRAY Performance Benchmarking Suite                   ║");
+    println!("║          Rust Edition 2024 | storage_manager v0.1.0                           ║");
+    println!("║          Methodology: black_box + ns timing + statistical analysis            ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
+
+    let mut results: Vec<BenchResult> = Vec::new();
+
+    bench_blob_encoding(&mut results);
+    bench_array_encoding(&mut results);
+    bench_toast_operations(&mut results);
+    bench_tuple_operations(&mut results);
+    bench_memory_efficiency();
+    print_summary(&results);
+
+    println!("\n  Benchmarking complete.\n");
 }
 
 #[cfg(test)]
 mod bench_tests {
-    use super::*;
-
     #[test]
     #[ignore]
     fn run_benchmarks() {
-        run_all_benchmarks();
+        super::main();
     }
 }
