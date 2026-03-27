@@ -1,0 +1,12 @@
+TEST: IS NOT NULL Predicate
+============================================================
+
+Purpose: Test IS NOT NULL returns True for non-NULL values, False otherwise
+------------------------------------------------------------
+Predicate: id IS NOT NULL
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 10
+

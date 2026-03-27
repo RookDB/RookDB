@@ -1,0 +1,12 @@
+TEST: Nested Predicate Tree
+============================================================
+
+Purpose: Verify recursive predicate evaluation
+------------------------------------------------------------
+Predicate: (id > 500 AND amount < 600.0) OR name = 'Emma'
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 2
+

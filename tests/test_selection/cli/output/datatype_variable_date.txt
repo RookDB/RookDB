@@ -1,0 +1,12 @@
+TEST: Variable Length Field: DATE
+============================================================
+
+Purpose: Ensure tuple decoding works for variable-length DATE fields
+------------------------------------------------------------
+Predicate: date = '2024-06-15'
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 2
+

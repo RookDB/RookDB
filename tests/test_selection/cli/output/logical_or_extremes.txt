@@ -1,0 +1,10 @@
+TEST: Logical OR: Extreme Values
+============================================================
+
+Predicate: (id < 100) OR (id > 900)
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 1
+

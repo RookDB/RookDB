@@ -1,0 +1,10 @@
+TEST: DATE Comparisons: Greater Or Equal
+============================================================
+
+Predicate: date >= '2024-06-01'
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 5
+

@@ -1,12 +1,14 @@
 // Comprehensive benchmark suite for the Selection Operator
-// Run with: cargo test --test test_selection_benchmark -- --nocapture
+// Run with: cargo run  (from tests/test_selection/benchmark/)
 
 use storage_manager::catalog::{Column, Table};
 use storage_manager::executor::selection::*;
 use rand::Rng;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::time::Instant;
 
-// ===== TUPLE BUILDER =====
+// Tuple builder
 
 /// Build a tuple in the storage format.
 /// Header is 8 bytes: [0-3] length, [4] version, [5] flags, [6-7] column count
@@ -63,9 +65,9 @@ fn build_tuple(columns: Vec<Option<Vec<u8>>>) -> Vec<u8> {
     tuple
 }
 
-// ===== SCHEMA =====
+// Schema definition
 
-fn create_benchmark_schema() -> Table {
+fn create_default_schema() -> Table {
     Table {
         columns: vec![
             Column { name: "id".to_string(), data_type: "INT".to_string() },
@@ -76,9 +78,27 @@ fn create_benchmark_schema() -> Table {
     }
 }
 
-// ===== TUPLE GENERATION =====
+fn create_wide_schema() -> Table {
+    let mut cols = vec![
+        Column { name: "id".to_string(),     data_type: "INT".to_string() },
+        Column { name: "amount".to_string(), data_type: "FLOAT".to_string() },
+        Column { name: "name".to_string(),   data_type: "TEXT".to_string() },
+        Column { name: "date".to_string(),   data_type: "DATE".to_string() },
+    ];
 
-fn generate_tuples(count: usize) -> Vec<Vec<u8>> {
+    for i in 1..=20 {
+        cols.push(Column {
+            name: format!("t{}", i),
+            data_type: "TEXT".to_string(),
+        });
+    }
+
+    Table { columns: cols }
+}
+
+// Tuple generation
+
+fn generate_tuples(count: usize, wide: bool) -> Vec<Vec<u8>> {
     let mut rng = rand::thread_rng();
     let names = vec!["Alice", "Bob", "Charlie", "Diana", "Frank"];
     let dates = vec!["2024-01-15", "2024-02-20", "2024-03-10", "2024-04-05", "2024-05-25"];
@@ -109,15 +129,42 @@ fn generate_tuples(count: usize) -> Vec<Vec<u8>> {
             Some(date.as_bytes().to_vec())
         };
 
-        tuples.push(build_tuple(vec![id_val, amount_val, name_val, date_val]));
+        if wide {
+            // Start with same base columns as narrow schema so all predicates work
+            let mut row = vec![id_val, amount_val, name_val, date_val];
+
+            // Append 20 extra TEXT columns (t1..t20)
+            for _ in 1..=20 {
+                let val = if rng.gen_bool(0.1) {
+                    None
+                } else {
+                    Some(format!("text_{}", rng.gen_range(0..1000)).into_bytes())
+                };
+                row.push(val);
+            }
+
+            tuples.push(build_tuple(row));
+        } else {
+            tuples.push(build_tuple(vec![id_val, amount_val, name_val, date_val]));
+        }
     }
 
     tuples
 }
 
-// ===== BENCHMARK HELPERS =====
+// Benchmark helpers
 
-fn benchmark<F: Fn() -> usize>(name: &str, rows: usize, f: F) -> (f64, usize) {
+fn log_line(writer: &mut BufWriter<File>, line: &str) {
+    println!("{}", line);
+    writeln!(writer, "{}", line).unwrap();
+}
+
+fn benchmark<F: Fn() -> usize>(
+    writer: &mut BufWriter<File>,
+    name: &str,
+    rows: usize,
+    f: F,
+) -> (f64, usize) {
     let iterations = 5;
     let mut total_time = 0.0;
     let mut output_size = 0;
@@ -130,69 +177,65 @@ fn benchmark<F: Fn() -> usize>(name: &str, rows: usize, f: F) -> (f64, usize) {
     }
 
     let avg_ms = total_time / iterations as f64;
-    println!("{:<30} | {:<8} | {:<10.3} | {}", name, rows, avg_ms, output_size);
+    let per_tuple = avg_ms * 1_000_000.0 / rows as f64;
+
+    let line = format!(
+        "{:<30} | {:<8} | {:<10.3} | {:<10.2} ns | {}",
+        name, rows, avg_ms, per_tuple, output_size
+    );
+
+    println!("{}", line);
+    writeln!(writer, "{}", line).unwrap();
 
     (avg_ms, output_size)
 }
 
-fn make_executor(predicate:    Predicate) -> SelectionExecutor {
-    let schema = create_benchmark_schema();
-    SelectionExecutor::new(predicate, schema).unwrap()
+fn run_and_log<F: Fn() -> usize>(
+    writer: &mut BufWriter<File>,
+    name: &str,
+    rows: usize,
+    f: F,
+) {
+    benchmark(writer, name, rows, f);
 }
 
-// ===== STREAMING HELPER =====
-
-struct TupleStream {
-    tuples: Vec<Vec<u8>>,
-    index: usize,
+fn make_executor(predicate: Predicate, schema: &Table) -> SelectionExecutor {
+    SelectionExecutor::new(predicate, schema.clone()).unwrap()
 }
 
-impl TupleStream {
-    fn new(tuples: Vec<Vec<u8>>) -> Self {
-        TupleStream { tuples, index: 0 }
-    }
-}
+// Main benchmark entry point
 
-impl Iterator for TupleStream {
-    type Item = Result<Vec<u8>, String>;
+fn benchmark_selection_operator(writer: &mut BufWriter<File>, schema: Table, wide: bool) {
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.tuples.len() {
-            let tuple = self.tuples[self.index].clone();
-            self.index += 1;
-            Some(Ok(tuple))
-        } else {
-            None
-        }
-    }
-}
+    log_line(&mut writer, &format!("\n{}", "=".repeat(80)));
+    log_line(&mut writer, "SELECTION OPERATOR BENCHMARK SUITE");
+    log_line(&mut writer, &"=".repeat(80));
 
-// ===== MAIN BENCHMARK TEST =====
-
-#[test]
-fn benchmark_selection_operator() {
-    println!("\n{}", "=".repeat(80));
-    println!("SELECTION OPERATOR BENCHMARK SUITE");
-    println!("{}", "=".repeat(80));
-
-    let dataset_sizes = vec![1_000, 10_000, 100_000];
+    let dataset_sizes = vec![1_000, 10_000, 100_000, 1_000_000];
 
     for &size in &dataset_sizes {
-        println!("\n{}", "=".repeat(80));
-        println!("Dataset Size: {} tuples", size);
-        println!("{}", "=".repeat(80));
+        log_line(&mut writer, &format!("\n{}", "=".repeat(80)));
+        log_line(&mut writer, &format!("Dataset Size: {} tuples", size));
+        log_line(&mut writer, &"=".repeat(80));
 
-        println!("\nGenerating {} tuples...", size);
-        let tuples = generate_tuples(size);
-        println!("Generation complete.\n");
+        log_line(&mut writer, &format!("\nGenerating {} tuples...", size));
+        let tuples = generate_tuples(size, wide);
+        log_line(&mut writer, "Generation complete.\n");
 
-        println!("## Test Name                     | Rows     | Time(ms)   | Output");
-        println!("{}", "-".repeat(80));
+        log_line(&mut writer, &format!("{:<30} | {:<8} | {:<10} | {:<13} | {}", "## Test Name", "Rows", "Time(ms)", "ns/tuple", "Output"));
+        log_line(&mut writer, &"-".repeat(90));
 
-        // ===== A. FULL SCAN =====
-        benchmark("Full Scan", size, || tuples.len());
+        // Full scan baseline
+        run_and_log(&mut writer, "Full Scan", size, || {
+            let mut count = 0;
+            for t in &tuples {
+                std::hint::black_box(t);
+                count += 1;
+            }
+            count
+        });
 
-        // ===== B. BASIC PREDICATES =====
+        // Basic predicates
 
         // id > 500
         let pred_id_gt_500 = Predicate::Compare(
@@ -200,9 +243,9 @@ fn benchmark_selection_operator() {
             ComparisonOp::GreaterThan,
             Box::new(Expr::Constant(Constant::Int(500))),
         );
-        let executor = make_executor(pred_id_gt_500);
-        benchmark("id > 500", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_id_gt_500, &schema);
+        run_and_log(&mut writer, "id > 500", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // amount > 500
@@ -211,12 +254,12 @@ fn benchmark_selection_operator() {
             ComparisonOp::GreaterThan,
             Box::new(Expr::Constant(Constant::Float(500.0))),
         );
-        let executor = make_executor(pred_amount_gt_500);
-        benchmark("amount > 500", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_amount_gt_500, &schema);
+        run_and_log(&mut writer, "amount > 500", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== C. SELECTIVITY TESTS =====
+        // Selectivity tests
 
         // id > 10 (high selectivity - most pass)
         let pred_id_gt_10 = Predicate::Compare(
@@ -224,9 +267,9 @@ fn benchmark_selection_operator() {
             ComparisonOp::GreaterThan,
             Box::new(Expr::Constant(Constant::Int(10))),
         );
-        let executor = make_executor(pred_id_gt_10);
-        benchmark("id > 10 (high select)", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_id_gt_10, &schema);
+        run_and_log(&mut writer, "id > 10 (high select)", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // id > 500 (medium selectivity)
@@ -235,9 +278,9 @@ fn benchmark_selection_operator() {
             ComparisonOp::GreaterThan,
             Box::new(Expr::Constant(Constant::Int(500))),
         );
-        let executor = make_executor(pred_id_gt_500);
-        benchmark("id > 500 (med select)", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_id_gt_500, &schema);
+        run_and_log(&mut writer, "id > 500 (med select)", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // id > 900 (low selectivity - few pass)
@@ -246,12 +289,12 @@ fn benchmark_selection_operator() {
             ComparisonOp::GreaterThan,
             Box::new(Expr::Constant(Constant::Int(900))),
         );
-        let executor = make_executor(pred_id_gt_900);
-        benchmark("id > 900 (low select)", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_id_gt_900, &schema);
+        run_and_log(&mut writer, "id > 900 (low select)", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== D. AND / OR LOGIC =====
+        // AND / OR logic
 
         // id > 500 AND amount < 300
         let pred_and = Predicate::And(
@@ -266,9 +309,9 @@ fn benchmark_selection_operator() {
                 Box::new(Expr::Constant(Constant::Float(300.0))),
             )),
         );
-        let executor = make_executor(pred_and);
-        benchmark("id>500 AND amount<300", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_and, &schema);
+        run_and_log(&mut writer, "id>500 AND amount<300", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // id > 500 OR amount < 300
@@ -284,12 +327,12 @@ fn benchmark_selection_operator() {
                 Box::new(Expr::Constant(Constant::Float(300.0))),
             )),
         );
-        let executor = make_executor(pred_or);
-        benchmark("id>500 OR amount<300", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_or, &schema);
+        run_and_log(&mut writer, "id>500 OR amount<300", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== SHORT-CIRCUIT TESTS =====
+        // Short-circuit tests
 
         // id < 0 AND amount > 100 (false short-circuit)
         let pred_false_and = Predicate::And(
@@ -304,9 +347,9 @@ fn benchmark_selection_operator() {
                 Box::new(Expr::Constant(Constant::Float(100.0))),
             )),
         );
-        let executor = make_executor(pred_false_and);
-        benchmark("id<0 AND amt>100 (short)", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_false_and, &schema);
+        run_and_log(&mut writer, "id<0 AND amt>100 (short)", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // id > 0 OR amount > 100 (true short-circuit)
@@ -322,12 +365,12 @@ fn benchmark_selection_operator() {
                 Box::new(Expr::Constant(Constant::Float(100.0))),
             )),
         );
-        let executor = make_executor(pred_true_or);
-        benchmark("id>0 OR amt>100 (short)", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_true_or, &schema);
+        run_and_log(&mut writer, "id>0 OR amt>100 (short)", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== E. EXPRESSIONS =====
+        // Expressions
 
         // id + 10 > 500
         let pred_expr_add = Predicate::Compare(
@@ -338,9 +381,9 @@ fn benchmark_selection_operator() {
             ComparisonOp::GreaterThan,
             Box::new(Expr::Constant(Constant::Int(500))),
         );
-        let executor = make_executor(pred_expr_add);
-        benchmark("id + 10 > 500", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_expr_add, &schema);
+        run_and_log(&mut writer, "id + 10 > 500", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // amount * 2 > 1000
@@ -352,29 +395,29 @@ fn benchmark_selection_operator() {
             ComparisonOp::GreaterThan,
             Box::new(Expr::Constant(Constant::Float(1000.0))),
         );
-        let executor = make_executor(pred_expr_mul);
-        benchmark("amount * 2 > 1000", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_expr_mul, &schema);
+        run_and_log(&mut writer, "amount * 2 > 1000", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== F. NULL HANDLING =====
+        // NULL handling
 
         // name IS NULL
         let pred_is_null = Predicate::IsNull(
             Box::new(Expr::Column(ColumnReference::new("name".to_string()))),
         );
-        let executor = make_executor(pred_is_null);
-        benchmark("name IS NULL", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_is_null, &schema);
+        run_and_log(&mut writer, "name IS NULL", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // name IS NOT NULL
         let pred_is_not_null = Predicate::IsNotNull(
             Box::new(Expr::Column(ColumnReference::new("name".to_string()))),
         );
-        let executor = make_executor(pred_is_not_null);
-        benchmark("name IS NOT NULL", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_is_not_null, &schema);
+        run_and_log(&mut writer, "name IS NOT NULL", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // name = "Alice"
@@ -383,12 +426,12 @@ fn benchmark_selection_operator() {
             ComparisonOp::Equals,
             Box::new(Expr::Constant(Constant::Text("Alice".to_string()))),
         );
-        let executor = make_executor(pred_name_eq);
-        benchmark("name = 'Alice'", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_name_eq, &schema);
+        run_and_log(&mut writer, "name = 'Alice'", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== G. LIKE =====
+        // LIKE operator
 
         // name LIKE "A%"
         let pred_like_a = Predicate::Like(
@@ -396,9 +439,9 @@ fn benchmark_selection_operator() {
             "A%".to_string(),
             None,
         );
-        let executor = make_executor(pred_like_a);
-        benchmark("name LIKE 'A%'", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_like_a, &schema);
+        run_and_log(&mut writer, "name LIKE 'A%'", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // name LIKE "%li%"
@@ -407,9 +450,9 @@ fn benchmark_selection_operator() {
             "%li%".to_string(),
             None,
         );
-        let executor = make_executor(pred_like_li);
-        benchmark("name LIKE '%li%'", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_like_li, &schema);
+        run_and_log(&mut writer, "name LIKE '%li%'", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // name LIKE "Bob"
@@ -418,12 +461,12 @@ fn benchmark_selection_operator() {
             "Bob".to_string(),
             None,
         );
-        let executor = make_executor(pred_like_bob);
-        benchmark("name LIKE 'Bob'", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_like_bob, &schema);
+        run_and_log(&mut writer, "name LIKE 'Bob'", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== H. IN =====
+        // IN operator
 
         // id IN (100, 200, 300)
         let pred_in_id = Predicate::In(
@@ -434,9 +477,9 @@ fn benchmark_selection_operator() {
                 Expr::Constant(Constant::Int(300)),
             ],
         );
-        let executor = make_executor(pred_in_id);
-        benchmark("id IN (100,200,300)", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_in_id, &schema);
+        run_and_log(&mut writer, "id IN (100,200,300)", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
         // name IN ("Alice", "Bob")
@@ -447,12 +490,12 @@ fn benchmark_selection_operator() {
                 Expr::Constant(Constant::Text("Bob".to_string())),
             ],
         );
-        let executor = make_executor(pred_in_name);
-        benchmark("name IN ('Alice','Bob')", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_in_name, &schema);
+        run_and_log(&mut writer, "name IN ('Alice','Bob')", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== I. BETWEEN =====
+        // BETWEEN operator
 
         // id BETWEEN 200 AND 800
         let pred_between = Predicate::Between(
@@ -460,16 +503,15 @@ fn benchmark_selection_operator() {
             Box::new(Expr::Constant(Constant::Int(200))),
             Box::new(Expr::Constant(Constant::Int(800))),
         );
-        let executor = make_executor(pred_between);
-        benchmark("id BETWEEN 200 AND 800", size, || {
-            filter_tuples(&executor, &tuples).unwrap().len()
+        let executor = make_executor(pred_between, &schema);
+        run_and_log(&mut writer, "id BETWEEN 200 AND 800", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
         });
 
-        // ===== J. TYPE COERCION =====
-        // NOTE: Type coercion tests removed - type validation now enforces strict type matching
+        // Type coercion tests removed - type validation now enforces strict type matching
         // at planning time to prevent type errors
 
-        // ===== K. EXECUTION MODES =====
+        // Execution modes
 
         // Predicate: id > 500
         let pred = Predicate::Compare(
@@ -477,28 +519,64 @@ fn benchmark_selection_operator() {
             ComparisonOp::GreaterThan,
             Box::new(Expr::Constant(Constant::Int(500))),
         );
-        let executor = make_executor(pred);
+        let executor = make_executor(pred, &schema);
 
-        // 1. filter_tuples
-        benchmark("EXEC: filter_tuples", size, || {
+        // filter_tuples
+        run_and_log(&mut writer, "EXEC: materialize", size, || {
             filter_tuples(&executor, &tuples).unwrap().len()
         });
 
-        // 2. filter_tuples_streaming
-        benchmark("EXEC: streaming", size, || {
-            let stream = TupleStream::new(tuples.clone());
+        // filter_tuples_streaming (zero-copy: iter().clone() only yields borrowed bytes)
+        run_and_log(&mut writer, "EXEC: streaming", size, || {
+            let stream = tuples.iter().cloned().map(Ok);
             let mut count = 0;
             filter_tuples_streaming(&executor, stream, |_| count += 1).unwrap();
             count
         });
 
-        // 3. count_matching_tuples
-        benchmark("EXEC: count_only", size, || {
+        // count_matching_tuples
+        run_and_log(&mut writer, "EXEC: compute_only", size, || {
+            count_matching_tuples(&executor, &tuples).unwrap()
+        });
+
+        // Worst-case predicate (both sides always evaluated, no short-circuit)
+        let pred_worst = Predicate::And(
+            Box::new(Predicate::Compare(
+                Box::new(Expr::Column(ColumnReference::new("id".to_string()))),
+                ComparisonOp::GreaterThan,
+                Box::new(Expr::Constant(Constant::Int(0))),
+            )),
+            Box::new(Predicate::Compare(
+                Box::new(Expr::Column(ColumnReference::new("amount".to_string()))),
+                ComparisonOp::GreaterThan,
+                Box::new(Expr::Constant(Constant::Float(0.0))),
+            )),
+        );
+
+        let executor = make_executor(pred_worst, &schema);
+
+        run_and_log(&mut writer, "worst-case (no short-circuit)", size, || {
             count_matching_tuples(&executor, &tuples).unwrap()
         });
     }
 
-    println!("\n{}", "=".repeat(80));
-    println!("BENCHMARK SUITE COMPLETE");
-    println!("{}", "=".repeat(80));
+    log_line(&mut writer, &format!("\n{}", "=".repeat(80)));
+    log_line(&mut writer, "BENCHMARK SUITE COMPLETE");
+    log_line(&mut writer, &"=".repeat(80));
+}
+
+fn main() {
+    let file = File::create("benchmark_output.txt").unwrap();
+    let mut writer = BufWriter::new(file);
+
+    println!("\n===== NARROW TABLE (4 columns) =====");
+    writeln!(writer, "\n===== NARROW TABLE (4 columns) =====").unwrap();
+    benchmark_selection_operator(&mut writer, create_default_schema(), false);
+
+    println!("\n===== WIDE TABLE (21 columns) =====");
+    writeln!(writer, "\n===== WIDE TABLE (21 columns) =====").unwrap();
+    benchmark_selection_operator(&mut writer, create_wide_schema(), true);
+
+    writer.flush().unwrap();
+    println!("\nResults saved to benchmark_output.txt");
 }

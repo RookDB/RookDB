@@ -1,0 +1,12 @@
+TEST: Multi Column Predicates
+============================================================
+
+Purpose: Verify predicates referencing multiple columns
+------------------------------------------------------------
+Predicate: id > 300 AND amount < 700.0
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 2
+

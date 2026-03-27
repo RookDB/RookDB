@@ -430,7 +430,7 @@ fn infer_expr_type(expr: &Expr, schema: &Table) -> Result<DataType, String> {
                 Constant::Null => Ok(DataType::Null),
             }
         }
-        Expr::Add(l, r) | Expr::Sub(l, r) | Expr::Mul(l, r) | Expr::Div(l, r) => {
+        Expr::Add(l, r) | Expr::Sub(l, r) | Expr::Mul(l, r) => {
             let left_type = infer_expr_type(l, schema)?;
             let right_type = infer_expr_type(r, schema)?;
 
@@ -440,6 +440,21 @@ fn infer_expr_type(expr: &Expr, schema: &Table) -> Result<DataType, String> {
                 (DataType::Int, DataType::Int) => Ok(DataType::Int),
                 (DataType::Float, DataType::Float) => Ok(DataType::Float),
                 (DataType::Int, DataType::Float) | (DataType::Float, DataType::Int) => Ok(DataType::Float),
+                _ => Err(format!("Arithmetic operation requires numeric types, got {:?} and {:?}", left_type, right_type)),
+            }
+        }
+
+        Expr::Div(l, r) => {
+            let left_type = infer_expr_type(l, schema)?;
+            let right_type = infer_expr_type(r, schema)?;
+
+            // Int / Int promotes to Float, matching runtime behavior
+            match (&left_type, &right_type) {
+                (DataType::Null, _) | (_, DataType::Null) => Ok(DataType::Null),
+                (DataType::Int, DataType::Int) => Ok(DataType::Float),
+                (DataType::Int, DataType::Float)
+                | (DataType::Float, DataType::Int)
+                | (DataType::Float, DataType::Float) => Ok(DataType::Float),
                 _ => Err(format!("Arithmetic operation requires numeric types, got {:?} and {:?}", left_type, right_type)),
             }
         }

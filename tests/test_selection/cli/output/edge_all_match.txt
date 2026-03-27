@@ -1,0 +1,12 @@
+TEST: All Tuples Match
+============================================================
+
+What if everything matches?
+------------------------------------------------------------
+Predicate: id >= 0
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 10
+

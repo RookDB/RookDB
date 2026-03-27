@@ -1,0 +1,10 @@
+TEST: Logical AND: Range Predicate
+============================================================
+
+Predicate: (id >= 100) AND (id <= 500)
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 6
+

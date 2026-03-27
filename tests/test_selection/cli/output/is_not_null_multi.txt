@@ -1,0 +1,12 @@
+TEST: IS NOT NULL on Multiple Columns
+============================================================
+
+Purpose: Test IS NOT NULL on multiple columns to filter complete rows
+------------------------------------------------------------
+Predicate: (id IS NOT NULL) AND (amount IS NOT NULL)
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 8
+

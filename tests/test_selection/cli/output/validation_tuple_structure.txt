@@ -1,0 +1,21 @@
+TEST: Tuple Structure Validation
+============================================================
+
+Making sure we safely reject malformed tuples
+------------------------------------------------------------
+
+Test 1: Invalid offset order (non-monotonic)
+----------------------------------------
+  PASS: Correctly rejected: "FieldRegionOutOfBounds"
+
+Test 2: Invalid tuple length
+----------------------------------------
+  PASS: Correctly rejected: "FieldRegionOutOfBounds"
+
+Test 3: Valid tuple (control test)
+----------------------------------------
+  PASS: Valid tuple accepted: True
+
+Summary:
+  SelectionExecutor correctly validates tuple structure
+  Malformed tuples are safely rejected with error codes

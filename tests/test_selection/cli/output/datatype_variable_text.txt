@@ -1,0 +1,12 @@
+TEST: Variable Length Field: TEXT
+============================================================
+
+Purpose: Ensure tuple decoding works for variable-length TEXT fields
+------------------------------------------------------------
+Predicate: name = 'Emma'
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 1
+

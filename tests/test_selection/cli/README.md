@@ -1,213 +1,234 @@
-# Selection Operator Interactive Testing Environment
+Here is a **formal, polished README** suitable for submission or documentation:
 
-This directory contains a standalone interactive CLI for testing the Selection Operator independently from the main database system.
+---
+
+# Selection Operator — CLI Test Suite
 
 ## Overview
 
-The testing environment simulates the execution pipeline:
+This directory provides a **Command-Line Interface (CLI)–based testing framework** for the Selection Operator of RookDB. The CLI enables interactive evaluation and validation of predicate execution over a generated dataset.
+
+The system is designed to support:
+
+* Manual execution of SQL-like predicates
+* Validation of predicate correctness
+* Testing across a wide range of logical, arithmetic, and edge-case scenarios
+
+---
+
+## Directory Structure
 
 ```
-Tuple Generator → Access Operator → Selection Operator → Output File
+tests/test_selection/
+├── cli/                 Interactive query CLI
+│   ├── Cargo.toml
+│   └── src/
+│       └── main.rs
+├── common/              Shared utilities (tuple builder, accessor)
+├── functional/          Cargo-integrated unit tests
+└── README.md            Documentation
 ```
 
-This mirrors the actual database workflow: `Access Method → Selection → Output`
+---
 
-## Architecture
+## Prerequisites
 
-### Modules
+* Rust toolchain (stable, version 1.70 or higher)
+* RookDB project properly cloned and accessible
 
-1. **tuple_generator.rs** - Generates test tuples in the correct storage format
-2. **tuple_accessor.rs** - Simulates the Access Operator with sequential tuple streaming
-3. **main.rs** - Interactive CLI menu system
+---
 
-### Tuple Format
+## CLI — Query Execution Interface
 
-All tuples follow the storage layer format:
+The CLI serves as the **primary interface** for testing the Selection Operator.
 
-```
-| Header (8 bytes) | NULL Bitmap | Offset Array | Field Data |
-```
+At runtime, the system:
 
-- **Header**: 
-  - [0..4] total length (u32 little-endian)
-  - [4..8] column count (u32 little-endian)
-- **NULL Bitmap**: ceil(columns / 8) bytes, 1 = NULL
-- **Offset Array**: num_columns × 4 bytes (absolute byte offsets from tuple start)
-- **Field Data**: Raw column values
+* Generates a dataset of random tuples
+* Stores the dataset in:
 
-## How to Run
+  * `tuple_storage.bin` (binary format)
+  * `tuple_rows.txt` (human-readable format)
+* Evaluates user-provided predicates over the generated data
 
-### Prerequisites
+---
 
-- Rust toolchain installed (cargo and rustc)
-- Run from within the RookDB-main project structure (this CLI is located at tests/test_selection_operator/cli-test_selection_operator/)
+## Usage
 
-### Quick Start
-
-1. **Navigate to the project directory:**
-   ```bash
-   cd tests/test_selection_operator/cli-test_selection_operator
-   ```
-
-2. **Build the project:**
-   ```bash
-   cargo build --release
-   ```
-
-3. **Run the interactive test CLI:**
-   ```bash
-   cargo run --release
-   ```
-   
-   Or run the compiled binary directly:
-   ```bash
-   ./target/release/selection_test
-   ```
-
-### What Happens When You Run
-
-- The program automatically generates 100 random test tuples at startup
-- Two files are created:
-  - `tuple_storage.bin` - Binary tuple data
-  - `tuple_rows.txt` - Human-readable version of the tuples
-- An interactive menu appears with all available tests
-
-### Interactive Menu
-
-The menu shows all available tests organized by category:
-
-```
-========================================
-Selection Operator Interactive Test CLI
-========================================
-
-Select a test:
-========================================
-
-Basic Comparison Tests
-----------------------------------------
-1. Equals Operator (=)
-2. Not Equals Operator (≠)
-3. Less Than Operator (<)
-...
-
-Logical Predicate Tests
-----------------------------------------
-10. Logical AND: Range Predicate
-11. Logical OR: Extreme Values
-...
-
-Exit
-----------------------------------------
-N. Exit
-```
-
-Simply enter the number of the test you want to run and press Enter.
-
-### Output
-
-Test results are automatically saved to the `output/` directory. Each test creates a file with:
-
-- Test description
-- Predicate being tested
-- Statistics (tuples processed and matched)
-- Result status
-
-Example:
-```
-output/comparison_equals.txt
-output/logical_and_range.txt
-output/datatype_int_gt.txt
-```
-
-You can also check `tuple_rows.txt` to see what random data was generated.
-
-## Example Run
+### Navigate to CLI Directory
 
 ```bash
-$ cargo run --release
-Generating 100 random tuples...
-PASS: Tuples generated and stored:
-  - Binary storage: tuple_storage.bin
-  - Human readable: tuple_rows.txt
-
-========================================
-Selection Operator Interactive Test CLI
-========================================
-
-Select a test:
-...
-Enter your choice: 1
-
-COMPLETE: Comparison Operator: Equals (=) complete. Results written to output/comparison_equals.txt
-
-Enter your choice: 28
-Exiting. Goodbye!
+cd tests/test_selection/cli
 ```
 
-Then check the results:
+### Build and Run
+
 ```bash
-$ cat output/comparison_equals.txt
-TEST: Comparison Operator: Equals (=)
-============================================================
-
-Predicate: id = 500
-...
-...
-------------------------------------------------------------
-
-Statistics:
-  Total tuples processed: 100
-  Matched tuples: 3
+cargo run
 ```
 
-## Running Specific Tests
+---
 
-If you want to run all tests at once, choose the "Run Full Test Suite" option from the menu. This will execute all tests sequentially and save results for each one.
+## Execution Modes
 
-## Troubleshooting
+Upon running the CLI, the user is prompted to select a mode:
 
-**Problem: `cargo: command not found`**
-- Install Rust from https://rustup.rs/
+```
+Select mode:
+  0 → Interactive query mode
+  1 → Run automated tests
+```
 
-**Problem: `storage_manager` dependency not found**
-- Make sure you're running from within the RookDB-main project structure
-- The correct path should be: RookDB-main/tests/test_selection_operator/cli-test_selection_operator/
-- Check that `Cargo.toml` has the correct path dependency: `storage_manager = { path = "../../.." }`
+---
 
-**Problem: Permission denied when running binary**
-- Run: `chmod +x target/release/selection_test`
+## Interactive Mode (Mode 0)
 
-## Test Data
+Interactive mode is the **recommended workflow** for testing and experimentation.
+Users can directly input SQL-like predicates, which are evaluated against the dataset.
 
-### INT Tuples
-- Values: 5, 10, 15, 20, 30
-- With NULL: 5, NULL, 15, 20, NULL
+### Example Queries
 
-### FLOAT Tuples
-- Values: 5.5, 10.2, 15.8, 20.1
-- With NULL: 5.5, NULL, 15.8
+```sql
+id > 500
+amount < 1000
+name = 'Alice'
+date >= '2023-01-01'
+```
 
-### DATE Tuples
-- Values: 2024-01-10, 2024-02-15, 2024-03-20
+---
 
-### STRING Tuples
-- Values: Alice, Bob, Charlie
+## Query Categories for Testing
 
-## Integration
+To ensure comprehensive validation, the following categories of queries should be tested:
 
-The testing environment imports and uses:
-- `SelectionExecutor` - Main selection operator
-- `Predicate` - Predicate tree structures
-- `ColumnReference` - Column references
-- `Constant` - Constant values
-- `TriValue` - Three-valued logic results
+### 1. Basic Comparisons
 
-No modifications are made to the core Selection Operator implementation.
+```sql
+id > 500
+id <= 100
+amount >= 250.5
+```
 
-## Notes
+### 2. Logical Expressions
 
-- This is a standalone testing tool - it does NOT modify the main database system
-- All tuples are manually constructed to match the exact storage format
-- The environment tests execution layer only (no disk I/O)
-- Output file is overwritten on each test run
+```sql
+id > 500 AND amount < 1000
+id < 100 OR name = 'Bob'
+(id > 200 AND amount < 800) OR name = 'Alice'
+```
+
+### 3. NULL Handling
+
+```sql
+name IS NULL
+amount IS NOT NULL
+name IS NULL OR id > 500
+```
+
+### 4. String Comparisons
+
+```sql
+name = 'Alice'
+name != 'Bob'
+```
+
+ pattern matching is supported:
+
+```sql
+name LIKE 'A%'
+name LIKE '%li%'
+```
+
+### 5. Arithmetic Expressions
+
+```sql
+id + 10 > 500
+amount * 2 > 1000
+```
+
+### 6. Edge Cases
+
+```sql
+id > 1000000     -- No matching tuples
+id >= 0          -- All tuples match
+```
+
+---
+
+## Advanced Predicate Testing
+
+For stress testing and validation of complex predicate trees:
+
+```sql
+(id > 500 AND amount < 1000) OR (name = 'Alice' AND date > '2022-01-01')
+```
+
+```sql
+name IS NULL AND (amount > 500 OR id < 100)
+```
+
+---
+
+## Automated Mode (Mode 1)
+
+Automated mode executes a predefined suite of test cases, including:
+
+* Comparison predicates
+* Logical operators
+* NULL semantics
+* Edge-case scenarios
+* Parser validation
+
+This mode is primarily intended for **verification**, whereas interactive mode is better suited for **exploration and debugging**.
+
+---
+
+## Clean Build
+
+To rebuild the project from scratch:
+
+```bash
+cargo clean && cargo run
+```
+
+---
+
+## Functional Unit Tests
+
+From the RookDB root directory:
+
+```bash
+cargo test --test test_selection
+```
+
+To display detailed output:
+
+```bash
+cargo test --test test_selection -- --nocapture
+```
+
+---
+
+## Implementation Notes
+
+* The dataset is regenerated on every execution of the CLI
+* Predicate evaluation includes:
+
+  * Expression parsing
+  * Tuple access via offset-based accessor
+  * Three-valued logic (TRUE, FALSE, UNKNOWN)
+* Execution is performed entirely in-memory (no runtime disk I/O)
+
+---
+
+## Quick Reference
+
+| Task           | Command                                    |
+| -------------- | ------------------------------------------ |
+| Run CLI        | `cd tests/test_selection/cli && cargo run` |
+| Clean and run  | `cargo clean && cargo run`                 |
+| Run unit tests | `cargo test --test test_selection`         |
+
+---
+
+

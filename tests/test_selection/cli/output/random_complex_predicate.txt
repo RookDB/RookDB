@@ -1,0 +1,12 @@
+TEST: Complex Predicate on Random Data
+============================================================
+
+Testing with randomly generated tuples. Check tuple_rows.txt to see what data we're working with.
+------------------------------------------------------------
+Predicate: amount > 500.0 AND name != 'Emma'
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 4
+

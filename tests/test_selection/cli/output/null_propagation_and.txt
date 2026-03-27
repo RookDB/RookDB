@@ -1,0 +1,12 @@
+TEST: NULL Propagation: AND Operator
+============================================================
+
+Expected: NULL rows produce UNKNOWN and are filtered
+------------------------------------------------------------
+Predicate: (id > 400) AND (amount < 800.0)
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 1
+

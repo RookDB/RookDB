@@ -1,0 +1,12 @@
+TEST: No Matching Tuples
+============================================================
+
+What if the predicate matches nothing?
+------------------------------------------------------------
+Predicate: id > 9999
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 0
+

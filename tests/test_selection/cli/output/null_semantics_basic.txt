@@ -1,0 +1,12 @@
+TEST: NULL Semantics: Three-Valued Logic
+============================================================
+
+Note: NULL comparisons return UNKNOWN and are filtered out
+------------------------------------------------------------
+Predicate: id > 500
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 4
+

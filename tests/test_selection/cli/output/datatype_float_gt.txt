@@ -1,0 +1,10 @@
+TEST: FLOAT Data Type: Greater Than
+============================================================
+
+Predicate: amount > 500.0
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 4
+

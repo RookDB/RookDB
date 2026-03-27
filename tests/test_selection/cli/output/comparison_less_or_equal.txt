@@ -1,0 +1,10 @@
+TEST: Comparison Operator: Less Or Equal (≤)
+============================================================
+
+Predicate: id ≤ 500
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 6
+

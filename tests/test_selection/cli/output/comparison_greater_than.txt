@@ -1,0 +1,10 @@
+TEST: Comparison Operator: Greater Than (>)
+============================================================
+
+Predicate: id > 500
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 4
+

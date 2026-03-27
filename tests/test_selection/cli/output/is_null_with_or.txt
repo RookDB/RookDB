@@ -1,0 +1,12 @@
+TEST: IS NULL with OR Logic
+============================================================
+
+Purpose: Test IS NULL combined with comparison using OR operator
+------------------------------------------------------------
+Predicate: (id IS NULL) OR (id > 500)
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 4
+

@@ -1,0 +1,12 @@
+TEST: IS NULL with AND Logic
+============================================================
+
+Purpose: Test IS NULL combined with IS NOT NULL using AND operator
+------------------------------------------------------------
+Predicate: (id IS NULL) AND (amount IS NOT NULL)
+------------------------------------------------------------
+
+Statistics:
+  Total tuples processed: 10
+  Matched tuples: 0
+
