@@ -58,3 +58,24 @@ fn varchar_length_prefix_violation_is_rejected() {
     let err = DataValue::from_bytes(&DataType::Varchar(5), &too_long).unwrap_err();
     assert!(err.contains("exceeds declared limit"));
 }
+
+#[test]
+fn team_robustness_edge_cases_validation() {
+    // SHUBHADEEP'S TYPES: Leap year logic and strict Bit lengths
+    assert!(validate_date("2024-02-29").is_ok()); // Valid leap year
+    assert!(validate_date("2026-02-29").is_err()); // Invalid leap year
+    assert!(validate_bit("B'101'", 4).is_err()); // Too short for BIT(4)
+
+    // AKSHAT'S TYPES: Real IEEE 754 special values and Time microsecond limits
+    assert!(validate_real("NaN").is_ok());
+    assert!(validate_real("-Infinity").is_ok());
+    assert!(validate_time("23:59:59.999999").is_ok());
+    assert!(validate_time("23:59:59.1000000").is_err()); // Exceeds microsecond precision
+
+    // SHRIANSH'S TYPES: Double Precision IEEE 754, Numeric limits, Timestamp leap years
+    assert!(validate_double("NaN").is_ok());
+    assert!(validate_double("Infinity").is_ok());
+    assert!(validate_numeric("1234567.89", 8, 2).is_err()); // 9 total digits, exceeds precision of 8
+    assert!(validate_timestamp("2024-02-29 23:59:59").is_ok());
+    assert!(validate_timestamp("2026-02-29 00:00:00").is_err());
+}

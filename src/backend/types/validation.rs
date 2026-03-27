@@ -193,6 +193,16 @@ pub fn validate_date(input: &str) -> Result<(), TypeValidationError> {
 
 pub fn validate_time(input: &str) -> Result<(), TypeValidationError> {
     let raw = input.trim().trim_matches('\'');
+
+    if let Some(fraction) = raw.split('.').nth(1) {
+        if fraction.len() > 6 {
+            return Err(TypeValidationError::InvalidFormat {
+                ty: "TIME".to_string(),
+                value: raw.to_string(),
+                details: "Time precision exceeds microsecond limit (maximum 6 fractional digits).".to_string(),
+            });
+        }
+    }
     NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
         .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M:%S"))
         .map(|_| ())
