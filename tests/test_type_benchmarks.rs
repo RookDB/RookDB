@@ -1,8 +1,11 @@
 use std::time::Instant;
 
 use storage_manager::types::{
+    // Original imports
     Comparable, DataType, DataValue, NumericValue, OrderedF64, abs, ceiling,
     deserialize_nullable_row, floor, round, serialize_nullable_row,
+    // New string functions
+    trim, upper, lower, substring, length
 };
 
 fn run_row_roundtrip_workload(rows: usize) -> (f64, f64) {
@@ -151,6 +154,42 @@ fn benchmark_numeric_comparison_small_medium_large() {
     println!("ops,size,seconds,ops_per_sec");
     for (ops, label) in workloads {
         let (secs, throughput) = run_numeric_compare_workload(ops);
+        println!("{ops},{label},{secs:.6},{throughput:.2}");
+    }
+}
+fn run_string_function_workload(iterations: usize) -> (f64, f64) {
+    let start = std::time::Instant::now();
+    let mut checksum = 0usize;
+
+    for i in 0..iterations {
+        let val_str = format!("  RookDB_User_{}  ", i % 1000);
+        let value = DataValue::Varchar(val_str);
+
+        let trimmed = trim(&value).unwrap();
+        let upper_cased = upper(&trimmed).unwrap();
+        let lower_cased = lower(&upper_cased).unwrap();
+        let sub = substring(&lower_cased, 1, 6).unwrap();
+        checksum += length(&sub).unwrap();
+    }
+
+    assert!(checksum > 0);
+    let secs = start.elapsed().as_secs_f64();
+    let throughput = iterations as f64 / secs.max(f64::EPSILON);
+    (secs, throughput)
+}
+
+#[test]
+fn benchmark_string_functions_small_medium_large() {
+    let workloads = [
+        (20_000usize, "small"),
+        (200_000usize, "medium"),
+        (1_000_000usize, "large"),
+    ];
+
+    println!("\n=== String Function Benchmark ===");
+    println!("ops,size,seconds,ops_per_sec");
+    for (ops, label) in workloads {
+        let (secs, throughput) = run_string_function_workload(ops);
         println!("{ops},{label},{secs:.6},{throughput:.2}");
     }
 }
