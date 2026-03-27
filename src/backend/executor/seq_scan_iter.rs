@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::backend::executor::{Tuple,Executor,Value};
+use crate::backend::executor::tuple::Tuple;
+use crate::backend::executor::iterator::Executor;
+use crate::backend::executor::value::Value;
 use crate::backend::catalog::types::Column;
 use crate::backend::buffer_manager::BufferManager;
 use crate::backend::page::{ITEM_ID_SIZE,PAGE_HEADER_SIZE};
@@ -41,7 +43,7 @@ impl Executor for SeqScan{
         let tuple_data = &curr_page.data[offset as usize..(offset + length) as usize];
 
         let bitmap_len=(self.schema.len()+7)/8;
-        let bitmap=tuple_data[0..bitmap_len];
+        let bitmap=&tuple_data[0..bitmap_len];
 
         let mut cursor=bitmap_len as usize;
         let mut values=Vec::new();
@@ -52,7 +54,7 @@ impl Executor for SeqScan{
             let bit_idx=j%8;
             let is_null=bitmap[byte_idx]&(1<<bit_idx);
 
-            if(is_null!=0){
+            if is_null!=0 {
                 values.push(Value::Null);
             } else {
                 match self.schema[j as usize].data_type.as_str() {

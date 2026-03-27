@@ -6,6 +6,7 @@ pub mod value;
 pub mod tuple;
 pub mod seq_scan_iter;
 pub mod hash_aggregator;
+pub mod expr;
 
 pub use load_csv::load_csv;
 pub use seq_scan::show_tuples;

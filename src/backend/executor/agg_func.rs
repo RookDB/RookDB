@@ -4,6 +4,14 @@ pub enum AggFunc{
     Count,
     Min,
     Max,
+    Sum,
+    Avg,
+    CountDistinct,
+    SumDistinct,
+    Variance,
+    StdDev,
+    BoolAnd,
+    BoolOr,
 }
 
 pub struct AggReq{
