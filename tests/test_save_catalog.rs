@@ -31,17 +31,24 @@ fn test_save_catalog() {
         columns: vec![
             Column {
                 name: "id".to_string(),
-                data_type: "INT".to_string(),
+                data_type: Some("INT".to_string()),
+                nullable: false,
+                schema_version: Some(2),
             },
             Column {
                 name: "name".to_string(),
-                data_type: "TEXT".to_string(),
+                data_type: Some("TEXT".to_string()),
+                nullable: false,
+                schema_version: Some(2),
             },
             Column {
                 name: "email".to_string(),
-                data_type: "TEXT".to_string(),
+                data_type: Some("TEXT".to_string()),
+                nullable: true,
+                schema_version: Some(2),
             },
         ],
+        schema_version: Some(2),
     };
 
     let db = catalog.databases.get_mut(db_name).unwrap();

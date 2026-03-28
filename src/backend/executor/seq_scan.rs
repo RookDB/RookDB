@@ -30,11 +30,10 @@ pub fn show_tuples(
     let columns = &table.columns;
 
     // 2. Read total number of pages
-    let mut total_pages = page_count(file)?; // total pages currently in file
+    let total_pages = page_count(file)?; // total pages currently in file
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
-    total_pages = total_pages;
 
     // 3. Loop through each page
     for page_num in 1..total_pages {
@@ -61,7 +60,8 @@ pub fn show_tuples(
             // 5. Decode each column
             let mut cursor = 0usize;
             for col in columns {
-                match col.data_type.as_str() {
+                let type_str = col.data_type.as_ref().map(|s| s.as_str()).unwrap_or("UNKNOWN");
+                match type_str {
                     "INT" => {
                         if cursor + 4 <= tuple_data.len() {
                             let val = i32::from_le_bytes(
