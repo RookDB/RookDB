@@ -668,35 +668,38 @@ impl HeapManager {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn setup_temp_heap() -> (PathBuf, HeapManager) {
-        let temp_file = PathBuf::from("test_heap_temp.dat");
+    fn unique_temp_file(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        PathBuf::from(format!("{}_{}_{}.dat", prefix, std::process::id(), nanos))
+    }
+
+    fn cleanup_temp_heap(path: &PathBuf) {
+        let _ = fs::remove_file(path);
+        let fsm_path = PathBuf::from(format!("{}.fsm", path.to_string_lossy()));
+        let _ = fs::remove_file(fsm_path);
+    }
+
+    fn setup_temp_heap(prefix: &str) -> (PathBuf, HeapManager) {
+        let temp_file = unique_temp_file(prefix);
         if temp_file.exists() {
             fs::remove_file(&temp_file).ok();
         }
 
-        // Create and initialize a new heap file
-        let mut file = File::create(&temp_file).unwrap();
-        let header = HeaderMetadata::new();
-        let header_bytes = header.serialize().unwrap();
-        file.write_all(&header_bytes).unwrap();
-
-        // Add initial page
-        let mut page = Page::new();
-        init_page(&mut page);
-        file.write_all(&page.data).unwrap();
-        file.flush().unwrap();
-
-        let manager = HeapManager::open(temp_file.clone()).unwrap();
+        let manager = HeapManager::create(temp_file.clone()).unwrap();
         (temp_file, manager)
     }
 
     #[test]
     fn test_open_heap() {
-        let (path, _) = setup_temp_heap();
+        let (path, _) = setup_temp_heap("test_open_heap");
         // If we get here, open succeeded
         assert!(path.exists());
-        fs::remove_file(&path).ok();
+        cleanup_temp_heap(&path);
     }
 
     #[test]
@@ -716,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_heap_scan_empty() {
-        let (path, manager) = setup_temp_heap();
+        let (path, manager) = setup_temp_heap("test_heap_scan_empty");
 
         let mut count = 0;
         for result in manager.scan() {
@@ -727,6 +730,6 @@ mod tests {
         }
 
         assert_eq!(count, 0);
-        fs::remove_file(&path).ok();
+        cleanup_temp_heap(&path);
     }
 }

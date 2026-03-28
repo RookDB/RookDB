@@ -16,6 +16,7 @@ fn test_create_page() {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(TEST_FILE)
         .expect("Failed to create file");
 

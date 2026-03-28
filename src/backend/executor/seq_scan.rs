@@ -67,6 +67,33 @@ pub fn show_tuples(
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+
+        if lower < PAGE_HEADER_SIZE || lower > upper || upper > page.data.len() as u32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Corrupted page header on page {}: lower={}, upper={}, page_size={}",
+                    page_num,
+                    lower,
+                    upper,
+                    page.data.len()
+                ),
+            ));
+        }
+
+        if (lower - PAGE_HEADER_SIZE) % ITEM_ID_SIZE != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Corrupted slot directory alignment on page {}: lower={}, header={}, item_size={}",
+                    page_num,
+                    lower,
+                    PAGE_HEADER_SIZE,
+                    ITEM_ID_SIZE
+                ),
+            ));
+        }
+
         let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
 
         println!("[PAGE {}] Lower: {}, Upper: {}, Tuples: {}", page_num, lower, upper, num_items);
@@ -77,6 +104,21 @@ pub fn show_tuples(
             let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
             let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
             let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
+
+            if offset > page.data.len() as u32 || length > page.data.len() as u32 || offset + length > page.data.len() as u32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Corrupted slot bounds on page {} slot {}: offset={}, length={}, page_size={}",
+                        page_num,
+                        i,
+                        offset,
+                        length,
+                        page.data.len()
+                    ),
+                ));
+            }
+
             let tuple_data = &page.data[offset as usize..(offset + length) as usize];
 
             print!("│ {:>3} │ ", total_tuples);
