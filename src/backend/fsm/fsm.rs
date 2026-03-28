@@ -211,14 +211,6 @@ impl FSM {
             page_count
         );
 
-        // Create or truncate FSM file
-        let mut fsm_file = OpenOptions::new()
-            .read(true) // NEEDED to be able to read from it later
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&fsm_path)?;
-
         // Calculate FSM structure
         let fsm_page_count = FSM::calculate_fsm_page_count(page_count);
         println!(
@@ -226,17 +218,21 @@ impl FSM {
             fsm_page_count
         );
 
+        // Create FSM handle and reset file contents
+        let mut fsm = FSM::open(fsm_path.clone(), page_count)?;
+        fsm.fsm_file.set_len(0)?;
+        fsm.fsm_file.seek(SeekFrom::Start(0))?;
+
         // Initialize FSM with empty pages (all zeros)
         let empty_page = FSMPage::new();
         let empty_bytes = empty_page.serialize();
 
         for _ in 0..fsm_page_count {
-            fsm_file.write_all(&empty_bytes)?;
+            fsm.fsm_file.write_all(&empty_bytes)?;
         }
 
-        // Scan heap pages and update FSM categories
+        // Scan heap pages and fully rebuild FSM categories (leaf + bubble-up)
         println!("[FSM::build_from_heap] Scanning heap pages...");
-        let mut fsm_pages: std::collections::HashMap<u32, FSMPage> = std::collections::HashMap::new();
 
         for heap_page_id in 1..page_count {
             // Read heap page
@@ -265,12 +261,8 @@ impl FSM {
                     0
                 };
 
-                // Compute category
-                let category = ((free_bytes as f64 * 255.0) / 8192.0).floor() as u8;
-
-                // Find which Level-0 FSM page this heap page belongs to
-                let _fsm_page_no = heap_page_id / FSM_SLOTS_PER_PAGE;
-                let _slot_in_page = heap_page_id % FSM_SLOTS_PER_PAGE;
+                // Write this page's free-space into FSM and propagate max values upward.
+                fsm.fsm_set_avail(heap_page_id, free_bytes)?;
 
                 if heap_page_id % 1000 == 0 {
                     println!(
@@ -278,34 +270,18 @@ impl FSM {
                         heap_page_id
                     );
                 }
-
-                // For MVP: just track in root page
-                // In full implementation: would update tree structure at Level 0
-                let root_entry = fsm_pages.entry(0).or_insert_with(FSMPage::new);
-                root_entry.tree[0] = root_entry.tree[0].max(category);
             }
         }
 
-        // Write updated FSM pages
         println!("[FSM::build_from_heap] Writing FSM pages to disk...");
-        for (page_no, page) in fsm_pages.iter() {
-            let offset = *page_no as u64 * FSM_PAGE_SIZE as u64;
-            fsm_file.seek(SeekFrom::Start(offset))?;
-            fsm_file.write_all(&page.serialize())?;
-        }
-
-        fsm_file.sync_all()?;
+        fsm.sync()?;
 
         println!(
             "[FSM::build_from_heap] FSM successfully built with {} pages",
             fsm_page_count
         );
 
-        Ok(Self {
-            fsm_path,
-            fsm_file,
-            heap_page_count: page_count,
-        })
+        Ok(fsm)
     }
 
     /// Get heap page count currently tracked by this FSM.

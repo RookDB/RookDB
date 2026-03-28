@@ -1,0 +1,53 @@
+{
+  "run_id_unix": 1774714733,
+  "system": {
+    "os_name": "Darwin",
+    "os_version": "14.5",
+    "kernel_version": "23.5.0",
+    "architecture": "aarch64",
+    "cpu_brand": "Apple M1",
+    "logical_cores": 8,
+    "total_memory_bytes_sysinfo": 8589934592
+  },
+  "config": {
+    "small_tuples": 1200,
+    "small_tuple_size": 50,
+    "large_tuples": 120,
+    "large_tuple_size": 1000,
+    "lookup_samples": 200
+  },
+  "correctness": {
+    "inserted_total": 1320,
+    "scanned_total": 1320,
+    "point_lookup_samples": 200,
+    "point_lookup_passed": 200,
+    "scan_matches_insert_count": true
+  },
+  "robustness": {
+    "oversized_tuple_rejected": true,
+    "fsm_rebuild_search_found_page": true
+  },
+  "performance": {
+    "small_insert_seconds": 0.606205458,
+    "small_insert_tuples_per_sec": 1979.5268817919484,
+    "large_insert_seconds": 0.10580875,
+    "large_insert_tuples_per_sec": 1134.1217054355145,
+    "point_lookup_seconds": 0.024424333,
+    "point_lookup_ops_per_sec": 8188.5552412014695,
+    "seq_scan_seconds": 0.045785458,
+    "seq_scan_tuples_per_sec": 28830.1145748067,
+    "fsm_rebuild_seconds": 0.032656917
+  },
+  "scalability": {
+    "heap_page_count": 25,
+    "fsm_page_count": 3,
+    "pages_used_with_tuples": 24,
+    "avg_tuples_per_used_page": 55.0,
+    "avg_free_bytes_on_used_pages": 244.0
+  },
+  "notes": [
+    "This benchmark is single-process and focuses on FSM/Heap manager behavior.",
+    "Use repeated runs and median values for stable reporting.",
+    "sysinfo memory unit depends on crate behavior/version; record as raw value in report."
+  ]
+}

@@ -5,6 +5,7 @@
 #[test]
 fn test_fsm_page_allocation() {
     use std::fs;
+    use std::io::Write;
     
     // Clean up from previous runs
     let _ = fs::remove_dir_all("database/base/test_fsm_alloc");
@@ -45,11 +46,19 @@ fn test_fsm_page_allocation() {
     let heap_file_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, "pages_test"));
     let _= fs::create_dir_all(heap_file_path.parent().unwrap());
     let _= HeapManager::create(heap_file_path);
+
+    // Create CSV fixture for this test (header + 500 rows)
+    let csv_path = format!("database/base/{}/gd.csv", db_name);
+    let mut csv_file = std::fs::File::create(&csv_path).expect("Failed to create test CSV");
+    writeln!(csv_file, "id,name").expect("Failed to write CSV header");
+    for id in 1..=500 {
+        writeln!(csv_file, "{},name{}", id, id).expect("Failed to write CSV row");
+    }
     
     // Load CSV - this should use HeapManager with FSM tree search
     // The gd.csv file has 500 rows which should fit in 2-3 pages with proper FSM allocation
-    println!("Loading 500 rows from gd.csv...");
-    match load_csv(&catalog, db_name, "pages_test", "gd.csv") {
+    println!("Loading 500 rows from {}...", csv_path);
+    match load_csv(&catalog, db_name, "pages_test", &csv_path) {
         Ok(count) => {
             println!("Inserted {} tuples", count);
             
