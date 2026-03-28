@@ -205,10 +205,16 @@ fn test_datatype_parse_case_insensitive() {
 }
 
 #[test]
-fn test_datatype_nested_array_rejection() {
-    // Current implementation rejects nested arrays
-    let result = DataType::parse("ARRAY<ARRAY<INT>>");
-    assert!(result.is_err()); // Should fail on nested arrays
+fn test_datatype_nested_array_support() {
+    let result = DataType::parse("ARRAY<ARRAY<INT>>").unwrap();
+    assert_eq!(
+        result,
+        DataType::Array {
+            element_type: Box::new(DataType::Array {
+                element_type: Box::new(DataType::Int32),
+            }),
+        }
+    );
 }
 
 #[test]
@@ -230,6 +236,11 @@ fn test_datatype_to_string_roundtrip() {
         },
         DataType::Array {
             element_type: Box::new(DataType::Text),
+        },
+        DataType::Array {
+            element_type: Box::new(DataType::Array {
+                element_type: Box::new(DataType::Int32),
+            }),
         },
     ];
 

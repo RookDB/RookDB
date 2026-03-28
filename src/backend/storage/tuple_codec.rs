@@ -2,7 +2,7 @@
 //! Handles the complete tuple serialization with header, null bitmap, and variable fields
 
 use crate::backend::catalog::data_type::{DataType, Value};
-use crate::backend::storage::row_layout::{TupleHeader, VarFieldEntry};
+use crate::backend::storage::row_layout::{ToastPointer, TupleHeader, VarFieldEntry};
 use crate::backend::storage::value_codec::ValueCodec;
 use crate::backend::storage::toast::{ToastManager, TOAST_THRESHOLD};
 
@@ -112,6 +112,23 @@ impl TupleCodec {
         tuple_bytes: &[u8],
         schema: &[(String, DataType)],
     ) -> Result<Vec<Value>, String> {
+        Self::decode_tuple_internal(tuple_bytes, schema, None)
+    }
+
+    /// Decode tuple bytes into a row of typed values, resolving TOAST-backed values
+    pub fn decode_tuple_with_toast(
+        tuple_bytes: &[u8],
+        schema: &[(String, DataType)],
+        toast_manager: &ToastManager,
+    ) -> Result<Vec<Value>, String> {
+        Self::decode_tuple_internal(tuple_bytes, schema, Some(toast_manager))
+    }
+
+    fn decode_tuple_internal(
+        tuple_bytes: &[u8],
+        schema: &[(String, DataType)],
+        toast_manager: Option<&ToastManager>,
+    ) -> Result<Vec<Value>, String> {
         if tuple_bytes.len() < TupleHeader::size() {
             return Err("Tuple too short for header".to_string());
         }
@@ -192,12 +209,12 @@ impl TupleCodec {
                 let field_bytes = &var_payload[entry.offset as usize
                     ..entry.offset as usize + entry.length as usize];
 
-                let value = if entry.is_toast() {
-                    // Would need to reconstruct from TOAST in full implementation
-                    ValueCodec::decode(field_bytes, data_type)?
-                } else {
-                    ValueCodec::decode(field_bytes, data_type)?
-                };
+                let value = Self::decode_variable_field(
+                    field_bytes,
+                    data_type,
+                    entry.is_toast(),
+                    toast_manager,
+                )?;
 
                 values.push(value);
                 var_entry_idx += 1;
@@ -212,6 +229,23 @@ impl TupleCodec {
         }
 
         Ok(values)
+    }
+
+    fn decode_variable_field(
+        field_bytes: &[u8],
+        data_type: &DataType,
+        is_toast: bool,
+        toast_manager: Option<&ToastManager>,
+    ) -> Result<Value, String> {
+        if is_toast {
+            let ptr = ToastPointer::from_bytes(field_bytes)?;
+            let toast_manager = toast_manager
+                .ok_or_else(|| "TOAST-backed tuple decode requires a ToastManager".to_string())?;
+            let payload = toast_manager.fetch_large_value(&ptr)?;
+            ValueCodec::decode(&payload, data_type)
+        } else {
+            ValueCodec::decode(field_bytes, data_type)
+        }
     }
 }
 
@@ -274,6 +308,35 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_decode_with_nested_array() {
+        let schema = vec![
+            ("id".to_string(), DataType::Int32),
+            (
+                "matrix".to_string(),
+                DataType::Array {
+                    element_type: Box::new(DataType::Array {
+                        element_type: Box::new(DataType::Int32),
+                    }),
+                },
+            ),
+        ];
+        let values = vec![
+            Value::Int32(1),
+            Value::Array(vec![
+                Value::Array(vec![Value::Int32(10), Value::Int32(20)]),
+                Value::Array(vec![]),
+                Value::Array(vec![Value::Int32(30)]),
+            ]),
+        ];
+
+        let mut toast_manager = ToastManager::new();
+        let encoded = TupleCodec::encode_tuple(&values, &schema, &mut toast_manager).unwrap();
+        let decoded = TupleCodec::decode_tuple(&encoded, &schema).unwrap();
+
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
     fn test_encode_decode_with_blob() {
         let schema = vec![
             ("id".to_string(), DataType::Int32),
@@ -286,5 +349,21 @@ mod tests {
         let decoded = TupleCodec::decode_tuple(&encoded, &schema).unwrap();
 
         assert_eq!(decoded[0], Value::Int32(1));
+    }
+
+    #[test]
+    fn test_decode_tuple_with_toast_large_blob() {
+        let schema = vec![
+            ("id".to_string(), DataType::Int32),
+            ("data".to_string(), DataType::Blob),
+        ];
+        let values = vec![Value::Int32(1), Value::Blob(vec![0xAB; TOAST_THRESHOLD + 1000])];
+
+        let mut toast_manager = ToastManager::new();
+        let encoded = TupleCodec::encode_tuple(&values, &schema, &mut toast_manager).unwrap();
+        let decoded =
+            TupleCodec::decode_tuple_with_toast(&encoded, &schema, &toast_manager).unwrap();
+
+        assert_eq!(decoded, values);
     }
 }

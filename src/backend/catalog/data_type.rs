@@ -51,12 +51,6 @@ impl DataType {
             s if s.starts_with("ARRAY<") && s.ends_with('>') => {
                 let inner = &s[6..s.len() - 1];
                 let element_type = Box::new(DataType::parse(inner)?);
-
-                // Validate that nested arrays are not allowed in this phase
-                if matches!(*element_type, DataType::Array { .. }) {
-                    return Err("Nested arrays are not supported".to_string());
-                }
-
                 Ok(DataType::Array { element_type })
             }
             _ => Err(format!("Unknown data type: {}", type_str)),
@@ -144,6 +138,19 @@ mod tests {
 
         let text_array = DataType::parse("ARRAY<TEXT>").unwrap();
         assert!(matches!(text_array, DataType::Array { .. }));
+    }
+
+    #[test]
+    fn test_parse_nested_array_types() {
+        let nested_array = DataType::parse("ARRAY<ARRAY<INT>>").unwrap();
+        assert_eq!(
+            nested_array,
+            DataType::Array {
+                element_type: Box::new(DataType::Array {
+                    element_type: Box::new(DataType::Int32),
+                }),
+            }
+        );
     }
 
     #[test]

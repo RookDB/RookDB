@@ -137,6 +137,23 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_decode_nested_int_array() {
+        let value = Value::Array(vec![
+            Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
+            Value::Array(vec![]),
+            Value::Array(vec![Value::Int32(3), Value::Int32(4), Value::Int32(5)]),
+        ]);
+        let ty = DataType::Array {
+            element_type: Box::new(DataType::Array {
+                element_type: Box::new(DataType::Int32),
+            }),
+        };
+        let encoded = ValueCodec::encode(&value, &ty).unwrap();
+        let decoded = ValueCodec::decode(&encoded, &ty).unwrap();
+        assert_eq!(value, decoded);
+    }
+
+    #[test]
     fn test_encode_decode_empty_array() {
         let value = Value::Array(vec![]);
         let ty = DataType::Array {
@@ -375,8 +392,25 @@ mod tests {
 
         let mut toast_manager = ToastManager::new();
         let encoded = TupleCodec::encode_tuple(&values, &schema, &mut toast_manager).unwrap();
-        let decoded = TupleCodec::decode_tuple(&encoded, &schema).unwrap();
+        let decoded = TupleCodec::decode_tuple_with_toast(&encoded, &schema, &toast_manager).unwrap();
 
-        assert_eq!(decoded[0], Value::Int32(1));
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn test_encode_decode_10kb_blob_with_toast() {
+        let schema = vec![
+            ("id".to_string(), DataType::Int32),
+            ("file_data".to_string(), DataType::Blob),
+        ];
+
+        let blob_10kb = vec![0x7Fu8; 10_240];
+        let values = vec![Value::Int32(7), Value::Blob(blob_10kb)];
+
+        let mut toast_manager = ToastManager::new();
+        let encoded = TupleCodec::encode_tuple(&values, &schema, &mut toast_manager).unwrap();
+        let decoded = TupleCodec::decode_tuple_with_toast(&encoded, &schema, &toast_manager).unwrap();
+
+        assert_eq!(decoded, values);
     }
 }

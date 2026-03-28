@@ -1,8 +1,7 @@
 # RookDB BLOB/ARRAY Implementation — Evaluation & Benchmarking Report
 
-**Phase**: Implementation & Testing  
-**Report Date**: March 27, 2026  
-**Evaluation Focus**: BLOB and ARRAY types — Correctness, Documentation, Robustness, Benchmarking, Testing, Code Quality, Standards Comparison, Innovation, Reusable APIs, Approach Experimentation, Modern Approaches Study
+**Phase**: Implementation & Testing   
+**Focus**: BLOB and ARRAY
 
 ---
 
@@ -12,20 +11,20 @@
 
 Verification through exhaustive type handling and roundtrip encoding tests across all BLOB/ARRAY paths.
 
-| Test Case | Result | Details |
-|-----------|--------|---------|
-| BLOB roundtrip (empty) | PASS | 4-byte length prefix, zero payload |
-| BLOB roundtrip (small) | PASS | `[0xDE, 0xAD, 0xBE, 0xEF]` preserved exactly |
-| BLOB roundtrip (all byte values) | PASS | 0x00–0xFF pattern bit-exact |
-| BLOB roundtrip (large, >TOAST) | PASS | 20KB payload correctly encoded |
-| ARRAY\<INT\> roundtrip | PASS | Element ordering and values correct |
-| ARRAY\<TEXT\> roundtrip | PASS | String ordering preserved |
-| ARRAY (empty) | PASS | Zero-element array round-trips |
-| ARRAY (large, 10K elements) | PASS | All elements preserved in order |
-| NULL handling in tuples | PASS | Null bitmap tracks missing values correctly |
-| BLOB in mixed-type tuple | PASS | (INT, BOOL, TEXT, BLOB) round-trips |
-| ARRAY in mixed-type tuple | PASS | (INT, ARRAY\<INT\>) round-trips |
-| Complex tuple (5 fields) | PASS | (INT, TEXT, BOOL, BLOB, ARRAY\<TEXT\>) |
+| Test Case  | Details |
+|-----------|---------|
+| BLOB roundtrip (empty)  | 4-byte length prefix, zero payload |
+| BLOB roundtrip (small)  | `[0xDE, 0xAD, 0xBE, 0xEF]` preserved exactly |
+| BLOB roundtrip (all byte values)  | 0x00–0xFF pattern bit-exact |
+| BLOB roundtrip (large, >TOAST)  | 20KB payload correctly encoded |
+| ARRAY\<INT\> roundtrip  | Element ordering and values correct |
+| ARRAY\<TEXT\> roundtrip  | String ordering preserved |
+| ARRAY (empty)  | Zero-element array round-trips |
+| ARRAY (large, 10K elements)  | All elements preserved in order |
+| NULL handling in tuples  | Null bitmap tracks missing values correctly |
+| BLOB in mixed-type tuple  | (INT, BOOL, TEXT, BLOB) round-trips |
+| ARRAY in mixed-type tuple  | (INT, ARRAY\<INT\>) round-trips |
+| Complex tuple (5 fields)  | (INT, TEXT, BOOL, BLOB, ARRAY\<TEXT\>) |
 
 **Correctness Metrics**:
 - Type parsing accuracy: 100% (BLOB, ARRAY\<T\> for all element types)
@@ -46,13 +45,13 @@ Verification through exhaustive type handling and roundtrip encoding tests acros
 | BLOB all-zeros (1000B) | Exact zeros preserved | PASS |
 | BLOB all-ones (0xFF × 1000) | Exact 0xFF preserved | PASS |
 | Array element ordering | Sequential order preserved | PASS |
-| Nested arrays | Rejected with `Err` | PASS |
+| Nested arrays | Round-trip parse/encode/decode  | PASS |
 
 **Correctness Guarantee**: No data corruption detected in any test case across 61 tests.
 
 ---
 
-## 2. Documentation Quality
+## 2. Overview
 
 ### 2.1 Architecture & Design Documentation
 
@@ -121,7 +120,7 @@ Two encoding paths exist depending on element type:
 |----------|-----------|-----------|
 | Length-prefixed encoding for BLOB | O(1) size lookup, simple parsing | 4-byte overhead per value |
 | TOAST threshold = 8KB | Balances inline vs. out-of-line storage; matches PostgreSQL default | Configurable in future |
-| No nested arrays | Simplifies type system and codec significantly | Phase 2 enhancement |
+| Recursive array types | Keeps `ARRAY<...>` expressive without changing the binary layout | Additional nesting still adds codec overhead |
 | Element-count prefix for ARRAY | Enables pre-allocation of `Vec::with_capacity` during decode | 4-byte overhead |
 | Bit-packed null bitmap | 1 bit per column, minimal space (1 byte for 5 columns) | Always present even if no NULLs |
 | Little-endian byte order | x86_64 native, avoids byte-swap overhead | Non-portable to big-endian without conversion |
@@ -133,7 +132,7 @@ Two encoding paths exist depending on element type:
 3. UTF-8 text encoding assumed (Rust default)
 4. Little-endian byte order (x86_64 target)
 5. TOAST persistence is in-memory only (Phase 1)
-6. Nested arrays (`ARRAY<ARRAY<T>>`) are explicitly rejected at parse time with `Err`
+6. Nested arrays (`ARRAY<ARRAY<T>>`) are parsed recursively and encoded with the same length-prefixed array format
 
 ---
 
@@ -162,7 +161,7 @@ All error conditions produce `Err(String)` — no panics in library code:
 | Error Condition | Handling | Test |
 |-----------------|---------|------|
 | Invalid type string (e.g., `"INVALID"`) | `Err("Unknown data type")` | `test_datatype_invalid_type_string` |
-| Nested arrays (`ARRAY<ARRAY<INT>>`) | `Err("Nested arrays are not supported")` | `test_datatype_nested_array_rejection` |
+| Nested arrays (`ARRAY<ARRAY<INT>>`) | Successful parse and round-trip encode/decode | `test_datatype_nested_array_support` |
 | Incomplete INT32 bytes (< 4 bytes) | `Err("Not enough bytes for INT32")` | `test_value_codec_decode_invalid_data` |
 | Incomplete TEXT/BLOB (length > data) | `Err("Not enough bytes for ... data")` | `test_value_codec_decode_incomplete_text` |
 | Type mismatch during encode | `Err("Type mismatch: expected ...")` | Caught in `ValueCodec::encode` match fallback |
@@ -199,74 +198,104 @@ The benchmarking suite (`benches/blob_array_bench.rs`) uses a statistically rigo
 
 ### 4.2 BLOB Performance (Initial Results)
 
-| Operation | Size | Mean | ±StdDev | Throughput |
-|-----------|------|------|---------|------------|
-| BLOB Encode | 10 B | 1.78 µs | ±1.25 µs | 563K ops/s |
-| BLOB Encode | 100 B | 1.26 µs | ±0.55 µs | 794K ops/s |
-| BLOB Encode | 1 KB | 1.24 µs | ±0.44 µs | 804K ops/s |
-| BLOB Encode | 10 KB | 1.37 µs | ±0.24 µs | 728K ops/s |
-| BLOB Encode | TOAST (~9.2KB) | 1.38 µs | ±0.59 µs | 722K ops/s |
-| BLOB Decode | 10 B | 1.23 µs | ±1.37 µs | 815K ops/s |
-| BLOB Decode | 100 B | 1.10 µs | ±0.38 µs | 907K ops/s |
-| BLOB Decode | 1 KB | 1.23 µs | ±0.58 µs | 813K ops/s |
-| BLOB Decode | 10 KB | 1.34 µs | ±0.24 µs | 749K ops/s |
-| BLOB Decode | TOAST (~9.2KB) | 1.35 µs | ±0.28 µs | 741K ops/s |
+| Operation | Size | Mean | ±StdDev | p95 | p99 | Throughput |
+|-----------|------|------|---------|-----|-----|------------|
+| BLOB Encode | 10 B | 1.33 µs | ±0.74 µs | 1.89 µs | 2.44 µs | 750K ops/s |
+| BLOB Encode | 100 B | 1.27 µs | ±0.38 µs | 1.47 µs | 1.89 µs | 790K ops/s |
+| BLOB Encode | 1 KB | 1.27 µs | ±0.42 µs | 1.47 µs | 1.89 µs | 788K ops/s |
+| BLOB Encode | 10 KB | 1.50 µs | ±0.82 µs | 1.89 µs | 1.96 µs | 668K ops/s |
+| BLOB Encode | TOAST (~9.2KB) | 1.55 µs | ±0.84 µs | 1.96 µs | 1.96 µs | 645K ops/s |
+| BLOB Decode | 10 B | 1.29 µs | ±0.58 µs | 1.47 µs | 1.89 µs | 775K ops/s |
+| BLOB Decode | 100 B | 1.26 µs | ±0.48 µs | 1.47 µs | 1.47 µs | 796K ops/s |
+| BLOB Decode | 1 KB | 1.25 µs | ±0.43 µs | 1.47 µs | 1.47 µs | 799K ops/s |
+| BLOB Decode | 10 KB | 1.46 µs | ±0.61 µs | 1.89 µs | 1.96 µs | 687K ops/s |
+| BLOB Decode | TOAST (~9.2KB) | 1.49 µs | ±0.73 µs | 1.96 µs | 1.96 µs | 671K ops/s |
 
 **Analysis**: BLOB encode/decode shows relatively flat latency across sizes (10B–10KB), indicating the measurement is dominated by `Vec` allocation overhead rather than `memcpy` cost at these sizes. The `extend_from_slice` operation is O(n) in theory but at < 10KB the allocation setup dominates. Throughput stays in the 700K–900K ops/s range.
+
+![BLOB performance comparison](../../images/Blob_performance.png)
 
 ### 4.3 ARRAY Performance (Initial Results)
 
 **ARRAY\<INT\>**:
 
-| Operation | Elements | Mean | ±StdDev | Throughput |
-|-----------|----------|------|---------|------------|
-| Encode | 10 | 1.48 µs | ±0.18 µs | 677K ops/s |
-| Encode | 100 | 3.46 µs | ±3.33 µs | 289K ops/s |
-| Encode | 1,000 | 18.72 µs | ±2.36 µs | 53K ops/s |
-| Encode | 10,000 | 166.54 µs | ±16.81 µs | 6K ops/s |
-| Decode | 10 | 1.48 µs | ±0.58 µs | 676K ops/s |
-| Decode | 100 | 3.53 µs | ±2.94 µs | 283K ops/s |
-| Decode | 1,000 | 22.27 µs | ±1.84 µs | 45K ops/s |
-| Decode | 10,000 | 215.70 µs | ±9.35 µs | 5K ops/s |
+| Operation | Elements | Mean | ±StdDev | p95 | p99 | Throughput |
+|-----------|----------|------|---------|-----|-----|------------|
+| Encode | 10 | 1.66 µs | ±0.28 µs | 1.96 µs | 2.31 µs | 601K ops/s |
+| Encode | 100 | 3.25 µs | ±0.83 µs | 3.91 µs | 4.40 µs | 308K ops/s |
+| Encode | 1,000 | 17.98 µs | ±1.83 µs | 22.56 µs | 26.26 µs | 56K ops/s |
+| Encode | 10,000 | 181.91 µs | ±34.17 µs | 241.66 µs | 253.32 µs | 5K ops/s |
+| Decode | 10 | 2.33 µs | ±13.13 µs | 1.96 µs | 2.44 µs | 430K ops/s |
+| Decode | 100 | 3.70 µs | ±1.42 µs | 3.91 µs | 4.82 µs | 270K ops/s |
+| Decode | 1,000 | 23.74 µs | ±2.87 µs | 24.10 µs | 41.07 µs | 42K ops/s |
+| Decode | 10,000 | 219.10 µs | ±6.39 µs | 233.00 µs | 237.12 µs | 5K ops/s |
 
-**ARRAY\<TEXT\>**:
 
-| Operation | Elements | Mean | ±StdDev | Throughput |
-|-----------|----------|------|---------|------------|
-| Encode | 10 | 1.52 µs | ±0.82 µs | 656K ops/s |
-| Encode | 100 | 3.63 µs | ±0.98 µs | 276K ops/s |
-| Encode | 1,000 | 23.46 µs | ±8.49 µs | 43K ops/s |
-| Decode | 10 | 1.73 µs | ±0.26 µs | 579K ops/s |
-| Decode | 100 | 5.58 µs | ±0.89 µs | 179K ops/s |
-| Decode | 1,000 | 57.49 µs | ±12.52 µs | 17K ops/s |
+**Analysis**: Arrays scale linearly with element count, confirming O(n) complexity. A 10x increase from 100 to 1,000 INT elements yields ~5.5x time increase (3.25µs → 17.98µs), which is sub-linear due to `Vec` allocation amortization.
+The 10x element increase from 1K→10K yields ~10.1x time increase (17.98→181.91µs), consistent with linear scaling plus a fixed per-call overhead.
 
-**Analysis**: Arrays scale linearly with element count, confirming O(n) complexity. A 10x increase from 100 to 1,000 INT elements yields ~5.4x time increase (3.46µs → 18.72µs), which is sub-linear due to `Vec` allocation amortization. TEXT arrays are ~2.5x slower to decode than INT arrays at 1,000 elements due to per-element UTF-8 `String` allocation overhead and the additional 4-byte length prefix per element.
+![ARRAY performance comparison](../../images/array_performance.png)
+
+**ARRAY\<ARRAY\<INT\>\>** (latest benchmark run, 4 INTs per inner array):
+
+| Operation | Shape | Mean | ±StdDev | p95 | p99 | Throughput |
+|-----------|-------|------|---------|-----|-----|------------|
+| Encode | 10x4 | 2.95 µs | ±0.71 µs | 3.35 µs | 3.42 µs | 338K ops/s |
+| Encode | 100x4 | 16.12 µs | ±1.40 µs | 18.65 µs | 24.24 µs | 62K ops/s |
+| Encode | 1,000x4 | 143.06 µs | ±3.17 µs | 150.44 µs | 153.52 µs | 7K ops/s |
+| Decode | 10x4 | 2.58 µs | ±0.78 µs | 2.93 µs | 3.35 µs | 388K ops/s |
+| Decode | 100x4 | 14.93 µs | ±1.03 µs | 15.16 µs | 22.00 µs | 67K ops/s |
+| Decode | 1,000x4 | 133.09 µs | ±3.57 µs | 140.32 µs | 140.67 µs | 8K ops/s |
+
+**Nested-array analysis**: Recursive arrays remain O(n) in the total number of scalar elements, but each inner array adds its own 4-byte count plus a 4-byte outer length prefix. That is why `ARRAY<ARRAY<INT>>` is materially slower and less space-efficient than flat `ARRAY<INT>` carrying the same number of integers.
+
+![Nested ARRAY analysis](../../images/nested_array_analysis.png)
 
 ### 4.4 TOAST Operations
 
-| Operation | Mean | ±StdDev | Throughput |
-|-----------|------|---------|------------|
-| ToastPointer to_bytes | 1.18 µs | ±0.58 µs | 848K ops/s |
-| ToastPointer from_bytes | 1.11 µs | ±0.49 µs | 902K ops/s |
-| should_use_toast check | 1.13 µs | ±0.48 µs | 884K ops/s |
-| store_large_value (13KB) | 1.16 µs | ±0.24 µs | 862K ops/s |
+| Operation | Mean | ±StdDev | p95 | p99 | Throughput |
+|-----------|------|---------|-----|-----|------------|
+| ToastPointer to_bytes | 1.26 µs | ±0.45 µs | 1.47 µs | 1.47 µs | 796K ops/s |
+| ToastPointer from_bytes | 1.23 µs | ±0.39 µs | 1.47 µs | 1.47 µs | 812K ops/s |
+| should_use_toast check | 1.23 µs | ±0.37 µs | 1.47 µs | 1.47 µs | 812K ops/s |
+| store_large_value (13KB) | 1.25 µs | ±0.24 µs | 1.47 µs | 1.47 µs | 801K ops/s |
 
 ### 4.5 Tuple Operations with BLOB & ARRAY
 
-| Operation | Mean | ±StdDev | Throughput |
-|-----------|------|---------|------------|
-| Tuple Encode (INT + 100B BLOB) | 1.56 µs | ±0.57 µs | 641K ops/s |
-| Tuple Encode (INT + 1KB BLOB) | 1.53 µs | ±0.69 µs | 654K ops/s |
-| Tuple Encode (INT + 4KB BLOB) | 1.78 µs | ±0.55 µs | 561K ops/s |
-| Tuple Decode (INT + 100B BLOB) | 1.35 µs | ±0.66 µs | 743K ops/s |
-| Tuple Decode (INT + 1KB BLOB) | 1.51 µs | ±0.48 µs | 660K ops/s |
-| Tuple Decode (INT + 4KB BLOB) | 1.38 µs | ±0.63 µs | 726K ops/s |
-| Tuple Encode (INT + 10-elem ARRAY) | 1.71 µs | ±0.52 µs | 585K ops/s |
-| Tuple Encode (INT + 100-elem ARRAY) | 3.34 µs | ±0.84 µs | 299K ops/s |
-| Tuple Encode (INT + 1000-elem ARRAY) | 18.34 µs | ±2.12 µs | 55K ops/s |
-| Tuple Decode (INT + 10-elem ARRAY) | 1.65 µs | ±0.25 µs | 606K ops/s |
-| Tuple Decode (INT + 100-elem ARRAY) | 3.57 µs | ±0.88 µs | 280K ops/s |
-| Tuple Decode (INT + 1000-elem ARRAY) | 22.66 µs | ±2.03 µs | 44K ops/s |
+| Operation | Mean | ±StdDev | p95 | p99 | Throughput |
+|-----------|------|---------|-----|-----|------------|
+| Tuple Encode (INT + 100B BLOB) | 1.45 µs | ±0.66 µs | 1.89 µs | 1.96 µs | 692K ops/s |
+| Tuple Encode (INT + 1KB BLOB) | 1.50 µs | ±0.54 µs | 1.96 µs | 1.96 µs | 665K ops/s |
+| Tuple Encode (INT + 4KB BLOB) | 1.52 µs | ±0.58 µs | 1.96 µs | 1.96 µs | 656K ops/s |
+| Tuple Encode (INT + 10KB BLOB) | 1.75 µs | ±0.72 µs | 2.38 µs | 2.44 µs | 573K ops/s |
+| Tuple Decode (INT + 100B BLOB) | 1.29 µs | ±0.40 µs | 1.47 µs | 1.89 µs | 777K ops/s |
+| Tuple Decode (INT + 1KB BLOB) | 1.28 µs | ±0.55 µs | 1.47 µs | 1.89 µs | 780K ops/s |
+| Tuple Decode (INT + 4KB BLOB) | 1.37 µs | ±0.25 µs | 1.89 µs | 1.96 µs | 730K ops/s |
+| Tuple Decode (INT + 10KB BLOB) | 1.53 µs | ±0.29 µs | 1.96 µs | 1.96 µs | 654K ops/s |
+| Tuple Encode (INT + 10-elem ARRAY) | 1.74 µs | ±0.67 µs | 1.96 µs | 2.44 µs | 575K ops/s |
+| Tuple Encode (INT + 100-elem ARRAY) | 3.31 µs | ±0.68 µs | 3.77 µs | 3.91 µs | 302K ops/s |
+| Tuple Encode (INT + 1000-elem ARRAY) | 17.88 µs | ±1.58 µs | 19.98 µs | 27.17 µs | 56K ops/s |
+| Tuple Decode (INT + 10-elem ARRAY) | 1.45 µs | ±0.25 µs | 1.89 µs | 1.96 µs | 692K ops/s |
+| Tuple Decode (INT + 100-elem ARRAY) | 3.20 µs | ±0.75 µs | 3.42 µs | 3.84 µs | 313K ops/s |
+| Tuple Decode (INT + 1000-elem ARRAY) | 19.87 µs | ±1.92 µs | 21.02 µs | 30.52 µs | 50K ops/s |
+| Tuple Encode (INT + 10x4 ARRAY\<ARRAY\<INT\>\>) | 4.00 µs | ±1.79 µs | 4.33 µs | 4.82 µs | 250K ops/s |
+| Tuple Encode (INT + 100x4 ARRAY\<ARRAY\<INT\>\>) | 23.18 µs | ±3.19 µs | 24.52 µs | 43.51 µs | 43K ops/s |
+| Tuple Encode (INT + 300x4 ARRAY\<ARRAY\<INT\>\>) | 71.06 µs | ±8.11 µs | 88.84 µs | 112.10 µs | 14K ops/s |
+| Tuple Decode (INT + 10x4 ARRAY\<ARRAY\<INT\>\>) | 3.37 µs | ±0.40 µs | 3.84 µs | 4.26 µs | 297K ops/s |
+| Tuple Decode (INT + 100x4 ARRAY\<ARRAY\<INT\>\>) | 17.48 µs | ±2.56 µs | 19.98 µs | 32.90 µs | 57K ops/s |
+| Tuple Decode (INT + 300x4 ARRAY\<ARRAY\<INT\>\>) | 52.15 µs | ±7.01 µs | 59.58 µs | 81.37 µs | 19K ops/s |
+
+**Tuple benchmark interpretation**: Tuple-level BLOB operations remain almost flat because the additional work is mostly fixed-cost framing: an 8-byte header, null bitmap handling, one 12-byte variable-field directory entry, and a fixed-width `INT` column. The new 10KB row now exercises the TOAST path end to end: encode stores a 16-byte `ToastPointer` inline, and decode reconstructs the original payload through the in-memory `ToastManager`. Even with TOAST reconstruction, latency stays in the low-microsecond range because the benchmark isolates codec/storage-manager work rather than disk I/O.
+
+For `INT + ARRAY<INT>`, the tuple curves closely track the raw array curves. Encoding must build the tuple envelope and append the already-encoded array payload; decoding must parse the tuple envelope and then hand off the variable field back to `ValueCodec::decode`. That is why tuple latency is consistently a little higher than raw array latency, but preserves the same linear scaling trend.
+
+For `INT + ARRAY<ARRAY<INT>>`, most of the cost still comes from recursive array encoding/decoding, not from tuple framing. The nested tuple benchmarks scale from `4.00 µs` to `71.06 µs` on encode and from `3.37 µs` to `52.15 µs` on decode, which shows that tuple bookkeeping stays secondary while recursive per-inner-array metadata dominates. These tuple benchmarks were intentionally capped at `300x4` to stay below the TOAST threshold and measure the inline tuple path rather than TOAST-pointer handling.
+
+![Tuple vs BLOB benchmark](../../images/tuple_vs_blob.png)
+
+![Tuple vs ARRAY benchmark](../../images/tuple_vs_array.png)
+
+![Tuple vs nested ARRAY benchmark](../../images/tuple_vs_nested.png)
 
 ### 4.6 Memory Efficiency
 
@@ -279,7 +308,7 @@ The benchmarking suite (`benches/blob_array_bench.rs`) uses a statistically rigo
 | ToastPointer | 16 bytes |
 | ToastChunk (base, excl. data) | 40 bytes |
 
-**Encoded Size Efficiency**:
+**Encoded Size Efficiency (raw `ValueCodec` payload only)**:
 
 | Type | Data Size | Encoded Size | Overhead | Efficiency |
 |------|-----------|-------------|----------|-----------|
@@ -290,14 +319,21 @@ The benchmarking suite (`benches/blob_array_bench.rs`) uses a statistically rigo
 | ARRAY\<INT\> (10) | 40 B | 44 B | 4 B | 90.9% |
 | ARRAY\<INT\> (100) | 400 B | 404 B | 4 B | 99.0% |
 | ARRAY\<INT\> (1000) | 4,000 B | 4,004 B | 4 B | 99.9% |
+| ARRAY\<ARRAY\<INT\>\> (10x4) | 160 B | 244 B | 84 B | 65.6% |
+| ARRAY\<ARRAY\<INT\>\> (100x4) | 1,600 B | 2,404 B | 804 B | 66.6% |
 
-**Key Finding**: Storage overhead is constant at 4 bytes (length/count prefix) regardless of data size. Efficiency exceeds 99% for payloads >= 1 KB.
+**Key Finding**: The constant 4-byte overhead applies only to raw BLOB and flat `ARRAY<INT>` values encoded directly by `ValueCodec`. Nested arrays add 8 bytes per inner array (inner count + outer length prefix), so their overhead grows with nesting.
 
-The chart below visualizes the same trend from the table: fixed 4-byte metadata becomes negligible as payload size grows. BLOB values reach near-ideal efficiency quickly, and `ARRAY<INT>` follows the same pattern because its only structural overhead is the 4-byte element-count prefix.
+These figures do not include tuple framing. At the tuple layer, overhead also includes `TupleHeader` (8 B), null bitmap bytes, `VarFieldEntry` (12 B per variable column), fixed-width sibling fields, and possibly a 16-byte `ToastPointer` when the value is externalized.
 
-![Memory efficiency chart](./images/memory_efficiency_chart.png)
+For example, a tuple shaped like `(INT, ARRAY<INT>)` with a non-TOASTed array has approximately `8 B` header + `1 B` null bitmap + `12 B` var entry + `4 B` fixed INT = `25 B` of tuple framing before the array payload itself. If the variable value is TOASTed, the inline tuple stores a 16-byte pointer payload instead of the full value, and the actual bytes move to TOAST storage.
+
+The chart below visualizes the same trend from the table: fixed 4-byte metadata becomes negligible as payload size grows for raw BLOB and flat `ARRAY<INT>` values. Nested arrays are intentionally less efficient because each inner array contributes its own framing.
+
+![Memory efficiency chart](../../images/memory_efficiency_chart.png)
 
 **Chart Interpretation**: The steep improvement from 10B to 1KB demonstrates that RookDB's framing cost is constant rather than proportional to payload size. This makes the encoding especially space-efficient for medium and large BLOB/ARRAY values.
+The near-flat throughput curve across 100B–10KB confirms that allocation setup dominates over `memcpy` cost. The dip at 10B is due to per-call overhead being proportionally larger relative to the small payload.
 
 ---
 
@@ -320,13 +356,13 @@ The chart below visualizes the same trend from the table: fixed 4-byte metadata 
 |----------|-------|-------------|
 | Data type parsing | 5 | Type string parsing, variable-length detection |
 | Value codec (BLOB) | 4 | BLOB encode/decode, empty, patterns |
-| Value codec (ARRAY) | 4 | INT/TEXT arrays, empty arrays |
+| Value codec (ARRAY) | 5 | INT/TEXT arrays, empty arrays, nested arrays |
 | Row layout structs | 4 | TupleHeader, VarFieldEntry, ToastPointer, ToastChunk roundtrips |
 | TOAST manager | 5 | Creation, large values, threshold boundaries |
 | Tuple codec | 8 | Simple/mixed/complex tuples, BLOB tuples, ARRAY tuples |
 | Edge cases | 12 | Empty values, boundary values, large values, Unicode, byte patterns |
 | Null handling | 3 | Single-column, multi-column patterns, all-null |
-| Robustness | 6 | Invalid data, type mismatches, nested array rejection |
+| Robustness | 6 | Invalid data, type mismatches, nested array support |
 | Correctness | 5 | Whitespace preservation, all-zeros/ones BLOB, ordering |
 | Integration | 2 | Multi-row encoding, schema evolution |
 | Performance | 3 | Primitive vs variable, tuple complexity, array scalability |
@@ -342,6 +378,8 @@ The chart below visualizes the same trend from the table: fixed 4-byte metadata 
 | 10,000 elements | 98.43 ms | ~86× (expected ~100×) |
 
 **Conclusion**: Linear O(n) scaling confirmed. Slightly sub-linear due to `Vec::with_capacity` allocation amortization — the allocator performs proportionally fewer resize operations as vector pre-allocation becomes more effective for larger sizes.
+
+
 
 ### 5.4 Performance Testing Results
 
@@ -361,9 +399,9 @@ The chart below visualizes the same trend from the table: fixed 4-byte metadata 
 ### 6.1 Module Architecture
 
 ```
-data_type.rs ──→ value_codec.rs ──→ tuple_codec.rs ──→ Backend
+data_type.rs ──> value_codec.rs ──> tuple_codec.rs ──> Backend
                        │
-                  toast.rs ──────────→ (future persistence)
+                  toast.rs
                        │
                  row_layout.rs (structs)
 ```
@@ -376,13 +414,13 @@ data_type.rs ──→ value_codec.rs ──→ tuple_codec.rs ──→ Backend
 
 ### 6.2 Module Sizes
 
-| Module | Lines | Responsibility |
-|--------|-------|---------------|
-| `data_type.rs` | 169 | Type definitions, Value enum, parsing |
-| `value_codec.rs` | 241 | Per-type encode/decode |
-| `tuple_codec.rs` | 261 | Full tuple serialization with null bitmap |
-| `row_layout.rs` | 338 | Header, VarFieldEntry, ToastPointer/Chunk structs |
-| `toast.rs` | 124 | TOAST threshold, chunking, storage |
+| Module  | Responsibility |
+|--------|---------------|
+| `data_type.rs`  | Type definitions, Value enum, parsing |
+| `value_codec.rs`  | Per-type encode/decode |
+| `tuple_codec.rs`  | Full tuple serialization with null bitmap |
+| `row_layout.rs`  | Header, VarFieldEntry, ToastPointer/Chunk structs |
+| `toast.rs`  | TOAST threshold, chunking, storage |
 
 All modules are under 350 lines — well within single-responsibility scope. Adding a new data type (e.g., FLOAT64) requires:
 1. A new variant in `DataType` enum (`data_type.rs`)
@@ -402,7 +440,7 @@ All modules are under 350 lines — well within single-responsibility scope. Add
 
 The benchmark file mirrors the library's modular structure:
 - `bench_blob_encoding()` — isolated BLOB encode/decode
-- `bench_array_encoding()` — isolated ARRAY encode/decode for INT and TEXT
+- `bench_array_encoding()` — isolated ARRAY encode/decode for INT, TEXT, and nested INT arrays
 - `bench_toast_operations()` — TOAST pointer and storage operations
 - `bench_tuple_operations()` — full tuple pipeline (header + bitmap + payload)
 - `bench_memory_efficiency()` — static structure size and encoding efficiency analysis
@@ -422,8 +460,11 @@ Each function is self-contained, pushes results into a shared `Vec<BenchResult>`
 | CockroachDB | ~10–20 µs | ~5–10 µs | Distributed KV + Raft consensus |
 | **RookDB** | **~1.24 µs** | **~1.23 µs** | Length-prefix, no compression, in-memory |
 
+![Industry Comparison](../../images/industry_comparison.png)
+
 **Context**: RookDB's raw codec throughput is faster because it performs no compression, no WAL writes, and no page-level framing during encode/decode. This is expected — the comparison highlights that the codec layer itself is not a bottleneck. Future additions (compression, disk I/O, WAL) will increase latency toward the PostgreSQL range.
 
+(The no. for other sqls are taken from the web)
 ### 7.2 Array Encoding Comparison
 
 | System | 1000-elem INT Array Encode | Format |
@@ -433,22 +474,6 @@ Each function is self-contained, pushes results into a shared `Vec<BenchResult>`
 | **RookDB** | **~18.72 µs** | Count-prefix + per-element encode |
 
 RookDB's array encoding is competitive with DuckDB and significantly faster than PostgreSQL. PostgreSQL's array handling carries overhead from multi-dimensional support (`ndim`, `dims[]`, `lbound[]` header fields) and OID-based element type resolution that RookDB's simpler single-dimension model avoids.
-
-### 7.3 BLOB Throughput Scaling (Graph Data)
-
-
-![BLOB throughput scaling chart](./images/blob_throughput_chart.png)
-
-The near-flat throughput curve across 100B–10KB confirms that allocation setup dominates over `memcpy` cost. The dip at 10B is due to per-call overhead being proportionally larger relative to the small payload.
-
-
-### 7.4 Array Encode Time Scaling (Graph Data)
-
-![Array scaling chart](./images/array_scaling_chart.png)
-
-The linear progression on a log-log scale confirms O(n) complexity. The 10x element increase from 1K→10K yields 8.9x time increase (18.72→166.54µs), consistent with linear scaling plus a fixed per-call overhead.
-
-
 
 
 

@@ -1,6 +1,8 @@
 //! TOAST (The Oversized Attribute Storage Technique) manager
 //! Handles out-of-line storage of large BLOB and ARRAY values
 
+use std::collections::HashMap;
+
 use crate::backend::storage::row_layout::{ToastChunk, ToastPointer};
 
 /// Default chunk size for TOAST storage (4 KB)
@@ -15,6 +17,8 @@ pub struct ToastManager {
     pub next_value_id: u64,
     /// Number of pages used by TOAST table
     pub toast_page_count: u32,
+    /// In-memory chunk store keyed by TOAST value ID
+    chunks: HashMap<u64, Vec<ToastChunk>>,
 }
 
 impl ToastManager {
@@ -22,6 +26,7 @@ impl ToastManager {
         ToastManager {
             next_value_id: 1,
             toast_page_count: 0,
+            chunks: HashMap::new(),
         }
     }
 
@@ -34,14 +39,58 @@ impl ToastManager {
         let chunk_count = (payload.len() + TOAST_CHUNK_SIZE - 1) / TOAST_CHUNK_SIZE;
 
         // Split payload into chunks
+        let mut stored_chunks = Vec::with_capacity(chunk_count);
         let mut chunk_no = 0;
         for chunk_data in payload.chunks(TOAST_CHUNK_SIZE) {
-            let _chunk = ToastChunk::new(value_id, chunk_no, chunk_data.to_vec());
-            // In a real implementation, these chunks would be written to a TOAST file
+            stored_chunks.push(ToastChunk::new(value_id, chunk_no, chunk_data.to_vec()));
             chunk_no += 1;
         }
+        self.chunks.insert(value_id, stored_chunks);
 
         Ok(ToastPointer::new(value_id, total_bytes, chunk_count as u32))
+    }
+
+    /// Read a large value from the in-memory TOAST store using a pointer
+    pub fn fetch_large_value(&self, ptr: &ToastPointer) -> Result<Vec<u8>, String> {
+        let chunks = self
+            .chunks
+            .get(&ptr.value_id)
+            .ok_or_else(|| format!("TOAST value {} not found", ptr.value_id))?;
+
+        if chunks.len() != ptr.chunk_count as usize {
+            return Err(format!(
+                "TOAST chunk count mismatch for value {}: expected {}, found {}",
+                ptr.value_id,
+                ptr.chunk_count,
+                chunks.len()
+            ));
+        }
+
+        let mut ordered_chunks: Vec<&ToastChunk> = chunks.iter().collect();
+        ordered_chunks.sort_by_key(|chunk| chunk.chunk_no);
+
+        let mut result = Vec::with_capacity(ptr.total_bytes as usize);
+        for (expected_chunk_no, chunk) in ordered_chunks.into_iter().enumerate() {
+            if chunk.chunk_no as usize != expected_chunk_no {
+                return Err(format!(
+                    "Missing or out-of-order TOAST chunk {} for value {}",
+                    expected_chunk_no,
+                    ptr.value_id
+                ));
+            }
+            result.extend_from_slice(&chunk.data);
+        }
+
+        if result.len() != ptr.total_bytes as usize {
+            return Err(format!(
+                "TOAST byte count mismatch for value {}: expected {}, found {}",
+                ptr.value_id,
+                ptr.total_bytes,
+                result.len()
+            ));
+        }
+
+        Ok(result)
     }
 
     /// Read a large value from TOAST using a pointer
@@ -50,13 +99,7 @@ impl ToastManager {
         _toast_file: &mut std::fs::File,
         ptr: &ToastPointer,
     ) -> Result<Vec<u8>, String> {
-        let mut result = Vec::with_capacity(ptr.total_bytes as usize);
-
-        // In this simplified implementation, we would read from the TOAST file
-        // For now, we return a placeholder
-        result.resize(ptr.total_bytes as usize, 0);
-
-        Ok(result)
+        self.fetch_large_value(ptr)
     }
 
     /// Check if a value should be stored in TOAST
@@ -83,6 +126,7 @@ impl ToastManager {
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]),
             toast_page_count: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            chunks: HashMap::new(),
         })
     }
 }
@@ -108,6 +152,7 @@ mod tests {
         assert_eq!(ptr.total_bytes, 10000);
         assert!(ptr.chunk_count > 0);
         assert_eq!(manager.next_value_id, 2);
+        assert_eq!(manager.fetch_large_value(&ptr).unwrap(), payload);
     }
 
     #[test]

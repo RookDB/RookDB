@@ -196,6 +196,28 @@ fn bench_blob_encoding(results: &mut Vec<BenchResult>) {
 //  ARRAY Benchmarks
 // ═══════════════════════════════════════════════════════════════════
 
+fn nested_int_array_type() -> DataType {
+    DataType::Array {
+        element_type: Box::new(DataType::Array {
+            element_type: Box::new(DataType::Int32),
+        }),
+    }
+}
+
+fn make_nested_int_array(outer_count: usize, inner_count: usize) -> Value {
+    Value::Array(
+        (0..outer_count)
+            .map(|outer| {
+                Value::Array(
+                    (0..inner_count)
+                        .map(|inner| Value::Int32((outer * inner_count + inner) as i32))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
 fn bench_array_encoding(results: &mut Vec<BenchResult>) {
     println!("\n╔════════════════════════════════════════════════════════════════════════════════╗");
     println!("║                   ARRAY Encoding / Decoding Benchmarks                       ║");
@@ -300,6 +322,47 @@ fn bench_array_encoding(results: &mut Vec<BenchResult>) {
         r.print_row();
         results.push(r);
     }
+
+    // Nested INT Array Encoding
+    println!("\n  --- ARRAY<ARRAY<INT>> Encoding ---");
+    for &(outer_count, inner_count) in &[(10_usize, 4_usize), (100, 4), (1_000, 4)] {
+        let array_val = make_nested_int_array(outer_count, inner_count);
+        let array_type = nested_int_array_type();
+        let iters = if outer_count >= 1_000 { 100 } else { 300 };
+
+        let r = benchmark(
+            &format!("ARRAY<ARRAY<INT>> Encode ({}x{})", outer_count, inner_count),
+            iters,
+            100,
+            || {
+                let encoded = ValueCodec::encode(black_box(&array_val), black_box(&array_type));
+                let _ = black_box(encoded);
+            },
+        );
+        r.print_row();
+        results.push(r);
+    }
+
+    // Nested INT Array Decoding
+    println!("\n  --- ARRAY<ARRAY<INT>> Decoding ---");
+    for &(outer_count, inner_count) in &[(10_usize, 4_usize), (100, 4), (1_000, 4)] {
+        let array_val = make_nested_int_array(outer_count, inner_count);
+        let array_type = nested_int_array_type();
+        let encoded = ValueCodec::encode(&array_val, &array_type).unwrap();
+        let iters = if outer_count >= 1_000 { 100 } else { 300 };
+
+        let r = benchmark(
+            &format!("ARRAY<ARRAY<INT>> Decode ({}x{})", outer_count, inner_count),
+            iters,
+            100,
+            || {
+                let decoded = ValueCodec::decode(black_box(&encoded), black_box(&array_type));
+                let _ = black_box(decoded);
+            },
+        );
+        r.print_row();
+        results.push(r);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -370,14 +433,15 @@ fn bench_tuple_operations(results: &mut Vec<BenchResult>) {
         ("data".to_string(), DataType::Blob),
     ];
 
-    for &blob_size in &[100_usize, 1024, 4096] {
+    for &blob_size in &[100_usize, 1024, 4096, 10_240] {
         let values = vec![
             Value::Int32(42),
             Value::Blob(vec![0xAB; blob_size]),
         ];
+        let iters = if blob_size >= 10_240 { 500 } else { 1000 };
         let r = benchmark(
             &format!("Tuple Encode (INT + {}B BLOB)", blob_size),
-            1000,
+            iters,
             100,
             || {
                 let mut toast_mgr = ToastManager::new();
@@ -395,7 +459,7 @@ fn bench_tuple_operations(results: &mut Vec<BenchResult>) {
 
     // Tuple with BLOB — Decoding
     println!();
-    for &blob_size in &[100_usize, 1024, 4096] {
+    for &blob_size in &[100_usize, 1024, 4096, 10_240] {
         let values = vec![
             Value::Int32(42),
             Value::Blob(vec![0xAB; blob_size]),
@@ -403,13 +467,18 @@ fn bench_tuple_operations(results: &mut Vec<BenchResult>) {
         let mut toast_mgr = ToastManager::new();
         let encoded =
             TupleCodec::encode_tuple(&values, &schema_blob, &mut toast_mgr).unwrap();
+        let iters = if blob_size >= 10_240 { 500 } else { 1000 };
 
         let r = benchmark(
             &format!("Tuple Decode (INT + {}B BLOB)", blob_size),
-            1000,
+            iters,
             100,
             || {
-                let dec = TupleCodec::decode_tuple(black_box(&encoded), black_box(&schema_blob));
+                let dec = TupleCodec::decode_tuple_with_toast(
+                    black_box(&encoded),
+                    black_box(&schema_blob),
+                    black_box(&toast_mgr),
+                );
                 let _ = black_box(dec);
             },
         );
@@ -469,6 +538,62 @@ fn bench_tuple_operations(results: &mut Vec<BenchResult>) {
             100,
             || {
                 let dec = TupleCodec::decode_tuple(black_box(&encoded), black_box(&schema_array));
+                let _ = black_box(dec);
+            },
+        );
+        r.print_row();
+        results.push(r);
+    }
+
+    // Tuple with nested ARRAY
+    println!();
+    let schema_nested_array = vec![
+        ("id".to_string(), DataType::Int32),
+        ("matrix".to_string(), nested_int_array_type()),
+    ];
+
+    // Keep nested tuple payloads below the TOAST threshold so decode benchmarks
+    // exercise the actual nested-array path rather than TOAST pointer handling.
+    for &outer_count in &[10_usize, 100, 300] {
+        let values = vec![
+            Value::Int32(1),
+            make_nested_int_array(outer_count, 4),
+        ];
+        let r = benchmark(
+            &format!("Tuple Encode (INT + {}x4 ARRAY<ARRAY<INT>>)", outer_count),
+            300,
+            100,
+            || {
+                let mut toast_mgr = ToastManager::new();
+                let enc = TupleCodec::encode_tuple(
+                    black_box(&values),
+                    black_box(&schema_nested_array),
+                    &mut toast_mgr,
+                );
+                let _ = black_box(enc);
+            },
+        );
+        r.print_row();
+        results.push(r);
+    }
+
+    println!();
+    for &outer_count in &[10_usize, 100, 300] {
+        let values = vec![
+            Value::Int32(1),
+            make_nested_int_array(outer_count, 4),
+        ];
+        let mut toast_mgr = ToastManager::new();
+        let encoded =
+            TupleCodec::encode_tuple(&values, &schema_nested_array, &mut toast_mgr).unwrap();
+
+        let r = benchmark(
+            &format!("Tuple Decode (INT + {}x4 ARRAY<ARRAY<INT>>)", outer_count),
+            300,
+            100,
+            || {
+                let dec =
+                    TupleCodec::decode_tuple(black_box(&encoded), black_box(&schema_nested_array));
                 let _ = black_box(dec);
             },
         );
