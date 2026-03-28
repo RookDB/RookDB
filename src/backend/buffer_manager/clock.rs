@@ -13,29 +13,35 @@ impl ClockPolicy {
 
 impl ReplacementPolicy for ClockPolicy {
 
-    fn victim(&mut self, frames: &Vec<BufferFrame>) -> Option<usize> {
+    fn victim(&mut self, frames: &mut Vec<BufferFrame>) -> Option<usize> {
 
-    let n = frames.len();
+        let n = frames.len();
+        let mut scanned = 0;
 
-    loop {
+        while scanned < 2 * n {
 
-        let frame = &frames[self.hand];
+            let frame = &mut frames[self.hand];
 
-        if frame.metadata.pin_count == 0 {
+            if frame.metadata.pin_count == 0 {
 
-            if frame.metadata.usage_count == 0 {
-                let victim = self.hand;
-                self.hand = (self.hand + 1) % n;
-                return Some(victim);
+                if frame.metadata.usage_count == 0 {
+                    let victim = self.hand;
+                    self.hand = (self.hand + 1) % n;
+                    return Some(victim);
+                } else {
+                    // give second chance
+                    frame.metadata.usage_count = 0;
+                }
             }
+
+            self.hand = (self.hand + 1) % n;
+            scanned += 1;
         }
 
-        self.hand = (self.hand + 1) % n;
+        None // all pages pinned
     }
-}
 
     fn record_access(&mut self, _frame_id: usize) {
-        // CLOCK uses usage_count in metadata.
-        // It will be updated inside BufferPool.
+        // handled via usage_count in BufferPool
     }
 }
