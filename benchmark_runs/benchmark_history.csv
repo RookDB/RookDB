@@ -1,2 +1,8 @@
 run_id_unix,output_file,small_tuples,large_tuples,lookup_samples,inserted_total,small_insert_tps,large_insert_tps,lookup_ops,scan_tps,fsm_rebuild_seconds,scan_matches_insert_count,oversized_tuple_rejected,fsm_rebuild_search_found_page
 1774714733,benchmark_runs/latest_fsm_heap_benchmark.json,1200,120,200,1320,1979.5269,1134.1217,8188.5552,28830.1146,0.032657,true,true,true
+1774716939,benchmark_runs/latest_fsm_heap_benchmark.json,1200,120,200,1320,520.4109,338.3271,50753.0226,10672.1538,0.029043,true,true,true
+1774717112,benchmark_runs/latest_fsm_heap_benchmark.json,1200,120,200,1320,693.6037,249.3411,112294.7603,7887.9456,0.002053,true,true,true
+1774717355,benchmark_runs/latest_fsm_heap_benchmark.json,1200,120,200,1320,526.4033,231.3932,5541.0010,5750.4546,0.003773,true,true,true
+1774717365,benchmark_runs/latest_fsm_heap_benchmark.json,1200,120,200,1320,664.9727,281.4339,111674.5090,8435.9284,0.001786,true,true,true
+1774717425,benchmark_runs/latest_fsm_heap_benchmark.json,3200,320,500,3520,615.6237,325.1352,7822.5659,10499.2630,0.008042,true,true,true
+1774717734,benchmark_runs/latest_fsm_heap_benchmark.json,20000,1000,1000,21000,498.6649,246.3923,4957.2531,6134.4812,0.042505,true,true,true

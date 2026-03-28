@@ -160,13 +160,13 @@ Source: `benchmark_runs/initial_phase_results.json`
 
 Latest run is injected automatically by `cargo run --bin benchmark_fsm_heap ...`.
 
-- Latest run id: `1774714733`
+- Latest run id: `1774717734`
 - Latest JSON report: `benchmark_runs/latest_fsm_heap_benchmark.json`
 - History CSV: `benchmark_runs/benchmark_history.csv`
 
 | Run ID | Small TPS | Large TPS | Lookup OPS | Scan TPS | Rebuild sec | Correctness | Oversize Reject |
 | --- | ---: | ---: | ---: | ---: | ---: | :---: | :---: |
-| `1774714733` | 1979.53 | 1134.12 | 8188.56 | 28830.11 | 0.032657 | ✅ | ✅ |
+| `1774717734` | 498.66 | 246.39 | 4957.25 | 6134.48 | 0.042505 | ✅ | ✅ |
 
 > Re-run the benchmark command to refresh this section and append to history files.
 <!-- BENCHMARK_RUN_LOG_END -->
