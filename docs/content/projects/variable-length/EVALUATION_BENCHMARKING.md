@@ -729,12 +729,9 @@ WiredTiger uses a cell-based page format where each cell contains a key or value
 | **Experimentation** | Evaluated TLV, varint, fixed-offset, Criterion.rs; tested 4 TOAST thresholds |
 | **Modern Study** | PostgreSQL TOAST, Arrow, Cap'n Proto, FlatBuffers, DuckDB, WiredTiger; 3 methodology refs |
 
-### Pending for Phase 2
+### Plans for Next Phase 
 
-1. TOAST persistence layer (currently in-memory only)
-2. Concurrency / thread-safe variants
-3. PGLZ or LZ4 compression for large BLOBs
-4. CLI integration for BLOB/ARRAY input syntax
-5. Query execution integration (`seq_scan` adaptation)
-6. Criterion.rs integration for regression detection
-7. Load testing with real-world datasets
+
+1. CLI integration for BLOB/ARRAY input syntax
+2. Query execution integration (`seq_scan` adaptation)
+3. Load testing with real-world datasets
