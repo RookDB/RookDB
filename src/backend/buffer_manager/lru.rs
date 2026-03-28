@@ -18,7 +18,7 @@ impl LRUPolicy {
 
 impl ReplacementPolicy for LRUPolicy {
 
-    fn victim(&mut self, frames: &Vec<BufferFrame>) -> Option<usize> {
+    fn victim(&mut self, frames: &mut Vec<BufferFrame>) -> Option<usize> {
 
         let mut victim_index = None;
         let mut oldest_time = u64::MAX;

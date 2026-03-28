@@ -239,29 +239,34 @@ impl BufferPool {
     }
 
     pub fn new_page(
-        &mut self,
-        table_name: String,
-    ) -> io::Result<(PageId, &mut Page)> {
+    &mut self,
+    table_name: String,
+) -> io::Result<(PageId, &mut Page)> {
 
-        // 1. Create page on disk
-        let new_page_number = create_page(&mut self.file)?;
+    // 1. Create page on disk
+    let new_page_number = create_page(&mut self.file)?;
 
-        // 2. Fetch into buffer
-        let page = self.fetch_page(table_name.clone(), new_page_number)?;
+    let page_id = PageId {
+        table_name: table_name.clone(),
+        page_number: new_page_number,
+    };
 
-        // 3. Mark dirty
-        let page_id = PageId {
-            table_name,
-            page_number: new_page_number,
-        };
+    // 2. Fetch page (this inserts into page_table)
+    self.fetch_page(table_name, new_page_number)?;
 
-        if let Some(&frame_index) = self.page_table.get(&page_id) {
-            self.frames[frame_index].metadata.dirty = true;
-        }
+    // 3. Now safely get frame index (no borrow active now)
+    let frame_index = *self
+        .page_table
+        .get(&page_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Page not found after fetch"))?;
 
-        Ok((page_id, page))
-    }
+    // 4. Mark dirty
+    let frame = &mut self.frames[frame_index];
+    frame.metadata.dirty = true;
 
+    // 5. Return page reference
+    Ok((page_id, &mut frame.page))
+}
     pub fn delete_page(&mut self, page_id: &PageId) -> io::Result<()> {
 
         if let Some(&frame_index) = self.page_table.get(page_id) {

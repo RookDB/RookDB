@@ -3,5 +3,6 @@
 mod frontend;
 
 fn main() -> std::io::Result<()> {
-    frontend::menu::run()
+    frontend::menu_test_buffer::run()
+    // frontend::menu::run()
 }
