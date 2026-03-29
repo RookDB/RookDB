@@ -1,23 +1,25 @@
-﻿//! Handles table-related user commands such as listing tables,
+//! Handles table-related user commands such as listing tables,
 //! creating tables, and displaying table statistics.
 
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{Catalog, create_table, show_tables};
-use storage_manager::catalog::types::{Column, DataType};
+use storage_manager::catalog::{Catalog, init_catalog_page_storage, create_table_enhanced, show_tables};
+use storage_manager::catalog::types::ColumnDefinition;
 use storage_manager::statistics::print_table_page_count;
 
 /// Displays tables in the currently selected database
-pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
+pub fn show_tables_cmd(catalog: &Catalog, bm: &mut BufferManager, current_db: &Option<String>) -> io::Result<()> {
     let db = match current_db {
         Some(db) => db,
         None => {
             println!("No database selected. Please select a database first.");
-            return;
+            return Ok(());
         }
     };
-    show_tables(catalog, db);
+    let mut pm = init_catalog_page_storage().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    show_tables(catalog, &mut pm, bm, db);
+    Ok(())
 }
 
 pub fn create_table_cmd(
@@ -42,8 +44,7 @@ pub fn create_table_cmd(
     print!("\nEnter columns in the format:- column_name:data_type\n");
     print!("Press Enter on an empty line to finish\n");
 
-    let mut columns: Vec<Column> = Vec::new();
-    let mut position: u16 = 1;
+    let mut columns: Vec<ColumnDefinition> = Vec::new();
     loop {
         let mut input = String::new();
         print!("Enter column (name:type): ");
@@ -61,27 +62,26 @@ pub fn create_table_cmd(
         }
 
         let col_name = parts[0].trim().to_string();
-        let type_str = parts[1].trim();
-        let data_type = DataType::from_name(type_str).unwrap_or_else(|| {
-            println!("Unknown type '{}', defaulting to TEXT", type_str);
-            DataType::text()
-        });
+        let type_str = parts[1].trim().to_string();
 
-        columns.push(Column {
-            column_oid: 0,
+        columns.push(ColumnDefinition {
             name: col_name,
-            column_position: position,
-            data_type,
+            type_name: type_str,
             type_modifier: None,
             is_nullable: true,
             default_value: None,
-            constraints: vec![],
         });
-        position += 1;
     }
 
-    create_table(catalog, &db, &table_name, columns);
-    buffer_manager.load_table_from_disk(&db, &table_name)?;
+    let mut pm = init_catalog_page_storage().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    match create_table_enhanced(catalog, &mut pm, buffer_manager, &db, &table_name, columns, vec![]) {
+        Ok(_) => {
+            println!("Table '{}' created in database '{}'.", table_name, db);
+        }
+        Err(e) => {
+            println!("Failed to create table '{}': {:?}", table_name, e);
+        }
+    }
 
     Ok(())
 }

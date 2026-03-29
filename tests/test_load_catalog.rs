@@ -1,4 +1,4 @@
-﻿use std::fs;
+use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::{Catalog, init_catalog, load_catalog};
@@ -8,11 +8,13 @@ use storage_manager::layout::CATALOG_FILE;
 fn test_load_catalog() {
     // Step 1: Ensure a valid catalog file exists before loading
     if !Path::new(CATALOG_FILE).exists() {
-        init_catalog(); // create catalog.json if missing
+        let mut bm = storage_manager::buffer_manager::BufferManager::new();
+init_catalog(&mut bm); // create catalog.json if missing
     }
 
     // Step 2: Run load_catalog()
-    let catalog = load_catalog();
+    let mut bm2 = storage_manager::buffer_manager::BufferManager::new();
+    let catalog = load_catalog(&mut bm2);
 
     // Step 3: Verify it returns a valid Catalog struct
     assert!(

@@ -6,12 +6,11 @@
 //! Variable-length strings are stored as:  `[u16 len (LE)] [bytes …]`
 //! Arrays are stored as: `[u16 count (LE)] [element × count]`
 
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Cursor, Read};
 
 use crate::catalog::types::{
-    Constraint, ConstraintMetadata, ConstraintType, DataType, Database, Encoding, Index, IndexType,
-    ReferentialAction, Table, TableStatistics, TableType, TypeCategory, TypeModifier,
-    DefaultValue,
+    Constraint, ConstraintMetadata, ConstraintType, DataType, Index, IndexType,
+    ReferentialAction, TypeCategory, TypeModifier, DefaultValue,
 };
 
 // ─────────────────────────────────────────────────────────────

@@ -12,20 +12,20 @@
 //! is the responsibility of CatalogCache (catalog/cache.rs).
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::Path;
 
-use crate::disk::{read_page, write_page};
-use crate::heap::{init_table, insert_tuple};
-use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
-use crate::table::page_count;
+use crate::disk::create_page;
+use crate::heap::init_table;
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, page_free_space};
 use crate::layout::{
     CATALOG_PAGES_DIR,
     PG_DATABASE_FILE, PG_TABLE_FILE, PG_COLUMN_FILE,
     PG_CONSTRAINT_FILE, PG_INDEX_FILE, PG_TYPE_FILE,
 };
 use crate::catalog::types::CatalogError;
+use crate::buffer_manager::{BufferManager, PageId};
 
 // ─────────────────────────────────────────────────────────────
 // Catalog name constants
@@ -69,8 +69,6 @@ impl CatalogPageManager {
     // Initialization helpers
     // ──────────────────────────────────────────────────────────────
 
-    /// Create the catalog_pages directory and all six system catalog files
-    /// if they do not already exist.
     pub fn initialize_files(&self) -> Result<(), CatalogError> {
         let dir = Path::new(CATALOG_PAGES_DIR);
         if !dir.exists() {
@@ -84,10 +82,6 @@ impl CatalogPageManager {
         Ok(())
     }
 
-    /// Create a brand-new catalog file: table header (page 0) + one empty data page.
-    /// Uses the same layout as user-table files so read_page/write_page work correctly:
-    ///   page 0 = 8192-byte header  (first 4 bytes = page count)
-    ///   page 1 = first slotted data page
     fn create_catalog_file(&self, path: &str) -> Result<(), CatalogError> {
         let mut file = OpenOptions::new()
             .create(true)
@@ -96,113 +90,124 @@ impl CatalogPageManager {
             .truncate(true)
             .open(path)?;
 
-        // init_table writes an 8192-byte header page (page count = 1) and then
-        // appends one empty slotted data page – identical to user-table layout.
         init_table(&mut file)?;
         Ok(())
     }
 
-    /// Open the catalog file in read+write mode
-    fn open_file(&self, catalog_name: &str) -> io::Result<File> {
-        let path = self.file_paths
+    fn get_path(&self, catalog_name: &str) -> io::Result<String> {
+        self.file_paths
             .get(catalog_name)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Unknown catalog: {}", catalog_name)))?;
-        OpenOptions::new().read(true).write(true).open(path)
+            .map(|s| s.to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Unknown catalog: {}", catalog_name)))
     }
 
     // ──────────────────────────────────────────────────────────────
     // CRUD operations
     // ──────────────────────────────────────────────────────────────
 
-    /// Append a tuple to the named system catalog.
-    /// Returns the exact `(page_num, slot_id)` where the tuple was stored.
     pub fn insert_catalog_tuple(
         &mut self,
+        bm: &mut BufferManager,
         catalog_name: &str,
         data: Vec<u8>,
     ) -> Result<(u32, u32), CatalogError> {
-        let mut file = self.open_file(catalog_name)?;
-        insert_tuple(&mut file, &data)?;
-
-        // After insert_tuple completes the tuple is the last slot on the last data page.
-        // Compute slot_id from the updated `lower` pointer.
-        let total    = page_count(&mut file)?;
-        let page_num = total - 1;
-        let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num)?;
-        let lower   = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        let path = self.get_path(catalog_name)?;
+        let header_fi = bm.pin_page(PageId::new(&path, 0)).map_err(CatalogError::IoError)?;
+        let mut total_pages = u32::from_le_bytes(bm.frames[header_fi].data[0..4].try_into().unwrap());
+        
+        let mut last_page_num = total_pages - 1;
+        let mut last_fi = bm.pin_page(PageId::new(&path, last_page_num)).map_err(CatalogError::IoError)?;
+        
+        let free_space = page_free_space(&bm.frames[last_fi]).map_err(CatalogError::IoError)?;
+        let required = data.len() as u32 + ITEM_ID_SIZE;
+        
+        if required > free_space {
+            bm.unpin_page(&PageId::new(&path, last_page_num), false).map_err(CatalogError::IoError)?;
+            
+            let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+            create_page(&mut file)?;
+            total_pages += 1;
+            last_page_num = total_pages - 1;
+            
+            bm.frames[header_fi].data[0..4].copy_from_slice(&total_pages.to_le_bytes());
+            bm.unpin_page(&PageId::new(&path, 0), true).map_err(CatalogError::IoError)?;
+            
+            last_fi = bm.pin_page(PageId::new(&path, last_page_num)).map_err(CatalogError::IoError)?;
+        } else {
+            bm.unpin_page(&PageId::new(&path, 0), false).map_err(CatalogError::IoError)?;
+        }
+        
+        let page = &mut bm.frames[last_fi];
+        let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+        
+        let start = upper - data.len() as u32;
+        page.data[start as usize..upper as usize].copy_from_slice(&data);
+        
+        upper = start;
+        page.data[4..8].copy_from_slice(&upper.to_le_bytes());
+        
+        page.data[lower as usize..lower as usize + 4].copy_from_slice(&start.to_le_bytes());
+        page.data[lower as usize + 4..lower as usize + 8].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        
+        lower += ITEM_ID_SIZE;
+        page.data[0..4].copy_from_slice(&lower.to_le_bytes());
+        
         let slot_id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE - 1;
-        Ok((page_num, slot_id))
+        bm.unpin_page(&PageId::new(&path, last_page_num), true).map_err(CatalogError::IoError)?;
+        
+        Ok((last_page_num, slot_id))
     }
 
-    /// Read a specific tuple from a catalog page by slot index.
     pub fn read_catalog_tuple(
         &self,
+        bm: &mut BufferManager,
         catalog_name: &str,
         page_num: u32,
         slot_id: u32,
     ) -> Result<Vec<u8>, CatalogError> {
-        let mut file = self.open_file(catalog_name)?;
-        let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num)?;
-
+        let path = self.get_path(catalog_name)?;
+        let fi = bm.pin_page(PageId::new(&path, page_num)).map_err(CatalogError::IoError)?;
+        let page = &bm.frames[fi];
+        
         let base = (PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE) as usize;
         if base + 8 > page.data.len() {
+            bm.unpin_page(&PageId::new(&path, page_num), false).map_err(CatalogError::IoError)?;
             return Err(CatalogError::InvalidOperation("slot out of range".into()));
         }
         let offset = u32::from_le_bytes(page.data[base..base+4].try_into().unwrap()) as usize;
         let length = u32::from_le_bytes(page.data[base+4..base+8].try_into().unwrap()) as usize;
-        Ok(page.data[offset..offset+length].to_vec())
+        let data = page.data[offset..offset+length].to_vec();
+        bm.unpin_page(&PageId::new(&path, page_num), false).map_err(CatalogError::IoError)?;
+        Ok(data)
     }
 
-    /// Replace the tuple at (page_num, slot_id) with new_data.
-    ///
-    /// Because catalog tuples are variable-length, a simple in-place overwrite
-    /// only works when the encoded size happens to be identical.  To handle the
-    /// general case this method employs a **delete-then-reinsert** strategy:
-    ///
-    /// 1. Zero the old slot's length field (logical delete – preserves slot IDs
-    ///    held by other in-flight callers and leaves the offset intact).
-    /// 2. Append new_data as a fresh tuple at the end of the last data page.
-    ///
-    /// Returns the `(page_num, slot_id)` of the newly inserted tuple so callers
-    /// can update any cached location information.
     pub fn update_catalog_tuple(
         &mut self,
+        bm: &mut BufferManager,
         catalog_name: &str,
         page_num: u32,
         slot_id: u32,
         new_data: &[u8],
     ) -> Result<(u32, u32), CatalogError> {
-        // Step 1 – logical delete of old slot.
-        self.delete_catalog_tuple(catalog_name, page_num, slot_id)?;
-
-        // Step 2 – append new tuple; return its exact location.
-        let mut file = self.open_file(catalog_name)?;
-        insert_tuple(&mut file, new_data)?;
-
-        let total       = page_count(&mut file)?;
-        let new_page    = total - 1;
-        let mut page    = Page::new();
-        read_page(&mut file, &mut page, new_page)?;
-        let lower       = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let new_slot    = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE - 1;
-        Ok((new_page, new_slot))
+        self.delete_catalog_tuple(bm, catalog_name, page_num, slot_id)?;
+        self.insert_catalog_tuple(bm, catalog_name, new_data.to_vec())
     }
 
-    /// Scan all data pages of a catalog file and collect every tuple.
-    pub fn scan_catalog(&self, catalog_name: &str) -> Result<Vec<Vec<u8>>, CatalogError> {
-        let mut file = self.open_file(catalog_name)?;
-        let total = page_count(&mut file)?;
+    pub fn scan_catalog(&self, bm: &mut BufferManager, catalog_name: &str) -> Result<Vec<Vec<u8>>, CatalogError> {
+        let path = self.get_path(catalog_name)?;
+        let header_fi = bm.pin_page(PageId::new(&path, 0)).map_err(CatalogError::IoError)?;
+        let total = u32::from_le_bytes(bm.frames[header_fi].data[0..4].try_into().unwrap());
+        bm.unpin_page(&PageId::new(&path, 0), false).map_err(CatalogError::IoError)?;
+        
         let mut results = Vec::new();
 
         for page_num in 1..total {
-            let mut page = Page::new();
-            match read_page(&mut file, &mut page, page_num) {
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(CatalogError::IoError(e)),
-            }
+            let fi = match bm.pin_page(PageId::new(&path, page_num)) {
+                Ok(ix) => ix,
+                Err(_) => break,
+            };
+            let page = &bm.frames[fi];
 
             let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
             let num_slots = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
@@ -212,64 +217,71 @@ impl CatalogPageManager {
                 let offset = u32::from_le_bytes(page.data[base..base+4].try_into().unwrap()) as usize;
                 let length = u32::from_le_bytes(page.data[base+4..base+8].try_into().unwrap()) as usize;
 
-                if length == 0 { continue; }  // deleted/empty slot
+                if length == 0 { continue; }
                 if offset + length > page.data.len() { continue; }
 
                 results.push(page.data[offset..offset+length].to_vec());
             }
+            bm.unpin_page(&PageId::new(&path, page_num), false).map_err(CatalogError::IoError)?;
         }
         Ok(results)
     }
 
-    /// Delete a tuple by zero-ing its length in the slot directory (logical delete).
     pub fn delete_catalog_tuple(
         &self,
+        bm: &mut BufferManager,
         catalog_name: &str,
         page_num: u32,
         slot_id: u32,
     ) -> Result<(), CatalogError> {
-        let mut file = self.open_file(catalog_name)?;
-        let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num)?;
+        let path = self.get_path(catalog_name)?;
+        let fi = bm.pin_page(PageId::new(&path, page_num)).map_err(CatalogError::IoError)?;
+        let page = &mut bm.frames[fi];
         let base = (PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE) as usize;
-        // Zero the length field to mark as deleted
         page.data[base+4..base+8].copy_from_slice(&0u32.to_le_bytes());
-        write_page(&mut file, &mut page, page_num)?;
+        bm.unpin_page(&PageId::new(&path, page_num), true).map_err(CatalogError::IoError)?;
         Ok(())
     }
 
-    /// Find the (page_num, slot_id) of the first tuple that matches a predicate.
     pub fn find_catalog_tuple<F>(
         &self,
+        bm: &mut BufferManager,
         catalog_name: &str,
         predicate: F,
     ) -> Result<Option<(u32, u32, Vec<u8>)>, CatalogError>
     where F: Fn(&[u8]) -> bool
     {
-        let mut file = self.open_file(catalog_name)?;
-        let total = page_count(&mut file)?;
+        let path = self.get_path(catalog_name)?;
+        let header_fi = bm.pin_page(PageId::new(&path, 0)).map_err(CatalogError::IoError)?;
+        let total = u32::from_le_bytes(bm.frames[header_fi].data[0..4].try_into().unwrap());
+        bm.unpin_page(&PageId::new(&path, 0), false).map_err(CatalogError::IoError)?;
 
         for page_num in 1..total {
-            let mut page = Page::new();
-            match read_page(&mut file, &mut page, page_num) {
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(CatalogError::IoError(e)),
-            }
-            let lower     = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-            let num_slots = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+            let fi = match bm.pin_page(PageId::new(&path, page_num)) {
+                Ok(ix) => ix,
+                Err(_) => break,
+            };
+            
+            let mut found = None;
+            {
+                let page = &bm.frames[fi];
+                let lower     = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+                let num_slots = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
 
-            for slot in 0..num_slots {
-                let base   = (PAGE_HEADER_SIZE + slot * ITEM_ID_SIZE) as usize;
-                let offset = u32::from_le_bytes(page.data[base..base+4].try_into().unwrap()) as usize;
-                let length = u32::from_le_bytes(page.data[base+4..base+8].try_into().unwrap()) as usize;
-                if length == 0 { continue; }
-                if offset + length > page.data.len() { continue; }
-                let tuple_bytes = &page.data[offset..offset+length];
-                if predicate(tuple_bytes) {
-                    return Ok(Some((page_num, slot, tuple_bytes.to_vec())));
+                for slot in 0..num_slots {
+                    let base   = (PAGE_HEADER_SIZE + slot * ITEM_ID_SIZE) as usize;
+                    let offset = u32::from_le_bytes(page.data[base..base+4].try_into().unwrap()) as usize;
+                    let length = u32::from_le_bytes(page.data[base+4..base+8].try_into().unwrap()) as usize;
+                    if length == 0 || offset + length > page.data.len() { continue; }
+                    let tuple_bytes = &page.data[offset..offset+length];
+                    if predicate(tuple_bytes) {
+                        found = Some((page_num, slot, tuple_bytes.to_vec()));
+                        break;
+                    }
                 }
             }
+            bm.unpin_page(&PageId::new(&path, page_num), false).map_err(CatalogError::IoError)?;
+            if found.is_some() { return Ok(found); }
         }
         Ok(None)
     }

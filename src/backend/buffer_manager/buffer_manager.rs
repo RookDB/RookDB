@@ -1,4 +1,4 @@
-﻿//! Page buffer manager with pin/unpin semantics and dirty-page tracking.
+//! Page buffer manager with pin/unpin semantics and dirty-page tracking.
 //!
 //! The BufferManager serves two roles:
 //!  1. **Legacy path** – table-specific bulk loading used by the CSV importer
@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::catalog::types::Catalog;

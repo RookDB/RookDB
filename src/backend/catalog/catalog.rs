@@ -1,4 +1,4 @@
-﻿//! Catalog manager – high-level operations on databases and tables.
+//! Catalog manager – high-level operations on databases and tables.
 //!
 //! Dual-mode catalog system:
 //!   * Page mode  – page-based storage under database/global/catalog_pages/
@@ -12,6 +12,7 @@ use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::buffer_manager::BufferManager;
 use crate::catalog::constraints::{add_not_null_constraint, add_primary_key_constraint};
 use crate::catalog::indexes::{drop_index, get_indexes_for_table};
 use crate::catalog::oid::OidCounter;
@@ -24,8 +25,8 @@ use crate::catalog::serialize::{
     serialize_column_tuple, serialize_database_tuple, serialize_table_tuple, serialize_type_tuple,
 };
 use crate::catalog::types::{
-    Catalog, CatalogError, Column, ColumnDefinition, Constraint, ConstraintDefinition,
-    DataType, Database, Encoding, Index, Table, TableMetadata, TableStatistics, TableType,
+    Catalog, CatalogError, Column, ColumnDefinition, ConstraintDefinition,
+    DataType, Database, Encoding, Table, TableMetadata, TableStatistics, TableType,
 };
 use crate::heap::init_table;
 use crate::layout::{
@@ -49,7 +50,7 @@ fn now_unix() -> u64 {
 // ─────────────────────────────────────────────────────────────
 
 /// Dual-mode catalog initialisation (called at startup).
-pub fn init_catalog() {
+pub fn init_catalog(bm: &mut BufferManager) {
     let global = Path::new(GLOBAL_DIR);
     if !global.exists() { fs::create_dir_all(global).expect("Failed to create global dir"); }
     let base = Path::new(DATABASE_DIR);
@@ -61,13 +62,13 @@ pub fn init_catalog() {
         println!("Legacy JSON catalog found at {}", CATALOG_FILE);
     } else {
         println!("No catalog found – bootstrapping ...");
-        if let Err(e) = bootstrap_catalog() { eprintln!("Bootstrap failed: {}", e); }
+        if let Err(e) = bootstrap_catalog(bm) { eprintln!("Bootstrap failed: {}", e); }
     }
 }
 
 /// Bootstrap the self-hosting catalog: creates system catalog .dat files,
 /// inserts built-in types, and writes the system database record.
-pub fn bootstrap_catalog() -> Result<(), CatalogError> {
+pub fn bootstrap_catalog(bm: &mut BufferManager) -> Result<(), CatalogError> {
     let global = Path::new(GLOBAL_DIR);
     if !global.exists() { fs::create_dir_all(global)?; }
     let base = Path::new(DATABASE_DIR);
@@ -75,21 +76,20 @@ pub fn bootstrap_catalog() -> Result<(), CatalogError> {
 
     OidCounter::initialize()?;
 
-    let pm = CatalogPageManager::new();
-    pm.initialize_files()?;
     let mut pm = CatalogPageManager::new();
+    pm.initialize_files()?;
 
     // Register built-in types
     for dt in DataType::all_builtins() {
         let bytes = serialize_type_tuple(&dt);
-        pm.insert_catalog_tuple(CAT_TYPE, bytes)?;
+        pm.insert_catalog_tuple(bm, CAT_TYPE, bytes)?;
     }
 
     // Insert system database record
     let sys_bytes = serialize_database_tuple(
         SYSTEM_DB_OID, "system", "rookdb", now_unix(), Encoding::UTF8.to_u8(),
     );
-    pm.insert_catalog_tuple(CAT_DATABASE, sys_bytes)?;
+    pm.insert_catalog_tuple(bm, CAT_DATABASE, sys_bytes)?;
 
     println!("Bootstrap complete – page-based catalog initialized.");
     Ok(())
@@ -107,9 +107,9 @@ pub fn init_catalog_page_storage() -> Result<CatalogPageManager, CatalogError> {
 // ─────────────────────────────────────────────────────────────
 
 /// Load the Catalog from the active storage backend.
-pub fn load_catalog() -> Catalog {
+pub fn load_catalog(bm: &mut BufferManager) -> Catalog {
     if Path::new(CATALOG_PAGES_DIR).exists() {
-        match load_catalog_from_pages() {
+        match load_catalog_from_pages(bm) {
             Ok(cat) => return cat,
             Err(e)  => eprintln!("Page catalog load failed ({}) – trying legacy.", e),
         }
@@ -121,7 +121,7 @@ pub fn load_catalog() -> Catalog {
     Catalog::new()
 }
 
-fn load_catalog_from_pages() -> Result<Catalog, CatalogError> {
+fn load_catalog_from_pages(bm: &mut BufferManager) -> Result<Catalog, CatalogError> {
     let pm = CatalogPageManager::new();
 
     let mut oid_ctr = OidCounter::new();
@@ -132,7 +132,7 @@ fn load_catalog_from_pages() -> Result<Catalog, CatalogError> {
     catalog.page_backend_active = true;
 
     // ── databases ────────────────────────────────────────────────
-    for bytes in pm.scan_catalog(CAT_DATABASE)? {
+    for bytes in pm.scan_catalog(bm, CAT_DATABASE)? {
         let (oid, name, owner, created_at, enc) =
             deserialize_database_tuple(&bytes).map_err(CatalogError::IoError)?;
         if name == "system" { continue; }
@@ -143,7 +143,7 @@ fn load_catalog_from_pages() -> Result<Catalog, CatalogError> {
     }
 
     // ── tables ───────────────────────────────────────────────────
-    for bytes in pm.scan_catalog(CAT_TABLE)? {
+    for bytes in pm.scan_catalog(bm, CAT_TABLE)? {
         let (toid, tname, db_oid, ttype_b, row_count, page_count, created_at) =
             deserialize_table_tuple(&bytes).map_err(CatalogError::IoError)?;
         if ttype_b == 1 { continue; } // skip system catalogs
@@ -159,7 +159,7 @@ fn load_catalog_from_pages() -> Result<Catalog, CatalogError> {
     }
 
     // ── columns ──────────────────────────────────────────────────
-    for bytes in pm.scan_catalog(CAT_COLUMN)? {
+    for bytes in pm.scan_catalog(bm, CAT_COLUMN)? {
         let (coid, toid, cname, cpos, dt, tm, is_nullable, default_val, constraint_oids) =
             deserialize_column_tuple(&bytes).map_err(CatalogError::IoError)?;
         let col = Column {
@@ -180,7 +180,7 @@ fn load_catalog_from_pages() -> Result<Catalog, CatalogError> {
     }
 
     // ── constraints ───────────────────────────────────────────────
-    for bytes in pm.scan_catalog(CAT_CONSTRAINT)? {
+    for bytes in pm.scan_catalog(bm, CAT_CONSTRAINT)? {
         let c = deserialize_constraint_tuple(&bytes).map_err(CatalogError::IoError)?;
         for db in catalog.databases.values_mut() {
             for table in db.tables.values_mut() {
@@ -190,7 +190,7 @@ fn load_catalog_from_pages() -> Result<Catalog, CatalogError> {
     }
 
     // ── index OIDs ────────────────────────────────────────────────
-    for bytes in pm.scan_catalog(CAT_INDEX)? {
+    for bytes in pm.scan_catalog(bm, CAT_INDEX)? {
         let idx = deserialize_index_tuple(&bytes).map_err(CatalogError::IoError)?;
         for db in catalog.databases.values_mut() {
             for table in db.tables.values_mut() {
@@ -217,20 +217,20 @@ pub fn save_catalog(catalog: &Catalog) {
 // 3.1.2 – Type helpers
 // ─────────────────────────────────────────────────────────────
 
-pub fn register_builtin_types(pm: &mut CatalogPageManager) -> Result<(), CatalogError> {
-    let existing: Vec<String> = pm.scan_catalog(CAT_TYPE)?
+pub fn register_builtin_types(pm: &mut CatalogPageManager, bm: &mut BufferManager) -> Result<(), CatalogError> {
+    let existing: Vec<String> = pm.scan_catalog(bm, CAT_TYPE)?
         .iter().filter_map(|b| deserialize_type_tuple(b).ok().map(|dt| dt.type_name)).collect();
     for dt in DataType::all_builtins() {
         if !existing.contains(&dt.type_name) {
-            pm.insert_catalog_tuple(CAT_TYPE, serialize_type_tuple(&dt))?;
+            pm.insert_catalog_tuple(bm, CAT_TYPE, serialize_type_tuple(&dt))?;
         }
     }
     Ok(())
 }
 
-pub fn lookup_type_by_name(pm: &CatalogPageManager, type_name: &str) -> Result<DataType, CatalogError> {
+pub fn lookup_type_by_name(pm: &CatalogPageManager, bm: &mut BufferManager, type_name: &str) -> Result<DataType, CatalogError> {
     if let Some(dt) = DataType::from_name(type_name) { return Ok(dt); }
-    for bytes in pm.scan_catalog(CAT_TYPE)? {
+    for bytes in pm.scan_catalog(bm, CAT_TYPE)? {
         let dt = deserialize_type_tuple(&bytes).map_err(CatalogError::IoError)?;
         if dt.type_name.eq_ignore_ascii_case(type_name) { return Ok(dt); }
     }
@@ -241,13 +241,24 @@ pub fn lookup_type_by_name(pm: &CatalogPageManager, type_name: &str) -> Result<D
 // 3.1.5 – Database operations
 // ─────────────────────────────────────────────────────────────
 
-pub fn show_databases(catalog: &Catalog) {
-    println!("--------------------------");
-    println!("Databases in Catalog");
-    println!("--------------------------");
-    if catalog.databases.is_empty() { println!("No databases found.\n"); return; }
-    for db_name in catalog.databases.keys() { println!("- {}", db_name); }
-    println!();
+pub fn show_databases(_catalog: &Catalog, pm: &mut CatalogPageManager, bm: &mut BufferManager) {
+    println!("---------------------------------------------------------------");
+    println!("{:<20} | {:<15} | {:<20}", "Database", "Owner", "Created At");
+    println!("---------------------------------------------------------------");
+    
+    // Fetch directly from page-based backend as required
+    let records = pm.scan_catalog(bm, CAT_DATABASE).unwrap_or_default();
+    if records.is_empty() {
+        println!("No databases found.\n"); 
+        return;
+    }
+    
+    for bytes in records {
+        if let Ok((_oid, name, owner, created_at, _enc)) = deserialize_database_tuple(&bytes) {
+            println!("{:<20} | {:<15} | {}", name, owner, created_at);
+        }
+    }
+    println!("---------------------------------------------------------------\n");
 }
 
 /// Legacy database creation (JSON mode).
@@ -272,6 +283,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
 pub fn create_database_enhanced(
     catalog: &mut Catalog,
     pm: &mut CatalogPageManager,
+    bm: &mut BufferManager,
     db_name: &str,
     owner: &str,
     encoding: Encoding,
@@ -285,7 +297,7 @@ pub fn create_database_enhanced(
     if !Path::new(&db_path).exists() { fs::create_dir_all(&db_path)?; }
 
     let bytes = serialize_database_tuple(db_oid, db_name, owner, created_at, encoding.to_u8());
-    pm.insert_catalog_tuple(CAT_DATABASE, bytes)?;
+    pm.insert_catalog_tuple(bm, CAT_DATABASE, bytes)?;
 
     catalog.databases.insert(db_name.to_string(), Database {
         db_oid, db_name: db_name.to_string(), tables: HashMap::new(),
@@ -299,6 +311,7 @@ pub fn create_database_enhanced(
 pub fn drop_database(
     catalog: &mut Catalog,
     pm: &mut CatalogPageManager,
+    bm: &mut BufferManager,
     db_name: &str,
 ) -> Result<(), CatalogError> {
     let db_oid = catalog.databases.get(db_name)
@@ -309,12 +322,12 @@ pub fn drop_database(
         .map(|db| db.tables.values().map(|t| t.table_oid).collect())
         .unwrap_or_default();
 
-    for oid in table_oids { drop_table(catalog, pm, oid)?; }
+    for oid in table_oids { drop_table(catalog, pm, bm, oid)?; }
 
-    let _ = pm.find_catalog_tuple(CAT_DATABASE, |b|
+    let _ = pm.find_catalog_tuple(bm, CAT_DATABASE, |b|
         deserialize_database_tuple(b).map(|(oid,..)| oid == db_oid).unwrap_or(false)
     ).and_then(|res| {
-        if let Some((pn, slot, _)) = res { pm.delete_catalog_tuple(CAT_DATABASE, pn, slot)?; }
+        if let Some((pn, slot, _)) = res { pm.delete_catalog_tuple(bm, CAT_DATABASE, pn, slot)?; }
         Ok(())
     });
 
@@ -359,6 +372,7 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
 pub fn create_table_enhanced(
     catalog: &mut Catalog,
     pm: &mut CatalogPageManager,
+    bm: &mut BufferManager,
     db_name: &str,
     table_name: &str,
     col_defs: Vec<ColumnDefinition>,
@@ -384,7 +398,7 @@ pub fn create_table_enhanced(
             col_oid, table_oid, &def.name, (pos + 1) as u16, &dt,
             type_mod_val.as_ref(), def.is_nullable, def.default_value.as_ref(), &[],
         );
-        pm.insert_catalog_tuple(CAT_COLUMN, col_bytes)?;
+        pm.insert_catalog_tuple(bm, CAT_COLUMN, col_bytes)?;
         columns.push(Column {
             column_oid: col_oid, name: def.name.clone(),
             column_position: (pos + 1) as u16, data_type: dt,
@@ -402,7 +416,7 @@ pub fn create_table_enhanced(
     }
 
     // Persist to pg_table
-    pm.insert_catalog_tuple(CAT_TABLE,
+    pm.insert_catalog_tuple(bm, CAT_TABLE,
         serialize_table_tuple(table_oid, table_name, db_oid, 0, 0, 1, created_at))?;
 
     let table = Table {
@@ -417,7 +431,7 @@ pub fn create_table_enhanced(
     for cdef in constraint_defs {
         match cdef {
             ConstraintDefinition::PrimaryKey { columns: cols, name } => {
-                add_primary_key_constraint(catalog, pm, table_oid, cols, name)?;
+                add_primary_key_constraint(catalog, pm, bm, table_oid, cols, name)?;
             }
             ConstraintDefinition::NotNull { column } => {
                 let oid = catalog.databases.get(db_name)
@@ -425,7 +439,7 @@ pub fn create_table_enhanced(
                     .and_then(|t| t.columns.iter().find(|c| c.name == column))
                     .map(|c| c.column_oid)
                     .ok_or_else(|| CatalogError::ColumnNotFound(column.clone()))?;
-                add_not_null_constraint(catalog, pm, table_oid, oid)?;
+                add_not_null_constraint(catalog, pm, bm, table_oid, oid)?;
             }
             ConstraintDefinition::ForeignKey { columns: cols, referenced_table, referenced_columns, on_delete, on_update, name } => {
                 let ref_oid = catalog.databases.get(db_name)
@@ -433,11 +447,11 @@ pub fn create_table_enhanced(
                     .map(|t| t.table_oid)
                     .ok_or_else(|| CatalogError::TableNotFound(referenced_table.clone()))?;
                 crate::catalog::constraints::add_foreign_key_constraint(
-                    catalog, pm, table_oid, cols, ref_oid, referenced_columns, on_delete, on_update, name,
+                    catalog, pm, bm, table_oid, cols, ref_oid, referenced_columns, on_delete, on_update, name,
                 )?;
             }
             ConstraintDefinition::Unique { columns: cols, name } => {
-                crate::catalog::constraints::add_unique_constraint(catalog, pm, table_oid, cols, name)?;
+                crate::catalog::constraints::add_unique_constraint(catalog, pm, bm, table_oid, cols, name)?;
             }
             _ => {}
         }
@@ -450,10 +464,11 @@ pub fn create_table_enhanced(
 pub fn drop_table(
     catalog: &mut Catalog,
     pm: &mut CatalogPageManager,
+    bm: &mut BufferManager,
     table_oid: u32,
 ) -> Result<(), CatalogError> {
     // Check for FK dependencies from other tables
-    for bytes in pm.scan_catalog(CAT_CONSTRAINT)? {
+    for bytes in pm.scan_catalog(bm, CAT_CONSTRAINT)? {
         let c = deserialize_constraint_tuple(&bytes).map_err(CatalogError::IoError)?;
         if let crate::catalog::types::ConstraintMetadata::ForeignKey { referenced_table_oid, .. } = &c.metadata {
             if *referenced_table_oid == table_oid && c.table_oid != table_oid {
@@ -463,8 +478,8 @@ pub fn drop_table(
     }
 
     // Drop indexes
-    for oid in get_indexes_for_table(pm, table_oid)?.iter().map(|i| i.index_oid).collect::<Vec<_>>() {
-        let _ = drop_index(catalog, pm, oid);
+    for oid in get_indexes_for_table(pm, bm, table_oid)?.iter().map(|i| i.index_oid).collect::<Vec<_>>() {
+        let _ = drop_index(catalog, pm, bm, oid);
     }
 
     let (db_name, table_name) = {
@@ -479,10 +494,10 @@ pub fn drop_table(
 
     let _ = fs::remove_file(TABLE_FILE_TEMPLATE.replace("{database}", &db_name).replace("{table}", &table_name));
 
-    let _ = pm.find_catalog_tuple(CAT_TABLE, |b|
+    let _ = pm.find_catalog_tuple(bm, CAT_TABLE, |b|
         deserialize_table_tuple(b).map(|(oid,..)| oid == table_oid).unwrap_or(false)
     ).and_then(|res| {
-        if let Some((pn, slot, _)) = res { pm.delete_catalog_tuple(CAT_TABLE, pn, slot)?; }
+        if let Some((pn, slot, _)) = res { pm.delete_catalog_tuple(bm, CAT_TABLE, pn, slot)?; }
         Ok(())
     });
 
@@ -500,6 +515,7 @@ pub fn drop_table(
 pub fn alter_table_add_column(
     catalog: &mut Catalog,
     pm: &mut CatalogPageManager,
+    bm: &mut BufferManager,
     table_oid: u32,
     col_def: ColumnDefinition,
 ) -> Result<u32, CatalogError> {
@@ -530,7 +546,7 @@ pub fn alter_table_add_column(
         col_oid, table_oid, &col_def.name, col_pos, &dt,
         type_mod.as_ref(), col_def.is_nullable, col_def.default_value.as_ref(), &[],
     );
-    pm.insert_catalog_tuple(CAT_COLUMN, col_bytes)?;
+    pm.insert_catalog_tuple(bm, CAT_COLUMN, col_bytes)?;
 
     for db in catalog.databases.values_mut() {
         for table in db.tables.values_mut() {
@@ -555,28 +571,44 @@ pub fn alter_table_add_column(
 pub fn get_table_metadata(
     catalog: &Catalog,
     pm: &CatalogPageManager,
+    bm: &mut BufferManager,
     db_name: &str,
     table_name: &str,
 ) -> Result<TableMetadata, CatalogError> {
     let db    = catalog.databases.get(db_name).ok_or_else(|| CatalogError::DatabaseNotFound(db_name.into()))?;
     let table = db.tables.get(table_name).ok_or_else(|| CatalogError::TableNotFound(table_name.into()))?;
-    let constraints = crate::catalog::constraints::get_constraints_for_table(catalog, pm, table.table_oid)?;
-    let indexes     = get_indexes_for_table(pm, table.table_oid)?;
+    let constraints = crate::catalog::constraints::get_constraints_for_table(catalog, pm, bm, table.table_oid)?;
+    let indexes     = get_indexes_for_table(pm, bm, table.table_oid)?;
     Ok(TableMetadata {
         table_oid: table.table_oid, table_name: table.table_name.clone(), db_oid: table.db_oid,
         columns: table.columns.clone(), constraints, indexes, statistics: table.statistics.clone(),
     })
 }
 
-pub fn show_tables(catalog: &Catalog, db_name: &str) {
-    println!("--------------------------");
+pub fn show_tables(catalog: &Catalog, pm: &mut CatalogPageManager, bm: &mut BufferManager, db_name: &str) {
+    println!("---------------------------------------------------------------");
     println!("Tables in Database: {}", db_name);
-    println!("--------------------------");
-    if let Some(db) = catalog.databases.get(db_name) {
-        if db.tables.is_empty() { println!("No tables found in '{}'.\n", db_name); return; }
-        for name in db.tables.keys() { println!("- {}", name); }
-        println!();
-    } else {
-        println!("Database '{}' not found.\n", db_name);
+    println!("---------------------------------------------------------------");
+    println!("{:<20} | {:<10} | {:<10} | {:<15}", "Table Name", "Rows", "Pages", "Created At");
+    println!("---------------------------------------------------------------");
+    
+    let db = match catalog.databases.get(db_name) {
+        Some(d) => d,
+        None => { println!("Database '{}' not found.\n", db_name); return; }
+    };
+    
+    let records = pm.scan_catalog(bm, CAT_TABLE).unwrap_or_default();
+    let mut found = false;
+    for bytes in records {
+        if let Ok((_toid, tname, db_oid, ttype_b, row_count, page_count, created_at)) = deserialize_table_tuple(&bytes) {
+            if db_oid == db.db_oid && ttype_b == 0 {
+                found = true;
+                println!("{:<20} | {:<10} | {:<10} | {}", tname, row_count, page_count, created_at);
+            }
+        }
     }
+    if !found {
+        println!("No tables found in '{}'.\n", db_name);
+    }
+    println!("---------------------------------------------------------------\n");
 }

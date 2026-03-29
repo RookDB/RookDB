@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -10,11 +10,18 @@ use storage_manager::layout::CATALOG_FILE;
 fn test_save_catalog() {
     // Step 1: Ensure the catalog file exists (create if missing)
     if !Path::new(CATALOG_FILE).exists() {
-        init_catalog();
+        let mut bm = storage_manager::buffer_manager::BufferManager::new();
+        init_catalog(&mut bm);
+    }
+    
+    // Remove default page directory for save_catalog test
+    if Path::new("database/global/catalog_pages").exists() {
+        let _ = fs::remove_dir_all("database/global/catalog_pages");
     }
 
     // Step 2: Load catalog into memory
-    let mut catalog = load_catalog();
+    let mut bm2 = storage_manager::buffer_manager::BufferManager::new();
+    let mut catalog = load_catalog(&mut bm2);
 
     // Step 3: Ensure a test database exists
     let db_name = "test_db";
@@ -66,7 +73,8 @@ fn test_save_catalog() {
     save_catalog(&catalog);
 
     // Step 6: Reload catalog from disk and verify it contains the database and table
-    let reloaded_catalog = load_catalog();
+    let mut bm3 = storage_manager::buffer_manager::BufferManager::new();
+    let reloaded_catalog = load_catalog(&mut bm3);
 
     assert!(
         reloaded_catalog.databases.contains_key(db_name),
