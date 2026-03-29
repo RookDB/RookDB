@@ -11,6 +11,7 @@ use storage_manager::catalog::{init_catalog, load_catalog};
 use storage_manager::{BufferPool, PageId, ReplacementPolicy, LRUPolicy, ClockPolicy};
 // Command implementations
 use crate::frontend::buffer_test_cmd;
+use crate::frontend::database_cmd;
 
 /// Runs the buffer pool test menu
 pub fn run() -> io::Result<()> {
@@ -129,6 +130,8 @@ input.clear();
                 let (table_name, page_number) = get_page_input()?;
                 buffer_test_cmd::fetch_page_cmd(
                     &mut buffer_pool,
+                    &catalog,
+                    &current_db,
                     table_name,
                     page_number,
                 );
@@ -203,6 +206,9 @@ input.clear();
                 break;
             }
 
+            "11" => database_cmd::show_databases_cmd(&catalog),
+            "12" => database_cmd::create_database_cmd(&mut catalog)?,
+            "13" => database_cmd::select_database_cmd(&catalog, &mut current_db)?,
             _ => println!("Invalid option."),
         }
     }
