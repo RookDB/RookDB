@@ -359,7 +359,7 @@ Steps:
 
 ### Set Buffer Size
 
-    SET BUFFER SIZE <N>;
+    SET BUFFER SIZE `<N>`;
 
 Example:
 
@@ -410,24 +410,186 @@ Displays:
 2.  Replacement policy selects victim
 3.  Dirty page flushed
 4.  New page loaded
+# 6. Benchmark Results
 
-------------------------------------------------------------------------
+## 📌 Setup
 
-# 6. Codebase Structure
+The benchmark was conducted on the RookDB storage manager to evaluate the performance of different buffer replacement policies under varying buffer pool sizes.
 
-    src/backend/buffer_manager/
-    │
-    ├── mod.rs
-    ├── buffer_pool.rs
-    ├── frame.rs
-    ├── policy.rs
-    ├── lru.rs
-    ├── clock.rs
-    └── stats.rs
+### Configuration
 
-------------------------------------------------------------------------
+- **Database Name:** `iiit`
+- **Table Name:** `ug1`
+- **Total Pages in Table:** 1005 pages  
+- **Workload:** 10,000 random page fetch requests  
+- **Access Pattern:** Random (from `random_numbers.txt`)
+- **Policies Evaluated:**
+  - LRU (Least Recently Used)
+  - Clock Replacement
+- **Buffer Pool Sizes Tested:**
+  - 1, 2, 32, 128, 256, 1024
 
-# 7. Conclusion
+### Metrics Collected
+
+- Average Fetch Time (ms)
+- Hit Count
+- Miss Count
+- Hit Ratio
+- Evictions
+- Dirty Flushes
+- Throughput (derived)
+- Miss Penalty (estimated)
+
+---
+
+## 📊 Results & Analysis
+
+---
+
+### 1️⃣ Buffer Size vs Average Fetch Time
+
+![1](/assets/buffer_vs_time.png)
+
+- Fetch time generally decreases as buffer size increases.
+- LRU shows instability at mid-range sizes (128–256), likely due to eviction overhead.
+- At buffer size 1024, both policies show minimal latency → **working set fits in memory**.
+
+---
+
+### 2️⃣ Buffer Size vs Hit Ratio
+
+![2](/assets/buffer_vs_hitratio.png)
+
+- Hit ratio increases almost linearly with buffer size.
+- At buffer size 1024, hit ratio reaches ~0.9.
+- Both policies perform nearly identically → workload is uniformly random.
+
+---
+
+### 3️⃣ Buffer Size vs Evictions
+
+![3](/assets/buffer_vs_evictions.png)
+
+- Evictions decrease sharply as buffer size increases.
+- At 1024, evictions drop to **zero**.
+- Indicates buffer pool can fully accommodate active working set.
+
+---
+
+### 4️⃣ Buffer Size vs Misses
+
+![4](/assets/buffer_vs_misses.png)
+
+- Misses decrease proportionally with increasing buffer size.
+- Mirrors hit ratio behavior.
+- Confirms correctness of buffer manager implementation.
+
+---
+
+### 5️⃣ Eviction Pressure vs Buffer Size
+
+![5](/assets/eviction_pressure.png)
+
+- Eviction pressure is extremely high at small buffer sizes (~1.0).
+- Drops steadily and reaches zero at large buffer size.
+- Shows system transitions from **I/O bound → memory bound**.
+
+---
+
+### 6️⃣ Hit vs Miss Distribution
+
+![6](/assets/hit_vs_miss_stacked.png)
+
+- Small buffers are dominated by misses.
+- Larger buffers show a clear shift toward hits.
+- At 1024, majority of accesses are cache hits.
+
+---
+
+### 7️⃣ Buffer Size vs Throughput
+
+![7](/assets/throughput.png)
+
+- Throughput increases with buffer size.
+- Clock consistently shows slightly higher throughput.
+- At large buffer sizes, throughput peaks → minimal disk access.
+
+---
+
+### 8️⃣ Estimated Miss Penalty
+
+![8](/assets/miss_penalty.png)
+
+- Miss penalty increases with buffer size for LRU.
+- Clock shows more stable behavior.
+- Indicates LRU may incur additional overhead under certain conditions.
+
+---
+
+### 9️⃣ Buffer Size vs Time (Log Scale)
+
+![9](/assets/log_buffer_vs_time.png)
+
+- Log scale highlights performance trends clearly.
+- Shows non-linear improvement in latency.
+- Sudden drop at large buffer confirms working set fit.
+
+---
+
+### 🔟 Policy vs Hit Ratio
+
+![10](/assets/policy_vs_hitratio.png)
+
+- Both policies achieve nearly identical hit ratios.
+- Confirms that under random workloads, replacement policy impact is minimal.
+
+---
+
+### 1️⃣1️⃣ Policy vs Average Time
+
+![11](/assets/policy_vs_time.png)
+
+- Clock outperforms LRU in average latency.
+- Indicates lower overhead in replacement decision-making.
+
+---
+
+## 🧠 Key Observations
+
+1. **Working Set Fit Effect**
+   - At buffer size 1024, evictions drop to zero and performance stabilizes.
+   - Indicates working set size is close to buffer capacity.
+
+2. **Policy Comparison**
+   - LRU and Clock perform similarly in terms of hit ratio.
+   - Clock shows better latency and throughput → lower overhead.
+
+3. **Scalability**
+   - System scales well with increasing buffer size.
+   - Performance improves due to reduced disk I/O.
+
+4. **Disk I/O Dominance**
+   - At small buffer sizes, performance is dominated by disk accesses.
+   - High eviction and miss rates confirm this.
+
+5. **Correctness Validation**
+   - Linear relationship between buffer size and hit ratio confirms correct implementation.
+
+---
+
+# 8. Future Work
+
+This work can be extended in several directions:
+
+- **LRU-K Policy:** Implement LRU-K to better capture access patterns by considering multiple past references, improving performance under skewed workloads.
+- **Multiple Buffer Pools:** Introduce multiple buffer pools (per table or database) to reduce contention and improve cache locality.
+- **Advanced Workloads:** Evaluate performance under realistic distributions such as Zipfian access patterns.
+- **Concurrency:** Extend the buffer manager to support multi-threaded access with proper synchronization.
+
+These enhancements will improve scalability, adaptability, and real-world applicability of the system.
+
+
+# 9. Conclusion
 
 The Buffer Manager introduces a modular and extensible caching layer
 within RookDB. By intercepting disk accesses and maintaining an
