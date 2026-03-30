@@ -1,32 +1,48 @@
-//! Manages catalog metadata including databases, tables, and columns.
-//! Handles persistence of catalog state and creation of physical
-//! database and table structures on disk.
-
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 
 use crate::catalog::types::*;
 
+#[allow(deprecated)]
 use crate::heap::init_table;
 use crate::layout::*;
 
-/// Initializes the catalog and required directory structure on disk.
-/// Creates the catalog file if it does not already exist.
+
 pub fn init_catalog() {
     let catalog_path = Path::new(CATALOG_FILE);
+
+    debug_print_catalog(&format!("Initializing catalog at: {}", catalog_path.display()));
 
     // Create directory if not exist
     if let Some(parent) = catalog_path.parent() {
         if !parent.exists() {
-            fs::create_dir_all(parent).expect("Failed to create catalog directory");
+            match fs::create_dir_all(parent) {
+                Ok(_) => {
+                    debug_print_catalog(&format!(" Created catalog directory: {}", parent.display()));
+                }
+                Err(e) => {
+                    eprintln!("Failed to create catalog directory: {}", e);
+                    eprintln!("Please check directory permissions and disk space.");
+                    return;
+                }
+            }
         }
     }
 
     // Ensure base database directory exists
     let base_dir = Path::new(DATABASE_DIR);
     if !base_dir.exists() {
-        fs::create_dir_all(base_dir).expect("Failed to create base data directory");
+        match fs::create_dir_all(base_dir) {
+            Ok(_) => {
+                debug_print_catalog(&format!("Created base database directory: {}", base_dir.display()));
+            }
+            Err(e) => {
+                eprintln!("Failed to create base data directory: {}", e);
+                eprintln!("Please check directory permissions and disk space.");
+                return;
+            }
+        }
     }
 
     // Create an empty catalog file if missing
@@ -34,14 +50,29 @@ pub fn init_catalog() {
         let empty_catalog = Catalog {
             databases: HashMap::new(),
         };
-        let json = serde_json::to_string_pretty(&empty_catalog)
-            .expect("Failed to serialize empty catalog");
-        fs::write(catalog_path, json).expect("Failed to write catalog file");
-        println!(
-            "Catalog file not found. Created new catalog file at {}",
-            catalog_path.display()
-        );
+        let json = match serde_json::to_string_pretty(&empty_catalog) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("Failed to serialize empty catalog: {}", e);
+                return;
+            }
+        };
+
+        match fs::write(catalog_path, json) {
+            Ok(_) => {
+                debug_print_catalog(&format!("Created new catalog file: {}", catalog_path.display()));
+                println!(
+                    " Catalog file created at {}",
+                    catalog_path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("Failed to write catalog file: {}", e);
+                eprintln!("Please check disk space and file permissions.");
+            }
+        }
     } else {
+        debug_print_catalog(&format!("Catalog file already exists: {}", catalog_path.display()));
         println!("Catalog file already exists at {}", catalog_path.display());
     }
 }
@@ -51,8 +82,11 @@ pub fn init_catalog() {
 pub fn load_catalog() -> Catalog {
     let catalog_path = Path::new(CATALOG_FILE);
 
+    debug_print_catalog(&format!("Loading catalog from: {}", catalog_path.display()));
+
     // Check if catalog file exists
     if !catalog_path.exists() {
+        debug_print_catalog("Catalog file does not exist. Returning empty catalog.");
         eprintln!("Catalog file does not exist at {}.", catalog_path.display());
         return Catalog {
             databases: HashMap::new(),
@@ -60,11 +94,15 @@ pub fn load_catalog() -> Catalog {
     }
 
     // Read the catalog file
-    let data = fs::read_to_string(catalog_path);
-    let data = match data {
-        Ok(content) => content,
+    let data = match fs::read_to_string(catalog_path) {
+        Ok(content) => {
+            debug_print_catalog(&format!("Read catalog file ({} bytes)", content.len()));
+            content
+        }
         Err(err) => {
+            debug_print_catalog(&format!("Error reading catalog file: {}", err));
             eprintln!("Failed to read catalog file: {}", err);
+            eprintln!("Please check file permissions and disk space.");
             return Catalog {
                 databases: HashMap::new(),
             };
@@ -73,9 +111,17 @@ pub fn load_catalog() -> Catalog {
 
     // Deserialize JSON into Catalog struct
     match serde_json::from_str::<Catalog>(&data) {
-        Ok(catalog) => catalog,
+        Ok(catalog) => {
+            debug_print_catalog(&format!(
+                "Parsed catalog successfully ({} databases)",
+                catalog.databases.len()
+            ));
+            catalog
+        }
         Err(err) => {
+            debug_print_catalog(&format!("✗ Error parsing catalog JSON: {}", err));
             eprintln!("Failed to parse catalog JSON: {}", err);
+            eprintln!("The catalog file may be corrupted. Please back it up and delete it to create a new one.");
             Catalog {
                 databases: HashMap::new(),
             }
@@ -83,20 +129,49 @@ pub fn load_catalog() -> Catalog {
     }
 }
 
-// Persists the in-memory catalog state to disk.
-pub fn save_catalog(catalog: &Catalog) {
+/// Persists the in-memory catalog state to disk.
+/// Returns Ok(()) on success, or an error with a detailed message if something goes wrong.
+pub fn save_catalog(catalog: &Catalog) -> std::io::Result<()> {
     let catalog_path = Path::new(CATALOG_FILE);
 
+    debug_print_catalog(&format!("Saving catalog to: {}", catalog_path.display()));
+
     // Convert catalog to formatted JSON
-    let json = serde_json::to_string_pretty(catalog).expect("Failed to serialize catalog to JSON");
+    let json = match serde_json::to_string_pretty(catalog) {
+        Ok(j) => {
+            debug_print_catalog(&format!("Serialized catalog ({} bytes)", j.len()));
+            j
+        }
+        Err(e) => {
+            let msg = format!("Failed to serialize catalog to JSON: {}", e);
+            debug_print_catalog(&format!("{}", msg));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, msg));
+        }
+    };
 
     // Write catalog to disk
-    fs::write(catalog_path, json).expect("Failed to write catalog file to disk");
+    match fs::write(catalog_path, json) {
+        Ok(_) => {
+            debug_print_catalog(&format!("Catalog saved successfully to: {}", catalog_path.display()));
+            println!(
+                "Catalog File updated with In Memory Data at {}",
+                catalog_path.display()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("Failed to write catalog file to disk: {}", e);
+            debug_print_catalog(&format!("{}", msg));
+            Err(e)
+        }
+    }
+}
 
-    println!(
-        "Catalog File updated with In Memory Data {}",
-        catalog_path.display()
-    );
+/// Print debug information for catalog operations
+fn debug_print_catalog(msg: &str) {
+    if cfg!(debug_assertions) {
+        println!("[CATALOG] {}", msg);
+    }
 }
 
 // Prints all databases present in the catalog.
@@ -119,14 +194,18 @@ pub fn show_databases(catalog: &Catalog) {
 
 // Creates a new database entry in the catalog and its directory on disk.
 pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
+    debug_print_catalog(&format!("Creating database: '{}'", db_name));
+
     // Validate database name
     if db_name.is_empty() {
         println!("Database name cannot be empty");
+        debug_print_catalog("Database name is empty");
         return false;
     }
 
     if catalog.databases.contains_key(db_name) {
         println!("Database '{}' already exists", db_name);
+        debug_print_catalog(&format!("Database '{}' already exists", db_name));
         return false;
     }
 
@@ -138,19 +217,25 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
         },
     );
 
+    debug_print_catalog(&format!("Added database to in-memory catalog: '{}'", db_name));
+
     // Persist updated catalog
     let json = match serde_json::to_string_pretty(&catalog) {
         Ok(j) => j,
         Err(e) => {
             println!("Failed to serialize catalog: {}", e);
+            debug_print_catalog(&format!("Serialization error: {}", e));
             return false;
         }
     };
 
     if let Err(e) = fs::write(CATALOG_FILE, json) {
         println!("Failed to write catalog file: {}", e);
+        debug_print_catalog(&format!("Write error: {}", e));
         return false;
     }
+
+    debug_print_catalog(&format!("Persisted database to catalog: '{}'", db_name));
 
     // Create database directory on disk
     let db_path_str = TABLE_DIR_TEMPLATE.replace("{database}", db_name);
@@ -159,18 +244,22 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
     if !db_path.exists() {
         if let Err(e) = fs::create_dir_all(db_path) {
             println!("Failed to create database directory: {}", e);
+            debug_print_catalog(&format!("Failed to create directory: {}", e));
             return false;
         }
-        // println!("Created new database directory at {}", db_path.display());
+        debug_print_catalog(&format!("Created database directory: {}", db_path.display()));
     } else {
-        println!("Database directory already exists at {}", db_path.display());
+        println!(" Database directory already exists at {}", db_path.display());
+        debug_print_catalog(&format!("Directory already exists: {}", db_path.display()));
     }
 
-    // println!("Database '{}' created successfully", db_name);
+    println!("Database '{}' created successfully", db_name);
+    debug_print_catalog(&format!("Database '{}' created successfully", db_name));
     true
 }
 
 // Creates a new table, updates the catalog, and initializes its data file.
+#[allow(deprecated)]
 pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, columns: Vec<Column>) {
     // Step 1: Validate database existence
     if !catalog.databases.contains_key(db_name) {
@@ -197,7 +286,10 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     database.tables.insert(table_name.to_string(), new_table);
 
     // Persist catalog changes
-    save_catalog(catalog);
+    if let Err(e) = save_catalog(catalog) {
+        eprintln!("Warning: Failed to save catalog immediately: {}. Table metadata may not be persisted.", e);
+        eprintln!("Continuing with table creation. Please save manually if needed.");
+    }
 
     // Construct table file path
     let table_file_path = TABLE_FILE_TEMPLATE

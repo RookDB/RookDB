@@ -1,9 +1,13 @@
 pub mod buffer_manager;
 pub mod catalog;
 pub mod disk;
+pub mod error_handler;
 pub mod executor;
+pub mod fsm;
 pub mod heap;
 pub mod layout;
 pub mod page;
+pub mod page_api;
 pub mod statistics;
 pub mod table;
+pub mod types_validator;

@@ -1,8 +1,5 @@
-//! Handles database-related user commands such as listing, creating,
-//! and selecting databases from the catalog.
-
 use std::io::{self, Write};
-use storage_manager::catalog::{Catalog, create_database, show_databases};
+use crate::catalog::{Catalog, create_database, show_databases};
 
 /// Displays all available databases
 pub fn show_databases_cmd(catalog: &Catalog) {

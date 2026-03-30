@@ -1,7 +1,37 @@
 # Rust build artifacts
-../target/
 target/
-assets/.DS_Store
-**/*.bin
-**/**/*.dat
-database
+../target/
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# IDE and editor files
+.vscode/
+.idea/
+*.iml
+
+# Test artifacts
+*.fsm
+*.bin
+*.dat
+test_*.dat.fsm
+test_heap_temp*.dat.fsm
+test_page_file.bin
+test_table_file.bin
+
+# Database, logs, and benchmarks
+database/
+logs/
+benchmark_results/
+
+# Temporary and backup files
+heap\ copy/
+*.swp
+*~
+.DS_Store
+
+# Cargo lock (optional - include if you have a binary)
+Cargo.lock

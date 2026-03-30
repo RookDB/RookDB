@@ -121,7 +121,6 @@ impl BufferManager {
             self.allocate_page();
         }
         let mut current_page_index = self.pages.len() - 1; // always a data page, never header
-
         for (i, line) in lines.enumerate() {
             let row = line?;
             if row.trim().is_empty() {

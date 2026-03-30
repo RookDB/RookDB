@@ -16,10 +16,15 @@
 use std::fs::File;
 use std::io;
 
+use crate::backend::heap::autovacuum::notify_table_write;
 use crate::catalog::types::{Catalog, Column};
 use crate::disk::{read_page, write_page};
-use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, PAGE_SIZE, SLOT_FLAG_DELETED};
-use crate::table::page_count;
+use crate::fsm_manager::fsm_set_avail;
+use crate::backend::log::operation_log::{current_timestamp_iso, log_compaction, log_delete};
+use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, PAGE_SIZE, SLOT_FLAG_DELETED, page_free_space};
+use crate::backend::page::page_lock::PageWriteLock;
+use crate::table::{page_count, increment_dead_tuple_count, write_dead_tuple_count};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -218,6 +223,75 @@ fn matches_condition_groups(decoded: &[(String, ColumnValue)], condition_groups:
     matches_condition_groups_pub(decoded, condition_groups)
 }
 
+pub fn operator_to_str(operator: &Operator) -> &'static str {
+    match operator {
+        Operator::Eq => "eq",
+        Operator::Ne => "ne",
+        Operator::Lt => "lt",
+        Operator::Le => "le",
+        Operator::Gt => "gt",
+        Operator::Ge => "ge",
+        Operator::Like => "like",
+        Operator::NotLike => "not_like",
+        Operator::In => "in",
+        Operator::NotIn => "not_in",
+    }
+}
+
+pub fn column_value_to_json(value: &ColumnValue) -> Value {
+    match value {
+        ColumnValue::Int(n) => json!({"type": "INT", "value": n}),
+        ColumnValue::Text(s) => json!({"type": "TEXT", "value": s}),
+        ColumnValue::List(values) => {
+            let list: Vec<Value> = values.iter().map(column_value_to_json).collect();
+            json!({"type": "LIST", "value": list})
+        }
+    }
+}
+
+pub fn condition_to_json(condition: &Condition) -> Value {
+    json!({
+        "column": condition.column,
+        "operator": operator_to_str(&condition.operator),
+        "value": column_value_to_json(&condition.value),
+    })
+}
+
+fn delete_log_details(
+    condition_groups: &[Vec<Condition>],
+    returning: bool,
+    deleted_count: Option<usize>,
+    error: Option<&str>,
+) -> Value {
+    let groups_json: Vec<Value> = condition_groups
+        .iter()
+        .map(|group| {
+            let conds: Vec<Value> = group.iter().map(condition_to_json).collect();
+            json!(conds)
+        })
+        .collect();
+
+    json!({
+        "timestamp": current_timestamp_iso(),
+        "condition_groups": groups_json,
+        "returning": returning,
+        "deleted_count": deleted_count,
+        "error": error,
+    })
+}
+
+fn compaction_log_details(
+    pages_compacted: Option<usize>,
+    error: Option<&str>,
+) -> Value {
+    json!({
+        "timestamp": current_timestamp_iso(),
+        "pages_compacted": pages_compacted,
+        "error": error,
+    })
+}
+
+
 /// Physically compact a page: remove all slots whose DELETED flag is set.
 /// Called only by `compaction_table()`, not by `delete_tuples()`.
 ///
@@ -295,88 +369,122 @@ pub fn delete_tuples(
     condition_groups: &[Vec<Condition>],
     returning: bool,
 ) -> io::Result<DeleteResult> {
-    // Resolve schema from catalog
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
-        )
-    })?;
+    let result = (|| -> io::Result<DeleteResult> {
+        let db = catalog.databases.get(db_name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Database '{}' not found", db_name),
+            )
+        })?;
 
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
+        let table = db.tables.get(table_name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Table '{}' not found", table_name),
+            )
+        })?;
 
-    let columns = &table.columns;
-    let total_pages = page_count(file)?;
-    let mut deleted_count = 0usize;
-    let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
+        let columns = &table.columns;
 
-    // Iterate every data page (page 0 is the table header)
-    for page_num in 1..total_pages {
-        let mut page = Page::new();
-        read_page(file, &mut page, page_num)?;
+        let total_pages = page_count(file)?;
+        let mut deleted_count = 0usize;
+        let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
+        let file_identity = crate::table::file_identity_from_file(file)?;
 
-        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
+        for page_num in 1..total_pages {
+            // Acquire exclusive write lock on this page before reading and modifying
+            let _page_lock = PageWriteLock::acquire(file_identity, page_num);
 
-        let mut slots_to_delete: Vec<usize> = Vec::new();
+            let mut page = Page::new();
+            read_page(file, &mut page, page_num)?;
 
-        for i in 0..num_items {
-            let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
-            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-            let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
-            let flags  = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+            let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+            let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
 
-            // Skip empty or already soft-deleted slots
-            if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
-                continue;
-            }
+            let mut slots_to_delete: Vec<usize> = Vec::new();
 
-            let tuple_data = &page.data[offset as usize..(offset + length) as usize];
-            let decoded = decode_tuple(tuple_data, columns);
+            for i in 0..num_items {
+                let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
+                let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
+                let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
+                let flags  = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
 
-            // Check conditions via DNF (empty groups = match everything)
-            if matches_condition_groups(&decoded, condition_groups) {
-                if returning {
-                    let row: Vec<(String, String)> = decoded
-                        .iter()
-                        .map(|(col, val)| {
-                            let s = match val {
-                                ColumnValue::Int(n)    => n.to_string(),
-                                ColumnValue::Text(t)   => t.clone(),
-                                ColumnValue::List(_)   => String::from("[list]"),
-                            };
-                            (col.clone(), s)
-                        })
-                        .collect();
-                    returning_rows.push(row);
+                if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
+                    continue;
                 }
 
-                slots_to_delete.push(i);
-                deleted_count += 1;
+                let tuple_data = &page.data[offset as usize..(offset + length) as usize];
+                let decoded = decode_tuple(tuple_data, columns);
+
+                if matches_condition_groups(&decoded, condition_groups) {
+                    if returning {
+                        let row: Vec<(String, String)> = decoded
+                            .iter()
+                            .map(|(col, val)| {
+                                let s = match val {
+                                    ColumnValue::Int(n)    => n.to_string(),
+                                    ColumnValue::Text(t)   => t.clone(),
+                                    ColumnValue::List(_)   => String::from("[list]"),
+                                };
+                                (col.clone(), s)
+                            })
+                            .collect();
+                        returning_rows.push(row);
+                    }
+
+                    slots_to_delete.push(i);
+                    deleted_count += 1;
+                }
             }
+
+            if !slots_to_delete.is_empty() {
+                for idx in &slots_to_delete {
+                    let base = PAGE_HEADER_SIZE as usize + idx * ITEM_ID_SIZE as usize;
+                    let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+                    let new_flags = flags | SLOT_FLAG_DELETED;
+                    page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
+                }
+                write_page(file, &mut page, page_num)?;
+            }
+            // Lock is automatically released here when _page_lock is dropped
         }
 
-        // Soft-delete: set SLOT_FLAG_DELETED on each matched slot (no physical removal)
-        if !slots_to_delete.is_empty() {
-            for idx in &slots_to_delete {
-                let base = PAGE_HEADER_SIZE as usize + idx * ITEM_ID_SIZE as usize;
-                let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-                let new_flags = flags | SLOT_FLAG_DELETED;
-                page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
-            }
-            write_page(file, &mut page, page_num)?;
+        if deleted_count > 0 {
+            // Persist dead-tuple count to disk (real side effect, skip if nothing deleted).
+            increment_dead_tuple_count(file, deleted_count as u32)?;
+        }
+        // Always report dead tuples; notify_table_write internally gates the
+        // BG wakeup on dead_tuple_count > threshold (50 + 0.2 * table_size).
+        notify_table_write(db_name, table_name, deleted_count, total_pages as usize);
+
+        Ok(DeleteResult {
+            deleted_count,
+            returning_rows,
+        })
+    })();
+
+    match &result {
+        Ok(delete_result) => {
+            let details = delete_log_details(
+                condition_groups,
+                returning,
+                Some(delete_result.deleted_count),
+                None,
+            );
+            let _ = log_delete(db_name, table_name, details, "success");
+        }
+        Err(err) => {
+            let details = delete_log_details(
+                condition_groups,
+                returning,
+                None,
+                Some(&err.to_string()),
+            );
+            let _ = log_delete(db_name, table_name, details, "failed");
         }
     }
 
-    Ok(DeleteResult {
-        deleted_count,
-        returning_rows,
-    })
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -393,51 +501,61 @@ pub fn compaction_table(
 ) -> io::Result<usize> {
     use std::fs::OpenOptions;
 
-    let path = format!("database/base/{}/{}.dat", db_name, table_name);
-    let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+    let result = (|| -> io::Result<usize> {
+        let path = format!("database/base/{}/{}.dat", db_name, table_name);
+        let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+        let file_identity = crate::table::file_identity_from_file(&file)?;
 
-    let total_pages = page_count(&mut file)?;
-    let mut pages_compacted = 0usize;
+        let total_pages = page_count(&mut file)?;
+        let mut pages_compacted = 0usize;
 
-    for page_num in 1..total_pages {
-        let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num)?;
+        for page_num in 1..total_pages {
+            // Acquire exclusive write lock on this page before reading and potentially compacting
+            let _page_lock = PageWriteLock::acquire(file_identity, page_num);
 
-        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
+            let mut page = Page::new();
+            read_page(&mut file, &mut page, page_num)?;
 
-        // Only rewrite the page if it has at least one soft-deleted slot
-        let has_deleted = (0..num_items).any(|i| {
-            let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
-            let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-            flags & SLOT_FLAG_DELETED != 0
-        });
+            let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+            let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
 
-        if has_deleted {
-            let upper_before = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-            println!(
-                "  Page {:>3} BEFORE → lower={:>5}  upper={:>5}  slots={}",
-                page_num, lower, upper_before, num_items
-            );
+            let has_deleted = (0..num_items).any(|i| {
+                let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
+                let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+                flags & SLOT_FLAG_DELETED != 0
+            });
 
-            compact_page(&mut page, num_items);
+            if has_deleted {
+                compact_page(&mut page, num_items);
 
-            let lower_after = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-            let upper_after = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-            let slots_after = ((lower_after - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
-            println!(
-                "  Page {:>3}  AFTER → lower={:>5}  upper={:>5}  slots={}  freed={}B",
-                page_num, lower_after, upper_after, slots_after,
-                (upper_after as i64 - upper_before as i64).abs()
-                    + (lower as i64 - lower_after as i64).abs()
-            );
+                write_page(&mut file, &mut page, page_num)?;
+                pages_compacted += 1;
+            }
 
-            write_page(&mut file, &mut page, page_num)?;
-            pages_compacted += 1;
+            let free = page_free_space(&page)?;
+            fsm_set_avail(file_identity, page_num, free);
+            // Lock is automatically released here when _page_lock is dropped
+        }
+
+        if pages_compacted > 0 {
+            write_dead_tuple_count(&mut file, 0)?;
+        }
+
+        Ok(pages_compacted)
+    })();
+
+    match &result {
+        Ok(pages_compacted) => {
+            let details = compaction_log_details(Some(*pages_compacted), None);
+            let _ = log_compaction(db_name, table_name, details, "success");
+        }
+        Err(err) => {
+            let details = compaction_log_details(None, Some(&err.to_string()));
+            let _ = log_compaction(db_name, table_name, details, "failed");
         }
     }
 
-    Ok(pages_compacted)
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -661,7 +779,7 @@ fn tokenize(input: &str, columns: &[Column]) -> Vec<Token> {
         if chars[i] == '(' {
             // Peek back: if the buffer (trimmed) ends with IN or NOT IN, keep '(' in buffer
             let buf_upper = buf.trim().to_uppercase();
-            if buf_upper.ends_with(" IN") || buf_upper.ends_with("NOT IN") || buf_upper == "IN" {
+            if buf_upper.ends_with("IN") || buf_upper.ends_with("NOT IN") {
                 buf.push('(');
                 i += 1;
                 continue;
@@ -811,7 +929,7 @@ fn to_dnf(expr: BoolExpr) -> Vec<Vec<Condition>> {
 /// Returns `None` for empty input (caller treats as DELETE ALL).
 ///
 /// # Examples
-/// ```
+/// ```text
 /// "price > 10"
 ///   → [[price>10]]
 ///

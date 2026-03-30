@@ -10,3 +10,6 @@ pub use backend::buffer_manager;
 pub use backend::statistics;
 pub use backend::layout;
 pub use backend::autovacuum;
+pub use backend::fsm;
+pub use backend::fsm_manager;
+pub use backend::operation_log;

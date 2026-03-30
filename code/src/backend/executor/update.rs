@@ -6,21 +6,25 @@
 //!   UPDATE table SET col1 = val1, col2 = val2 WHERE id > 5;
 //!   UPDATE table SET col = val WHERE (a = 1 AND b = 2) OR c = 3;
 //!
-//! Since tuples are fixed-size (INT = 4 bytes, TEXT = 10 bytes) the updated
-//! tuple is always the same length and we can overwrite the bytes in-place at
-//! the existing slot offset — no page restructuring required.
-//!
+//! UPDATE is implemented using delete + insert semantics for latest-version wins.
 //! Rows with the SLOT_FLAG_DELETED bit set are invisible and are never updated.
 
 use std::fs::File;
 use std::io;
 
+use crate::backend::heap::autovacuum::notify_table_write;
 use crate::catalog::types::Catalog;
-use crate::disk::{read_page, write_page};
+use crate::disk::read_page;
+use crate::heap::{insert_tuple, soft_delete_tuple_at, TuplePointer};
+use crate::backend::log::operation_log::log_update;
+use crate::backend::log::operation_log::current_timestamp_iso;
 use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, SLOT_FLAG_DELETED};
+use crate::backend::page::page_lock::PageWriteLock;
 use crate::table::page_count;
+use crate::table::increment_dead_tuple_count;
+use serde_json::{Value, json};
 
-use super::delete::{Condition, ColumnValue, matches_condition_groups_pub};
+use super::delete::{Condition, ColumnValue, condition_to_json, matches_condition_groups_pub};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -196,6 +200,35 @@ fn apply_assignments(
     decoded
 }
 
+struct PendingUpdate {
+    pointer: TuplePointer,
+    new_bytes: Vec<u8>,
+    updated_decoded: Vec<(String, ColumnValue)>,
+}
+
+fn update_log_details(
+    condition_groups: &[Vec<Condition>],
+    returning: bool,
+    updated_count: Option<usize>,
+    error: Option<&str>,
+) -> Value {
+    let groups_json: Vec<Value> = condition_groups
+        .iter()
+        .map(|group| {
+            let conds: Vec<Value> = group.iter().map(condition_to_json).collect();
+            json!(conds)
+        })
+        .collect();
+
+    json!({
+        "timestamp": current_timestamp_iso(),
+        "condition_groups": groups_json,
+        "returning": returning,
+        "updated_count": updated_count,
+        "error": error,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -207,8 +240,6 @@ fn apply_assignments(
 /// - `returning = true`       → populate `UpdateResult::returning_rows` with
 ///                              the rows **after** update.
 ///
-/// Because tuples are fixed-width the updated bytes are written back at the
-/// exact same offset — the slot array is never modified.
 pub fn update_tuples(
     catalog:           &Catalog,
     db_name:           &str,
@@ -218,7 +249,6 @@ pub fn update_tuples(
     condition_groups:  &[Vec<Condition>],
     returning:         bool,
 ) -> io::Result<UpdateResult> {
-    // Resolve schema
     let db = catalog.databases.get(db_name).ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
     })?;
@@ -228,8 +258,10 @@ pub fn update_tuples(
     let columns = &table.columns;
 
     let total_pages = page_count(file)?;
+    let file_identity = crate::table::file_identity_from_file(file)?;
     let mut updated_count  = 0usize;
     let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
+    let mut pending_updates: Vec<PendingUpdate> = Vec::new();
 
     for page_num in 1..total_pages {
         let mut page = Page::new();
@@ -237,7 +269,6 @@ pub fn update_tuples(
 
         let lower     = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
-        let mut page_dirty = false;
 
         for i in 0..num_items {
             let base   = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
@@ -245,7 +276,6 @@ pub fn update_tuples(
             let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
             let flags  = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
 
-            // Skip empty or soft-deleted slots
             if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
                 continue;
             }
@@ -253,46 +283,82 @@ pub fn update_tuples(
             let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
             let decoded    = decode_tuple(&tuple_data, columns);
 
-            // Check WHERE conditions (empty = match all)
             if !matches_condition_groups_pub(&decoded, condition_groups) {
                 continue;
             }
 
-            // Apply SET assignments
             let updated_decoded = apply_assignments(decoded, assignments);
             let new_bytes       = encode_tuple(&updated_decoded, columns);
 
-            // Overwrite tuple data in-place (same length guaranteed for fixed-width tuples)
-            let end = (offset + length) as usize;
-            let len = new_bytes.len().min(length as usize);
-            page.data[offset as usize..offset as usize + len].copy_from_slice(&new_bytes[..len]);
+            pending_updates.push(PendingUpdate {
+                pointer: TuplePointer {
+                    page_id: page_num,
+                    slot_index: i as u16,
+                },
+                new_bytes,
+                updated_decoded,
+            });
+
+            updated_count += 1;
+        }
+    }
+
+    if !pending_updates.is_empty() {
+        for update in &pending_updates {
+            let _page_lock = PageWriteLock::acquire(file_identity, update.pointer.page_id);
+            soft_delete_tuple_at(file, update.pointer)?;
+        }
+        increment_dead_tuple_count(file, pending_updates.len() as u32)?;
+    }
+
+    if !pending_updates.is_empty() {
+        for update in pending_updates {
+            insert_tuple(file, &update.new_bytes)?;
 
             if returning {
-                let row: Vec<(String, String)> = updated_decoded
+                let row: Vec<(String, String)> = update
+                    .updated_decoded
                     .iter()
                     .map(|(col, val)| {
                         let s = match val {
-                            ColumnValue::Int(n)   => n.to_string(),
-                            ColumnValue::Text(t)  => t.clone(),
-                            ColumnValue::List(_)  => String::from("[list]"),
+                            ColumnValue::Int(n) => n.to_string(),
+                            ColumnValue::Text(t) => t.clone(),
+                            ColumnValue::List(_) => String::from("[list]"),
                         };
                         (col.clone(), s)
                     })
                     .collect();
                 returning_rows.push(row);
-                let _ = end; // suppress unused warning
             }
-
-            updated_count += 1;
-            page_dirty     = true;
-        }
-
-        if page_dirty {
-            write_page(file, &mut page, page_num)?;
         }
     }
 
-    Ok(UpdateResult { updated_count, returning_rows })
+    notify_table_write(db_name, table_name, updated_count, total_pages as usize);
+
+    let result: io::Result<UpdateResult> = Ok(UpdateResult { updated_count, returning_rows });
+
+    match &result {
+        Ok(update_result) => {
+            let details = update_log_details(
+                condition_groups,
+                returning,
+                Some(update_result.updated_count),
+                None,
+            );
+            let _ = log_update(db_name, table_name, details, "success");
+        }
+        Err(err) => {
+            let details = update_log_details(
+                condition_groups,
+                returning,
+                None,
+                Some(&err.to_string()),
+            );
+            let _ = log_update(db_name, table_name, details, "failed");
+        }
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------

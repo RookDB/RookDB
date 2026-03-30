@@ -1,11 +1,8 @@
-//! Handles table-related user commands such as listing tables,
-//! creating tables, and displaying table statistics.
-
 use std::io::{self, Write};
 
-use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{Catalog, Column, create_table, show_tables};
-use storage_manager::statistics::print_table_page_count;
+use crate::buffer_manager::BufferManager;
+use crate::catalog::{Catalog, Column, create_table, show_tables};
+use crate::statistics::print_table_page_count;
 
 /// Displays tables in the currently selected database
 pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {

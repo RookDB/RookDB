@@ -1,0 +1,1104 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage{graphicx}
+\usepackage{float}
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10},
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red!80!black},
+    numbers=none,
+    showstringspaces=false,
+    tabsize=4,
+    xleftmargin=0pt,
+    xrightmargin=0pt,
+    aboveskip=8pt,
+    belowskip=8pt
+}
+
+% Rust language definition
+\lstdefinelanguage{Rust}{
+    keywords={fn, let, mut, pub, struct, impl, self, Self, if, else, for, in, while, loop, match, return, true, false, const, use, mod, where, type, enum, trait, as, break, continue, move, ref, static, unsafe, async, await, dyn, extern, macro, super, crate},
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+    sensitive=true,
+}
+
+% Section formatting - more compact
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{1em}{}
+\titlespacing*{\section}{0pt}{12pt}{6pt}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
+\titlespacing*{\subsubsection}{0pt}{8pt}{4pt}
+
+% Reduce list spacing
+\setlist{nosep, leftmargin=*}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{RookDB Design Document}
+\lhead{Update/Delete \& Space Reorganization}
+\cfoot{\thepage}
+
+% Hyperref setup
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\begin{document}
+
+% Title Page
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries RookDB Design Document\par}
+    \vspace{1cm}
+    {\Large Update/Delete and Space Reorganization\par}
+    \vspace{2cm}
+    {\large\textbf{Author:} Bibek Singh Dhody\par}
+    {\large\textbf{Roll Number:} 2023101054\par}
+    \vspace{1cm}
+    {\large\textbf{Date:} 18th February 2026\par}
+    \vfill
+\end{titlepage}
+
+% Table of Contents
+\tableofcontents
+\newpage
+
+%==============================================================================
+\section{Database and Architecture Design Changes}
+%==============================================================================
+
+\subsection{Overview of Component}
+
+This component implements \textbf{tuple deletion}, \textbf{tuple updates}, and \textbf{space reorganization} (compaction) for RookDB. These are fundamental operations for any database system that needs to modify existing data.
+
+\textbf{Key Responsibilities:}
+\begin{itemize}
+    \item Support deletion of records
+    \item Support update of existing records
+    \item Manage reuse of freed space
+    \item Handle record relocation when required
+    \item Perform page reorganization and compaction
+\end{itemize}
+
+\subsection{Current System Analysis}
+
+Based on the existing documentation (\texttt{Database-Doc.pdf}, \texttt{Design-Doc.pdf}, \texttt{API-Doc.pdf}):
+
+\subsubsection{Current Page Layout (Slotted Page)}
+
+\begin{lstlisting}
++-----------------------------------------------------------+
+| Page Header (8 bytes)                                     |
+|   [0-3]: lower pointer (end of slot array)                |
+|   [4-7]: upper pointer (start of tuple data)              |
++-----------------------------------------------------------+
+| Slot Array (grows downward)                               |
+|   Slot 0: [offset: 4 bytes][length: 4 bytes]              |
+|   Slot 1: [offset: 4 bytes][length: 4 bytes]              |
++-----------------------------------------------------------+
+|                    Free Space                             |
++-----------------------------------------------------------+
+| Tuple Data (grows upward)                                 |
+|   Tuple N, Tuple N-1, ... Tuple 0                         |
++-----------------------------------------------------------+
+\end{lstlisting}
+
+\subsubsection{Current Slot Entry Format}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Bytes} & \textbf{Field} & \textbf{Type} & \textbf{Description} \\
+\midrule
+0-3 & offset & u32 & Byte offset of tuple data \\
+4-7 & length & u32 & Length of tuple in bytes \\
+\bottomrule
+\end{tabular}
+\caption{Current slot entry format (8 bytes total)}
+\end{table}
+
+\subsubsection{Current Limitations}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}p{0.45\textwidth}p{0.45\textwidth}@{}}
+\toprule
+\textbf{Limitation} & \textbf{Impact} \\
+\midrule
+No mechanism to mark tuples as deleted & Cannot logically remove records \\
+No support for updating existing tuples & Must delete and re-insert \\
+No way to reclaim space from deleted tuples & Disk space grows indefinitely \\
+No free space reuse strategy & Poor space efficiency \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Proposed Design Changes}
+
+\subsubsection{Modified Slot Entry Format}
+
+\textbf{New Format (8 bytes total - unchanged size):}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Bytes} & \textbf{Field} & \textbf{Type} & \textbf{Description} \\
+\midrule
+0-3 & offset & u32 & Byte offset of tuple data \\
+4-5 & length & u16 & Length of tuple in bytes \\
+6-7 & flags & u16 & Status flags (deleted, moved) \\
+\bottomrule
+\end{tabular}
+\caption{New slot entry format}
+\end{table}
+
+\textbf{Flag Bit Definitions:}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Bit} & \textbf{Name} & \textbf{Value} & \textbf{Description} \\
+\midrule
+0 & DELETED & 0x0001 & Tuple is logically deleted \\
+1 & MOVED & 0x0002 & Tuple was relocated (HOT) \\
+2-15 & Reserved & - & Reserved for future use \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Visual Comparison:}
+\begin{lstlisting}
+BEFORE: [offset: 4 bytes][length: 4 bytes        ] = 8 bytes
+AFTER:  [offset: 4 bytes][length: 2 bytes][flags: 2 bytes] = 8 bytes
+\end{lstlisting}
+
+\subsubsection{Justification for Slot Entry Design}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}p{0.3\textwidth}p{0.65\textwidth}@{}}
+\toprule
+\textbf{Design Decision} & \textbf{Justification} \\
+\midrule
+Length reduced to 2 bytes (u16) & PAGE\_SIZE = 8192 bytes. Max tuple size $\approx$ 8176 bytes. u16 supports 0-65,535, exceeding max tuple size. \\
+Maintaining 8-byte slot size & Preserves backward compatibility. Maintains memory alignment. Minimizes code changes. \\
+16-bit flags field & Provides 16 flags for future extensions (MVCC, locking). More flexible than single boolean. \\
+Soft delete approach & O(1) delete operations, potential undo capability, deferred space reclamation. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Page Layout After Deletion}
+
+\textbf{Before Deletion:}
+\begin{lstlisting}
++------------------------------------------+
+| Header: lower=32, upper=8150             |
++------------------------------------------+
+| Slot 0: [8164, 14, 0x0000] -> Tuple A    |
+| Slot 1: [8150, 14, 0x0000] -> Tuple B    |
+| Slot 2: [8136, 14, 0x0000] -> Tuple C    |
++------------------------------------------+
+|           Free Space (8118 bytes)        |
++------------------------------------------+
+| [Tuple C][Tuple B][Tuple A]              |
++------------------------------------------+
+\end{lstlisting}
+
+\textbf{After Deleting Tuple B (Slot 1):}
+\begin{lstlisting}
++------------------------------------------+
+| Header: lower=32, upper=8150             |
++------------------------------------------+
+| Slot 0: [8164, 14, 0x0000] -> Tuple A    |
+| Slot 1: [8150, 14, 0x0001] -> DELETED    |  <- flags = DELETED
+| Slot 2: [8136, 14, 0x0000] -> Tuple C    |
++------------------------------------------+
+|           Free Space (8118 bytes)        |
++------------------------------------------+
+| [Tuple C][DEAD SPACE][Tuple A]           |  <- 14 bytes dead
++------------------------------------------+
+\end{lstlisting}
+
+\textbf{After Compaction:}
+\begin{lstlisting}
++------------------------------------------+
+| Header: lower=32, upper=8164             |  <- upper moved up
++------------------------------------------+
+| Slot 0: [8178, 14, 0x0000] -> Tuple A    |  <- offset updated
+| Slot 1: [0,    0,  0x0000] -> EMPTY      |  <- cleared
+| Slot 2: [8164, 14, 0x0000] -> Tuple C    |  <- offset updated
++------------------------------------------+
+|           Free Space (8132 bytes)        |  <- 14 bytes reclaimed
++------------------------------------------+
+| [Tuple C][Tuple A]                       |  <- contiguous
++------------------------------------------+
+\end{lstlisting}
+
+\subsubsection{Update Operation Strategies}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}p{0.2\textwidth}p{0.35\textwidth}p{0.35\textwidth}@{}}
+\toprule
+\textbf{Scenario} & \textbf{Condition} & \textbf{Strategy} \\
+\midrule
+In-place Update & new\_size $\leq$ old\_size & Overwrite at same offset, update length \\
+Same-page Relocate & new\_size $>$ old\_size AND page has space & Write at new offset, update slot entry \\
+Cross-page Move & new\_size $>$ old\_size AND page full & Delete old, insert on different page \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Update Decision Flowchart:}
+\begin{lstlisting}
+                    +------------------+
+                    |  UPDATE Request  |
+                    +--------+---------+
+                             |
+                    +--------v---------+
+                    |  new_size <=     |
+                    |  old_size?       |
+                    +--------+---------+
+                      YES |      | NO
+                          |      |
+              +-----------v+    +v----------------+
+              |  IN-PLACE  |    |  Check page     |
+              |  UPDATE    |    |  free space     |
+              +------------+    +--------+--------+
+                                   YES |      | NO
+                           +-----------v+    +v----------------+
+                           | SAME-PAGE  |    |  CROSS-PAGE     |
+                           | RELOCATE   |    |  MOVE           |
+                           +------------+    +-----------------+
+\end{lstlisting}
+
+\subsubsection{Compaction Algorithm}
+
+\textbf{Purpose:} Reclaim dead space from deleted tuples by reorganizing live tuples contiguously.
+
+\begin{lstlisting}
+COMPACT_PAGE(page):
+    1. Scan all slots, collect live tuples (not deleted, not empty)
+    2. Store each live tuple's data: [(slot_num, data), ...]
+    3. Clear tuple data area (slot_array_end to PAGE_SIZE)
+    4. current_upper = PAGE_SIZE
+    5. For each (slot_num, data) in live_tuples:
+        a. new_offset = current_upper - len(data)
+        b. Write data to page[new_offset..current_upper]
+        c. Update slot: offset=new_offset, length=len(data), flags=0
+        d. current_upper = new_offset
+    6. Mark deleted slots as empty: offset=0, length=0, flags=0
+    7. Update page header: upper = current_upper
+    8. Write page to disk
+    9. Return bytes reclaimed
+\end{lstlisting}
+
+\textbf{Complexity Analysis:}
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} & \textbf{Explanation} \\
+\midrule
+Time Complexity & O(n) & n = number of tuples on page \\
+Space Complexity & O(m) & m = total size of live tuples \\
+I/O Operations & 2 & 1 read + 1 write per page \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Tuple Identification}
+
+\textbf{TupleId Structure:} \texttt{TupleId \{ page\_id: u32, slot\_id: u32 \}}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Field} & \textbf{Type} & \textbf{Description} \\
+\midrule
+page\_id & u32 & Page number (1 to N, page 0 is header) \\
+slot\_id & u32 & Slot index within page (0 to M-1) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Justification:} Simple/efficient (8 bytes), direct addressing, industry standard (PostgreSQL ctid, MySQL row\_id).
+
+\subsubsection{RecordId Abstraction}
+
+\textbf{RecordId:} A user-facing stable identifier (\texttt{u64}) mapped to internal \texttt{TupleId} via \texttt{HashMap<RecordId, TupleId>}.
+
+\begin{lstlisting}
+RecordId (u64) ---> HashMap ---> TupleId { page_id, slot_id }
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Aspect} & \textbf{RecordId} & \textbf{TupleId} \\
+\midrule
+Visibility & User-facing (CLI) & Internal only \\
+Stability & Always stable & May change on relocation \\
+Format & Single u64 number & \{page\_id, slot\_id\} pair \\
+Storage & In-memory HashMap & Implicit in page layout \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Benefits:}
+\begin{itemize}
+    \item Users interact with simple, stable identifiers
+    \item Internal tuple relocation is transparent to users
+    \item CLI commands use single RecordId instead of page/slot pair
+\end{itemize}
+
+\subsection{Component Dependencies}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Dependency} & \textbf{Module} & \textbf{Purpose} \\
+\midrule
+Catalog Manager & catalog/ & Read table schema for updates \\
+Disk Manager & disk/ & Read/write pages to disk \\
+Page Manager & page/ & Page constants and initialization \\
+Heap Manager & heap/ & Insert tuple for cross-page moves \\
+Table Manager & table/ & Get page count for validation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Scalability and Performance}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Aspect} & \textbf{Design Choice} & \textbf{Benefit} \\
+\midrule
+Delete Performance & O(1) flag setting & Fast deletes, no data movement \\
+Update Performance & O(1) for in-place & Optimized for common case \\
+Space Efficiency & Lazy reclamation & Avoids fragmentation overhead \\
+Large Tables & Per-page operations & Constant memory usage \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%==============================================================================
+\section{Backend Data Structures}
+%==============================================================================
+
+\subsection{Data Structures to be Created}
+
+\subsubsection{TupleId}
+
+\begin{lstlisting}[language=Rust]
+/// Uniquely identifies a tuple within a table (internal use)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TupleId {
+    pub page_id: u32,   // Page number (1 to N, 0 is header)
+    pub slot_id: u32,   // Slot index within page (0 to M-1)
+}
+
+impl TupleId {
+    pub fn new(page_id: u32, slot_id: u32) -> Self {
+        TupleId { page_id, slot_id }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.page_id > 0
+    }
+}
+\end{lstlisting}
+
+\textbf{Purpose:} Internal identifier for tuple location within pages.
+
+\textbf{Justification:} Required for delete/update operations; standard approach (PostgreSQL ctid, MySQL row\_id).
+
+\subsubsection{RecordId and RecordIdManager}
+
+\begin{lstlisting}[language=Rust]
+/// User-facing stable identifier for tuples
+pub type RecordId = u64;
+
+/// Manages mapping between RecordId and TupleId
+pub struct RecordIdManager {
+    next_id: RecordId,
+    mapping: HashMap<RecordId, TupleId>,
+}
+
+impl RecordIdManager {
+    pub fn new() -> Self {
+        RecordIdManager {
+            next_id: 1,
+            mapping: HashMap::new(),
+        }
+    }
+
+    /// Assign a new RecordId to a TupleId
+    pub fn assign(&mut self, tuple_id: TupleId) -> RecordId {
+        let record_id = self.next_id;
+        self.next_id += 1;
+        self.mapping.insert(record_id, tuple_id);
+        record_id
+    }
+
+    /// Lookup TupleId by RecordId
+    pub fn get(&self, record_id: RecordId) -> Option<&TupleId> {
+        self.mapping.get(&record_id)
+    }
+
+    /// Update mapping when tuple is relocated
+    pub fn update(&mut self, record_id: RecordId, new_tuple_id: TupleId) {
+        self.mapping.insert(record_id, new_tuple_id);
+    }
+
+    /// Remove mapping when tuple is deleted
+    pub fn remove(&mut self, record_id: RecordId) {
+        self.mapping.remove(&record_id);
+    }
+
+\textbf{Note on Durability:}
+Currently, the RecordId to TupleId mapping is maintained only in memory and is not persisted to disk. For true durability and stability of RecordIds across system restarts, disk persistence of this mapping must be implemented as part of this component. This is required for production-grade reliability and is a necessary feature for the design to be complete.
+
+\textbf{Note on Deletion and Compaction:}
+When a tuple is deleted, the RecordIdManager must remove the RecordId mapping (\texttt{record\_id\_manager.remove(record\_id)}). After compaction, slots corresponding to deleted tuples are cleared and become empty, and there is no RecordId mapping for these slots. This ensures that deleted records are no longer accessible via RecordId, maintaining correctness and preventing stale references.
+}
+\end{lstlisting}
+
+\textbf{Purpose:} Provides stable user-facing identifiers that persist across tuple relocations.
+
+\textbf{Justification:} Decouples user interaction from internal storage details; enables transparent compaction.
+
+\subsubsection{SlotEntry}
+
+\begin{lstlisting}[language=Rust]
+#[derive(Debug, Clone, Copy)]
+pub struct SlotEntry {
+    pub offset: u32,    // Byte offset of tuple data
+    pub length: u16,    // Length of tuple data in bytes
+    pub flags: u16,     // Status flags (deleted, moved)
+}
+
+impl SlotEntry {
+    pub fn read_from_page(page: &Page, slot_num: u32) -> Self {
+        let base = (PAGE_HEADER_SIZE + slot_num * ITEM_ID_SIZE) as usize;
+        let offset = u32::from_le_bytes(page.data[base..base+4].try_into().unwrap());
+        let length = u16::from_le_bytes(page.data[base+4..base+6].try_into().unwrap());
+        let flags = u16::from_le_bytes(page.data[base+6..base+8].try_into().unwrap());
+        SlotEntry { offset, length, flags }
+    }
+
+    pub fn write_to_page(&self, page: &mut Page, slot_num: u32) {
+        let base = (PAGE_HEADER_SIZE + slot_num * ITEM_ID_SIZE) as usize;
+        page.data[base..base+4].copy_from_slice(&self.offset.to_le_bytes());
+        page.data[base+4..base+6].copy_from_slice(&self.length.to_le_bytes());
+        page.data[base+6..base+8].copy_from_slice(&self.flags.to_le_bytes());
+    }
+
+    pub fn is_deleted(&self) -> bool { (self.flags & FLAG_DELETED) != 0 }
+    pub fn is_empty(&self) -> bool { self.offset == 0 && self.length == 0 }
+    pub fn set_deleted(&mut self) { self.flags |= FLAG_DELETED; }
+    pub fn clear(&mut self) { self.offset = 0; self.length = 0; self.flags = 0; }
+}
+\end{lstlisting}
+
+\textbf{Purpose:} Encapsulates slot entry format with clean read/write operations.
+
+\textbf{Justification:} Abstracts binary format, centralizes flag manipulation, improves maintainability.
+
+\subsubsection{PageStats}
+
+\begin{lstlisting}[language=Rust]
+#[derive(Debug)]
+pub struct PageStats {
+    pub total_slots: u32,      // Total slots in slot array
+    pub live_tuples: u32,      // Non-deleted tuples
+    pub deleted_tuples: u32,   // Deleted tuples
+    pub free_space: u32,       // Contiguous free space
+    pub dead_space: u32,       // Space from deleted tuples
+    pub live_space: u32,       // Space from live tuples
+}
+\end{lstlisting}
+
+\subsubsection{Flag Constants}
+
+\begin{lstlisting}[language=Rust]
+pub const FLAG_DELETED: u16 = 0x0001;  // Bit 0: Tuple deleted
+pub const FLAG_MOVED: u16 = 0x0002;    // Bit 1: Tuple relocated
+// Bits 2-15: Reserved for future use
+\end{lstlisting}
+
+\subsection{Data Structures to be Modified}
+
+\subsubsection{Page Structure}
+
+\textbf{Current:} \texttt{pub struct Page \{ pub data: Vec<u8> \}} (8192 bytes)
+
+\textbf{Modification:} No structural change. Only interpretation of slot entry bytes 4-7 changes from \texttt{length(u32)} to \texttt{length(u16) + flags(u16)}.
+
+%==============================================================================
+\section{Backend Functions}
+%==============================================================================
+
+\subsection{Functions to be Created}
+
+\subsubsection{delete\_tuple}
+
+\begin{lstlisting}[language=Rust]
+pub fn delete_tuple(file: &mut File, tuple_id: TupleId) -> io::Result<()>
+\end{lstlisting}
+
+\textbf{Description:} Marks a tuple as deleted by setting the DELETED flag.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Description} \\
+\midrule
+file & \&mut File & Open file handle for the table \\
+tuple\_id & TupleId & Identifier of tuple to delete \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Returns:} \texttt{io::Result<()>} - Ok(()) on success, Error on failure.
+
+\textbf{Errors:} Invalid page/slot number, tuple already deleted.
+
+\textbf{Implementation:}
+\begin{lstlisting}
+1. READ total_pages from file header
+2. VALIDATE page_num (not 0, within range)
+3. READ page from disk
+4. CALCULATE num_slots = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE
+5. VALIDATE slot_num
+6. READ slot entry, CHECK if already deleted
+7. SET deleted flag: slot.flags |= FLAG_DELETED
+8. WRITE slot entry and page to disk
+9. RETURN Ok(())
+\end{lstlisting}
+
+\subsubsection{update\_tuple}
+
+\begin{lstlisting}[language=Rust]
+pub fn update_tuple(file: &mut File, tuple_id: TupleId, new_data: &[u8])
+    -> io::Result<TupleId>
+\end{lstlisting}
+
+\textbf{Description:} Updates tuple with new data. Handles in-place, same-page relocate, cross-page move.
+
+\textbf{Returns:} \texttt{io::Result<TupleId>} - Location of updated tuple (may differ if relocated).
+
+\textbf{Implementation:}
+\begin{lstlisting}
+1. VALIDATE tuple_id, READ page and slot
+2. CHECK if deleted -> Error
+3. COMPARE sizes: old_length vs new_length
+4. CASE 1 (new <= old): In-place overwrite, update length
+5. CASE 2 (page has space): Write at new_offset, update slot
+6. CASE 3 (no space): Mark deleted, insert_tuple_with_id()
+7. RETURN TupleId (same or new)
+\end{lstlisting}
+
+\subsubsection{compact\_page}
+
+\begin{lstlisting}[language=Rust]
+pub fn compact_page(file: &mut File, page_num: u32) -> io::Result<u32>
+\end{lstlisting}
+
+\textbf{Description:} Reorganizes page by removing dead space, making tuples contiguous.
+
+\textbf{Returns:} Number of bytes reclaimed.
+
+\textbf{Implementation:}
+\begin{lstlisting}
+1. VALIDATE page_num, READ page
+2. COLLECT live tuples: [(slot_num, data), ...]
+3. CLEAR tuple data area
+4. REWRITE contiguously from PAGE_SIZE downward
+5. UPDATE slot entries with new offsets
+6. CLEAR deleted slots, UPDATE header
+7. WRITE page, RETURN bytes_reclaimed
+\end{lstlisting}
+
+\subsubsection{compact\_table}
+
+\begin{lstlisting}[language=Rust]
+pub fn compact_table(file: &mut File) -> io::Result<u32>
+\end{lstlisting}
+
+\textbf{Description:} Compacts all data pages in table.
+
+\textbf{Implementation:} Loop through pages 1..total\_pages, call compact\_page(), sum reclaimed bytes.
+
+\subsubsection{get\_slot\_count / get\_page\_stats}
+
+\begin{lstlisting}[language=Rust]
+pub fn get_slot_count(page: &Page) -> u32
+pub fn get_page_stats(page: &Page) -> PageStats
+\end{lstlisting}
+
+\subsection{Functions to be Modified}
+
+\subsubsection{show\_tuples (seq\_scan.rs)}
+
+\textbf{Changes:} Use SlotEntry, check \texttt{is\_deleted()}, skip deleted tuples, display summary.
+
+\begin{lstlisting}[language=Rust]
+for i in 0..num_items {
+    let slot = SlotEntry::read_from_page(&page, i);
+    if slot.is_deleted() { deleted_count += 1; continue; }
+    if slot.is_empty() { continue; }
+    // Process live tuple...
+}
+\end{lstlisting}
+
+\subsubsection{insert\_tuple (heap/mod.rs)}
+
+\textbf{Changes:} Write slot entries with new format (length: u16, flags: u16 = 0). Trigger automatic compaction if free space is insufficient.
+
+\begin{lstlisting}[language=Rust]
+page.data[slot_base..slot_base+4].copy_from_slice(&new_upper.to_le_bytes());
+page.data[slot_base+4..slot_base+6].copy_from_slice(&(size as u16).to_le_bytes());
+page.data[slot_base+6..slot_base+8].copy_from_slice(&0u16.to_le_bytes());
+\end{lstlisting}
+
+\textbf{Auto-Compaction Logic:}
+\begin{lstlisting}
+INSERT_TUPLE(file, data):
+    FOR each page in 1..total_pages:
+        READ page
+        free_space = upper - lower
+        needed_space = ITEM_ID_SIZE + len(data)
+
+        IF free_space < needed_space:
+            // Try compaction before giving up on this page
+            reclaimed = compact_page(file, page_num)
+            RE-READ page
+            free_space = upper - lower
+
+        IF free_space >= needed_space:
+            WRITE tuple and slot entry
+            RETURN new TupleId
+
+    // All pages full even after compaction - create new page
+    CREATE new page
+    WRITE tuple
+    RETURN new TupleId
+\end{lstlisting}
+
+%==============================================================================
+\section{Frontend Changes (CLI Inputs)}
+%==============================================================================
+
+\subsection{New CLI Commands}
+
+\textbf{Note: For all tuple/table operations (delete, update, compact, stats, show tuples), the user must specify the target table (the database is already selected).}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Option} & \textbf{Command} & \textbf{Description} \\
+\midrule
+9 & Delete Tuple & Delete tuple by RecordId (specify table first) \\
+10 & Update Tuple & Update tuple by RecordId with new values (specify table first) \\
+11 & Compact Page & Compact a specific page (specify table first) \\
+12 & Compact Table & Compact all pages in table (specify table first) \\
+13 & Show Page Stats & Display space usage statistics (specify table first) \\
+14 & Show Tuples & Display all live tuples with RecordIds (specify table first) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Note:} CLI commands 9--14 require the user to select the table before performing the operation. The database context is assumed to be already set.
+
+\subsection{User Input/Output Examples}
+
+\textbf{Show Tuples (with RecordIds):}
+\begin{lstlisting}
+Enter choice: 14
+Enter table name: students
+=== Tuples in 'students' ===
+RecordId=1: id=1 name='Alice'
+RecordId=2: id=2 name='Bob'
+RecordId=3: id=3 name='Charlie'
+(3 live tuples, 0 deleted)
+\end{lstlisting}
+
+\textbf{Delete Tuple (Option 9):}
+\begin{lstlisting}
+Enter choice: 9
+Enter table name: students
+Enter RecordId: 2
+>>> Deleted tuple with RecordId=2 from 'students'
+\end{lstlisting}
+
+\textbf{Update Tuple (Option 10):}
+\begin{lstlisting}
+Enter choice: 10
+Enter table name: students
+Enter RecordId: 1
+Enter new values:
+  id (INT): 101
+  name (TEXT): UpdatedName
+>>> Successfully updated tuple with RecordId=1 in 'students'
+>>> (Note: Tuple may be relocated internally, RecordId remains stable)
+\end{lstlisting}
+
+\textbf{Compact Page (Option 11):}
+\begin{lstlisting}
+Enter choice: 11
+Enter table name: students
+Enter page number: 1
+>>> Compacted page 1 of 'students': reclaimed 42 bytes (free: 7500 -> 7542)
+\end{lstlisting}
+
+\textbf{Compact Table (Option 12):}
+\begin{lstlisting}
+Enter choice: 12
+Enter table name: students
+>>> Compacted page 1: reclaimed 42 bytes
+>>> Compacted page 2: reclaimed 28 bytes
+>>> Total reclaimed: 70 bytes in 'students'
+\end{lstlisting}
+
+\textbf{Show Page Stats (Option 13):}
+\begin{lstlisting}
+Enter choice: 13
+Enter table name: students
+=== Page Statistics for 'students' ===
+Page     Live  Deleted  FreeSpace  DeadSpace
+----------------------------------------------
+1           8        2       7500         28
+2           5        1       7800         14
+----------------------------------------------
+Total      13        3      15300         42
+Reclaimable space: 42 bytes
+\end{lstlisting}
+
+%==============================================================================
+\section{Overall Component Workflow}
+%==============================================================================
+
+\subsection{Delete Tuple Workflow}
+
+\begin{lstlisting}
+User Input (RecordId=2)
+         |
+         v
++-------------+     +------------------+     +---------------+
+|  menu.rs    |---->| RecordIdManager  |---->| tuple_ops.rs  |
+| (Option 9)  |     | get(record_id)   |     | delete_tuple()|
++-------------+     | -> TupleId       |     +-------+-------+
+                    +------------------+             |
+                                                    v
+                    +---------------+     +---------------+
+                    | table_file.rs |     |   disk.rs     |
+                    | page_count()  |     | read/write    |
+                    +---------------+     +-------+-------+
+                                                  |
+                                                  v
+                                          +---------------+
+                                          | SlotEntry::   |
+                                          | Set DELETED   |
+                                          +---------------+
+\end{lstlisting}
+
+\subsection{Update Tuple Workflow}
+
+\begin{lstlisting}
+User Input (RecordId, new values)
+         |
+         v
++-------------+     +------------------+     +---------------+
+|  menu.rs    |---->| RecordIdManager  |---->|  catalog.rs   |
+| (Option 10) |     | get(record_id)   |     | Get schema    |
++-------------+     | -> TupleId       |     +-------+-------+
+                    +------------------+             |
+                                                    v
+                                          +---------------+
+                                          | update_tuple()|
+                                          +-------+-------+
+                                                  |
+                    +-------------+-------+-------+
+                    |             |               |
+                    v             v               v
+              +-----------+ +-----------+ +-------------+
+              | IN-PLACE  | | SAME-PAGE | | CROSS-PAGE  |
+              | OVERWRITE | | RELOCATE  | | MOVE        |
+              +-----------+ +-----------+ +-------------+
+\end{lstlisting}
+
+\subsection{Compact Table Workflow}
+
+\begin{lstlisting}
+User Input (Option 12)
+         |
+         v
++-------------+     +---------------+
+|  menu.rs    |---->| tuple_cmd.rs  |
+| (Option 12) |     | compact_table_|
++-------------+     |     cmd()     |
+                    +-------+-------+
+                            |
+                            v
+                    +---------------+
+                    | compact_table |---> FOR each page:
+                    +-------+-------+         |
+                            |                 v
+                            |         +---------------+
+                            +-------->| compact_page()|
+                                      +---------------+
+                                              |
+                    1. Collect live tuples    |
+                    2. Clear data area        |
+                    3. Rewrite contiguous     |
+                    4. Update slots/header    |
+\end{lstlisting}
+
+%==============================================================================
+\section{Codebase Structure Changes}
+%==============================================================================
+
+\subsection{New Files to be Created}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File Path} & \textbf{Purpose} \\
+\midrule
+code/src/backend/executor/tuple\_ops.rs & Core delete/update/compact functions \\
+code/src/frontend/tuple\_cmd.rs & CLI command handlers \\
+code/tests/test\_delete\_tuple.rs & Delete unit tests \\
+code/tests/test\_update\_tuple.rs & Update unit tests \\
+code/tests/test\_compact\_page.rs & Compaction unit tests \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Files to be Modified}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File Path} & \textbf{Modification} \\
+\midrule
+code/src/backend/executor/mod.rs & Add \texttt{pub mod tuple\_ops;} \\
+code/src/backend/executor/seq\_scan.rs & Skip deleted tuples \\
+code/src/backend/heap/mod.rs & New slot entry format \\
+code/src/frontend/mod.rs & Add \texttt{pub mod tuple\_cmd;} \\
+code/src/frontend/menu.rs & Add menu options 9-13 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Directory Structure After Changes}
+
+\begin{lstlisting}
+code/src/
+|-- main.rs
+|-- lib.rs
+|-- frontend/
+|   |-- mod.rs              (modified)
+|   |-- menu.rs             (modified)
+|   |-- database_cmd.rs
+|   |-- table_cmd.rs
+|   |-- data_cmd.rs
+|   +-- tuple_cmd.rs        (NEW)
++-- backend/
+    |-- executor/
+    |   |-- mod.rs          (modified)
+    |   |-- seq_scan.rs     (modified)
+    |   +-- tuple_ops.rs    (NEW)
+    |-- heap/
+    |   +-- mod.rs          (modified)
+    +-- ...
+
+code/tests/
+|-- test_delete_tuple.rs    (NEW)
+|-- test_update_tuple.rs    (NEW)
++-- test_compact_page.rs    (NEW)
+\end{lstlisting}
+
+%==============================================================================
+\section{Test Cases}
+%==============================================================================
+
+\subsection{Aspects to be Tested}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Aspect} & \textbf{Description} \\
+\midrule
+Delete correctness & Tuple marked deleted, not physically removed \\
+Delete validation & Invalid page/slot returns errors \\
+Double delete & Re-deleting already deleted tuple fails \\
+Update in-place & Same-size update at same location \\
+Update relocate & Larger update moves within/across pages \\
+Update deleted & Cannot update deleted tuple \\
+Compaction correctness & Live tuples preserved, dead space reclaimed \\
+Show tuples & Deleted tuples not displayed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Unit Tests}
+
+\textbf{Test 1: Delete Tuple}
+\begin{lstlisting}[language=Rust]
+#[test]
+fn test_delete_tuple_basic() {
+    // Setup: Create table with 3 tuples
+    // Action: Delete tuple at (page=1, slot=1)
+    // Verify: Slot 1 has FLAG_DELETED, others unchanged
+}
+
+#[test]
+fn test_delete_tuple_invalid_page() {
+    // Action: Delete at (page=999, slot=0)
+    // Verify: Returns error "Invalid page number"
+}
+
+#[test]
+fn test_delete_tuple_already_deleted() {
+    // Setup: Delete tuple at (1, 0)
+    // Action: Delete same tuple again
+    // Verify: Returns error "Tuple already deleted"
+}
+\end{lstlisting}
+
+\textbf{Test 2: Update Tuple}
+\begin{lstlisting}[language=Rust]
+#[test]
+fn test_update_tuple_in_place() {
+    // Setup: Insert tuple with name="Alice"
+    // Action: Update to name="Bob" (same size)
+    // Verify: TupleId unchanged, data updated
+}
+
+#[test]
+fn test_update_tuple_cross_page() {
+    // Setup: Fill page, insert small tuple
+    // Action: Update with larger data
+    // Verify: New TupleId returned, old slot deleted
+}
+\end{lstlisting}
+
+\textbf{Test 3: Compaction}
+\begin{lstlisting}[language=Rust]
+#[test]
+fn test_compact_page_basic() {
+    // Setup: Insert 5 tuples, delete 2
+    // Action: compact_page()
+    // Verify: 3 tuples remain, free space increased
+}
+
+#[test]
+fn test_compact_table_multiple_pages() {
+    // Setup: 3 pages with deletions
+    // Action: compact_table()
+    // Verify: All pages compacted, total reclaimed
+}
+\end{lstlisting}
+
+\subsection{Integration Test}
+
+\begin{lstlisting}[language=Rust]
+#[test]
+fn test_full_workflow() {
+    // 1. Create database and table
+    // 2. Load CSV with 10 rows
+    // 3. Delete rows 2, 5, 7
+    // 4. Update row 3 with larger data
+    // 5. Show page stats (verify dead space)
+    // 6. Compact table
+    // 7. Show page stats (dead space = 0)
+    // 8. Show tuples (verify correct rows)
+}
+\end{lstlisting}
+
+\subsection{Test Data}
+
+\textbf{Sample CSV:}
+\begin{lstlisting}
+id,name
+1,Alice
+2,Bob
+3,Charlie
+4,David
+5,Eve
+\end{lstlisting}
+
+\textbf{Expected tuple size:} 4 (INT) + 10 (TEXT) = 14 bytes
+
+%==============================================================================
+\section*{Summary}
+%==============================================================================
+
+This design document presents a complete implementation plan for \textbf{Update/Delete and Space Reorganization} in RookDB.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Component} & \textbf{Decision} & \textbf{Rationale} \\
+\midrule
+Slot Format & offset(4) + length(2) + flags(2) & Maintains alignment, enables flags \\
+Delete & Soft delete via FLAG\_DELETED & O(1) operation, reversible \\
+Update & Three strategies based on size & Optimizes common cases \\
+Compaction & On-demand, per-page & Controlled space reclamation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Implementation Priorities:}
+\begin{enumerate}
+    \item \textbf{Performance:} O(1) deletes, optimized updates
+    \item \textbf{Scalability:} Per-page operations, constant memory
+    \item \textbf{Maintainability:} Clean abstractions (SlotEntry, TupleId)
+    \item \textbf{Extensibility:} Reserved flag bits for future features
+\end{enumerate}
+
+\end{document}
