@@ -31,7 +31,7 @@ pub use constraints::{
 };
 
 // ── Re-exports: index operations ─────────────────────────────────────────────
-pub use indexes::{create_index, drop_index, get_indexes_for_table};
+pub use indexes::{create_index, drop_index, get_indexes_for_table, index_lookup, insert_index_entry};
 
 // ── Re-exports: OID counter ───────────────────────────────────────────────────
 pub use oid::OidCounter;

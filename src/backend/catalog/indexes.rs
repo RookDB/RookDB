@@ -4,7 +4,6 @@
 //! pg_index and utilizes a page-based B-Tree for constraint validation.
 
 use std::fs;
-use std::io::{Read, Write, Seek};
 use std::path::Path;
 
 use crate::buffer_manager::BufferManager;
