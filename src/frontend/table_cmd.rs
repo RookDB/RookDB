@@ -52,15 +52,14 @@ pub fn create_table_cmd(
             break;
         }
 
-        let parts: Vec<&str> = input.split(':').collect();
-        if parts.len() != 2 {
-            println!("Invalid format. Please use name:type (e.g. id:INT)");
+        let Some((name, dtype)) = input.split_once(':') else {
+            println!("Invalid format. Please use name:type (e.g. id:INT or address:UDT:address)");
             continue;
-        }
+        };
 
         columns.push(Column {
-            name: parts[0].to_string(),
-            data_type: parts[1].to_string(),
+            name: name.to_string(),
+            data_type: dtype.to_string(),
         });
     }
 
