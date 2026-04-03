@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DatePart","FunctionError"],"fn":["abs","cast","ceiling","coalesce","current_date","current_time","current_timestamp","extract","floor","length","lower","ltrim","nullif","round","rtrim","substring","trim","upper"]};

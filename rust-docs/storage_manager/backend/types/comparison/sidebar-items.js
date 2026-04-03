@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ComparisonError"],"fn":["compare_nullable","nullable_equals"],"trait":["Comparable"]};

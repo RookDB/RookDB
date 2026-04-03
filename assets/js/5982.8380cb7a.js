@@ -1,0 +1,1 @@
+"use strict";(globalThis.webpackChunkrook_db=globalThis.webpackChunkrook_db||[]).push([[5982],{5982(e,a,k){k.d(a,{createPacketServices:()=>b.$});var b=k(6527);k(6902)}}]);

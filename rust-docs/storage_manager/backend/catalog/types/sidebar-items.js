@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["Catalog","Column","Database","Table"]};
+window.SIDEBAR_ITEMS = {"struct":["Catalog","Column","Constraints","Database","Table"]};
