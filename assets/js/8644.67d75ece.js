@@ -1,1 +1,0 @@
-"use strict";(globalThis.webpackChunkrook_db=globalThis.webpackChunkrook_db||[]).push([[8644],{8644(e,r,c){c.d(r,{createArchitectureServices:()=>a.S});var a=c(5877);c(6902)}}]);
