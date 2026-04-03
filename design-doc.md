@@ -123,9 +123,9 @@ Layout (simplified with F=4):
 
 **FSM page constants (8 KB page):**
 
-- `FSM_NODES_PER_PAGE: usize = 4080` — bytes in the binary max-tree array
-- `FSM_SLOTS_PER_PAGE: u32 = 2040` — usable leaf slots per Level-0 FSM page
-- `FSM_LEVELS: u32 = 3` — Level 0 = leaves, Level 2 = root
+- `FSM_NODES_PER_PAGE: usize = 4080` - bytes in the binary max-tree array
+- `FSM_SLOTS_PER_PAGE: u32 = 2040` - usable leaf slots per Level-0 FSM page
+- `FSM_LEVELS: u32 = 3` - Level 0 = leaves, Level 2 = root
 
 **Benefits:**
 
@@ -172,7 +172,7 @@ pub struct FSM {
 }
 ```
 
-**Purpose:** Model the PostgreSQL-style FSM fork — a 3-level tree of `FSMPage` values, each containing a binary max-tree of 1-byte free-space categories covering all heap pages.
+**Purpose:** Model the PostgreSQL-style FSM fork - a 3-level tree of `FSMPage` values, each containing a binary max-tree of 1-byte free-space categories covering all heap pages.
 **Justification:** O(log N) tree search; 1 byte/page memory overhead; `fp_next_slot` spreads concurrent inserts; self-correcting without WAL logging.
 
 #### `HeaderMetadata`
@@ -290,7 +290,7 @@ pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<u32>>
 ```
 
 **Description:** Traverse the 3-level FSM tree to find a heap page whose free-space category is at least `min_category`, using `fp_next_slot` on each FSM page to spread load.  
-**Inputs:** `min_category` — minimum required free-space category (0–255)  
+**Inputs:** `min_category` - minimum required free-space category (0–255)  
 **Outputs:** heap `PageID` or `None` (root value < min_category means no eligible page)  
 **Steps:**
 
@@ -331,7 +331,7 @@ pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32) -> io::R
 5. Walk up the binary tree: for each parent, recompute as `max(left_child, right_child)`. Stop when the parent value does not change (or root is reached).
 6. Write the updated Level-0 FSM page.
 7. If the root value of this Level-0 page changed, recursively call `fsm_set_avail` on the corresponding Level-1 page (passing `fsm_page_no` as the "heap page" and the new root as category), and so on up to Level 2.
-8. Mark all modified FSM pages dirty (treated as hints — no WAL entry written).
+8. Mark all modified FSM pages dirty (treated as hints - no WAL entry written).
 
 #### `FSM::fsm_vacuum_update`
 
@@ -611,7 +611,7 @@ FSM tree now reflects page 45 as nearly empty (category 254)
 Next fsm_search_avail call will find page 45
 ```
 
-**Critical:** We never decide to compact — only receive `fsm_vacuum_update` notifications. No heap page bytes are modified; all changes are confined to the FSM fork file.
+**Critical:** We never decide to compact - only receive `fsm_vacuum_update` notifications. No heap page bytes are modified; all changes are confined to the FSM fork file.
 
 ### Component Interaction
 
@@ -800,6 +800,6 @@ This design implements RookDB's Free Space Manager and Heap File Manager (Projec
 1. **Scalability**: O(log N) FSM tree search; O(1) early-exit via root node when table is full
 2. **Performance**: PostgreSQL-style binary max-tree with `fp_next_slot` spreads concurrent inserts and avoids contention
 3. **Modularity**: Clear Project 6/10 separation; FSM fork is a pure sidecar with no heap-page overhead
-4. **Persistence**: FSM fork treated as a hint — rebuilt from heap on crash without WAL; header survives crashes
+4. **Persistence**: FSM fork treated as a hint - rebuilt from heap on crash without WAL; header survives crashes
 5. **Testing**: 24 comprehensive tests covering tree invariants, search, insertion and persistence
 

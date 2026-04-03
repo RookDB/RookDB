@@ -598,5 +598,12 @@ fn main() -> io::Result<()> {
         report.performance.seq_scan_tuples_per_sec
     );
 
+    if heap_path.exists() {
+        fs::remove_file(&heap_path).ok();
+    }
+    if fsm_path.exists() {
+        fs::remove_file(&fsm_path).ok();
+    }
+
     Ok(())
 }
