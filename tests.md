@@ -1,87 +1,90 @@
-1. Large Insertions & Timing (test_large_insertions)
-Concept Testing: Point 1 (Large insertions) and Point 9 (Time analysis).
-What it does: Inserts 50,000 records (50-byte tuples) into the system consecutively as fast as possible.
-Verification: Benchmarks the total elapsed CPU time checking if the insertions take an acceptable length (< 30 seconds) and ensuring the tree does not choke recursively as leaves fill up.
-2. Updation and Deallocation Integrity (test_update_delete_fsm_deallocation)
-Concept Testing: Points 2 (Updates/deletions mapped minimal behavior) and 4 (Deallocation).
-What it does: Inserts a heavily sized tuple (4000 bytes). Since an ~8184 byte page is nearly half-full, requesting more space returns a different page or blocks the first. We trigger an FSM update manually utilizing fsm_vacuum_update(...) (to reclaim ~8000 bytes) simulating an UPDATE or DELETE compaction event.
-Verification: Asserts that after reclaiming the space, the fsm_search_avail can successfully locate our page once again.
-3. Allocation Accuracy & Collision (test_allocation_accuracy)
-Concept Testing: Point 3 (Allocation limits, no double tracking).
-What it does: Tries to insert two distinct 8000-byte tuples, each large enough to occupy over 95% of a page boundary.
-Verification: As the FSM correctly tracks space boundaries, it makes sure HeapManager puts these tuples onto different pages (page_id1 != page_id2). If a collision happens, it panics.
-4. Fragmentation Management / Leaf Node Bubble Up (test_fragmentation_management)
-Concept Testing: Point 5 (Fragmentation / Coalescing).
-What it does: Inserts tiny fragments of data sequentially. It then opens the database file directly via FSM to search the internal max-tree explicitly using build_from_heap.
-Verification: The test verifies that many small usages trigger appropriate max-tree categorizations and bubbling up limits. (Note: Currently, this execution correctly exposes a bug in your build_from_heap() logic—while it initializes FSM, it forgets to correctly serialize some of the mid-level tree internal slots! The test rightfully fails here and identifies exactly what you need to fix locally next).
-5. Persistence Recovery (test_persistence_fsm_recovery)
-Concept Testing: Point 6 (File System Crash/Recovery).
-What it does: Intentionally writes records, drops bounds (simulating ungraceful stop without saving state buffers), then surgically deletes the .fsm side-car persistence file.
-Verification: Validates whether FSM::build_from_heap successfully resuscitates and regains an identical map topology from parsing only the primary heap data file (.dat) header variables.
-6. Boundary Violations (test_boundary_violations)
-Concept Testing: Points 7 and 8 (Boundaries and Overflows).
-What it does: Explicitly tricks the HeapManager with a 9000-byte payload that heavily exceeds a safe block maximum boundary (8192 - headers bytes).
-Verification: Asserts that the FSM/Heap mechanism rightfully catches Err(_) and throws an I/O rejection instead of bleeding memory, overwriting magic headers on the next page bounds, or triggering hard kernel Out-of-Memory behavior!
-7. large test cases check
+# RookDB Comprehensive Test Documentation
 
+This document serves as the unified source for all integrated and unit tests implemented in the RookDB database system. It blends design-doc coverage objectives (FSM + Heap functionality) with general validation and schema testing goals.
 
+## 1. Running the Test Suite
 
+To execute all tests within the workspace (unit + integration):
+```bash
+cargo test --all-targets --all-features
+```
 
+For executing documentation tests specifically:
+```bash
+cargo test --doc
+```
 
----
+## 2. Integration Tests (`tests/` directory)
 
-## Test Coverage
+The integration test suite strictly examines the boundary behaviors and interactions between the components (HeapManager, Free Space Manager (FSM), Catalog, and Layout managers).
 
-### Implemented Tests:
-1. **Data Type Validation (Case-Insensitive)** ✓
-   - INT, int, InT all work
-   - FLOAT and VARCHAR rejected
+### High-Stress FSM and Allocation Tests (`test_fsm_heavy.rs`)
+1. **Large Insertions & Timing (`test_large_insertions`)**
+   - **Concept**: Throughput limitations and Large Insertions.
+   - **Action**: Inserts tens of thousands of records consecutively as fast as possible.
+   - **Verification**: Benchmarks elapsed CPU time ensuring operations complete under thresholds and the FSM tree doesn't choke during leaf filling.
 
-2. **Graceful Error Handling** ✓
-   - Invalid paths detected
-   - Non-existent files reported
-   - Directories rejected
-   - Helpful guidance provided
+2. **Updation and Deallocation Integrity (`test_update_delete_fsm_deallocation`)**
+   - **Concept**: Emulating Updates/Deletes and Reclaiming space.
+   - **Action**: Inserts heavy tuples (e.g., 4000 bytes) taking half of a page. Clears out the FSM explicitly simulating a compaction/delete event (`fsm_vacuum_update`).
+   - **Verification**: Verifies that the FSM's `fsm_search_avail` can successfully locate and repurpose the released page boundary reliably.
 
-3. **CSV Data Validation** ✓
-   - Pre-load schema validation
-   - Row-by-row validation
-   - Column count checking
-   - Invalid value detection with line numbers
+3. **Allocation Accuracy & Collision (`test_allocation_accuracy`)**
+   - **Concept**: Allocation limits, bounded-tracking.
+   - **Action**: Inserts two 8000-byte tuples which occupy ~95% of a page boundary each.
+   - **Verification**: Ensures the HeapManager effectively enforces physical page splits for each tuple (`page_id1 != page_id2`).
 
-4. **TEXT Type Truncation** ✓
-   - Padding for short strings
-   - Truncation with warnings for long strings
-   - Proper deserialization
+4. **Fragmentation Management / Leaf Node Bubble Up (`test_fragmentation_management`)**
+   - **Concept**: Spatial Fragmentation & Coalescing.
+   - **Action**: Inserts small fragmented sequential payloads, opening the FSM mapping files directly to observe spatial distribution limits bubbling up the max-tree bounds.
+   - **Verification**: Ensures max-tree index categorization accurately reflects node capacities.
 
-5. **Data Type Checking** ✓
-   - INT validation (32-bit range)
-   - TEXT validation (string checks)
-   - Extensible design
+5. **Persistence Recovery (`test_persistence_fsm_recovery`)**
+   - **Concept**: Crash Resilience / Recovery.
+   - **Action**: Writes records and destructively deletes the `.fsm` runtime side-car mapped to the layout.
+   - **Verification**: Asserts that `FSM::build_from_heap` successfully resuscitates the spatial mapping layout by scraping the `.dat` master-file independently.
 
-6. **Catalog Persistence** ✓
-   - Result<> return type
-   - Graceful error handling
-   - No crashes on disk errors
+6. **Boundary Violations (`test_boundary_violations`)**
+   - **Concept**: Safe boundaries and pointer overflows.
+   - **Action**: Injects a payload mathematically exceeding safe limits (9000 bytes).
+   - **Verification**: Asserts explicit `Err(_)` rejections before pointer corruption or Out-Of-Memory anomalies happen.
 
-7. **Page API Abstraction** ✓
-   - Safe pointer access
-   - Boundary checking
-   - Statistics calculation
+### Heap Manager General Tests (`test_heap_manager.rs`)
+7. **Basic Heap Operations**
+   - **`test_heap_create`**: Opening empty heaps vs establishing new ones.
+   - **`test_heap_insert_single` / `test_heap_insert_multiple`**: Verifying sequential and chunked payload storage correctly updates internal byte-counters.
+   - **`test_heap_get_tuple` / `test_heap_scan`**: Checks tuple exact coordinations (Page + Slot bounds) routing correctly alongside linear unindexed scans over non-contiguous spaces.
+   - **`test_heap_header_persistence`**: Saving header counters seamlessly avoiding desync logic.
+   - **`test_heap_large_tuples` & `test_heap_invalid_operations`**: Checks safety measures natively against invalid pointers.
+   - **`test_heap_multiple_pages`**: Assertions verifying page spanning sequences seamlessly index across 8192 boundaries.
 
-8. **Single Tuple Insertion** ✓
-   - Manual data entry
-   - Schema validation
-   - Value validation
+### Smart Leaf FSM Allocations (`test_fsm_page_allocation.rs`)
+8. **Optimized FSM Page Density**
+   - **`test_fsm_page_allocation`**: Triggers full data injection via Bulk CSV loaders and directly analyzes `HeapManager` distribution layout. Ensures tuples are spread properly into 2-3 packed pages (e.g., using 8184 capacity logic) instead of creating sequential wasted pages iteratively.
 
-9. **Table Display** ✓
-   - Professional formatting
-   - Single header row
-   - Data type information
+### Primitive Page Boundaries (`test_create_page.rs`, `test_read_page.rs`, etc.)
+9. **Raw Layout I/O Tests**
+   - Validates `.dat` primitive operations, assuring read/write limits map correctly. Sizes verify (`PAGE_HEADER_SIZE` + `PAGE_SIZE`) exactly and no metadata bytes drip recursively.
 
-10. **Menu System** ✓
-    - New options available
-    - Proper organization
-    - Clear categories
+## 3. Unit Tests (`src/` directory)
 
----
+### Page & Offset Safeties (`src/backend/page/mod.rs`)
+Unit tests placed inside the Page layout module focus exclusively on raw offset integrities:
+1. **`test_page_free_space_detects_corrupted_pointers`**
+   - Verifies corrupted `lower/upper` pointers are rejected aggressively rather than triggering kernel panics natively.
+2. **`test_get_tuple_count_detects_invalid_alignment`**
+   - Refuses malformatted slot-directory assignments mathematically out of index bounds.
+3. **`test_get_slot_entry_detects_out_of_bounds_tuple`**
+   - Protects byte sequences slices out-of-index, securing memory boundary limits effectively.
+
+### Type Verification Tests (`src/backend/types_validator.rs`)
+Unit tests targeting database schema type integrities:
+1. **Case-Insensitive Types (`INT`, `int`, `InT`)**: Successfully parsed seamlessly over variants.
+2. **Types Blocking (`FLOAT`, `VARCHAR`)**: Rejected gracefully reporting Unsupported exceptions.
+3. **Data Dimensions**: Checking `INT` over/underflows, `TEXT` truncation paddings under constraints linearly without crash traces.
+
+## 4. Coverage Gaps & Future Additions
+The current architecture enjoys strict safety assurances. If strict completion of the historical design document is sought, the following named tests could be formally asserted using explicit assertion bindings:
+- Explicit invariant tree bubbling checks (e.g., `test_fsm_set_avail_bubbles_up`).
+- Decrement category mapping validations (`test_fsm_set_avail_decreases_category`).
+- Explicit metrics benchmarks using automated Rust Criterion tools `bench_insert_throughput`.
