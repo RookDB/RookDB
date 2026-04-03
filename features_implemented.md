@@ -132,13 +132,20 @@ Total tuples displayed: 3
 - Manual single-tuple ingestion feature mapping commands securely into native layout layers (`insert_tuple_cmd`).
 - Upgraded nested boxes UI for operations categorizations visually dividing Menu selections over operations boundaries.
 
-## 8. Core File & Heap Layout (`src/backend/heap/heap_manager.rs` & `buffer_manager.rs`)
-- Consolidated bulk array API loaders.
-- Extraced redundant `load_csv_to_pages` in favor of precise inline insertion bindings tracking page layout limits efficiently.
+## 8. Heap File Management (HM) (`src/backend/heap/heap_manager.rs`)
+- **FSM-Backed Tuple Insertion**: `insert_tuple` intelligently maps new data directly to pages with free space by consulting the FSM tree instead of blindly appending.
+- **Dynamic Growth**: `allocate_new_page` safely expands table boundaries horizontally and notifies FSM mappings only when capacity is exhausted.
+- **Header Metadata Integrity**: `HeaderMetadata` persists schema state (total tuples securely updated natively, `page_count`, `fsm_page_count`) ensuring state integrity preventing sequential misalignment.
+- **Coordinate Lookups**: Added `get_tuple(page_id, slot_id)` for O(1) constant-time direct tuple coordinate fetching bypassing global scans natively.
+- **Lazy Evaluation Iterator Scans**: Implemented `HeapScanIterator` yielding page/slot structures lazily preventing memory faults when scanning multi-GB files.
 
-## 9. FSM - Free Space Management
-- Side-Car tracking records map persistent spatial data trees. Space limits are recursively checked by tree-indexing avoiding repeated header evaluations recursively making heap ingestion faster.
-- Fallback integrity logic implemented securely.
+## 9. Free Space Management (FSM) (`src/backend/fsm/fsm.rs`)
+- **3-Level Binary Max-Tree**: Tree-based structure replacing O(N) scan layouts. Stored safely inside a `.fsm` persistence sidecar fork avoiding main file cluster intrusion.
+- **Constant-Time I/O Space Discovery (`fsm_search_avail`)**: Rapid lookup resolving exact target heap pages fitting arbitrary payloads. Requires exactly 3 bounded page reads (O(1) I/O) while leveraging O(log N) binary max-tree cpu-checks internally, completely avoiding raw header sequence scanning.
+- **Load Balancing/Spreading (`fp_next_slot`)**: Incorporating sequential slot hints driving horizontal data ingestion eliminating hot-spots linearly.
+- **Auto-Bubble Capacity Resolvers (`fsm_set_avail`)**: Updating a leaf slot capacity recursively updates max parent nodes, notifying the tree roots exactly how much space is left across subsets.
+- **Compaction Readiness (`fsm_vacuum_update`)**: Integration hooking natively into vacuuming modules marking pages as refreshed effortlessly.
+- **Fault-Tolerant Native Reconstruction (`build_from_heap`)**: If a `.fsm` sidecar drops out of scope or is deleted, FSM rebuilds the layout completely seamlessly from the primary heap data without logging exceptions.
 
 ## 10. Diagnostics and Tracing Debug Statements
 - Pervasive output streams mapping operation traces recursively `[TYPE_VALIDATOR]`, `[ERROR_HANDLER]`, `[CATALOG]`, `[CSV_LOADER]`, `[FSM_ALLOCATOR]`.
@@ -155,6 +162,7 @@ Total tuples displayed: 3
 - **Refactoring `load_table_from_disk`**: Modified `BufferManager::load_table_from_disk` in `buffer_manager.rs` to utilize the new `read_all_pages` API, significantly simplifying the reading logic.
 - **Cleaned Up Legacy Code**: Removed `load_csv_into_pages` and `load_csv_to_buffer` from the buffer manager. The active bulk loading logic now relies appropriately on `load_csv.rs` through the frontend commands.
 - **`load_catalog` Data Sync Issue**: Standardized CSV/Bulk loader to strictly use `insert_tuple` per valid row insertion rather than trying to construct un-validated tuples blindly. 
-- **Catalog Auto-Recovery Feature**: Fixed a critical issue where a damaged, lost, or corrupted catalog file caused the DB to create a blank slate catalog. The engine now recursively searches through the existing layout folders to accurately auto-repopulate databases and table structs straight into memory, preventing data loss.
+- **Catalog Failure Problem**: Critical issue is when a accidentally deleted catalog file caused the DB to create a blank slate catalog. Thus data loss of the existing data.
 
 
+    
