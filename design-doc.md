@@ -39,7 +39,7 @@ Project 10 will handle tuple-level operations including deletion, updates, in-pa
 ```
 Offset | Size | Field              | Purpose
 -------|------|--------------------|---------------------------------
-0-4    | 4    | Page Count         | Total heap pages in file
+0-3    | 4    | Page Count         | Total heap pages in file
 4-7    | 4    | FSM Page Count     | Total pages in FSM fork file
 8-11   | 4    | Total Tuples (Low) | Tuple count lower 32 bits
 12-15  | 4    | Total Tuples (High)| Tuple count upper 32 bits
@@ -53,7 +53,7 @@ Offset | Size | Field              | Purpose
 - **Tuple Count:** O(1) COUNT(\*) queries
 - **Persistence:** Survives crashes; FSM fork is treated as a hint and can be fully rebuilt from heap data
 
-#### Target Page Algorithm — FSM Binary Max-Tree Search
+#### FSM Binary Max-Tree Search
 
 **Objective:** Find a page with sufficient free space by traversing a 3-level binary max-tree (one byte per heap page, 0–255 scale), using a per-FSM-page `fp_next_slot` hint to spread insertions.
 
