@@ -4,7 +4,7 @@ use storage_manager::disk::create_page;
 use storage_manager::page::PAGE_SIZE;
 use storage_manager::table::TABLE_HEADER_SIZE;
 
-const TEST_FILE: &str = "test_page_file.bin";
+const TEST_FILE: &str = "tests/test_page_file.bin";
 
 #[test]
 fn test_create_page() {
@@ -55,4 +55,6 @@ fn test_create_page() {
         page_num,
         &buffer[0..8]
     );
+
+    let _ = remove_file(TEST_FILE);
 }

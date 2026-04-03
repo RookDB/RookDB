@@ -7,7 +7,7 @@ use storage_manager::table::page_count;
 #[test]
 fn test_page_free_space() {
     // Create a temporary file for testing
-    let file_path = "test_page_free_space.bin";
+    let file_path = "tests/test_page_free_space.bin";
 
     // --- Step 0: Initialize the table header (Table metadata region)
     let _hm = HeapManager::create(std::path::PathBuf::from(file_path)).expect("Failed to create heap manager");
@@ -24,7 +24,7 @@ fn test_page_free_space() {
 
     // --- Step 2: Create second page (actual data page)
     let data_page_num = create_page(&mut file).expect("Failed to create data page");
-    println!("✅ Created data page number: {}", data_page_num);
+    println!("Created data page number: {}", data_page_num);
 
     // --- Step 3: Verify total page count
     let total_pages = page_count(&mut file).expect("Failed to get page count");
@@ -69,7 +69,7 @@ fn test_page_free_space() {
         "Expected upper offset = PAGE_SIZE after init_page()"
     );
 
-    println!("✅ test_page_free_space passed successfully!");
+    println!("test_page_free_space passed successfully!");
 
     // --- Step 7: Cleanup
     std::fs::remove_file(file_path).unwrap();

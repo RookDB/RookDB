@@ -5,7 +5,7 @@ use storage_manager::heap::heap_manager::HeapManager;
 use storage_manager::page::PAGE_SIZE;
 use storage_manager::table::TABLE_HEADER_SIZE;
 
-const TEST_FILE: &str = "test_table_file.bin";
+const TEST_FILE: &str = "tests/test_table_file.bin";
 
 #[test]
 fn test_init_table() {
@@ -59,4 +59,6 @@ fn test_init_table() {
     let mut page_buf = vec![0u8; PAGE_SIZE as usize];
     file.read_exact(&mut page_buf)
         .expect("Failed to read first data page");
+    let _ = remove_file(TEST_FILE);
+    let _ = remove_file(format!("{}.fsm", TEST_FILE));
 }
