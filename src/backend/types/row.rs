@@ -131,7 +131,7 @@ pub fn serialize_nullable_typed_row(
 ///
 /// `encoded_values[i]` is the raw bytes produced by the type's encoder:
 /// - Fixed-length types: exactly `fixed_size()` bytes.
-/// - Varchar: `[u16 len_prefix][payload bytes]` (we strip the prefix here).
+/// - Varchar: Raw UTF-8 payload bytes exclusively.
 fn serialize_encoded(
     schema: &[DataType],
     encoded_values: &[Option<Vec<u8>>],
