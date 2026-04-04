@@ -1,3 +1,29 @@
+//! Runtime typed values and their binary encoding/decoding.
+//!
+//! [`DataValue`] is the in-memory representation of any SQL column value.
+//! The two primary operations are:
+//! - [`DataValue::parse_and_encode`] — parse a raw string literal and return
+//!   the binary encoding ready for on-disk storage.
+//! - [`DataValue::from_bytes`] — decode the binary form back into a typed value.
+//!
+//! **Wire format summary:**
+//!
+//! | Type | Bytes | Notes |
+//! |---|---|---|
+//! | SMALLINT | 2 | signed little-endian i16 |
+//! | INT | 4 | signed little-endian i32 |
+//! | BIGINT | 8 | signed little-endian i64 |
+//! | REAL | 4 | IEEE 754 f32, little-endian |
+//! | DOUBLE | 8 | IEEE 754 f64, little-endian |
+//! | NUMERIC/DECIMAL | ceil((p+1)/2) | packed BCD + sign nibble |
+//! | BOOL | 1 | 0x00=false 0x01=true |
+//! | CHAR(n) | n | UTF-8, space-padded |
+//! | VARCHAR(n) | 2 + len | [u16 len prefix][UTF-8] in `to_bytes()`; stored without prefix in row |
+//! | DATE | 4 | days since 1970-01-01, i32 LE |
+//! | TIME | 8 | µs since midnight, i64 LE |
+//! | TIMESTAMP | 8 | µs since Unix epoch, i64 LE |
+//! | BIT(n) | ceil(n/8) | packed MSB-first |
+
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -6,9 +32,18 @@ use crate::types::bit_utils::{normalize_bit_literal, pack_bit_string, unpack_bit
 use crate::types::datatype::DataType;
 use crate::types::validation::validate_value;
 
+/// An exact fixed-point number stored as a scaled integer.
+///
+/// The mathematical value is `unscaled / 10^scale`. For example,
+/// `NumericValue { unscaled: 12345, scale: 2 }` represents `123.45`.
+///
+/// On disk the value is encoded as packed BCD (Binary Coded Decimal) with
+/// a trailing sign nibble (`0x0C` = positive, `0x0D` = negative).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NumericValue {
+    /// The integer coefficient: actual value = `unscaled / 10^scale`.
     pub unscaled: i128,
+    /// Number of decimal places (fractional digits).
     pub scale: u8,
 }
 
@@ -73,20 +108,34 @@ impl Ord for OrderedF64 {
     }
 }
 
+/// The in-memory representation of a SQL column value.
+///
+/// Each variant corresponds to one or more [`DataType`] variants. Encoding and
+/// decoding rules are documented in the module-level table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataValue {
     SmallInt(i16),
     Int(i32),
     BigInt(i64),
+    /// Single-precision float wrapped in [`OrderedF32`] to satisfy `Eq`.
     Real(OrderedF32),
+    /// Double-precision float wrapped in [`OrderedF64`] to satisfy `Eq`.
     DoublePrecision(OrderedF64),
+    /// Exact decimal; see [`NumericValue`] for the encoding contract.
     Numeric(NumericValue),
     Bool(bool),
+    /// Fixed-length character string (may be shorter than declared width;
+    /// space-padding is applied during encoding).
     Char(String),
+    /// Variable-length UTF-8 string.
     Varchar(String),
+    /// Calendar date.
     Date(NaiveDate),
+    /// Time of day, sub-second precision up to microseconds.
     Time(NaiveTime),
+    /// A fixed-width bit string as a `'0'`/`'1'` character sequence.
     Bit(String),
+    /// Date + time (no timezone).
     Timestamp(NaiveDateTime),
 }
 
@@ -251,6 +300,12 @@ fn decode_numeric_bcd(bytes: &[u8], precision: u8, scale: u8) -> Result<NumericV
 }
 
 impl DataValue {
+    /// Encode a value to bytes using the type's canonical wire format.
+    ///
+    /// **Important for `Varchar`:** this method emits a 2-byte little-endian
+    /// length prefix followed by the UTF-8 payload (`[u16 len][bytes...]`). The
+    /// row serializer strips the prefix before writing to the var-len data region;
+    /// `from_bytes` expects the prefix to be present when decoding varchar.
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             DataValue::SmallInt(v) => v.to_le_bytes().to_vec(),
@@ -299,6 +354,12 @@ impl DataValue {
         }
     }
 
+    /// Decode a typed value from its on-disk byte representation.
+    ///
+    /// For `Varchar`, `bytes` must include the 2-byte length prefix (as
+    /// produced by [`to_bytes`](Self::to_bytes)), even though the row itself
+    /// stores the raw payload without a prefix; the deserializer reconstructs
+    /// the prefix from the offset table before calling this function.
     pub fn from_bytes(ty: &DataType, bytes: &[u8]) -> Result<Self, String> {
         match ty {
             DataType::SmallInt => {
@@ -441,6 +502,11 @@ impl DataValue {
         }
     }
 
+    /// Parse a raw SQL literal string, validate it, and return the encoded bytes.
+    ///
+    /// Combines validation ([`validate_value`]) and encoding ([`to_bytes`](Self::to_bytes))
+    /// into a single step. Used by the INSERT path to convert user-supplied string
+    /// literals directly into storage bytes.
     pub fn parse_and_encode(ty: &DataType, input: &str) -> Result<Vec<u8>, String> {
         let input = input.trim();
         validate_value(ty, input).map_err(|e| e.to_string())?;
@@ -539,6 +605,12 @@ impl DataValue {
         }
     }
 
+    /// Type-aware variant of [`to_bytes`](Self::to_bytes) for types whose
+    /// encoding depends on schema metadata (`NUMERIC` precision, `CHAR` length).
+    ///
+    /// For most types this delegates to [`to_bytes`]. For `NUMERIC`/`DECIMAL`
+    /// it validates the scale matches before BCD-encoding. For `CHAR`/`CHARACTER`
+    /// it applies space-padding to the declared fixed length.
     pub fn to_bytes_for_type(&self, ty: &DataType) -> Result<Vec<u8>, String> {
         match (ty, self) {
             (DataType::Numeric { precision, scale }, DataValue::Numeric(v)) => {

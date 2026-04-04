@@ -1,7 +1,22 @@
+//! Unit tests for the `types` subsystem.
+//!
+//! Tests are grouped into the following sections:
+//! - **DataType parsing** — `FromStr`, serde round-trips, Display.
+//! - **Phase-2 layout rules** — `fixed_size`, `alignment`, `min_storage_size`.
+//! - **Value encode/decode** — per-type `parse_and_encode` → `from_bytes` round-trips.
+//! - **Validation** — reject out-of-range and malformed literals.
+//! - **Comparison** — `Comparable` impl, nullable wrappers, numeric promotion.
+//! - **NullBitmap** — bit manipulation correctness.
+//! - **Row serialization** — full row round-trips, null handling, typed API.
+//! - **Built-in functions** — string, numeric, temporal, and conditional functions.
+//! - **Row layout** — new physical-layout tests (header fields, offset table, byte_size).
+
 use chrono::NaiveDate;
 use std::cmp::Ordering;
 
 use super::*;
+
+// ── DataType parsing ──────────────────────────────────────────────────────────
 
 #[test]
 fn parse_phase_one_types() {
@@ -109,6 +124,8 @@ fn display_matches_parse() {
     }
 }
 
+// ── Phase-2 layout rules (fixed_size, alignment, min_storage_size) ───────────
+
 #[test]
 fn phase_two_layout_rules() {
     assert_eq!(DataType::SmallInt.alignment(), 2);
@@ -177,6 +194,8 @@ fn phase_two_layout_rules() {
     assert!(!DataType::Bit(13).is_variable_length());
 }
 
+// ── Value encode / decode round-trips ────────────────────────────────────────
+
 #[test]
 fn roundtrip_smallint() {
     let encoded = DataValue::parse_and_encode(&DataType::SmallInt, "-12").unwrap();
@@ -238,6 +257,8 @@ fn varchar_length_violation_is_error() {
     assert!(err.contains("VARCHAR(3)"));
 }
 
+// ── Validation (reject bad literals) ────────────────────────────────────────
+
 #[test]
 fn validate_smallint_bounds() {
     assert!(validate_smallint("-32768").is_ok());
@@ -267,6 +288,8 @@ fn validate_bigint_bounds() {
     assert!(validate_bigint("9223372036854775808").is_err());
     assert!(validate_bigint("-9223372036854775808").is_ok());
 }
+
+// ── Comparison ───────────────────────────────────────────────────────────────
 
 #[test]
 fn compare_bigint_promotion() {
@@ -517,6 +540,8 @@ fn validate_bit_rules() {
     assert!(validate_bit("B'01A1'", 4).is_err());
 }
 
+// ── NullBitmap ───────────────────────────────────────────────────────────────
+
 #[test]
 fn null_bitmap_set_clear_and_probe() {
     let mut bitmap = NullBitmap::new(10);
@@ -533,6 +558,8 @@ fn null_bitmap_set_clear_and_probe() {
     assert!(!bitmap.is_null(3));
 }
 
+// ── Row serialization ────────────────────────────────────────────────────────
+
 #[test]
 fn nullable_row_roundtrip() {
     let schema = vec![
@@ -546,7 +573,9 @@ fn nullable_row_roundtrip() {
         serialize_nullable_row(&schema, &[Some("42"), None, Some("2026-03-13"), Some("-7")])
             .unwrap();
 
-    assert_eq!(encoded[0] & (1 << 1), 1 << 1);
+    // In the new layout the null bitmap starts at byte 4 (after the 4-byte header).
+    // Logical column 1 (Varchar, NULL) → bit 1 of bitmap byte 4 should be set.
+    assert_eq!(encoded[4] & (1 << 1), 1 << 1);
 
     let decoded = deserialize_nullable_row(&schema, &encoded).unwrap();
     assert_eq!(decoded.len(), 4);
@@ -741,6 +770,8 @@ fn fn_ltrim_rtrim() {
     assert_eq!(rtrim(&v).unwrap(), DataValue::Varchar("  rookdb".to_string()));
 }
 
+// ── Built-in functions ─────────────────────────────────────────────────────────
+
 #[test]
 fn fn_abs_round_floor_ceiling() {
     assert_eq!(abs(&DataValue::Int(-7)).unwrap(), DataValue::Int(7));
@@ -798,4 +829,173 @@ fn fn_current_temporal_values() {
         DataValue::Timestamp(_) => {}
         _ => panic!("expected Timestamp"),
     }
+}
+
+// ── New layout-specific tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_row_header_fields() {
+    // Schema with 2 fixed + 1 var-len column
+    let schema = vec![DataType::Int, DataType::Varchar(16), DataType::Bool];
+    let bytes =
+        serialize_nullable_row(&schema, &[Some("7"), Some("hello"), Some("true")]).unwrap();
+
+    let num_cols = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let num_varlen = u16::from_le_bytes([bytes[2], bytes[3]]);
+    assert_eq!(num_cols, 3, "header num_columns should be 3");
+    assert_eq!(num_varlen, 1, "header num_varlen_cols should be 1");
+}
+
+#[test]
+fn test_varlen_offset_sentinel_for_null_varchar() {
+    // NULL varchar column → offset table entry must be 0x0000
+    let schema = vec![DataType::Int, DataType::Varchar(32)];
+    // col 1 (varchar) is NULL
+    let bytes = serialize_nullable_row(&schema, &[Some("1"), None]).unwrap();
+
+    let physical = PhysicalSchema::from_logical(&schema);
+    let layout = RowLayout::compute(&physical);
+
+    // var-len offset table starts at 4 + null_bitmap_size
+    let vt_start = layout.varlen_table_offset();
+    let slot_val = u16::from_le_bytes([bytes[vt_start], bytes[vt_start + 1]]);
+    assert_eq!(slot_val, 0x0000, "NULL varchar offset slot must be 0x0000");
+}
+
+#[test]
+fn test_fixed_col_direct_access() {
+    // Verify a fixed-length column can be read directly via RowLayout offsets.
+    let schema = vec![DataType::Varchar(16), DataType::Int, DataType::Bool];
+    let bytes =
+        serialize_nullable_row(&schema, &[Some("hi"), Some("42"), Some("true")]).unwrap();
+
+    let physical = PhysicalSchema::from_logical(&schema);
+    let layout = RowLayout::compute(&physical);
+
+    // INT is in physical fixed group; find its rank
+    let int_rank = physical
+        .fixed_indices_logical
+        .iter()
+        .position(|&li| li == 1) // logical index 1 = INT
+        .unwrap();
+    let col_start = layout.fixed_data_start + layout.fixed_col_offsets[int_rank];
+    let col_bytes = &bytes[col_start..col_start + 4];
+    let val = i32::from_le_bytes([col_bytes[0], col_bytes[1], col_bytes[2], col_bytes[3]]);
+    assert_eq!(val, 42, "direct fixed-offset read of INT column should be 42");
+}
+
+#[test]
+fn test_mixed_schema_layout_roundtrip() {
+    let schema = vec![
+        DataType::Int,
+        DataType::Varchar(16),
+        DataType::Bool,
+        DataType::Varchar(8),
+        DataType::Date,
+    ];
+    let bytes = serialize_nullable_row(
+        &schema,
+        &[
+            Some("99"),
+            Some("alice"),
+            None,
+            Some("hi"),
+            Some("2026-04-04"),
+        ],
+    )
+    .unwrap();
+
+    let decoded = deserialize_nullable_row(&schema, &bytes).unwrap();
+    assert_eq!(decoded[0], Some(DataValue::Int(99)));
+    assert_eq!(decoded[1], Some(DataValue::Varchar("alice".to_string())));
+    assert_eq!(decoded[2], None); // NULL bool
+    assert_eq!(decoded[3], Some(DataValue::Varchar("hi".to_string())));
+    use chrono::NaiveDate;
+    assert_eq!(
+        decoded[4],
+        Some(DataValue::Date(NaiveDate::from_ymd_opt(2026, 4, 4).unwrap()))
+    );
+}
+
+#[test]
+fn test_row_layout_compute_geometry() {
+    // Pure fixed schema: no var-len columns
+    let fixed_schema = vec![DataType::SmallInt, DataType::Int, DataType::BigInt];
+    let physical = PhysicalSchema::from_logical(&fixed_schema);
+    let layout = RowLayout::compute(&physical);
+
+    assert_eq!(layout.num_varlen_cols, 0);
+    assert_eq!(layout.varlen_table_size, 0);
+    // null_bitmap_size = ceil(3/8) = 1
+    assert_eq!(layout.null_bitmap_size, 1);
+    // fixed_data_start = 4 + 1 + 0 = 5
+    assert_eq!(layout.fixed_data_start, 5);
+
+    // Mixed schema
+    let mixed = vec![DataType::Varchar(10), DataType::Int];
+    let phys2 = PhysicalSchema::from_logical(&mixed);
+    let lay2 = RowLayout::compute(&phys2);
+
+    assert_eq!(lay2.num_varlen_cols, 1);
+    assert_eq!(lay2.varlen_table_size, 2);
+    assert_eq!(lay2.fixed_data_start, 4 + 1 + 2); // 7
+}
+
+#[test]
+fn test_byte_size_matches_serialized_len() {
+    // row.byte_size() must equal row.serialize().len()
+    let schema = vec![
+        DataType::Int,
+        DataType::Varchar(20),
+        DataType::Bool,
+        DataType::SmallInt,
+    ];
+    let mut row = Row::new(schema);
+    row.set_value(0, &DataValue::Int(5)).unwrap();
+    row.set_value(1, &DataValue::Varchar("rookdb".to_string()))
+        .unwrap();
+    // col 2 stays NULL
+    row.set_value(3, &DataValue::SmallInt(9)).unwrap();
+
+    assert_eq!(row.byte_size(), row.serialize().len());
+}
+
+#[test]
+fn test_byte_size_null_varlen_excluded() {
+    // A NULL varchar must not contribute payload bytes to byte_size().
+    let schema = vec![DataType::Int, DataType::Varchar(32)];
+    let mut row_with_val = Row::new(schema.clone());
+    row_with_val.set_value(0, &DataValue::Int(1)).unwrap();
+    row_with_val
+        .set_value(1, &DataValue::Varchar("hello".to_string()))
+        .unwrap();
+
+    let mut row_null = Row::new(schema.clone());
+    row_null.set_value(0, &DataValue::Int(1)).unwrap();
+    // col 1 stays NULL
+
+    // Null row should be smaller than the row with a varchar value
+    assert!(row_null.byte_size() < row_with_val.byte_size());
+    assert_eq!(row_null.byte_size(), row_null.serialize().len());
+}
+
+#[test]
+fn test_free_fn_row_byte_size() {
+    use crate::types::row::row_byte_size;
+
+    let schema = vec![DataType::Int, DataType::Varchar(16), DataType::Bool];
+    let v0 = DataValue::Int(1);
+    let v1 = DataValue::Varchar("hi".to_string());
+    let v2 = DataValue::Bool(true);
+
+    let mut row = Row::new(schema.clone());
+    row.set_value(0, &v0).unwrap();
+    row.set_value(1, &v1).unwrap();
+    row.set_value(2, &v2).unwrap();
+
+    let free_size = row_byte_size(
+        &schema,
+        &[Some(&v0), Some(&v1), Some(&v2)],
+    );
+    assert_eq!(free_size, row.serialize().len());
 }
