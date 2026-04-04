@@ -115,23 +115,6 @@ impl DataType {
     pub fn is_fixed_length(&self) -> bool {
         !self.is_variable_length()
     }
-
-    pub fn encoded_len(&self, bytes: &[u8]) -> Result<usize, String> {
-        match self {
-            DataType::Varchar(_) => {
-                if bytes.len() < 2 {
-                    return Err("VARCHAR field is missing its 2-byte length prefix".to_string());
-                }
-                let payload_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
-                let total_len = 2 + payload_len;
-                if bytes.len() < total_len {
-                    return Err("VARCHAR field is truncated".to_string());
-                }
-                Ok(total_len)
-            }
-            _ => Ok(self.fixed_size().expect("fixed-width type") as usize),
-        }
-    }
 }
 
 impl fmt::Display for DataType {

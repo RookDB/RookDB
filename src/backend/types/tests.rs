@@ -225,7 +225,7 @@ fn roundtrip_bool() {
 #[test]
 fn roundtrip_varchar() {
     let encoded = DataValue::parse_and_encode(&DataType::Varchar(32), "Alice").unwrap();
-    assert_eq!(u16::from_le_bytes([encoded[0], encoded[1]]), 5);
+    assert_eq!(encoded.len(), 5);
     assert_eq!(
         DataValue::from_bytes(&DataType::Varchar(32), &encoded).unwrap(),
         DataValue::Varchar("Alice".to_string())

@@ -302,10 +302,8 @@ fn decode_numeric_bcd(bytes: &[u8], precision: u8, scale: u8) -> Result<NumericV
 impl DataValue {
     /// Encode a value to bytes using the type's canonical wire format.
     ///
-    /// **Important for `Varchar`:** this method emits a 2-byte little-endian
-    /// length prefix followed by the UTF-8 payload (`[u16 len][bytes...]`). The
-    /// row serializer strips the prefix before writing to the var-len data region;
-    /// `from_bytes` expects the prefix to be present when decoding varchar.
+    /// The row serializer uses this output directly. Variable-length (Varchar)
+    /// payloads are returned as raw UTF-8 bytes with no length prefix.
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             DataValue::SmallInt(v) => v.to_le_bytes().to_vec(),
@@ -322,13 +320,7 @@ impl DataValue {
             }
             DataValue::Bool(v) => vec![u8::from(*v)],
             DataValue::Char(v) => v.as_bytes().to_vec(),
-            DataValue::Varchar(v) => {
-                let bytes = v.as_bytes();
-                let mut out = Vec::with_capacity(2 + bytes.len());
-                out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-                out.extend_from_slice(bytes);
-                out
-            }
+            DataValue::Varchar(v) => v.as_bytes().to_vec(),
             DataValue::Date(v) => {
                 let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
                 let days = v.signed_duration_since(epoch).num_days() as i32;
@@ -356,10 +348,8 @@ impl DataValue {
 
     /// Decode a typed value from its on-disk byte representation.
     ///
-    /// For `Varchar`, `bytes` must include the 2-byte length prefix (as
-    /// produced by [`to_bytes`](Self::to_bytes)), even though the row itself
-    /// stores the raw payload without a prefix; the deserializer reconstructs
-    /// the prefix from the offset table before calling this function.
+    /// For variable-length data (`Varchar`), the byte slice explicitly
+    /// delimits the exact payload, as extracted from the row's offset geometry.
     pub fn from_bytes(ty: &DataType, bytes: &[u8]) -> Result<Self, String> {
         match ty {
             DataType::SmallInt => {
@@ -437,16 +427,14 @@ impl DataValue {
                 Ok(DataValue::Char(value))
             }
             DataType::Varchar(max_len) => {
-                let encoded_len = ty.encoded_len(bytes)?;
-                let payload_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+                let payload_len = bytes.len();
                 if payload_len > *max_len as usize {
                     return Err(format!(
                         "VARCHAR payload length {} exceeds declared limit {}",
                         payload_len, max_len
                     ));
                 }
-                let payload = &bytes[2..encoded_len];
-                let value = String::from_utf8(payload.to_vec())
+                let value = String::from_utf8(bytes.to_vec())
                     .map_err(|_| "VARCHAR payload is not valid UTF-8".to_string())?;
                 Ok(DataValue::Varchar(value))
             }

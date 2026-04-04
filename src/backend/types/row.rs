@@ -41,12 +41,8 @@ pub fn row_byte_size(schema: &[DataType], values: &[Option<&DataValue>]) -> usiz
             let bytes = val
                 .to_bytes_for_type(&schema[log_idx])
                 .unwrap_or_default();
-            // stored bytes for varchar are [u16 len prefix][payload]; we want raw payload only
-            let payload_len = if bytes.len() >= 2 {
-                u16::from_le_bytes([bytes[0], bytes[1]]) as usize
-            } else {
-                0
-            };
+            // stored bytes for varchar are exclusively raw payload
+            let payload_len = bytes.len();
             let _ = k; // offset-table slot already counted in min_row_size
             size += payload_len;
         }
@@ -151,14 +147,7 @@ fn serialize_encoded(
         .map(|&log_idx| {
             encoded_values[log_idx]
                 .as_ref()
-                .map(|enc| {
-                    // enc = [u16 prefix][payload]; extract payload length
-                    if enc.len() >= 2 {
-                        u16::from_le_bytes([enc[0], enc[1]]) as usize
-                    } else {
-                        0
-                    }
-                })
+                .map(|enc| enc.len())
                 .unwrap_or(0)
         })
         .sum();
@@ -195,14 +184,7 @@ fn serialize_encoded(
 
     for (vl_rank, &log_idx) in physical.varlen_indices_logical.iter().enumerate() {
         let offset_slot = vt_start + vl_rank * 2;
-        if let Some(enc) = &encoded_values[log_idx] {
-            // enc = [u16 len_prefix][payload bytes]; we write only the payload
-            let payload = if enc.len() >= 2 {
-                &enc[2..] // skip the 2-byte length prefix
-            } else {
-                &enc[..]
-            };
-
+        if let Some(payload) = &encoded_values[log_idx] {
             // Record offset of this payload from row start
             let row_offset = append_cursor as u16;
             buf[offset_slot..offset_slot + 2].copy_from_slice(&row_offset.to_le_bytes());
@@ -323,13 +305,9 @@ pub fn deserialize_nullable_row(
             // var-len column — rank within the var-len group
             let vl_rank = phys_idx - physical.num_fixed();
             if let Some((start, end)) = varlen_ranges[vl_rank] {
-                // Re-assemble as [u16 len_prefix][payload] for the existing decoder
+                // Pass exact payload bytes to the decoder
                 let payload = &row_bytes[start..end];
-                let prefix = (payload.len() as u16).to_le_bytes();
-                let mut enc = Vec::with_capacity(2 + payload.len());
-                enc.extend_from_slice(&prefix);
-                enc.extend_from_slice(payload);
-                let value = DataValue::from_bytes(ty, &enc)?;
+                let value = DataValue::from_bytes(ty, payload)?;
                 out[log_idx] = Some(value);
             }
             // else: offset was 0x0000 but bitmap said non-null — treat as null
@@ -382,7 +360,7 @@ impl Row {
     /// Returns the exact on-disk byte size of this row without serialising it.
     /// Used by the heap/page manager to check if a row fits before writing.
     pub fn byte_size(&self) -> usize {
-        self.serialize().len()
+        RowLayout::bitmap_offset() + self.layout.null_bitmap_size + self.data.len()
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -401,40 +379,130 @@ impl Row {
             ));
         }
 
-        let mut values = self.to_values()?;
-        values[column_index] = Some(value.clone());
-        self.rebuild_from_values(&values)
+        let enc = value.to_bytes_for_type(ty)?;
+        let phys_idx = self.physical.logical_to_physical[column_index];
+        let bm_start = RowLayout::bitmap_offset();
+        let data_start_in_row = bm_start + self.layout.null_bitmap_size;
+        
+        self.null_bitmap.clear_null(column_index);
+
+        if ty.is_fixed_length() {
+            let rank = phys_idx;
+            let row_col_start = self.layout.fixed_data_start + self.layout.fixed_col_offsets[rank];
+            let self_col_start = row_col_start - data_start_in_row;
+            self.data[self_col_start..self_col_start + enc.len()].copy_from_slice(&enc);
+            return Ok(());
+        }
+
+        let vl_rank = phys_idx - self.physical.num_fixed();
+        let (payload_start, payload_end) = self.get_varlen_bounds(vl_rank);
+        let old_len = payload_end - payload_start;
+        let new_len = enc.len();
+        
+        // Ensure its offset is active
+        let slot = vl_rank * 2;
+        let mut raw_offset = u16::from_le_bytes([self.data[slot], self.data[slot + 1]]) as usize;
+        
+        if raw_offset == 0 {
+            raw_offset = payload_start + data_start_in_row;
+            self.data[slot..slot + 2].copy_from_slice(&(raw_offset as u16).to_le_bytes());
+        }
+
+        if new_len > old_len {
+            self.data.splice(payload_start..payload_end, enc);
+            self.adjust_varlen_offsets(vl_rank, (new_len - old_len) as isize);
+        } else if new_len < old_len {
+            self.data.splice(payload_start..payload_end, enc);
+            self.adjust_varlen_offsets(vl_rank, -((old_len - new_len) as isize));
+        } else {
+            self.data[payload_start..payload_end].copy_from_slice(&enc);
+        }
+
+        Ok(())
     }
 
     pub fn set_null(&mut self, column_index: usize) -> Result<(), String> {
         if column_index >= self.logical_schema.len() {
             return Err(format!("Column index {} out of bounds", column_index));
         }
-        let mut values = self.to_values()?;
-        values[column_index] = None;
-        self.rebuild_from_values(&values)
+
+        if self.null_bitmap.is_null(column_index) {
+            return Ok(()); // Already NULL
+        }
+
+        let ty = &self.logical_schema[column_index];
+        let phys_idx = self.physical.logical_to_physical[column_index];
+        self.null_bitmap.set_null(column_index);
+
+        if ty.is_fixed_length() {
+            return Ok(()); // Zero dead space handling needed for fixed
+        }
+
+        let vl_rank = phys_idx - self.physical.num_fixed();
+        let (payload_start, payload_end) = self.get_varlen_bounds(vl_rank);
+        let bytes_to_remove = payload_end - payload_start;
+        
+        if bytes_to_remove > 0 {
+            self.data.drain(payload_start..payload_end);
+            self.adjust_varlen_offsets(vl_rank, -(bytes_to_remove as isize));
+        }
+
+        // Set offset to 0 sentinel
+        let slot = vl_rank * 2;
+        self.data[slot..slot + 2].copy_from_slice(&0u16.to_le_bytes());
+
+        Ok(())
     }
 
     pub fn get_value(&self, column_index: usize) -> Result<Option<DataValue>, String> {
         if column_index >= self.logical_schema.len() {
             return Err(format!("Column index {} out of bounds", column_index));
         }
-        let values = self.to_values()?;
-        Ok(values[column_index].clone())
+
+        if self.null_bitmap.is_null(column_index) {
+            return Ok(None);
+        }
+
+        let ty = &self.logical_schema[column_index];
+        let phys_idx = self.physical.logical_to_physical[column_index];
+
+        let bm_start = RowLayout::bitmap_offset();
+        let data_start_in_row = bm_start + self.layout.null_bitmap_size;
+
+        if ty.is_fixed_length() {
+            let rank = phys_idx;
+            let row_col_start = self.layout.fixed_data_start + self.layout.fixed_col_offsets[rank];
+            let self_col_start = row_col_start - data_start_in_row;
+            
+            let col_size = ty.fixed_size().expect("fixed-length type must have fixed_size") as usize;
+            let bytes = &self.data[self_col_start..self_col_start + col_size];
+            return Ok(Some(DataValue::from_bytes(ty, bytes)?));
+        }
+
+        let vl_rank = phys_idx - self.physical.num_fixed();
+        let (start, end) = self.get_varlen_bounds(vl_rank);
+        let bytes = &self.data[start..end];
+        Ok(Some(DataValue::from_bytes(ty, bytes)?))
     }
 
     // ── Serialisation ─────────────────────────────────────────────────────────
 
-    /// Produce the full on-disk byte sequence:
-    /// [Header 4B][Null Bitmap][Var-Len Offset Table][Fixed Data][Var-Len Data]
+    /// Produce the full on-disk byte sequence.
     pub fn serialize(&self) -> Vec<u8> {
-        let values = self
-            .to_values()
-            .expect("Row::serialize: internal decode failed");
+        let bm_start = RowLayout::bitmap_offset();
+        let data_start = bm_start + self.layout.null_bitmap_size;
+        let total = data_start + self.data.len();
 
-        // Re-use the typed serializer which builds the full layout correctly.
-        serialize_nullable_typed_row(&self.logical_schema, &values)
-            .expect("Row::serialize: internal serialize failed")
+        let mut out = vec![0u8; total];
+        // Header
+        out[0..2].copy_from_slice(&(self.logical_schema.len() as u16).to_le_bytes());
+        out[2..4].copy_from_slice(&(self.physical.num_varlen() as u16).to_le_bytes());
+        // Null bitmap
+        out[bm_start..bm_start + self.layout.null_bitmap_size]
+            .copy_from_slice(self.null_bitmap.as_bytes());
+        // Remaining data (var-len table + fixed + var-len payloads)
+        out[data_start..].copy_from_slice(&self.data);
+        out
     }
 
     pub fn deserialize(schema: &[DataType], bytes: &[u8]) -> Result<Self, String> {
@@ -468,37 +536,57 @@ impl Row {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    fn to_values(&self) -> Result<Vec<Option<DataValue>>, String> {
-        deserialize_nullable_row(&self.logical_schema, &self.serialize_bytes())
+    /// Returns the absolute `(start, end)` offset bounds for a var-len payload
+    /// inside `self.data`. Uses exactly the same logic as deserialize, ensuring
+    /// we can splice values optimally without breaking layout geometry.
+    fn get_varlen_bounds(&self, vl_rank: usize) -> (usize, usize) {
+        let bm_start = RowLayout::bitmap_offset();
+        let data_start_in_row = bm_start + self.layout.null_bitmap_size;
+        
+        let slot = vl_rank * 2;
+        let raw_offset = u16::from_le_bytes([self.data[slot], self.data[slot + 1]]) as usize;
+        
+        if raw_offset == 0 {
+            // Null column: its theoretical insertion point is the beginning 
+            // of the next sequence.
+            let mut insertion_point = self.data.len();
+            for r in (vl_rank + 1)..self.physical.num_varlen() {
+                let next_slot = r * 2;
+                let next_off = u16::from_le_bytes([self.data[next_slot], self.data[next_slot + 1]]) as usize;
+                if next_off != 0 {
+                    insertion_point = next_off - data_start_in_row;
+                    break;
+                }
+            }
+            return (insertion_point, insertion_point);
+        }
+
+        let start = raw_offset - data_start_in_row;
+        let mut end = self.data.len();
+        for r in (vl_rank + 1)..self.physical.num_varlen() {
+            let next_slot = r * 2;
+            let next_off = u16::from_le_bytes([self.data[next_slot], self.data[next_slot + 1]]) as usize;
+            if next_off != 0 {
+                end = next_off - data_start_in_row;
+                break;
+            }
+        }
+        
+        (start, end)
     }
 
-    /// Serialise without going through `Row::serialize` (avoids infinite recursion).
-    fn serialize_bytes(&self) -> Vec<u8> {
-        let bm_start = RowLayout::bitmap_offset();
-        let data_start = bm_start + self.layout.null_bitmap_size;
-        let total = data_start + self.data.len();
-
-        let mut out = vec![0u8; total];
-        // Header
-        out[0..2].copy_from_slice(&(self.logical_schema.len() as u16).to_le_bytes());
-        out[2..4].copy_from_slice(&(self.physical.num_varlen() as u16).to_le_bytes());
-        // Null bitmap
-        out[bm_start..bm_start + self.layout.null_bitmap_size]
-            .copy_from_slice(self.null_bitmap.as_bytes());
-        // Remaining data (var-len table + fixed + var-len payloads)
-        out[data_start..].copy_from_slice(&self.data);
-        out
-    }
-
-    fn rebuild_from_values(&mut self, values: &[Option<DataValue>]) -> Result<(), String> {
-        let row_bytes = serialize_nullable_typed_row(&self.logical_schema, values)?;
-        let bm_start = RowLayout::bitmap_offset();
-        self.null_bitmap = NullBitmap::from_bytes(
-            self.logical_schema.len(),
-            &row_bytes[bm_start..bm_start + self.layout.null_bitmap_size],
-        )?;
-        let data_start = bm_start + self.layout.null_bitmap_size;
-        self.data = row_bytes[data_start..].to_vec();
-        Ok(())
+    /// Shift the absolute offset reference for all variable-length rows mapped
+    /// geometrically *after* the given rank up or down by `delta`.
+    fn adjust_varlen_offsets(&mut self, after_vl_rank: usize, delta: isize) {
+        for r in (after_vl_rank + 1)..self.physical.num_varlen() {
+            let slot = r * 2;
+            let current_off = u16::from_le_bytes([self.data[slot], self.data[slot + 1]]) as usize;
+            if current_off != 0 {
+                let updated = (current_off as isize + delta) as u16;
+                self.data[slot..slot + 2].copy_from_slice(&updated.to_le_bytes());
+            }
+        }
     }
 }
+
+
