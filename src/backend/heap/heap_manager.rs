@@ -38,7 +38,7 @@ pub struct HeapScanIterator {
 impl HeapScanIterator {
     /// Create a new scan iterator starting at page 1 (Page 0 is header).
     fn new(file_path: PathBuf, total_pages: u32) -> Self {
-        println!(
+        log::trace!(
             "[HeapScanIterator::new] Created iterator for {} pages",
             total_pages
         );
@@ -53,7 +53,7 @@ impl HeapScanIterator {
 
     /// Load a specific page into cache.
     fn load_page(&mut self, page_id: u32) -> io::Result<()> {
-        println!("[HeapScanIterator::load_page] Loading page {}", page_id);
+        log::trace!("[HeapScanIterator::load_page] Loading page {}", page_id);
         
         let mut file = OpenOptions::new()
             .read(true)
@@ -74,7 +74,7 @@ impl Iterator for HeapScanIterator {
         loop {
             // Check if we've reached the end
             if self.current_page >= self.total_pages {
-                println!("[HeapScanIterator::next] End of scan reached");
+                log::trace!("[HeapScanIterator::next] End of scan reached");
                 return None;
             }
 
@@ -96,7 +96,7 @@ impl Iterator for HeapScanIterator {
 
             // Check if we've exhausted tuples in this page
             if self.current_slot >= tuple_count {
-                println!(
+                log::trace!(
                     "[HeapScanIterator::next] Page {} exhausted, moving to next",
                     self.current_page
                 );
@@ -126,7 +126,7 @@ impl Iterator for HeapScanIterator {
 
             let data = page.data[offset as usize..(offset + length) as usize].to_vec();
 
-            println!(
+            log::trace!(
                 "[HeapScanIterator::next] Yielding page={}, slot={}, data_len={}",
                 page_id, slot_id, data.len()
             );
@@ -166,7 +166,7 @@ impl HeapManager {
     /// 3. Create first data page (Page 1)
     /// 4. Create and initialize FSM fork
     pub fn create(file_path: PathBuf) -> io::Result<Self> {
-        println!("[HeapManager::create] Creating new heap file at {:?}", file_path);
+        log::trace!("[HeapManager::create] Creating new heap file at {:?}", file_path);
 
         // Remove existing file if present
         if file_path.exists() {
@@ -193,7 +193,7 @@ impl HeapManager {
         file_handle.flush()?;
         file_handle.sync_all()?;
 
-        println!("[HeapManager::create] Heap file created, initializing FSM");
+        log::trace!("[HeapManager::create] Heap file created, initializing FSM");
 
         // Derive FSM path
         let fsm_path = PathBuf::from(format!(
@@ -222,7 +222,7 @@ impl HeapManager {
         // Persist changes
         manager.flush()?;
 
-        println!("[HeapManager::create] HeapManager successfully created");
+        log::trace!("[HeapManager::create] HeapManager successfully created");
 
         Ok(manager)
     }
@@ -240,7 +240,7 @@ impl HeapManager {
     /// 2. Read header metadata
     /// 3. Open/rebuild FSM fork
     pub fn open(file_path: PathBuf) -> io::Result<Self> {
-        println!("[HeapManager::open] Opening heap file {:?}", file_path);
+        log::trace!("[HeapManager::open] Opening heap file {:?}", file_path);
 
         // Verify path exists
         if !file_path.exists() {
@@ -258,7 +258,7 @@ impl HeapManager {
 
         // Read header
         let mut header = read_header_page(&mut file_handle)?;
-        println!(
+        log::trace!(
             "[HeapManager::open] Read header: page_count={}, fsm_page_count={}, total_tuples={}",
             header.page_count, header.fsm_page_count, header.total_tuples
         );
@@ -281,7 +281,7 @@ impl HeapManager {
         
         // Only update if different
         if header.fsm_page_count != calculated_fsm_pages {
-            println!(
+            log::trace!(
                 "[HeapManager::open] FSM page count mismatch: header={}, calculated={}. Updating...",
                 header.fsm_page_count, calculated_fsm_pages
             );
@@ -289,10 +289,10 @@ impl HeapManager {
             
             // Persist updated header to disk
             update_header_page(&mut file_handle, &header)?;
-            println!("[HeapManager::open] Updated and persisted fsm_page_count to {}", calculated_fsm_pages);
+            log::trace!("[HeapManager::open] Updated and persisted fsm_page_count to {}", calculated_fsm_pages);
         }
 
-        println!("[HeapManager::open] Successfully opened HeapManager");
+        log::trace!("[HeapManager::open] Successfully opened HeapManager");
 
         Ok(Self {
             file_path,
@@ -318,7 +318,10 @@ impl HeapManager {
     /// 5. Update FSM with new free space
     /// 6. Increment total_tuples counter
     pub fn insert_tuple(&mut self, tuple_data: &[u8]) -> io::Result<(u32, u32)> {
-        println!(
+        use crate::backend::instrumentation::HEAP_METRICS;
+        HEAP_METRICS.insert_tuple_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        log::trace!(
             "[HeapManager::insert_tuple] Inserting tuple of {} bytes",
             tuple_data.len()
         );
@@ -346,7 +349,7 @@ impl HeapManager {
         let required_bytes = (tuple_data.len() as u32) + ITEM_ID_SIZE;
         let min_category = Self::bytes_to_category(required_bytes);
 
-        println!(
+        log::trace!(
             "[HeapManager::insert_tuple] min_category required: {}",
             min_category
         );
@@ -356,27 +359,27 @@ impl HeapManager {
 
         // Try up to 3 times to find or allocate a suitable page
         for attempt in 0..3 {
-            println!("[HeapManager::insert_tuple] Attempt {}/3", attempt + 1);
+            log::trace!("[HeapManager::insert_tuple] Attempt {}/3", attempt + 1);
             
             // Get a page to try
             let page_id = match self.fsm.fsm_search_avail(min_category)? {
                 Some(pid) => {
                     // Check if this page failed before
                     if failed_pages.contains(&pid) {
-                        println!(
+                        log::trace!(
                             "[HeapManager::insert_tuple] Page {} previously failed for this insert, allocating new",
                             pid
                         );
                         // This page failed before, don't try it again
                         if attempt < 2 {
-                            println!("[HeapManager::insert_tuple] Retrying with fresh search");
+                            log::trace!("[HeapManager::insert_tuple] Retrying with fresh search");
                             continue;
                         } else {
-                            println!("[HeapManager::insert_tuple] Final attempt: allocating new page");
+                            log::trace!("[HeapManager::insert_tuple] Final attempt: allocating new page");
                             self.allocate_new_page()?
                         }
                     } else {
-                        println!(
+                        log::trace!(
                             "[HeapManager::insert_tuple] FSM search returned page: {}",
                             pid
                         );
@@ -385,10 +388,10 @@ impl HeapManager {
                 }
                 None => {
                     if attempt < 2 {
-                        println!("[HeapManager::insert_tuple] FSM returned None, will retry");
+                        log::trace!("[HeapManager::insert_tuple] FSM returned None, will retry");
                         continue;
                     } else {
-                        println!("[HeapManager::insert_tuple] Final attempt: allocating new page");
+                        log::trace!("[HeapManager::insert_tuple] Final attempt: allocating new page");
                         self.allocate_new_page()?
                     }
                 }
@@ -420,7 +423,7 @@ impl HeapManager {
             // Get current free space and verify
             let current_free = page_free_space(&page)?;
             if current_free < required_bytes {
-                println!(
+                log::trace!(
                     "[HeapManager::insert_tuple] Page {} has only {} bytes free, needs {} - will retry with new page",
                     page_id, current_free, required_bytes
                 );
@@ -447,11 +450,11 @@ impl HeapManager {
             
             // Sync updated header to disk
             match update_header_page(&mut self.file_handle, &self.header) {
-                Ok(_) => println!("[HeapManager::insert_tuple] Header updated on disk"),
+                Ok(_) => log::trace!("[HeapManager::insert_tuple] Header updated on disk"),
                 Err(e) => eprintln!("[WARN] Failed to update header on disk: {}", e),
             }
 
-            println!(
+            log::trace!(
                 "[HeapManager::insert_tuple] Successfully inserted at (page={}, slot={}); total_tuples={}",
                 page_id, slot_id, self.header.total_tuples
             );
@@ -475,7 +478,7 @@ impl HeapManager {
     /// # Returns
     /// Tuple data or error
     pub fn get_tuple(&mut self, page_id: u32, slot_id: u32) -> io::Result<Vec<u8>> {
-        println!(
+        log::trace!(
             "[HeapManager::get_tuple] Retrieving tuple (page={}, slot={})",
             page_id, slot_id
         );
@@ -519,7 +522,7 @@ impl HeapManager {
         // Extract and return tuple
         let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
 
-        println!(
+        log::trace!(
             "[HeapManager::get_tuple] Retrieved {} bytes",
             tuple_data.len()
         );
@@ -527,17 +530,87 @@ impl HeapManager {
         Ok(tuple_data)
     }
 
+    /// Delete a tuple by marking it as deleted and updating FSM.
+    /// 
+    /// # Arguments
+    /// * `page_id` - Page containing the tuple
+    /// * `slot_id` - Slot within the page
+    /// 
+    /// # Returns
+    /// Number of bytes freed or error
+    pub fn delete_tuple(&mut self, page_id: u32, slot_id: u32) -> io::Result<u32> {
+        use crate::backend::instrumentation::HEAP_METRICS;
+        HEAP_METRICS.insert_tuple_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        log::trace!(
+            "[HeapManager::delete_tuple] Deleting tuple (page={}, slot={})",
+            page_id, slot_id
+        );
+
+        // Validate page_id
+        if page_id >= self.header.page_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Page {} out of bounds (page_count={})", page_id, self.header.page_count),
+            ));
+        }
+
+        // Read page
+        let mut page = Page::new();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.file_path)?;
+        read_page(&mut file, &mut page, page_id)?;
+
+        // Get the tuple data to calculate freed bytes
+        let (_offset, length) = get_slot_entry(&page, slot_id)?;
+        let freed_bytes = (length + ITEM_ID_SIZE) as u32;
+
+        log::trace!(
+            "[HeapManager::delete_tuple] Marked slot {} as deleted, freed {} bytes",
+            slot_id, freed_bytes
+        );
+
+        // Update the slot directory entry to mark as deleted (set length to 0)
+        let slot_offset = PAGE_HEADER_SIZE as usize + (slot_id as usize) * ITEM_ID_SIZE as usize;
+        page.data[slot_offset..slot_offset + 4].copy_from_slice(&0u32.to_le_bytes()); // offset = 0
+        page.data[slot_offset + 4..slot_offset + 8].copy_from_slice(&0u32.to_le_bytes()); // length = 0
+
+        // Write page back
+        write_page(&mut file, &mut page, page_id)?;
+
+        // Calculate new free space and update FSM
+        let new_free = page_free_space(&page)?;
+        self.fsm.fsm_set_avail(page_id, new_free)?;
+
+        // Decrement tuple counter
+        if self.header.total_tuples > 0 {
+            self.header.total_tuples -= 1;
+        }
+
+        // Sync header to disk
+        update_header_page(&mut self.file_handle, &self.header)?;
+
+        Ok(freed_bytes)
+    }
+
     /// Start a sequential scan iterator over all pages.
     pub fn scan(&self) -> HeapScanIterator {
-        println!("[HeapManager::scan] Creating scan iterator");
+        log::trace!("[HeapManager::scan] Creating scan iterator");
         HeapScanIterator::new(self.file_path.clone(), self.header.page_count)
+    }
+
+    /// Search for a page with available space (for testing/debugging).
+    pub fn fsm_search_for_page(&mut self, min_category: u8) -> io::Result<Option<u32>> {
+        self.fsm.fsm_search_avail(min_category)
     }
 
     /// Persist all changes to disk.
     /// - Updates header metadata
     /// - Syncs heap file and FSM fork
     pub fn flush(&mut self) -> io::Result<()> {
-        println!("[HeapManager::flush] Flushing all changes");
+        log::trace!("[HeapManager::flush] Flushing all changes");
 
         // Write header
         update_header_page(&mut self.file_handle, &self.header)?;
@@ -548,7 +621,7 @@ impl HeapManager {
         // Sync FSM fork
         self.fsm.sync()?;
 
-        println!("[HeapManager::flush] Flush complete");
+        log::trace!("[HeapManager::flush] Flush complete");
 
         Ok(())
     }
@@ -559,7 +632,7 @@ impl HeapManager {
 
     /// Allocate a new heap page and register with FSM.
     fn allocate_new_page(&mut self) -> io::Result<u32> {
-        println!("[HeapManager::allocate_new_page] Allocating new page");
+        log::trace!("[HeapManager::allocate_new_page] Allocating new page");
 
         let new_page_id = self.header.page_count;
 
@@ -583,7 +656,7 @@ impl HeapManager {
         let initial_free = PAGE_SIZE as u32 - PAGE_HEADER_SIZE;
         self.fsm.fsm_set_avail(new_page_id, initial_free)?;
 
-        println!(
+        log::trace!(
             "[HeapManager::allocate_new_page] New page_id={}, total_pages={}",
             new_page_id, self.header.page_count
         );
@@ -593,7 +666,7 @@ impl HeapManager {
 
     /// Insert a tuple into a specific page and return the slot_id.
     fn insert_into_page(&self, page: &mut Page, data: &[u8]) -> io::Result<u32> {
-        println!(
+        log::trace!(
             "[HeapManager::insert_into_page] Inserting {} bytes into page",
             data.len()
         );
@@ -635,7 +708,7 @@ impl HeapManager {
         // Calculate slot_id
         let slot_id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE - 1;
 
-        println!(
+        log::trace!(
             "[HeapManager::insert_into_page] Inserted at slot_id={}",
             slot_id
         );
@@ -656,7 +729,7 @@ impl HeapManager {
             // Ceiling division: (a + b - 1) / b instead of a / b
             ((free_bytes as f64 * 255.0 + PAGE_SIZE as f64 - 1.0) / PAGE_SIZE as f64).floor() as u8
         };
-        println!(
+        log::trace!(
             "[HeapManager::bytes_to_category] {} bytes → category {}",
             free_bytes, category
         );

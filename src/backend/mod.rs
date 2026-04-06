@@ -5,6 +5,7 @@ pub mod error_handler;
 pub mod executor;
 pub mod fsm;
 pub mod heap;
+pub mod instrumentation;
 pub mod layout;
 pub mod page;
 pub mod page_api;
