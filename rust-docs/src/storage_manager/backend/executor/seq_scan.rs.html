@@ -5,7 +5,7 @@
 <a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span><span class="kw">crate</span>::disk::read_page;
 <a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span><span class="kw">crate</span>::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 <a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span><span class="kw">crate</span>::table::page_count;
-<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span><span class="kw">crate</span>::types::DataValue;
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span><span class="kw">crate</span>::types::{DataValue, deserialize_nullable_row};
 <a href=#9 id=9 data-nosnippet>9</a>
 <a href=#10 id=10 data-nosnippet>10</a><span class="kw">pub fn </span>show_tuples(
 <a href=#11 id=11 data-nosnippet>11</a>    catalog: <span class="kw-2">&amp;</span>Catalog,
@@ -61,36 +61,24 @@
 <a href=#61 id=61 data-nosnippet>61</a>            <span class="macro">print!</span>(<span class="string">"Tuple {}: "</span>, i + <span class="number">1</span>);
 <a href=#62 id=62 data-nosnippet>62</a>
 <a href=#63 id=63 data-nosnippet>63</a>            <span class="comment">// 5. Decode each column using its DataType
-<a href=#64 id=64 data-nosnippet>64</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>cursor = <span class="number">0usize</span>;
-<a href=#65 id=65 data-nosnippet>65</a>            <span class="kw">for </span>col <span class="kw">in </span>columns {
-<a href=#66 id=66 data-nosnippet>66</a>                <span class="kw">let </span>field = <span class="kw-2">&amp;</span>tuple_data[cursor..];
-<a href=#67 id=67 data-nosnippet>67</a>                <span class="kw">let </span>sz = <span class="kw">match </span>col.data_type.encoded_len(field) {
-<a href=#68 id=68 data-nosnippet>68</a>                    <span class="prelude-val">Ok</span>(sz) =&gt; sz,
-<a href=#69 id=69 data-nosnippet>69</a>                    <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-<a href=#70 id=70 data-nosnippet>70</a>                        <span class="macro">print!</span>(<span class="string">"{}=&lt;truncated&gt; "</span>, col.name);
-<a href=#71 id=71 data-nosnippet>71</a>                        <span class="kw">break</span>;
+<a href=#64 id=64 data-nosnippet>64</a>            </span><span class="kw">let </span>schema_types: Vec&lt;<span class="kw">_</span>&gt; = columns.iter().map(|c| c.data_type.clone()).collect();
+<a href=#65 id=65 data-nosnippet>65</a>            <span class="kw">match </span>deserialize_nullable_row(<span class="kw-2">&amp;</span>schema_types, tuple_data) {
+<a href=#66 id=66 data-nosnippet>66</a>                <span class="prelude-val">Ok</span>(values) =&gt; {
+<a href=#67 id=67 data-nosnippet>67</a>                    <span class="kw">for </span>(col, val_opt) <span class="kw">in </span>columns.iter().zip(values.iter()) {
+<a href=#68 id=68 data-nosnippet>68</a>                        <span class="kw">match </span>val_opt {
+<a href=#69 id=69 data-nosnippet>69</a>                            <span class="prelude-val">Some</span>(val) =&gt; <span class="macro">print!</span>(<span class="string">"{}={} "</span>, col.name, val),
+<a href=#70 id=70 data-nosnippet>70</a>                            <span class="prelude-val">None </span>=&gt; <span class="macro">print!</span>(<span class="string">"{}=NULL "</span>, col.name),
+<a href=#71 id=71 data-nosnippet>71</a>                        }
 <a href=#72 id=72 data-nosnippet>72</a>                    }
-<a href=#73 id=73 data-nosnippet>73</a>                };
-<a href=#74 id=74 data-nosnippet>74</a>
-<a href=#75 id=75 data-nosnippet>75</a>                <span class="kw">if </span>cursor + sz &lt;= tuple_data.len() {
-<a href=#76 id=76 data-nosnippet>76</a>                    <span class="kw">match </span>DataValue::from_bytes(<span class="kw-2">&amp;</span>col.data_type, <span class="kw-2">&amp;</span>tuple_data[cursor..cursor + sz]) {
-<a href=#77 id=77 data-nosnippet>77</a>                        <span class="prelude-val">Ok</span>(val) =&gt; <span class="macro">print!</span>(<span class="string">"{}={} "</span>, col.name, val),
-<a href=#78 id=78 data-nosnippet>78</a>                        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-<a href=#79 id=79 data-nosnippet>79</a>                            <span class="macro">print!</span>(<span class="string">"{}=&lt;decode-error&gt; "</span>, col.name);
-<a href=#80 id=80 data-nosnippet>80</a>                            <span class="kw">break</span>;
-<a href=#81 id=81 data-nosnippet>81</a>                        }
-<a href=#82 id=82 data-nosnippet>82</a>                    }
-<a href=#83 id=83 data-nosnippet>83</a>                    cursor += sz;
-<a href=#84 id=84 data-nosnippet>84</a>                } <span class="kw">else </span>{
-<a href=#85 id=85 data-nosnippet>85</a>                    <span class="macro">print!</span>(<span class="string">"{}=&lt;truncated&gt; "</span>, col.name);
-<a href=#86 id=86 data-nosnippet>86</a>                    <span class="kw">break</span>;
-<a href=#87 id=87 data-nosnippet>87</a>                }
-<a href=#88 id=88 data-nosnippet>88</a>            }
-<a href=#89 id=89 data-nosnippet>89</a>            <span class="macro">println!</span>();
-<a href=#90 id=90 data-nosnippet>90</a>        }
-<a href=#91 id=91 data-nosnippet>91</a>    }
-<a href=#92 id=92 data-nosnippet>92</a>
-<a href=#93 id=93 data-nosnippet>93</a>    <span class="macro">println!</span>(<span class="string">"\n=== End of tuples ===\n"</span>);
-<a href=#94 id=94 data-nosnippet>94</a>    <span class="prelude-val">Ok</span>(())
-<a href=#95 id=95 data-nosnippet>95</a>}
+<a href=#73 id=73 data-nosnippet>73</a>                }
+<a href=#74 id=74 data-nosnippet>74</a>                <span class="prelude-val">Err</span>(e) =&gt; <span class="macro">print!</span>(<span class="string">"&lt;decode-error: {}&gt; "</span>, e),
+<a href=#75 id=75 data-nosnippet>75</a>            }
+<a href=#76 id=76 data-nosnippet>76</a>
+<a href=#77 id=77 data-nosnippet>77</a>            <span class="macro">println!</span>();
+<a href=#78 id=78 data-nosnippet>78</a>        }
+<a href=#79 id=79 data-nosnippet>79</a>    }
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="macro">println!</span>(<span class="string">"\n=== End of tuples ===\n"</span>);
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="prelude-val">Ok</span>(())
+<a href=#83 id=83 data-nosnippet>83</a>}
 </code></pre></div></section></main></body></html>

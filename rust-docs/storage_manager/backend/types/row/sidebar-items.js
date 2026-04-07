@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["deserialize_nullable_row","serialize_nullable_row"],"struct":["Row"]};
+window.SIDEBAR_ITEMS = {"fn":["deserialize_nullable_row","row_byte_size","serialize_nullable_row","serialize_nullable_typed_row"],"struct":["Row"]};
