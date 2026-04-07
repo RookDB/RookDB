@@ -43,5 +43,5 @@ fn nullable_row_roundtrip_preserves_null_positions() {
 fn deserialize_rejects_short_bitmap() {
     let schema = vec![DataType::Int, DataType::Int, DataType::Int, DataType::Int, DataType::Int, DataType::Int, DataType::Int, DataType::Int, DataType::Int];
     let err = deserialize_nullable_row(&schema, &[0u8]).unwrap_err();
-    assert!(err.contains("NULL bitmap"));
+    assert!(err.contains("Row too short"));
 }

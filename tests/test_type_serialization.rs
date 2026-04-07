@@ -95,7 +95,8 @@ fn roundtrip_serialization_for_all_datatypes() {
 }
 
 #[test]
-fn varchar_decoding_rejects_truncated_payload() {
-    let err = DataValue::from_bytes(&DataType::Varchar(10), &[5, 0, b'a', b'b']).unwrap_err();
-    assert!(err.contains("truncated"));
+fn varchar_decoding_rejects_invalid_utf8() {
+    let err = DataValue::from_bytes(&DataType::Varchar(10), &[0xFF, 0xFF]).unwrap_err();
+    assert!(err.contains("UTF-8"));
 }
+

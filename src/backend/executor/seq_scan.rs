@@ -5,7 +5,7 @@ use crate::catalog::types::Catalog;
 use crate::disk::read_page;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
-use crate::types::DataValue;
+use crate::types::{DataValue, deserialize_nullable_row};
 
 pub fn show_tuples(
     catalog: &Catalog,
@@ -61,31 +61,19 @@ pub fn show_tuples(
             print!("Tuple {}: ", i + 1);
 
             // 5. Decode each column using its DataType
-            let mut cursor = 0usize;
-            for col in columns {
-                let field = &tuple_data[cursor..];
-                let sz = match col.data_type.encoded_len(field) {
-                    Ok(sz) => sz,
-                    Err(_) => {
-                        print!("{}=<truncated> ", col.name);
-                        break;
-                    }
-                };
-
-                if cursor + sz <= tuple_data.len() {
-                    match DataValue::from_bytes(&col.data_type, &tuple_data[cursor..cursor + sz]) {
-                        Ok(val) => print!("{}={} ", col.name, val),
-                        Err(_) => {
-                            print!("{}=<decode-error> ", col.name);
-                            break;
+            let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
+            match deserialize_nullable_row(&schema_types, tuple_data) {
+                Ok(values) => {
+                    for (col, val_opt) in columns.iter().zip(values.iter()) {
+                        match val_opt {
+                            Some(val) => print!("{}={} ", col.name, val),
+                            None => print!("{}=NULL ", col.name),
                         }
                     }
-                    cursor += sz;
-                } else {
-                    print!("{}=<truncated> ", col.name);
-                    break;
                 }
+                Err(e) => print!("<decode-error: {}> ", e),
             }
+
             println!();
         }
     }

@@ -1,23 +1,62 @@
+//! SQL data type descriptors for the RookDB type system.
+//!
+//! Each [`DataType`] variant represents one supported SQL column type and
+//! carries the minimal metadata needed to:
+//! - Allocate the correct fixed-size storage slot for fixed-length types.
+//! - Compute alignment padding for the packed fixed-data region of a row.
+//! - Identify variable-length columns so they are routed to the var-len region.
+//!
+//! The [`DataValue`](crate::types::value::DataValue) enum holds runtime values
+//! for the same set of types.
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A SQL column type descriptor.
+///
+/// Fixed-length variants have a `fixed_size()` and `alignment()` that are
+/// used by [`RowLayout`](crate::types::row_layout::RowLayout) to compute
+/// packed byte offsets within the fixed-data region of a row.
+///
+/// Variable-length variants (`Varchar`) are segregated into a separate
+/// var-len region; their payload lengths are derived from an offset table
+/// at decode time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
+    /// 16-bit signed integer (`-32 768` … `32 767`). 2 bytes, alignment 2.
     SmallInt,
+    /// 32-bit signed integer. 4 bytes, alignment 4.
     Int,
+    /// 64-bit signed integer. 8 bytes, alignment 8.
     BigInt,
+    /// IEEE 754 single-precision float (`f32`). 4 bytes, alignment 4.
     Real,
+    /// IEEE 754 double-precision float (`f64`). 8 bytes, alignment 8.
     DoublePrecision,
+    /// Exact fixed-point decimal stored as Binary Coded Decimal (BCD).
+    /// `precision` = total significant digits; `scale` = fractional digits.
     Numeric { precision: u8, scale: u8 },
+    /// Alias for `NUMERIC` — same wire format.
     Decimal { precision: u8, scale: u8 },
+    /// 1-byte boolean: `0x00` = false, `0x01` = true. Alignment 1.
     Bool,
+    /// Fixed-length character string, space-padded to `n` bytes. Alignment 1.
     Char(u16),
+    /// Alias for `CHAR(n)`. Same encoding.
     Character(u16),
+    /// Variable-length string, up to `n` UTF-8 bytes.
+    /// Stored in the var-len region; no on-disk length prefix (length derived
+    /// from the row's var-len offset table).
     Varchar(u16),
+    /// Calendar date stored as days since `1970-01-01` (i32, 4 bytes). Alignment 4.
     Date,
+    /// Time-of-day stored as microseconds since midnight (i64, 8 bytes). Alignment 8.
     Time,
+    /// Fixed-length bit string of exactly `n` bits, packed MSB-first.
+    /// Occupies `ceil(n / 8)` bytes. Alignment 1.
     Bit(u16),
+    /// Date + time, stored as microseconds since `1970-01-01 00:00:00` (i64, 8 bytes). Alignment 8.
     Timestamp,
 }
 
@@ -73,21 +112,8 @@ impl DataType {
         matches!(self, DataType::Varchar(_))
     }
 
-    pub fn encoded_len(&self, bytes: &[u8]) -> Result<usize, String> {
-        match self {
-            DataType::Varchar(_) => {
-                if bytes.len() < 2 {
-                    return Err("VARCHAR field is missing its 2-byte length prefix".to_string());
-                }
-                let payload_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
-                let total_len = 2 + payload_len;
-                if bytes.len() < total_len {
-                    return Err("VARCHAR field is truncated".to_string());
-                }
-                Ok(total_len)
-            }
-            _ => Ok(self.fixed_size().expect("fixed-width type") as usize),
-        }
+    pub fn is_fixed_length(&self) -> bool {
+        !self.is_variable_length()
     }
 }
 

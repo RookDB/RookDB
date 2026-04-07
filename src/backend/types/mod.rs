@@ -6,6 +6,7 @@ pub mod datatype;
 pub mod functions;
 pub mod null_bitmap;
 pub mod row;
+pub mod row_layout;
 pub mod validation;
 pub mod value;
 
@@ -18,6 +19,7 @@ pub use functions::{
 };
 pub use null_bitmap::NullBitmap;
 pub use row::{Row, deserialize_nullable_row, serialize_nullable_row};
+pub use row_layout::{PhysicalSchema, RowLayout};
 pub use validation::{
     TypeValidationError, validate_bigint, validate_bit, validate_bool, validate_char,
     validate_date, validate_double, validate_int, validate_numeric, validate_real,

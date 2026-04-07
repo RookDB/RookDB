@@ -1,7 +1,7 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
-use crate::types::DataValue;
+use crate::types::{DataValue, serialize_nullable_row};
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
@@ -139,30 +139,20 @@ impl BufferManager {
                 continue;
             }
 
-            // Serialize tuple using DataType-aware encoding
-            let mut tuple_bytes: Vec<u8> = Vec::new();
-            let mut row_ok = true;
-            for (val, col) in values.iter().zip(columns.iter()) {
-                match DataValue::parse_and_encode(&col.data_type, val) {
-                    Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
-                    Err(e) => {
-                        println!(
-                            "Skipping row {}: column '{}' — {}",
-                            i + 1,
-                            col.name,
-                            e
-                        );
-                        row_ok = false;
-                        break;
-                    }
+            let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
+            let optional_values: Vec<Option<&str>> = values.iter().map(|&v| Some(v)).collect();
+
+            let tuple_bytes = match serialize_nullable_row(&schema_types, &optional_values) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    println!("Skipping row {}: {}", i + 1, e);
+                    continue;
                 }
-            }
-            if !row_ok {
-                continue;
-            }
+            };
 
             let tuple_len = tuple_bytes.len() as u32;
-            let required = tuple_len + ITEM_ID_SIZE;
+            let total_space_required = tuple_len + ITEM_ID_SIZE;
+
 
             loop {
                 if current_page_index >= self.pages.len() {
@@ -172,7 +162,7 @@ impl BufferManager {
                 let page = &mut self.pages[current_page_index];
                 let free = page_free_space(page)?;
 
-                if free < required {
+                if free < total_space_required {
                     current_page_index += 1;
                     continue;
                 }
