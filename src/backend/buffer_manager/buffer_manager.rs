@@ -151,7 +151,7 @@ impl BufferManager {
             };
 
             let tuple_len = tuple_bytes.len() as u32;
-            let required = tuple_len + ITEM_ID_SIZE;
+            let total_space_required = tuple_len + ITEM_ID_SIZE;
 
 
             loop {
@@ -162,7 +162,7 @@ impl BufferManager {
                 let page = &mut self.pages[current_page_index];
                 let free = page_free_space(page)?;
 
-                if free < required {
+                if free < total_space_required {
                     current_page_index += 1;
                     continue;
                 }
