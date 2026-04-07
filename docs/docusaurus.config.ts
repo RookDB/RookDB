@@ -7,10 +7,6 @@ import type * as Preset from "@docusaurus/preset-classic";
 const config: Config = {
   title: "RookDB Docs",
   tagline: "Documentation for RooKDB Project",
-  themes: ["@docusaurus/theme-mermaid"],
-  markdown: {
-    mermaid: true,
-  },
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
