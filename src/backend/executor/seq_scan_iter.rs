@@ -8,7 +8,7 @@ use crate::backend::buffer_manager::BufferManager;
 use crate::backend::page::{ITEM_ID_SIZE,PAGE_HEADER_SIZE};
 
 pub struct SeqScan{
-    table_name: String,
+    _table_name: String,
     buffer_pool: Arc<BufferManager>,
     current_page_id: u32,
     current_slot_idx: u32,

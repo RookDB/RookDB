@@ -41,7 +41,8 @@ pub fn run() -> io::Result<()> {
         println!("6. Load CSV");
         println!("7. Show Tuples");
         println!("8. Show Table Statistics");
-        println!("9. Exit");
+        println!("9. Aggregate Query");
+        println!("10. Exit");
         println!("=============================");
 
         // Read user input
@@ -62,7 +63,8 @@ pub fn run() -> io::Result<()> {
             "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
-            "9" => {
+            "9" => data_cmd::aggregate_query_cmd(&current_db)?,
+            "10" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }

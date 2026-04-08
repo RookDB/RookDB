@@ -56,7 +56,7 @@ impl AggregationState{
                     results.push(AggValueState::Variance{count:0, mean:0.0, m2:0.0})
                 }
                 AggFunc::StdDev=>{
-                    results.push(AggValueState::Variance{count:0, mean:0.0, m2:0.0})
+                    results.push(AggValueState::StdDev{count:0, mean:0.0, m2:0.0})
                 }
                 AggFunc::BoolAnd=>{
                     results.push(AggValueState::BoolAnd(None));
@@ -331,31 +331,35 @@ impl HashAggregator {
 
 impl Executor for HashAggregator {
     fn next(&mut self) -> Option<Tuple> {
-        // Already returned our single aggregated row, we are done.
-        if self.built {
-            return None;
-        }
+        if !self.built {
+            // 1. Drain the child iterator to build the state
+            while let Some(tuple) = self.child.next() {
+                let mut hash_key=Vec::new();
+                for col_idx in &self.group_by_cols {
+                    let tuple_val = &tuple.values[*col_idx];
+                    hash_key.push(tuple_val.clone());
+                }
 
-        // 1. Drain the child iterator to build the state
-        while let Some(tuple) = self.child.next() {
-            let mut hash_key=Vec::new();
-            for col_idx in &self.group_by_cols {
-                let tuple_val = &tuple.values[*col_idx];
-                hash_key.push(tuple_val.clone());
+                let agg_state = self.states.entry(hash_key).or_insert_with(|| {
+                    AggregationState::new(&self.reqs)
+                });
+
+                agg_state.update(&tuple, &self.reqs);
+            }
+            self.built = true;
+
+            // 1.5 Handle Empty Table Aggregations (Scalar Aggregates)
+            // If there are no group_by columns and the table was entirely empty,
+            // SQL standards mandate that we still return exactly 1 row containing default values (like COUNT=0, SUM=NULL).
+            if self.group_by_cols.is_empty() && self.states.is_empty() {
+                self.states.insert(Vec::new(), AggregationState::new(&self.reqs));
             }
 
-            let agg_state = self.states.entry(hash_key).or_insert_with(|| {
-                AggregationState::new(&self.reqs)
-            });
-
-            agg_state.update(&tuple, &self.reqs);
-        }
-        self.built = true;
-
-        // 2. Convert the internal AggValueState into output Values
-        if self.iter.is_none() {
-            let hm_iter = std::mem::replace(&mut self.states, HashMap::new()).into_iter();
-            self.iter = Some(hm_iter);
+            // 2. Convert the internal AggValueState into output Values
+            if self.iter.is_none() {
+                let hm_iter = std::mem::replace(&mut self.states, HashMap::new()).into_iter();
+                self.iter = Some(hm_iter);
+            }
         }
 
         if let Some(ref mut iter) = self.iter {
@@ -409,14 +413,14 @@ impl Executor for HashAggregator {
                                 final_values.push(Value::Null); // Overflow case
                             }
                         }
-                        AggValueState::Variance{count,mean,m2}=>{
+                        AggValueState::Variance{count,mean: _,m2}=>{
                             if count<2 {
                                 final_values.push(Value::Null);
                             } else {
                                 final_values.push(Value::Float(ordered_float::OrderedFloat(m2 / (count-1) as f64)));
                             }
                         }
-                        AggValueState::StdDev{count,mean,m2}=>{
+                        AggValueState::StdDev{count,mean: _,m2}=>{
                             if count<2 {
                                 final_values.push(Value::Null);
                             } else {
@@ -457,9 +461,14 @@ impl Executor for HashAggregator {
     }
 }
 
-pub fn execute_aggregation(child: Box<dyn Executor>, reqs: Vec<AggReq>,group_by_cols: Vec<usize>, having: Option<Expr>) -> Option<Tuple> {
+pub fn execute_aggregation(child: Box<dyn Executor>, reqs: Vec<AggReq>,group_by_cols: Vec<usize>, having: Option<Expr>) -> Vec<Tuple> {
 
     let mut aggregator = HashAggregator::new(child, reqs, group_by_cols, having);
+    let mut output_table = Vec::new();
     
-    aggregator.next()
+    while let Some(tuple) = aggregator.next() {
+        output_table.push(tuple);
+    }
+    
+    output_table
 }

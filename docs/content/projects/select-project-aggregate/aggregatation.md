@@ -19,7 +19,7 @@ pub fn execute_aggregation(
     reqs: Vec<AggReq>, 
     group_by_cols: Vec<usize>, 
     having: Option<Expr>
-) -> Option<Tuple>
+) -> Vec<Tuple>
 ```
 
 - **Inputs**: 
@@ -27,13 +27,21 @@ pub fn execute_aggregation(
   - `reqs`: Array of aggregation function variants to compute (e.g., `SUM`, `AVG`).
   - `group_by_cols`: Target column indices defining the grouping key.
   - `having`: Optional recursive AST (`Expr`) used for mathematical/boolean filtering post-aggregation.
-- **Output Format**: Iteratively yields `Option<Tuple>` representing completely aggregated, grouped, and filtered rows.
+- **Output Format**: Returns `Vec<Tuple>` representing completely aggregated, grouped, and filtered rows (forming the output table).
 
 ## Implementation & Justification
 
 - **Hash-Based Grouping**: Utilizes `HashMap<Vec<Value>, AggregationState>` alongside Rust's Entry API (`entry().or_insert_with()`) to calculate mapped aggregates dynamically in a single O(N) pass, bypassing the need for pre-sorting.
 - **HAVING Evaluation**: Implemented via a `Box<Expr>` recursive enumeration structure evaluating directly against finalized groups. Failed evaluates map to `Value::Boolean(false)` and are discarded silently.
 - **Welford’s Algorithm**: Selected for `VARIANCE` and `STDDEV` computing logic to prevent catastrophic cancellation intrinsic to standard variance floating-point summations.
+  - **Working Principle**: It calculates the variance in a single pass without keeping all elements in memory. It maintains a running `count`, `mean`, and sum of squared differences from the mean ($M_2$).
+  - **Iteration Logic**: For each new value $x$:
+    1. $count = count + 1$
+    2. $delta = x - mean$
+    3. $mean = mean + \frac{delta}{count}$
+    4. $delta2 = x - mean$
+    5. $M_2 = M_2 + (delta \times delta2)$
+  - **Result Extraction**: The sample variance is computed as $\frac{M_2}{count - 1}$, and standard deviation is $\sqrt{\frac{M_2}{count - 1}}$.
 - **Ordered-Float**: Native `f64` primitives are wrapped inside `ordered-float` to strictly satisfy Rust's `Eq` and `Hash` constraints, permitting them safely in HashSets (`DISTINCT`) and HashMaps (`GROUP BY`).
 
 ## Case Handling
