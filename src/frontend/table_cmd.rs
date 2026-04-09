@@ -5,7 +5,7 @@ use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{Catalog, Column, DataType, create_table, show_tables};
-use storage_manager::statistics::print_table_page_count;
+use storage_manager::statistics::print_table_statistics;
 
 /// Displays tables in the currently selected database
 pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
@@ -79,7 +79,10 @@ pub fn create_table_cmd(
     Ok(())
 }
 
-pub fn show_table_statistics_cmd(current_db: &Option<String>) -> io::Result<()> {
+pub fn show_table_statistics_cmd(
+    catalog: &Catalog,
+    current_db: &Option<String>,
+) -> io::Result<()> {
     let db_name = match current_db {
         Some(db) => db,
         None => {
@@ -95,7 +98,7 @@ pub fn show_table_statistics_cmd(current_db: &Option<String>) -> io::Result<()> 
     io::stdin().read_line(&mut table_name)?;
     let table_name = table_name.trim();
 
-    print_table_page_count(db_name, table_name)?;
+    print_table_statistics(catalog, db_name, table_name)?;
 
     Ok(())
 }
