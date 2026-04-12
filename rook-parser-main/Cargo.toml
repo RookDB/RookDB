@@ -1,0 +1,25 @@
+[package]
+name = "rook-parser"
+version = "0.1.7"
+edition = "2024"
+
+description = "SQL parser layer for RookDB built using DataFusion sqlparser"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/RookDB/rook-parser"
+
+exclude = [
+    "Books/*",
+    "assets/*",
+    "MoMs/*",
+    "Notes.md",
+    "Questions.md",
+    "Resources.md",
+    "tests/*",
+    "Cargo.lock"
+]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.149"
+sqlparser = { version = "0.61.0", features = ["serde"] }

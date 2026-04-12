@@ -1,0 +1,13 @@
+# Rust build artifacts
+../target/
+target/
+assets/.DS_Store
+**/*.bin
+**/**/*.dat
+database
+target/*
+code/.DS_Store
+.DS_Store
+.tex
+.txt
+.sh
