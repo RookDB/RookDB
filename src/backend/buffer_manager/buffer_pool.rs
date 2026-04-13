@@ -12,7 +12,7 @@ use crate::disk::{read_page, write_page, create_page};
 pub struct BufferPool {
     pub frames: Vec<BufferFrame>,
     pub page_table: HashMap<PageId, usize>,
-    pub pool_size: usize,
+    pub num_frames: usize,
     pub policy: Box<dyn ReplacementPolicy>,
     pub stats: BufferStats,
     pub file: File,
@@ -21,30 +21,34 @@ pub struct BufferPool {
 impl BufferPool {
 
     pub fn new(
-        pool_size: usize,
-        policy: Box<dyn ReplacementPolicy>,
-        file: File,
-    ) -> Self {
+    policy: Box<dyn ReplacementPolicy>,
+    file: File,
+) -> Self {
+    let num_frames = BUFFER_SIZE / PAGE_SIZE;
 
-        let mut frames = Vec::with_capacity(pool_size);
+    assert!(
+        num_frames > RESERVED_FRAMES,
+        "Buffer too small for reserved frames"
+    );
 
-        for _ in 0..pool_size {
-            frames.push(BufferFrame {
-                page: Page::new(),
-                metadata: FrameMetadata::new(),
-            });
-        }
+    let mut frames = Vec::with_capacity(num_frames);
 
-        Self {
-            frames,
-            page_table: HashMap::new(),
-            pool_size,
-            policy,
-            stats: BufferStats::new(),
-            file,
-        }
+    for _ in 0..num_frames {
+        frames.push(BufferFrame {
+            page: Page::new(),
+            metadata: FrameMetadata::new(),
+        });
     }
 
+    Self {
+        frames,
+        page_table: HashMap::new(),
+        num_frames,
+        policy,
+        stats: BufferStats::new(),
+        file,
+    }
+}
     pub fn fetch_page(
         &mut self,
         table_name: String,
@@ -66,7 +70,9 @@ impl BufferPool {
             frame.metadata.pin_count += 1;
             frame.metadata.usage_count += 1;
 
-            self.policy.record_access(frame_index);
+            if frame_index >= RESERVED_FRAMES {
+    self.policy.record_access(frame_index - RESERVED_FRAMES);
+}
             self.stats.record_hit();
 
             return Ok(&mut frame.page);
@@ -82,13 +88,12 @@ impl BufferPool {
         // -----------------------------
         let mut frame_index = None;
 
-        for (i, frame) in self.frames.iter().enumerate() {
-            if frame.metadata.page_id.is_none() {
-                frame_index = Some(i);
-                break;
-            }
-        }
-
+        for i in RESERVED_FRAMES..self.num_frames {
+    if self.frames[i].metadata.page_id.is_none() {
+        frame_index = Some(i);
+        break;
+    }
+}
         let frame_index = match frame_index {
 
             Some(index) => index,
@@ -98,7 +103,42 @@ impl BufferPool {
                 // -----------------------------
                 // 4. EVICTION
                 // -----------------------------
-                let victim = self.policy.victim(&mut self.frames);
+let victim = self.policy.victim(&mut self.frames);
+
+let victim_index = match victim {
+    Some(idx) if idx >= RESERVED_FRAMES => idx,
+
+    Some(_) => {
+        // Policy picked from reserved region → ignore and fallback
+        let mut candidate = None;
+
+        for i in RESERVED_FRAMES..self.num_frames {
+            let frame = &self.frames[i];
+
+            if frame.metadata.pin_count == 0 {
+                candidate = Some(i);
+                break;
+            }
+        }
+
+        match candidate {
+            Some(i) => i,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "All frames are pinned",
+                ));
+            }
+        }
+    }
+
+    None => {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "All frames are pinned",
+        ));
+    }
+};
 
                 if victim.is_none() {
                     return Err(io::Error::new(
@@ -146,7 +186,9 @@ impl BufferPool {
         frame.metadata.dirty = false;
         frame.metadata.usage_count = 1;
 
-        self.policy.record_access(frame_index);
+        if frame_index >= RESERVED_FRAMES {
+    self.policy.record_access(frame_index - RESERVED_FRAMES);
+}
         self.page_table.insert(page_id, frame_index);
 
         Ok(&mut frame.page)
@@ -293,4 +335,82 @@ impl BufferPool {
 
         Ok(())
     }
+
+    pub fn reset(&mut self) {
+    for frame in &mut self.frames {
+        frame.metadata = FrameMetadata::new();
+    }
+
+    self.page_table.clear();
+    self.stats = BufferStats::new();
+}
+
+use std::fs;
+use std::path::Path;
+
+pub fn preload_database(
+    &mut self,
+    db_name: &str,
+) -> io::Result<()> {
+
+    self.flush_all_pages()?;
+    self.reset();
+
+    let base_path = format!(
+        "/home/pratham-omkar-pattanayak/SEM 8/Data Systems/Project/RookDB/database/base/{}",
+        db_name
+    );
+
+    let mut frame_index = RESERVED_FRAMES;
+
+    for entry in fs::read_dir(base_path)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) != Some("dat") {
+            continue;
+        }
+
+        let table_name = path.file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let mut file = File::open(&path)?;
+
+        let total_pages = crate::disk::page_count(&mut file)?; // existing API
+
+        // Skip page 0 (header), start from page 1
+        for page_number in 1..total_pages {
+
+            if frame_index >= self.num_frames {
+                return Ok(()); // buffer full
+            }
+
+            let page_id = PageId {
+                table_name: table_name.clone(),
+                page_number,
+            };
+
+            let frame = &mut self.frames[frame_index];
+
+            read_page(&mut file, &mut frame.page, page_number)?;
+
+            frame.metadata.page_id = Some(page_id.clone());
+            frame.metadata.pin_count = 0;
+            frame.metadata.dirty = false;
+            frame.metadata.usage_count = 1;
+
+            self.page_table.insert(page_id, frame_index);
+
+            // optional: register with policy
+            self.policy.record_access(frame_index - RESERVED_FRAMES);
+
+            frame_index += 1;
+        }
+    }
+
+    Ok(())
+}
 }
