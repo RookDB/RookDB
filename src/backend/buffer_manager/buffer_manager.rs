@@ -1,6 +1,7 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
+use crate::types::{DataValue, serialize_nullable_row};
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
@@ -138,29 +139,20 @@ impl BufferManager {
                 continue;
             }
 
-            // Serialize tuple
-            let mut tuple_bytes: Vec<u8> = Vec::new();
-            for (val, col) in values.iter().zip(columns.iter()) {
-                match col.data_type.as_str() {
-                    "INT" => {
-                        let num: i32 = val.parse().unwrap_or_default();
-                        tuple_bytes.extend_from_slice(&num.to_le_bytes());
-                    }
-                    "TEXT" => {
-                        let mut t = val.as_bytes().to_vec();
-                        if t.len() > 10 {
-                            t.truncate(10);
-                        } else if t.len() < 10 {
-                            t.extend(vec![b' '; 10 - t.len()]);
-                        }
-                        tuple_bytes.extend_from_slice(&t);
-                    }
-                    _ => continue,
+            let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
+            let optional_values: Vec<Option<&str>> = values.iter().map(|&v| Some(v)).collect();
+
+            let tuple_bytes = match serialize_nullable_row(&schema_types, &optional_values) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    println!("Skipping row {}: {}", i + 1, e);
+                    continue;
                 }
-            }
+            };
 
             let tuple_len = tuple_bytes.len() as u32;
-            let required = tuple_len + ITEM_ID_SIZE;
+            let total_space_required = tuple_len + ITEM_ID_SIZE;
+
 
             loop {
                 if current_page_index >= self.pages.len() {
@@ -170,7 +162,7 @@ impl BufferManager {
                 let page = &mut self.pages[current_page_index];
                 let free = page_free_space(page)?;
 
-                if free < required {
+                if free < total_space_required {
                     current_page_index += 1;
                     continue;
                 }

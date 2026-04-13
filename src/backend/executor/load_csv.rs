@@ -4,6 +4,7 @@ use std::io::{self, BufRead, BufReader};
 
 use crate::catalog::types::Catalog;
 use crate::heap::insert_tuple;
+use crate::types::DataValue;
 
 pub fn load_csv(
     catalog: &Catalog,
@@ -42,9 +43,7 @@ pub fn load_csv(
     let mut lines = reader.lines();
 
     // Skip header line
-    if let Some(Ok(_header)) = lines.next() {
-        // println!("Header: {}", header);
-    }
+    if let Some(Ok(_header)) = lines.next() {}
 
     // --- 3. Iterate through rows ---
     let mut inserted = 0;
@@ -54,10 +53,8 @@ pub fn load_csv(
             continue;
         }
 
-        // Split CSV fields by comma
         let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
 
-        // Validate number of columns
         if values.len() != columns.len() {
             println!(
                 "Skipping row {}: expected {} columns, found {}",
@@ -68,32 +65,28 @@ pub fn load_csv(
             continue;
         }
 
-        // --- 4. Serialize row based on schema ---
+        // --- 4. Encode each field using the column's DataType ---
         let mut tuple_bytes: Vec<u8> = Vec::new();
+        let mut row_ok = true;
 
         for (val, col) in values.iter().zip(columns.iter()) {
-            match col.data_type.as_str() {
-                "INT" => {
-                    let num: i32 = val.parse().unwrap_or_default();
-                    tuple_bytes.extend_from_slice(&num.to_le_bytes());
-                }
-                "TEXT" => {
-                    let mut text_bytes = val.as_bytes().to_vec();
-                    if text_bytes.len() > 10 {
-                        text_bytes.truncate(10);
-                    } else if text_bytes.len() < 10 {
-                        text_bytes.extend(vec![b' '; 10 - text_bytes.len()]);
-                    }
-                    tuple_bytes.extend_from_slice(&text_bytes);
-                }
-                _ => {
+            match DataValue::parse_and_encode(&col.data_type, val) {
+                Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
+                Err(e) => {
                     println!(
-                        "Unsupported column type '{}' in column '{}'",
-                        col.data_type, col.name
+                        "Skipping row {}: column '{}' — {}",
+                        i + 1,
+                        col.name,
+                        e
                     );
-                    continue;
+                    row_ok = false;
+                    break;
                 }
             }
+        }
+
+        if !row_ok {
+            continue;
         }
 
         // --- 5. Insert tuple into page system ---
