@@ -135,6 +135,9 @@ fn convert_predicate(expr: SqlExpr) -> Result<Predicate, String> {
                 Ok(like_pred)
             }
         }
+        SqlExpr::Nested(inner) => {
+            convert_predicate(*inner)
+        },
         // Explicitly reject unsupported constructs.
         SqlExpr::Subquery(_)
         | SqlExpr::Exists { .. }

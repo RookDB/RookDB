@@ -16,6 +16,7 @@ pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
             return;
         }
     };
+    
     show_tables(catalog, db);
 }
 
