@@ -131,6 +131,89 @@ The following assumptions are made for this implementation:
 
 ------------------------------------------------------------------------
 
+## 1.6 Buffer Pool Warmup and Segmented Replacement Strategy
+
+### Overview
+
+The Buffer Manager has been extended with a **segmented buffer pool design and database-aware warmup strategy** to improve performance and control page replacement behavior.
+
+---
+
+### Segmented Buffer Pool
+
+The buffer pool is logically divided into two regions:
+
+- **Reserved Region (Frames 0–128)**  
+  - A total of **128 frames are reserved for catalog and metadata pages**  
+  - Not managed by the replacement policy  
+  - Used for:
+    - Catalog-related pages  
+    - Frequently accessed (hot) pages  
+    - System-critical data  
+
+- **Managed Region (Frames ≥129)**  
+  - Fully controlled by the replacement policy (LRU / Clock)  
+  - Used for:
+    - Bulk data pages  
+    - Preloaded table data  
+    - Eviction and replacement decisions  
+
+This separation ensures that catalog and critical metadata remain protected from eviction.
+
+---
+
+### Database-Aware Buffer Warmup
+
+When a database is selected, the buffer pool is automatically refreshed and preloaded with table data.
+
+#### Workflow
+
+1. **Flush Dirty Pages**
+   - All dirty pages in the buffer pool are written back to disk using `flush_all_pages()`.
+
+2. **Reset Buffer Pool**
+   - Frame metadata, page table, and statistics are cleared.
+
+3. **Preload Tables**
+   - All tables in the selected database are scanned.
+   - Pages are loaded sequentially:
+     - Starting from **page 1** (skipping header page)
+     - Inserted into frames starting from **frame index 129**
+   - Loading continues until:
+     - Buffer pool is full, or
+     - All table pages are loaded
+
+4. **Page Table Update**
+   - Each loaded page is registered in the page table to avoid duplicate disk reads.
+
+---
+
+### Replacement Policy Behavior
+
+The replacement policy is applied **only to the managed region (frames ≥129)**.
+
+- Reserved frames (0–128) are **never selected as victims**
+- Replacement decisions (LRU / Clock) operate only on eligible frames
+- Preloaded pages are registered with the policy to ensure correct eviction ordering
+
+---
+
+### Catalog Initialization Behavior
+
+The **Catalog Manager is loaded onto the first 128 pages after every `cargo run`**.
+
+- Ensures that:
+  - Database metadata is always initialized
+  - Table and schema information is available before buffer operations
+- Guarantees consistency between:
+  - Disk state (database directory)
+  - In-memory metadata (catalog)
+
+---
+
+
+--------------------------------------------------------------------------------
+
 # 2. Backend Data Structures
 
 ## 2.1 Data Structures to be Created
