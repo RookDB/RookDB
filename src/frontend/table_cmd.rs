@@ -4,12 +4,18 @@
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{Catalog, init_catalog_page_storage, create_table_enhanced, show_tables};
 use storage_manager::catalog::types::ColumnDefinition;
+use storage_manager::catalog::{
+    Catalog, create_table, init_catalog_page_storage, show_tables,
+};
 use storage_manager::statistics::print_table_page_count;
 
 /// Displays tables in the currently selected database
-pub fn show_tables_cmd(catalog: &Catalog, bm: &mut BufferManager, current_db: &Option<String>) -> io::Result<()> {
+pub fn show_tables_cmd(
+    catalog: &Catalog,
+    bm: &mut BufferManager,
+    current_db: &Option<String>,
+) -> io::Result<()> {
     let db = match current_db {
         Some(db) => db,
         None => {
@@ -17,7 +23,8 @@ pub fn show_tables_cmd(catalog: &Catalog, bm: &mut BufferManager, current_db: &O
             return Ok(());
         }
     };
-    let mut pm = init_catalog_page_storage().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let mut pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     show_tables(catalog, &mut pm, bm, db);
     Ok(())
 }
@@ -73,8 +80,17 @@ pub fn create_table_cmd(
         });
     }
 
-    let mut pm = init_catalog_page_storage().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-    match create_table_enhanced(catalog, &mut pm, buffer_manager, &db, &table_name, columns, vec![]) {
+    let mut pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    match create_table(
+        catalog,
+        &mut pm,
+        buffer_manager,
+        &db,
+        &table_name,
+        columns,
+        vec![],
+    ) {
         Ok(_) => {
             println!("Table '{}' created in database '{}'.", table_name, db);
         }

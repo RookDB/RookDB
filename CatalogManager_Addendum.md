@@ -224,10 +224,10 @@ and `invalidate_*` / `insert_*` were never called.
 | Function | File | Invalidation added |
 |---|---|---|
 | `create_database` (legacy) | `catalog.rs` | `invalidate_database(db_name)` |
-| `create_database_enhanced` | `catalog.rs` | `invalidate_database(db_name)` |
+| `create_database` | `catalog.rs` | `invalidate_database(db_name)` |
 | `drop_database` | `catalog.rs` | `invalidate_database(db_name)` |
 | `create_table` (legacy) | `catalog.rs` | `invalidate_table(db_oid, table_name)` |
-| `create_table_enhanced` | `catalog.rs` | `invalidate_table(db_oid, table_name)` |
+| `create_table` | `catalog.rs` | `invalidate_table(db_oid, table_name)` |
 | `drop_table` | `catalog.rs` | `invalidate_table`, `invalidate_constraints`, `invalidate_indexes` |
 | `alter_table_add_column` | `catalog.rs` | `invalidate_constraints(table_oid)` |
 | `add_primary_key_constraint` | `constraints.rs` | `invalidate_constraints(table_oid)` |

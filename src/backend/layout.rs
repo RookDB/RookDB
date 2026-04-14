@@ -6,9 +6,6 @@ pub const DATA_DIR: &str = "database";
 // Catalog metadata directory
 pub const GLOBAL_DIR: &str = "database/global";
 
-// Legacy global catalog file (JSON format)
-pub const CATALOG_FILE: &str = "database/global/catalog.json";
-
 // Root directory for all databases
 pub const DATABASE_DIR: &str = "database/base";
 

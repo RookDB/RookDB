@@ -16,27 +16,26 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::Path;
 
+use crate::buffer_manager::{BufferManager, PageId};
+use crate::catalog::types::CatalogError;
 use crate::disk::create_page;
 use crate::heap::init_table;
-use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, page_free_space};
 use crate::layout::{
-    CATALOG_PAGES_DIR,
-    PG_DATABASE_FILE, PG_TABLE_FILE, PG_COLUMN_FILE,
-    PG_CONSTRAINT_FILE, PG_INDEX_FILE, PG_TYPE_FILE,
+    CATALOG_PAGES_DIR, PG_COLUMN_FILE, PG_CONSTRAINT_FILE, PG_DATABASE_FILE, PG_INDEX_FILE,
+    PG_TABLE_FILE, PG_TYPE_FILE,
 };
-use crate::catalog::types::CatalogError;
-use crate::buffer_manager::{BufferManager, PageId};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, page_free_space};
 
 // ─────────────────────────────────────────────────────────────
 // Catalog name constants
 // ─────────────────────────────────────────────────────────────
 
-pub const CAT_DATABASE   : &str = "pg_database";
-pub const CAT_TABLE      : &str = "pg_table";
-pub const CAT_COLUMN     : &str = "pg_column";
-pub const CAT_CONSTRAINT : &str = "pg_constraint";
-pub const CAT_INDEX      : &str = "pg_index";
-pub const CAT_TYPE       : &str = "pg_type";
+pub const CAT_DATABASE: &str = "pg_database";
+pub const CAT_TABLE: &str = "pg_table";
+pub const CAT_COLUMN: &str = "pg_column";
+pub const CAT_CONSTRAINT: &str = "pg_constraint";
+pub const CAT_INDEX: &str = "pg_index";
+pub const CAT_TYPE: &str = "pg_type";
 
 // ─────────────────────────────────────────────────────────────
 // Page-manager struct
@@ -56,12 +55,12 @@ impl CatalogPageManager {
 
     pub fn new() -> Self {
         let mut fp: CatalogFilePaths = HashMap::new();
-        fp.insert(CAT_DATABASE,   PG_DATABASE_FILE);
-        fp.insert(CAT_TABLE,      PG_TABLE_FILE);
-        fp.insert(CAT_COLUMN,     PG_COLUMN_FILE);
+        fp.insert(CAT_DATABASE, PG_DATABASE_FILE);
+        fp.insert(CAT_TABLE, PG_TABLE_FILE);
+        fp.insert(CAT_COLUMN, PG_COLUMN_FILE);
         fp.insert(CAT_CONSTRAINT, PG_CONSTRAINT_FILE);
-        fp.insert(CAT_INDEX,      PG_INDEX_FILE);
-        fp.insert(CAT_TYPE,       PG_TYPE_FILE);
+        fp.insert(CAT_INDEX, PG_INDEX_FILE);
+        fp.insert(CAT_TYPE, PG_TYPE_FILE);
         CatalogPageManager { file_paths: fp }
     }
 
@@ -98,7 +97,12 @@ impl CatalogPageManager {
         self.file_paths
             .get(catalog_name)
             .map(|s| s.to_string())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Unknown catalog: {}", catalog_name)))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Unknown catalog: {}", catalog_name),
+                )
+            })
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -112,50 +116,62 @@ impl CatalogPageManager {
         data: Vec<u8>,
     ) -> Result<(u32, u32), CatalogError> {
         let path = self.get_path(catalog_name)?;
-        let header_fi = bm.pin_page(PageId::new(&path, 0)).map_err(CatalogError::IoError)?;
-        let mut total_pages = u32::from_le_bytes(bm.frames[header_fi].data[0..4].try_into().unwrap());
-        
+        let header_fi = bm
+            .pin_page(PageId::new(&path, 0))
+            .map_err(CatalogError::IoError)?;
+        let mut total_pages =
+            u32::from_le_bytes(bm.frames[header_fi].data[0..4].try_into().unwrap());
+
         let mut last_page_num = total_pages - 1;
-        let mut last_fi = bm.pin_page(PageId::new(&path, last_page_num)).map_err(CatalogError::IoError)?;
-        
+        let mut last_fi = bm
+            .pin_page(PageId::new(&path, last_page_num))
+            .map_err(CatalogError::IoError)?;
+
         let free_space = page_free_space(&bm.frames[last_fi]).map_err(CatalogError::IoError)?;
         let required = data.len() as u32 + ITEM_ID_SIZE;
-        
+
         if required > free_space {
-            bm.unpin_page(&PageId::new(&path, last_page_num), false).map_err(CatalogError::IoError)?;
-            
+            bm.unpin_page(&PageId::new(&path, last_page_num), false)
+                .map_err(CatalogError::IoError)?;
+
             let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
             create_page(&mut file)?;
             total_pages += 1;
             last_page_num = total_pages - 1;
-            
+
             bm.frames[header_fi].data[0..4].copy_from_slice(&total_pages.to_le_bytes());
-            bm.unpin_page(&PageId::new(&path, 0), true).map_err(CatalogError::IoError)?;
-            
-            last_fi = bm.pin_page(PageId::new(&path, last_page_num)).map_err(CatalogError::IoError)?;
+            bm.unpin_page(&PageId::new(&path, 0), true)
+                .map_err(CatalogError::IoError)?;
+
+            last_fi = bm
+                .pin_page(PageId::new(&path, last_page_num))
+                .map_err(CatalogError::IoError)?;
         } else {
-            bm.unpin_page(&PageId::new(&path, 0), false).map_err(CatalogError::IoError)?;
+            bm.unpin_page(&PageId::new(&path, 0), false)
+                .map_err(CatalogError::IoError)?;
         }
-        
+
         let page = &mut bm.frames[last_fi];
         let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-        
+
         let start = upper - data.len() as u32;
         page.data[start as usize..upper as usize].copy_from_slice(&data);
-        
+
         upper = start;
         page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-        
+
         page.data[lower as usize..lower as usize + 4].copy_from_slice(&start.to_le_bytes());
-        page.data[lower as usize + 4..lower as usize + 8].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        
+        page.data[lower as usize + 4..lower as usize + 8]
+            .copy_from_slice(&(data.len() as u32).to_le_bytes());
+
         lower += ITEM_ID_SIZE;
         page.data[0..4].copy_from_slice(&lower.to_le_bytes());
-        
+
         let slot_id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE - 1;
-        bm.unpin_page(&PageId::new(&path, last_page_num), true).map_err(CatalogError::IoError)?;
-        
+        bm.unpin_page(&PageId::new(&path, last_page_num), true)
+            .map_err(CatalogError::IoError)?;
+
         Ok((last_page_num, slot_id))
     }
 
@@ -167,18 +183,22 @@ impl CatalogPageManager {
         slot_id: u32,
     ) -> Result<Vec<u8>, CatalogError> {
         let path = self.get_path(catalog_name)?;
-        let fi = bm.pin_page(PageId::new(&path, page_num)).map_err(CatalogError::IoError)?;
+        let fi = bm
+            .pin_page(PageId::new(&path, page_num))
+            .map_err(CatalogError::IoError)?;
         let page = &bm.frames[fi];
-        
+
         let base = (PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE) as usize;
         if base + 8 > page.data.len() {
-            bm.unpin_page(&PageId::new(&path, page_num), false).map_err(CatalogError::IoError)?;
+            bm.unpin_page(&PageId::new(&path, page_num), false)
+                .map_err(CatalogError::IoError)?;
             return Err(CatalogError::InvalidOperation("slot out of range".into()));
         }
-        let offset = u32::from_le_bytes(page.data[base..base+4].try_into().unwrap()) as usize;
-        let length = u32::from_le_bytes(page.data[base+4..base+8].try_into().unwrap()) as usize;
-        let data = page.data[offset..offset+length].to_vec();
-        bm.unpin_page(&PageId::new(&path, page_num), false).map_err(CatalogError::IoError)?;
+        let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+        let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap()) as usize;
+        let data = page.data[offset..offset + length].to_vec();
+        bm.unpin_page(&PageId::new(&path, page_num), false)
+            .map_err(CatalogError::IoError)?;
         Ok(data)
     }
 
@@ -194,12 +214,19 @@ impl CatalogPageManager {
         self.insert_catalog_tuple(bm, catalog_name, new_data.to_vec())
     }
 
-    pub fn scan_catalog(&self, bm: &mut BufferManager, catalog_name: &str) -> Result<Vec<Vec<u8>>, CatalogError> {
+    pub fn scan_catalog(
+        &self,
+        bm: &mut BufferManager,
+        catalog_name: &str,
+    ) -> Result<Vec<Vec<u8>>, CatalogError> {
         let path = self.get_path(catalog_name)?;
-        let header_fi = bm.pin_page(PageId::new(&path, 0)).map_err(CatalogError::IoError)?;
+        let header_fi = bm
+            .pin_page(PageId::new(&path, 0))
+            .map_err(CatalogError::IoError)?;
         let total = u32::from_le_bytes(bm.frames[header_fi].data[0..4].try_into().unwrap());
-        bm.unpin_page(&PageId::new(&path, 0), false).map_err(CatalogError::IoError)?;
-        
+        bm.unpin_page(&PageId::new(&path, 0), false)
+            .map_err(CatalogError::IoError)?;
+
         let mut results = Vec::new();
 
         for page_num in 1..total {
@@ -213,16 +240,23 @@ impl CatalogPageManager {
             let num_slots = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
 
             for slot in 0..num_slots {
-                let base   = (PAGE_HEADER_SIZE + slot * ITEM_ID_SIZE) as usize;
-                let offset = u32::from_le_bytes(page.data[base..base+4].try_into().unwrap()) as usize;
-                let length = u32::from_le_bytes(page.data[base+4..base+8].try_into().unwrap()) as usize;
+                let base = (PAGE_HEADER_SIZE + slot * ITEM_ID_SIZE) as usize;
+                let offset =
+                    u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+                let length =
+                    u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap()) as usize;
 
-                if length == 0 { continue; }
-                if offset + length > page.data.len() { continue; }
+                if length == 0 {
+                    continue;
+                }
+                if offset + length > page.data.len() {
+                    continue;
+                }
 
-                results.push(page.data[offset..offset+length].to_vec());
+                results.push(page.data[offset..offset + length].to_vec());
             }
-            bm.unpin_page(&PageId::new(&path, page_num), false).map_err(CatalogError::IoError)?;
+            bm.unpin_page(&PageId::new(&path, page_num), false)
+                .map_err(CatalogError::IoError)?;
         }
         Ok(results)
     }
@@ -235,11 +269,14 @@ impl CatalogPageManager {
         slot_id: u32,
     ) -> Result<(), CatalogError> {
         let path = self.get_path(catalog_name)?;
-        let fi = bm.pin_page(PageId::new(&path, page_num)).map_err(CatalogError::IoError)?;
+        let fi = bm
+            .pin_page(PageId::new(&path, page_num))
+            .map_err(CatalogError::IoError)?;
         let page = &mut bm.frames[fi];
         let base = (PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE) as usize;
-        page.data[base+4..base+8].copy_from_slice(&0u32.to_le_bytes());
-        bm.unpin_page(&PageId::new(&path, page_num), true).map_err(CatalogError::IoError)?;
+        page.data[base + 4..base + 8].copy_from_slice(&0u32.to_le_bytes());
+        bm.unpin_page(&PageId::new(&path, page_num), true)
+            .map_err(CatalogError::IoError)?;
         Ok(())
     }
 
@@ -249,39 +286,51 @@ impl CatalogPageManager {
         catalog_name: &str,
         predicate: F,
     ) -> Result<Option<(u32, u32, Vec<u8>)>, CatalogError>
-    where F: Fn(&[u8]) -> bool
+    where
+        F: Fn(&[u8]) -> bool,
     {
         let path = self.get_path(catalog_name)?;
-        let header_fi = bm.pin_page(PageId::new(&path, 0)).map_err(CatalogError::IoError)?;
+        let header_fi = bm
+            .pin_page(PageId::new(&path, 0))
+            .map_err(CatalogError::IoError)?;
         let total = u32::from_le_bytes(bm.frames[header_fi].data[0..4].try_into().unwrap());
-        bm.unpin_page(&PageId::new(&path, 0), false).map_err(CatalogError::IoError)?;
+        bm.unpin_page(&PageId::new(&path, 0), false)
+            .map_err(CatalogError::IoError)?;
 
         for page_num in 1..total {
             let fi = match bm.pin_page(PageId::new(&path, page_num)) {
                 Ok(ix) => ix,
                 Err(_) => break,
             };
-            
+
             let mut found = None;
             {
                 let page = &bm.frames[fi];
-                let lower     = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+                let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
                 let num_slots = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
 
                 for slot in 0..num_slots {
-                    let base   = (PAGE_HEADER_SIZE + slot * ITEM_ID_SIZE) as usize;
-                    let offset = u32::from_le_bytes(page.data[base..base+4].try_into().unwrap()) as usize;
-                    let length = u32::from_le_bytes(page.data[base+4..base+8].try_into().unwrap()) as usize;
-                    if length == 0 || offset + length > page.data.len() { continue; }
-                    let tuple_bytes = &page.data[offset..offset+length];
+                    let base = (PAGE_HEADER_SIZE + slot * ITEM_ID_SIZE) as usize;
+                    let offset =
+                        u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+                    let length =
+                        u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap())
+                            as usize;
+                    if length == 0 || offset + length > page.data.len() {
+                        continue;
+                    }
+                    let tuple_bytes = &page.data[offset..offset + length];
                     if predicate(tuple_bytes) {
                         found = Some((page_num, slot, tuple_bytes.to_vec()));
                         break;
                     }
                 }
             }
-            bm.unpin_page(&PageId::new(&path, page_num), false).map_err(CatalogError::IoError)?;
-            if found.is_some() { return Ok(found); }
+            bm.unpin_page(&PageId::new(&path, page_num), false)
+                .map_err(CatalogError::IoError)?;
+            if found.is_some() {
+                return Ok(found);
+            }
         }
         Ok(None)
     }

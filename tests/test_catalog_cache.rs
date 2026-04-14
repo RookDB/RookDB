@@ -5,9 +5,9 @@
 //! - 7.5.2: Cache invalidation on DDL
 //! - 7.5.3: LRU eviction when max_cache_size is reached
 
+use std::collections::HashMap;
 use storage_manager::catalog::cache::CatalogCache;
 use storage_manager::catalog::types::*;
-use std::collections::HashMap;
 
 /// Helper: create a minimal Database struct for cache testing
 fn make_db(name: &str, oid: u32) -> Database {
@@ -63,7 +63,11 @@ fn test_cache_table_hit() {
 
     assert!(cache.get_table(db_oid, "users").is_none());
 
-    cache.insert_table(db_oid, "users".to_string(), make_table("users", 100, db_oid));
+    cache.insert_table(
+        db_oid,
+        "users".to_string(),
+        make_table("users", 100, db_oid),
+    );
 
     let t = cache.get_table(db_oid, "users");
     assert!(t.is_some());
@@ -151,7 +155,11 @@ fn test_cache_invalidate_database() {
 fn test_cache_invalidate_table() {
     let mut cache = CatalogCache::new(256);
     let db_oid = 1;
-    cache.insert_table(db_oid, "users".to_string(), make_table("users", 100, db_oid));
+    cache.insert_table(
+        db_oid,
+        "users".to_string(),
+        make_table("users", 100, db_oid),
+    );
     assert!(cache.get_table(db_oid, "users").is_some());
 
     cache.invalidate_table(db_oid, "users");
@@ -229,7 +237,10 @@ fn test_cache_lru_eviction_basic() {
     cache.insert_database("db5".to_string(), make_db("db5", 5));
 
     // The newest entry should be present
-    assert!(cache.get_database("db5").is_some(), "db5 should be in cache");
+    assert!(
+        cache.get_database("db5").is_some(),
+        "db5 should be in cache"
+    );
 }
 
 #[test]
@@ -248,11 +259,17 @@ fn test_cache_lru_eviction_access_order() {
     cache.insert_database("d".to_string(), make_db("d", 4));
 
     // "a" should survive (was recently accessed)
-    assert!(cache.get_database("a").is_some(), "a should survive LRU eviction");
+    assert!(
+        cache.get_database("a").is_some(),
+        "a should survive LRU eviction"
+    );
     // "d" should be present (just inserted)
     assert!(cache.get_database("d").is_some(), "d should be in cache");
     // "b" should be evicted (oldest)
-    assert!(cache.get_database("b").is_none(), "b should have been evicted");
+    assert!(
+        cache.get_database("b").is_none(),
+        "b should have been evicted"
+    );
 }
 
 #[test]
@@ -272,10 +289,8 @@ fn test_cache_lru_mixed_entry_types() {
 
     // We can't predict exactly which one was evicted since get_database updated access,
     // but the cache should have exactly 3 entries max
-    let total_entries = cache.databases.len()
-        + cache.tables.len()
-        + cache.constraints.len()
-        + cache.indexes.len();
+    let total_entries =
+        cache.databases.len() + cache.tables.len() + cache.constraints.len() + cache.indexes.len();
     assert!(
         total_entries <= 3,
         "Cache should not exceed max_cache_size of 3, got {}",
@@ -286,5 +301,8 @@ fn test_cache_lru_mixed_entry_types() {
 #[test]
 fn test_cache_default_instance() {
     let cache = CatalogCache::default_instance();
-    assert_eq!(cache.max_cache_size, 256, "Default cache size should be 256");
+    assert_eq!(
+        cache.max_cache_size, 256,
+        "Default cache size should be 256"
+    );
 }

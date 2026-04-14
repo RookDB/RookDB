@@ -18,10 +18,9 @@ pub use types::{
 
 // ── Re-exports: catalog operations ───────────────────────────────────────────
 pub use catalog::{
-    bootstrap_catalog, create_database, create_database_enhanced, create_table,
-    create_table_enhanced, drop_database, drop_table, alter_table_add_column,
-    get_table_metadata, init_catalog, init_catalog_page_storage, load_catalog,
-    lookup_type_by_name, register_builtin_types, save_catalog, show_databases, show_tables,
+    bootstrap_catalog, alter_table_add_column, create_database, create_table,
+    drop_database, drop_table, get_table_metadata, init_catalog, init_catalog_page_storage,
+    load_catalog, lookup_type_by_name, register_builtin_types, show_databases, show_tables,
 };
 
 // ── Re-exports: constraint operations ────────────────────────────────────────
@@ -31,7 +30,9 @@ pub use constraints::{
 };
 
 // ── Re-exports: index operations ─────────────────────────────────────────────
-pub use indexes::{create_index, drop_index, get_indexes_for_table, index_lookup, insert_index_entry};
+pub use indexes::{
+    create_index, drop_index, get_indexes_for_table, index_lookup, insert_index_entry,
+};
 
 // ── Re-exports: OID counter ───────────────────────────────────────────────────
 pub use oid::OidCounter;

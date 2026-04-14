@@ -7,7 +7,8 @@ use storage_manager::catalog::{Catalog, init_catalog_page_storage, show_database
 
 /// Displays all available databases
 pub fn show_databases_cmd(catalog: &Catalog, bm: &mut BufferManager) -> io::Result<()> {
-    let mut pm = init_catalog_page_storage().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let mut pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     show_databases(catalog, &mut pm, bm);
     Ok(())
 }
@@ -26,14 +27,15 @@ pub fn create_database_cmd(catalog: &mut Catalog, bm: &mut BufferManager) -> io:
     if db_name.is_empty() {
         println!("Database name cannot be empty.");
     } else {
-        let mut pm = init_catalog_page_storage().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        match storage_manager::catalog::create_database_enhanced(
-            catalog, 
-            &mut pm, 
-            bm, 
-            db_name, 
-            "admin", 
-            storage_manager::catalog::types::Encoding::UTF8
+        let mut pm = init_catalog_page_storage()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        match storage_manager::catalog::create_database(
+            catalog,
+            &mut pm,
+            bm,
+            db_name,
+            "admin",
+            storage_manager::catalog::types::Encoding::UTF8,
         ) {
             Ok(_) => println!("Database '{}' created successfully.", db_name),
             Err(e) => println!("Failed to create database '{}': {:?}", db_name, e),

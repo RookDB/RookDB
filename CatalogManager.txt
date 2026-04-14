@@ -606,7 +606,7 @@ return error.
 ● Update Catalog: Remove the corresponding row from pg_index.
 ● Refresh & Return: Invalidate cache and return Ok(()).
 3.1.5 Database Operations Functions
-create_database_enhanced(catalog: &mut Catalog, db_name: &str, owner: &str,
+create_database(catalog: &mut Catalog, db_name: &str, owner: &str,
 encoding: Encoding) -> Result<u32, CatalogError>
 Description: Enhanced database creation with metadata
 Implementation:
@@ -630,7 +630,7 @@ drop_table for each.
 ● Cleanup & Return: Remove from in-memory map, invalidate cache, and return
 Ok(()).
 3.1.6 Table Operations Functions
-create_table_enhanced(catalog: &mut Catalog, db_name: &str, table_name: &str,
+create_table(catalog: &mut Catalog, db_name: &str, table_name: &str,
 columns: Vec<ColumnDefinition>, constraints: Vec<ConstraintDefinition>) ->
 Result<u32, CatalogError>
 Description: Enhanced table creation with constraints
@@ -750,14 +750,14 @@ CatalogError>
 Current Implementation: The system validates the database name, inserts it into the
 in-memory catalog, writes the catalog to JSON, and creates the corresponding
 directory.
-Updated Functionality: The system now calls create_database_enhanced() with a
+Updated Functionality: The system now calls create_database() with a
 default owner and UTF-8 encoding and persists the database entry by inserting it into
 pg_database in the page-based catalog.
 Reason for Update: The update enables support for additional metadata such as
 owner, encoding, and timestamp while integrating database creation with the
 page-based catalog system.
 Implementation:
-● Invoke Creation: Call create_database_enhanced(catalog, db_name,
+● Invoke Creation: Call create_database(catalog, db_name,
 "default_user", Encoding::UTF8).
 ● Handle Initialization: Let the enhanced function perform validation, allocation,
 and setup.
@@ -778,7 +778,7 @@ Reason for Update: The update enables support for primary keys, foreign keys,
 unique, and NOT NULL constraints while integrating table creation with the
 page-based catalog system.
 Implementation:
-● Invoke Creation: Call create_table_enhanced(catalog, db_name, table_name,
+● Invoke Creation: Call create_table(catalog, db_name, table_name,
 columns, constraints).
 ● Handle Validation: Let the enhanced function validate database, table name,
 columns, and constraints.

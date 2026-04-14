@@ -2,8 +2,8 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{load_catalog, init_catalog_page_storage};
-use storage_manager::executor::{show_tuples, load_csv};
+use storage_manager::catalog::{init_catalog_page_storage, load_catalog};
+use storage_manager::executor::{load_csv, show_tuples};
 use storage_manager::table::page_count;
 
 pub fn load_csv_cmd(
@@ -31,19 +31,31 @@ pub fn load_csv_cmd(
     let csv_path = csv_path.trim();
 
     let catalog = load_catalog(buffer_manager);
-    let mut pm = init_catalog_page_storage().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let mut pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     let path = format!("database/base/{}/{}.dat", db, table);
     let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
 
-    load_csv(&catalog, &mut pm, buffer_manager, &db, table, &mut file, csv_path)?;
+    load_csv(
+        &catalog,
+        &mut pm,
+        buffer_manager,
+        &db,
+        table,
+        &mut file,
+        csv_path,
+    )?;
 
     println!("Page Count: {}", page_count(&mut file)?);
 
     Ok(())
 }
 
-pub fn show_tuples_cmd(buffer_manager: &mut BufferManager, current_db: &Option<String>) -> io::Result<()> {
+pub fn show_tuples_cmd(
+    buffer_manager: &mut BufferManager,
+    current_db: &Option<String>,
+) -> io::Result<()> {
     let db = match current_db {
         Some(db) => db.clone(),
         None => {

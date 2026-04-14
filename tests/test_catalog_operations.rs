@@ -9,7 +9,6 @@
 //! - Database CRUD: create, show, drop
 //! - Table CRUD: create, show, drop, alter
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -26,19 +25,21 @@ fn cleanup() {
     if Path::new(OID_COUNTER_FILE).exists() {
         let _ = fs::remove_file(OID_COUNTER_FILE);
     }
-    let catalog_json = "database/global/catalog.json";
-    if Path::new(catalog_json).exists() {
-        let _ = fs::remove_file(catalog_json);
-    }
     // Clean up test database directories
-    for dir_name in &["ops_test_db", "ops_test_db2", "persist_db", "fk_dep_db", "invalid_type_db", "alter_db"] {
+    for dir_name in &[
+        "ops_test_db",
+        "ops_test_db2",
+        "persist_db",
+        "fk_dep_db",
+        "invalid_type_db",
+        "alter_db",
+    ] {
         let path = format!("database/base/{}", dir_name);
         if Path::new(&path).exists() {
             let _ = fs::remove_dir_all(&path);
         }
     }
 }
-
 fn fresh_setup() -> (Catalog, CatalogPageManager, BufferManager) {
     cleanup();
     let mut bm = BufferManager::new();
@@ -54,14 +55,22 @@ fn fresh_setup() -> (Catalog, CatalogPageManager, BufferManager) {
 // ─────────────────────────────────────────────────────────────
 
 #[test]
-fn test_create_database_enhanced_success() {
+fn test_create_database_success() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    let result = create_database_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "ops_test_db", "admin", Encoding::UTF8,
+    let result = create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
     );
-    assert!(result.is_ok(), "create_database_enhanced should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "create_database should succeed: {:?}",
+        result.err()
+    );
 
     let db_oid = result.unwrap();
     assert!(db_oid > 0);
@@ -83,10 +92,24 @@ fn test_create_database_enhanced_success() {
 fn test_create_database_duplicate_rejected() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8)
-        .expect("first create should succeed");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("first create should succeed");
 
-    let result = create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8);
+    let result = create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    );
     assert!(result.is_err(), "Duplicate database should be rejected");
     match result.err().unwrap() {
         CatalogError::DatabaseAlreadyExists(name) => assert_eq!(name, "ops_test_db"),
@@ -100,7 +123,8 @@ fn test_create_database_duplicate_rejected() {
 fn test_create_database_empty_name_rejected() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    let result = create_database_enhanced(&mut catalog, &mut pm, &mut bm, "", "admin", Encoding::UTF8);
+    let result =
+        create_database(&mut catalog, &mut pm, &mut bm, "", "admin", Encoding::UTF8);
     assert!(result.is_err(), "Empty database name should be rejected");
 
     cleanup();
@@ -110,13 +134,24 @@ fn test_create_database_empty_name_rejected() {
 fn test_drop_database() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8)
-        .expect("create should succeed");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create should succeed");
 
     assert!(catalog.databases.contains_key("ops_test_db"));
 
     let result = drop_database(&mut catalog, &mut pm, &mut bm, "ops_test_db");
-    assert!(result.is_ok(), "drop_database should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "drop_database should succeed: {:?}",
+        result.err()
+    );
 
     assert!(!catalog.databases.contains_key("ops_test_db"));
     assert!(!Path::new("database/base/ops_test_db").exists());
@@ -146,8 +181,15 @@ fn test_drop_nonexistent_database() {
 fn test_e2e_table_creation_with_pk_constraint() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8)
-        .expect("create db should succeed");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db should succeed");
 
     // Create table with PK constraint
     let col_defs = vec![
@@ -166,18 +208,25 @@ fn test_e2e_table_creation_with_pk_constraint() {
             default_value: None,
         },
     ];
-    let constraint_defs = vec![
-        ConstraintDefinition::PrimaryKey {
-            columns: vec!["id".to_string()],
-            name: Some("pk_users_id".to_string()),
-        },
-    ];
+    let constraint_defs = vec![ConstraintDefinition::PrimaryKey {
+        columns: vec!["id".to_string()],
+        name: Some("pk_users_id".to_string()),
+    }];
 
-    let result = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "ops_test_db", "users", col_defs, constraint_defs,
+    let result = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "users",
+        col_defs,
+        constraint_defs,
     );
-    assert!(result.is_ok(), "Table creation with PK should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Table creation with PK should succeed: {:?}",
+        result.err()
+    );
 
     let table_oid = result.unwrap();
 
@@ -189,8 +238,14 @@ fn test_e2e_table_creation_with_pk_constraint() {
     assert_eq!(table.columns.len(), 2);
 
     // Verify PK constraint was applied
-    assert!(!table.constraints.is_empty(), "Table should have constraints");
-    let pk = table.constraints.iter().find(|c| c.constraint_type == ConstraintType::PrimaryKey);
+    assert!(
+        !table.constraints.is_empty(),
+        "Table should have constraints"
+    );
+    let pk = table
+        .constraints
+        .iter()
+        .find(|c| c.constraint_type == ConstraintType::PrimaryKey);
     assert!(pk.is_some(), "PK constraint should be present");
 
     // Verify id column is NOT NULL
@@ -198,7 +253,10 @@ fn test_e2e_table_creation_with_pk_constraint() {
     assert!(!id_col.is_nullable, "PK column should be NOT NULL");
 
     // Verify backing index exists
-    assert!(!table.indexes.is_empty(), "Table should have indexes from PK");
+    assert!(
+        !table.indexes.is_empty(),
+        "Table should have indexes from PK"
+    );
 
     // Verify table data file exists
     let table_file = format!("database/base/ops_test_db/users.dat");
@@ -211,8 +269,15 @@ fn test_e2e_table_creation_with_pk_constraint() {
 fn test_e2e_table_creation_with_not_null() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8)
-        .expect("create db should succeed");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db should succeed");
 
     let col_defs = vec![
         ColumnDefinition {
@@ -230,15 +295,24 @@ fn test_e2e_table_creation_with_not_null() {
             default_value: None,
         },
     ];
-    let constraint_defs = vec![
-        ConstraintDefinition::NotNull { column: "name".to_string() },
-    ];
+    let constraint_defs = vec![ConstraintDefinition::NotNull {
+        column: "name".to_string(),
+    }];
 
-    let result = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "ops_test_db", "users", col_defs, constraint_defs,
+    let result = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "users",
+        col_defs,
+        constraint_defs,
     );
-    assert!(result.is_ok(), "Table creation with NOT NULL should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Table creation with NOT NULL should succeed: {:?}",
+        result.err()
+    );
 
     let db = catalog.databases.get("ops_test_db").unwrap();
     let table = db.tables.get("users").unwrap();
@@ -256,8 +330,15 @@ fn test_e2e_table_creation_with_not_null() {
 fn test_create_table_duplicate_rejected() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8)
-        .expect("create db should succeed");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db should succeed");
 
     let col_defs = vec![ColumnDefinition {
         name: "id".to_string(),
@@ -267,10 +348,26 @@ fn test_create_table_duplicate_rejected() {
         default_value: None,
     }];
 
-    create_table_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "t1", col_defs.clone(), vec![])
-        .expect("first create should succeed");
+    create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "t1",
+        col_defs.clone(),
+        vec![],
+    )
+    .expect("first create should succeed");
 
-    let result = create_table_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "t1", col_defs, vec![]);
+    let result = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "t1",
+        col_defs,
+        vec![],
+    );
     assert!(result.is_err());
     match result.err().unwrap() {
         CatalogError::TableAlreadyExists(name) => assert_eq!(name, "t1"),
@@ -284,9 +381,12 @@ fn test_create_table_duplicate_rejected() {
 fn test_create_table_in_nonexistent_db() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    let result = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "nonexistent_db", "t1",
+    let result = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "nonexistent_db",
+        "t1",
         vec![ColumnDefinition {
             name: "id".to_string(),
             type_name: "INT".to_string(),
@@ -309,8 +409,15 @@ fn test_create_table_in_nonexistent_db() {
 fn test_drop_table() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     let col_defs = vec![ColumnDefinition {
         name: "id".to_string(),
@@ -320,15 +427,41 @@ fn test_drop_table() {
         default_value: None,
     }];
 
-    let table_oid = create_table_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "to_drop", col_defs, vec![])
-        .expect("create table");
+    let table_oid = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "to_drop",
+        col_defs,
+        vec![],
+    )
+    .expect("create table");
 
-    assert!(catalog.databases.get("ops_test_db").unwrap().tables.contains_key("to_drop"));
+    assert!(
+        catalog
+            .databases
+            .get("ops_test_db")
+            .unwrap()
+            .tables
+            .contains_key("to_drop")
+    );
 
     let result = drop_table(&mut catalog, &mut pm, &mut bm, table_oid);
-    assert!(result.is_ok(), "drop_table should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "drop_table should succeed: {:?}",
+        result.err()
+    );
 
-    assert!(!catalog.databases.get("ops_test_db").unwrap().tables.contains_key("to_drop"));
+    assert!(
+        !catalog
+            .databases
+            .get("ops_test_db")
+            .unwrap()
+            .tables
+            .contains_key("to_drop")
+    );
 
     cleanup();
 }
@@ -342,8 +475,15 @@ fn test_catalog_persistence_across_restart() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
     // Create database and table
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "persist_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "persist_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     let col_defs = vec![
         ColumnDefinition {
@@ -362,8 +502,16 @@ fn test_catalog_persistence_across_restart() {
         },
     ];
 
-    create_table_enhanced(&mut catalog, &mut pm, &mut bm, "persist_db", "persistent_table", col_defs, vec![])
-        .expect("create table");
+    create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "persist_db",
+        "persistent_table",
+        col_defs,
+        vec![],
+    )
+    .expect("create table");
 
     // Flush buffer manager
     bm.flush_pages().expect("flush should succeed");
@@ -387,7 +535,11 @@ fn test_catalog_persistence_across_restart() {
 
     // Verify columns survive
     let table = db.tables.get("persistent_table").unwrap();
-    assert_eq!(table.columns.len(), 2, "Table should have 2 columns after restart");
+    assert_eq!(
+        table.columns.len(),
+        2,
+        "Table should have 2 columns after restart"
+    );
 
     let id_col = table.columns.iter().find(|c| c.name == "id");
     assert!(id_col.is_some(), "Column 'id' should survive restart");
@@ -406,8 +558,15 @@ fn test_catalog_persistence_across_restart() {
 fn test_alter_table_add_column() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "alter_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "alter_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     let col_defs = vec![
         ColumnDefinition {
@@ -426,10 +585,16 @@ fn test_alter_table_add_column() {
         },
     ];
 
-    let table_oid = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "alter_db", "users", col_defs, vec![],
-    ).expect("create table");
+    let table_oid = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "alter_db",
+        "users",
+        col_defs,
+        vec![],
+    )
+    .expect("create table");
 
     // Add a new column
     let new_col = ColumnDefinition {
@@ -441,7 +606,11 @@ fn test_alter_table_add_column() {
     };
 
     let result = alter_table_add_column(&mut catalog, &mut pm, &mut bm, table_oid, new_col);
-    assert!(result.is_ok(), "ALTER TABLE ADD COLUMN should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "ALTER TABLE ADD COLUMN should succeed: {:?}",
+        result.err()
+    );
 
     // Verify column was added
     let db = catalog.databases.get("alter_db").unwrap();
@@ -462,8 +631,15 @@ fn test_alter_table_add_column() {
 fn test_alter_table_add_not_null_without_default_rejected() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "alter_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "alter_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     let col_defs = vec![ColumnDefinition {
         name: "id".to_string(),
@@ -473,10 +649,16 @@ fn test_alter_table_add_not_null_without_default_rejected() {
         default_value: None,
     }];
 
-    let table_oid = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "alter_db", "users", col_defs, vec![],
-    ).expect("create table");
+    let table_oid = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "alter_db",
+        "users",
+        col_defs,
+        vec![],
+    )
+    .expect("create table");
 
     // Add NOT NULL column without default – should fail
     let new_col = ColumnDefinition {
@@ -488,7 +670,10 @@ fn test_alter_table_add_not_null_without_default_rejected() {
     };
 
     let result = alter_table_add_column(&mut catalog, &mut pm, &mut bm, table_oid, new_col);
-    assert!(result.is_err(), "NOT NULL without default should be rejected");
+    assert!(
+        result.is_err(),
+        "NOT NULL without default should be rejected"
+    );
 
     cleanup();
 }
@@ -497,8 +682,15 @@ fn test_alter_table_add_not_null_without_default_rejected() {
 fn test_alter_table_add_duplicate_column_rejected() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "alter_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "alter_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     let col_defs = vec![ColumnDefinition {
         name: "id".to_string(),
@@ -508,10 +700,16 @@ fn test_alter_table_add_duplicate_column_rejected() {
         default_value: None,
     }];
 
-    let table_oid = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "alter_db", "users", col_defs, vec![],
-    ).expect("create table");
+    let table_oid = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "alter_db",
+        "users",
+        col_defs,
+        vec![],
+    )
+    .expect("create table");
 
     // Try to add column with existing name
     let dup_col = ColumnDefinition {
@@ -536,47 +734,92 @@ fn test_alter_table_add_duplicate_column_rejected() {
 fn test_drop_table_with_dependent_fk_rejected() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "fk_dep_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "fk_dep_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     // Create parent table (users) with PK
     let parent_cols = vec![
-        ColumnDefinition { name: "id".to_string(), type_name: "INT".to_string(), type_modifier: None, is_nullable: true, default_value: None },
-        ColumnDefinition { name: "name".to_string(), type_name: "TEXT".to_string(), type_modifier: None, is_nullable: true, default_value: None },
+        ColumnDefinition {
+            name: "id".to_string(),
+            type_name: "INT".to_string(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+        },
+        ColumnDefinition {
+            name: "name".to_string(),
+            type_name: "TEXT".to_string(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+        },
     ];
-    let parent_constraints = vec![
-        ConstraintDefinition::PrimaryKey { columns: vec!["id".to_string()], name: Some("pk_users".to_string()) },
-    ];
+    let parent_constraints = vec![ConstraintDefinition::PrimaryKey {
+        columns: vec!["id".to_string()],
+        name: Some("pk_users".to_string()),
+    }];
 
-    let parent_oid = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "fk_dep_db", "users", parent_cols, parent_constraints,
-    ).expect("create parent table");
+    let parent_oid = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "fk_dep_db",
+        "users",
+        parent_cols,
+        parent_constraints,
+    )
+    .expect("create parent table");
 
     // Create child table (orders) with FK referencing users
     let child_cols = vec![
-        ColumnDefinition { name: "order_id".to_string(), type_name: "INT".to_string(), type_modifier: None, is_nullable: true, default_value: None },
-        ColumnDefinition { name: "user_id".to_string(), type_name: "INT".to_string(), type_modifier: None, is_nullable: true, default_value: None },
-    ];
-    let child_constraints = vec![
-        ConstraintDefinition::ForeignKey {
-            columns: vec!["user_id".to_string()],
-            referenced_table: "users".to_string(),
-            referenced_columns: vec!["id".to_string()],
-            on_delete: ReferentialAction::NoAction,
-            on_update: ReferentialAction::NoAction,
-            name: Some("fk_orders_user".to_string()),
+        ColumnDefinition {
+            name: "order_id".to_string(),
+            type_name: "INT".to_string(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+        },
+        ColumnDefinition {
+            name: "user_id".to_string(),
+            type_name: "INT".to_string(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
         },
     ];
+    let child_constraints = vec![ConstraintDefinition::ForeignKey {
+        columns: vec!["user_id".to_string()],
+        referenced_table: "users".to_string(),
+        referenced_columns: vec!["id".to_string()],
+        on_delete: ReferentialAction::NoAction,
+        on_update: ReferentialAction::NoAction,
+        name: Some("fk_orders_user".to_string()),
+    }];
 
-    create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "fk_dep_db", "orders", child_cols, child_constraints,
-    ).expect("create child table");
+    create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "fk_dep_db",
+        "orders",
+        child_cols,
+        child_constraints,
+    )
+    .expect("create child table");
 
     // Try to drop parent table (users) – should fail due to FK dependency
     let result = drop_table(&mut catalog, &mut pm, &mut bm, parent_oid);
-    assert!(result.is_err(), "Should not be able to drop table with FK dependents");
+    assert!(
+        result.is_err(),
+        "Should not be able to drop table with FK dependents"
+    );
     match result.err().unwrap() {
         CatalogError::ForeignKeyDependency(_) => {}
         other => panic!("Expected ForeignKeyDependency, got {:?}", other),
@@ -593,8 +836,15 @@ fn test_drop_table_with_dependent_fk_rejected() {
 fn test_create_table_invalid_type_rejected() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "invalid_type_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "invalid_type_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     let col_defs = vec![ColumnDefinition {
         name: "id".to_string(),
@@ -604,9 +854,14 @@ fn test_create_table_invalid_type_rejected() {
         default_value: None,
     }];
 
-    let result = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "invalid_type_db", "test", col_defs, vec![],
+    let result = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "invalid_type_db",
+        "test",
+        col_defs,
+        vec![],
     );
     assert!(result.is_err(), "Invalid type should be rejected");
     match result.err().unwrap() {
@@ -625,22 +880,54 @@ fn test_create_table_invalid_type_rejected() {
 fn test_get_table_metadata() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     let col_defs = vec![
-        ColumnDefinition { name: "id".to_string(), type_name: "INT".to_string(), type_modifier: None, is_nullable: true, default_value: None },
-        ColumnDefinition { name: "email".to_string(), type_name: "TEXT".to_string(), type_modifier: None, is_nullable: true, default_value: None },
+        ColumnDefinition {
+            name: "id".to_string(),
+            type_name: "INT".to_string(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+        },
+        ColumnDefinition {
+            name: "email".to_string(),
+            type_name: "TEXT".to_string(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+        },
     ];
-    let constraint_defs = vec![
-        ConstraintDefinition::PrimaryKey { columns: vec!["id".to_string()], name: None },
-    ];
+    let constraint_defs = vec![ConstraintDefinition::PrimaryKey {
+        columns: vec!["id".to_string()],
+        name: None,
+    }];
 
-    create_table_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "meta_test", col_defs, constraint_defs)
-        .expect("create table");
+    create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "meta_test",
+        col_defs,
+        constraint_defs,
+    )
+    .expect("create table");
 
     let meta = get_table_metadata(&catalog, &pm, &mut bm, "ops_test_db", "meta_test");
-    assert!(meta.is_ok(), "get_table_metadata should succeed: {:?}", meta.err());
+    assert!(
+        meta.is_ok(),
+        "get_table_metadata should succeed: {:?}",
+        meta.err()
+    );
 
     let meta = meta.unwrap();
     assert_eq!(meta.table_name, "meta_test");
@@ -655,8 +942,15 @@ fn test_get_table_metadata() {
 fn test_get_table_metadata_nonexistent() {
     let (mut catalog, mut pm, mut bm) = fresh_setup();
 
-    create_database_enhanced(&mut catalog, &mut pm, &mut bm, "ops_test_db", "admin", Encoding::UTF8)
-        .expect("create db");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "ops_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create db");
 
     let result = get_table_metadata(&catalog, &pm, &mut bm, "ops_test_db", "nonexistent_table");
     assert!(result.is_err());
@@ -721,15 +1015,30 @@ fn test_catalog_error_display() {
 #[test]
 fn test_constraint_violation_display() {
     assert_eq!(
-        format!("{}", ConstraintViolation::NotNullViolation { column: "name".into() }),
+        format!(
+            "{}",
+            ConstraintViolation::NotNullViolation {
+                column: "name".into()
+            }
+        ),
         "NOT NULL violation on column 'name'"
     );
     assert_eq!(
-        format!("{}", ConstraintViolation::UniqueViolation { constraint: "uq_email".into() }),
+        format!(
+            "{}",
+            ConstraintViolation::UniqueViolation {
+                constraint: "uq_email".into()
+            }
+        ),
         "UNIQUE violation on constraint 'uq_email'"
     );
     assert_eq!(
-        format!("{}", ConstraintViolation::ForeignKeyViolation { constraint: "fk_ref".into() }),
+        format!(
+            "{}",
+            ConstraintViolation::ForeignKeyViolation {
+                constraint: "fk_ref".into()
+            }
+        ),
         "FOREIGN KEY violation on constraint 'fk_ref'"
     );
 }

@@ -13,10 +13,9 @@ use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::page_manager::CatalogPageManager;
 use storage_manager::catalog::serialize::deserialize_type_tuple;
 use storage_manager::catalog::{bootstrap_catalog, init_catalog, load_catalog};
-use storage_manager::catalog::types::Catalog;
 use storage_manager::layout::{
-    CATALOG_PAGES_DIR, PG_COLUMN_FILE, PG_CONSTRAINT_FILE, PG_DATABASE_FILE,
-    PG_INDEX_FILE, PG_TABLE_FILE, PG_TYPE_FILE, OID_COUNTER_FILE,
+    CATALOG_PAGES_DIR, OID_COUNTER_FILE, PG_COLUMN_FILE, PG_CONSTRAINT_FILE, PG_DATABASE_FILE,
+    PG_INDEX_FILE, PG_TABLE_FILE, PG_TYPE_FILE,
 };
 
 /// Helper: clean up catalog pages directory and OID counter for test isolation.
@@ -26,11 +25,6 @@ fn cleanup_catalog() {
     }
     if Path::new(OID_COUNTER_FILE).exists() {
         let _ = fs::remove_file(OID_COUNTER_FILE);
-    }
-    // Also remove legacy JSON if present
-    let catalog_json = "database/global/catalog.json";
-    if Path::new(catalog_json).exists() {
-        let _ = fs::remove_file(catalog_json);
     }
 }
 
@@ -44,7 +38,11 @@ fn test_bootstrap_creates_all_catalog_files() {
 
     let mut bm = BufferManager::new();
     let result = bootstrap_catalog(&mut bm);
-    assert!(result.is_ok(), "bootstrap_catalog() should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "bootstrap_catalog() should succeed: {:?}",
+        result.err()
+    );
 
     // Verify all 6 system catalog files are created
     let catalog_files = [
@@ -132,7 +130,17 @@ fn test_bootstrap_registers_builtin_types() {
     }
 
     // Check for specific expected types
-    let expected = ["INT", "BIGINT", "FLOAT", "DOUBLE", "BOOL", "TEXT", "DATE", "TIMESTAMP", "BYTES"];
+    let expected = [
+        "INT",
+        "BIGINT",
+        "FLOAT",
+        "DOUBLE",
+        "BOOL",
+        "TEXT",
+        "DATE",
+        "TIMESTAMP",
+        "BYTES",
+    ];
     for exp in &expected {
         assert!(
             type_names.iter().any(|n| n == exp),

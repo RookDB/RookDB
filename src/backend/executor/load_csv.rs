@@ -1,11 +1,11 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use std::collections::HashMap;
 
 use crate::buffer_manager::BufferManager;
+use crate::catalog::indexes::get_indexes_for_table;
 use crate::catalog::page_manager::CatalogPageManager;
 use crate::catalog::types::Catalog;
-use crate::catalog::indexes::get_indexes_for_table;
 use crate::heap::insert_tuple;
 
 pub fn load_csv(
@@ -101,11 +101,15 @@ pub fn load_csv(
                     field_bytes.extend_from_slice(&num.to_le_bytes());
                 }
                 "BOOL" | "BOOLEAN" => {
-                    let b: u8 = match val.to_lowercase().as_str() { "true"|"1"|"yes" => 1, _ => 0 };
+                    let b: u8 = match val.to_lowercase().as_str() {
+                        "true" | "1" | "yes" => 1,
+                        _ => 0,
+                    };
                     field_bytes.push(b);
                 }
                 t if t.starts_with("VARCHAR") => {
-                    let max_len: usize = t.strip_prefix("VARCHAR(")
+                    let max_len: usize = t
+                        .strip_prefix("VARCHAR(")
                         .and_then(|s| s.strip_suffix(')'))
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(255);
@@ -130,7 +134,13 @@ pub fn load_csv(
         }
 
         // --- 5. Validate Constraints ---
-        if let Err(e) = crate::catalog::constraints::validate_constraints(catalog, pm, bm, table.table_oid, &tuple_map) {
+        if let Err(e) = crate::catalog::constraints::validate_constraints(
+            catalog,
+            pm,
+            bm,
+            table.table_oid,
+            &tuple_map,
+        ) {
             println!("Skipping row {}: Constraint violation: {:?}", i + 1, e);
             continue;
         }
@@ -147,7 +157,14 @@ pub fn load_csv(
                             key_bytes.extend_from_slice(val);
                         }
                     }
-                    let _ = crate::catalog::indexes::insert_index_entry(bm, db_name, &idx.index_name, &key_bytes, page_num, slot_id);
+                    let _ = crate::catalog::indexes::insert_index_entry(
+                        bm,
+                        db_name,
+                        &idx.index_name,
+                        &key_bytes,
+                        page_num,
+                        slot_id,
+                    );
                 }
             }
             Err(e) => {

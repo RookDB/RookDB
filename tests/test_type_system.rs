@@ -7,17 +7,16 @@
 
 use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::page_manager::CatalogPageManager;
-use storage_manager::catalog::serialize::deserialize_type_tuple;
-use storage_manager::catalog::types::{DataType, TypeCategory, CatalogError};
-use storage_manager::catalog::{bootstrap_catalog, lookup_type_by_name, register_builtin_types};
-use storage_manager::layout::{
-    CATALOG_PAGES_DIR, OID_COUNTER_FILE,
-    OID_TYPE_INT, OID_TYPE_BIGINT, OID_TYPE_FLOAT, OID_TYPE_DOUBLE,
-    OID_TYPE_BOOL, OID_TYPE_TEXT, OID_TYPE_VARCHAR,
-    OID_TYPE_DATE, OID_TYPE_TIMESTAMP, OID_TYPE_BYTES,
-};
+
 use std::fs;
 use std::path::Path;
+use storage_manager::catalog::types::{CatalogError, DataType, TypeCategory};
+use storage_manager::catalog::{bootstrap_catalog, lookup_type_by_name, register_builtin_types};
+use storage_manager::layout::{
+    CATALOG_PAGES_DIR, OID_COUNTER_FILE, OID_TYPE_BIGINT, OID_TYPE_BOOL, OID_TYPE_BYTES,
+    OID_TYPE_DATE, OID_TYPE_DOUBLE, OID_TYPE_FLOAT, OID_TYPE_INT, OID_TYPE_TEXT,
+    OID_TYPE_TIMESTAMP, OID_TYPE_VARCHAR,
+};
 
 fn cleanup() {
     if Path::new(CATALOG_PAGES_DIR).exists() {
@@ -25,10 +24,6 @@ fn cleanup() {
     }
     if Path::new(OID_COUNTER_FILE).exists() {
         let _ = fs::remove_file(OID_COUNTER_FILE);
-    }
-    let catalog_json = "database/global/catalog.json";
-    if Path::new(catalog_json).exists() {
-        let _ = fs::remove_file(catalog_json);
     }
 }
 

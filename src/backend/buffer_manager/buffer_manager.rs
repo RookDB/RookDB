@@ -29,10 +29,15 @@ pub struct PageId {
 
 impl PageId {
     pub fn new(file_path: impl Into<String>, page_num: u32) -> Self {
-        PageId { file_path: file_path.into(), page_num }
+        PageId {
+            file_path: file_path.into(),
+            page_num,
+        }
     }
     /// Canonical string key used in the page table hash map.
-    fn key(&self) -> String { format!("{}:{}", self.file_path, self.page_num) }
+    fn key(&self) -> String {
+        format!("{}:{}", self.file_path, self.page_num)
+    }
 }
 
 /// Per-frame metadata for the general buffer pool.
@@ -50,7 +55,10 @@ pub struct PageMetadata {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -79,7 +87,13 @@ impl BufferManager {
         init_page(&mut header);
         pages.push(header);
         println!("Buffer Manager initialized with header page only.");
-        Self { pages, frames: Vec::new(), page_table: HashMap::new(), lru_order: Vec::new(), max_pages: 256 }
+        Self {
+            pages,
+            frames: Vec::new(),
+            page_table: HashMap::new(),
+            lru_order: Vec::new(),
+            max_pages: 256,
+        }
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -122,8 +136,12 @@ impl BufferManager {
     pub fn unpin_page(&mut self, page_id: &PageId, is_dirty: bool) -> io::Result<()> {
         let key = page_id.key();
         if let Some(meta) = self.page_table.get_mut(&key) {
-            if meta.pin_count > 0 { meta.pin_count -= 1; }
-            if is_dirty { meta.is_dirty = true; }
+            if meta.pin_count > 0 {
+                meta.pin_count -= 1;
+            }
+            if is_dirty {
+                meta.is_dirty = true;
+            }
         }
         Ok(())
     }
@@ -131,15 +149,26 @@ impl BufferManager {
     /// Write all dirty frames back to their respective files.
     pub fn flush_pages(&mut self) -> io::Result<()> {
         // Collect dirty frames first to avoid borrow conflicts
-        let dirty: Vec<(String, String, u32, usize)> = self.page_table.values()
+        let dirty: Vec<(String, String, u32, usize)> = self
+            .page_table
+            .values()
             .filter(|m| m.is_dirty)
-            .map(|m| (m.page_id.key(), m.page_id.file_path.clone(), m.page_id.page_num, m.frame_index))
+            .map(|m| {
+                (
+                    m.page_id.key(),
+                    m.page_id.file_path.clone(),
+                    m.page_id.page_num,
+                    m.frame_index,
+                )
+            })
             .collect();
 
         for (key, path, page_num, fi) in dirty {
             let mut file = std::fs::OpenOptions::new().write(true).open(&path)?;
             write_page(&mut file, &mut self.frames[fi], page_num)?;
-            if let Some(meta) = self.page_table.get_mut(&key) { meta.is_dirty = false; }
+            if let Some(meta) = self.page_table.get_mut(&key) {
+                meta.is_dirty = false;
+            }
         }
         Ok(())
     }
@@ -147,20 +176,36 @@ impl BufferManager {
     /// Evict the oldest unpinned page to free a buffer frame.
     fn evict_page(&mut self) -> io::Result<usize> {
         // Find oldest unpinned entry in LRU order
-        let evict_key = self.lru_order.iter()
-            .find(|k| self.page_table.get(*k).map(|m| m.pin_count == 0).unwrap_or(false))
+        let evict_key = self
+            .lru_order
+            .iter()
+            .find(|k| {
+                self.page_table
+                    .get(*k)
+                    .map(|m| m.pin_count == 0)
+                    .unwrap_or(false)
+            })
             .cloned();
 
         if let Some(key) = evict_key {
             let meta = self.page_table.remove(&key).unwrap();
             if meta.is_dirty {
-                let mut file = std::fs::OpenOptions::new().write(true).open(&meta.page_id.file_path)?;
-                write_page(&mut file, &mut self.frames[meta.frame_index], meta.page_id.page_num)?;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&meta.page_id.file_path)?;
+                write_page(
+                    &mut file,
+                    &mut self.frames[meta.frame_index],
+                    meta.page_id.page_num,
+                )?;
             }
             self.lru_order.retain(|k| k != &key);
             return Ok(meta.frame_index);
         }
-        Err(io::Error::new(io::ErrorKind::Other, "No unpinned frames available for eviction"))
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "No unpinned frames available for eviction",
+        ))
     }
 
     /// Return a free frame index, evicting if necessary.
@@ -188,10 +233,13 @@ impl BufferManager {
     pub fn load_table_from_disk(&mut self, db_name: &str, table_name: &str) -> io::Result<()> {
         let table_path = format!("database/base/{}/{}.dat", db_name, table_name);
         let mut file = File::open(&table_path)?;
-        let file_size  = file.metadata()?.len();
+        let file_size = file.metadata()?.len();
         let total_pages = (file_size as usize) / PAGE_SIZE;
 
-        println!("Loading table '{}' ({} bytes, {} pages)...", table_name, file_size, total_pages);
+        println!(
+            "Loading table '{}' ({} bytes, {} pages)...",
+            table_name, file_size, total_pages
+        );
         self.pages.clear();
 
         let mut header = Page::new();
@@ -207,7 +255,11 @@ impl BufferManager {
                 Err(e) => return Err(e),
             }
         }
-        println!("Loaded {} pages (1 header + {} data).", self.pages.len(), self.pages.len().saturating_sub(1));
+        println!(
+            "Loaded {} pages (1 header + {} data).",
+            self.pages.len(),
+            self.pages.len().saturating_sub(1)
+        );
         Ok(())
     }
 
@@ -220,30 +272,52 @@ impl BufferManager {
         csv_path: &str,
     ) -> io::Result<usize> {
         // Fetch schema from catalog
-        let db    = catalog.databases.get(db_name).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name)))?;
-        let table = db.tables.get(table_name).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name)))?;
+        let db = catalog.databases.get(db_name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Database '{}' not found", db_name),
+            )
+        })?;
+        let table = db.tables.get(table_name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Table '{}' not found", table_name),
+            )
+        })?;
         let columns = &table.columns;
 
         if columns.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Table has no columns"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Table has no columns",
+            ));
         }
 
         let csv_file = File::open(csv_path)?;
-        let reader   = BufReader::new(csv_file);
+        let reader = BufReader::new(csv_file);
         let mut lines = reader.lines();
         if let Some(Ok(_)) = lines.next() {} // skip header
 
-        let mut inserted_rows   = 0usize;
+        let mut inserted_rows = 0usize;
         let mut current_page_ix = self.pages.len() - 1;
-        if self.pages.len() == 1 { self.allocate_page(); }
+        if self.pages.len() == 1 {
+            self.allocate_page();
+        }
 
         for (i, line) in lines.enumerate() {
             let row = line?;
-            if row.trim().is_empty() { continue; }
+            if row.trim().is_empty() {
+                continue;
+            }
 
             let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
             if values.len() != columns.len() {
-                println!("Skipping row {}: expected {} columns, got {}", i + 1, columns.len(), values.len());
+                println!(
+                    "Skipping row {}: expected {} columns, got {}",
+                    i + 1,
+                    columns.len(),
+                    values.len()
+                );
                 continue;
             }
 
@@ -268,12 +342,16 @@ impl BufferManager {
                         tuple_bytes.extend_from_slice(&num.to_le_bytes());
                     }
                     "BOOL" | "BOOLEAN" => {
-                        let b: u8 = match val.to_lowercase().as_str() { "true"|"1"|"yes" => 1, _ => 0 };
+                        let b: u8 = match val.to_lowercase().as_str() {
+                            "true" | "1" | "yes" => 1,
+                            _ => 0,
+                        };
                         tuple_bytes.push(b);
                     }
                     t if t.starts_with("VARCHAR") => {
                         // Extract max length from VARCHAR(n), default 255
-                        let max_len: usize = t.strip_prefix("VARCHAR(")
+                        let max_len: usize = t
+                            .strip_prefix("VARCHAR(")
                             .and_then(|s| s.strip_suffix(')'))
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(255);
@@ -286,21 +364,29 @@ impl BufferManager {
                     _ => {
                         // Default TEXT: fixed 10-byte field
                         let mut t = val.as_bytes().to_vec();
-                        if t.len() > 10 { t.truncate(10); }
-                        else { t.extend(vec![b' '; 10 - t.len()]); }
+                        if t.len() > 10 {
+                            t.truncate(10);
+                        } else {
+                            t.extend(vec![b' '; 10 - t.len()]);
+                        }
                         tuple_bytes.extend_from_slice(&t);
                     }
                 }
             }
 
             let tuple_len = tuple_bytes.len() as u32;
-            let required  = tuple_len + ITEM_ID_SIZE;
+            let required = tuple_len + ITEM_ID_SIZE;
 
             loop {
-                if current_page_ix >= self.pages.len() { self.allocate_page(); }
+                if current_page_ix >= self.pages.len() {
+                    self.allocate_page();
+                }
                 let page = &mut self.pages[current_page_ix];
                 let free = page_free_space(page)?;
-                if free < required { current_page_ix += 1; continue; }
+                if free < required {
+                    current_page_ix += 1;
+                    continue;
+                }
 
                 let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
                 let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
@@ -308,9 +394,10 @@ impl BufferManager {
 
                 page.data[start as usize..upper as usize].copy_from_slice(&tuple_bytes);
                 let ip = lower as usize;
-                page.data[ip..ip+4].copy_from_slice(&start.to_le_bytes());
-                page.data[ip+4..ip+8].copy_from_slice(&tuple_len.to_le_bytes());
-                lower += ITEM_ID_SIZE; upper = start;
+                page.data[ip..ip + 4].copy_from_slice(&start.to_le_bytes());
+                page.data[ip + 4..ip + 8].copy_from_slice(&tuple_len.to_le_bytes());
+                lower += ITEM_ID_SIZE;
+                upper = start;
                 page.data[0..4].copy_from_slice(&lower.to_le_bytes());
                 page.data[4..8].copy_from_slice(&upper.to_le_bytes());
                 inserted_rows += 1;
@@ -320,11 +407,20 @@ impl BufferManager {
 
         let used = self.pages.len();
         self.pages[0].data[0..4].copy_from_slice(&(used as u32).to_le_bytes());
-        println!("Loaded {} rows into {} data pages.", inserted_rows, used - 1);
+        println!(
+            "Loaded {} rows into {} data pages.",
+            inserted_rows,
+            used - 1
+        );
         Ok(used)
     }
 
-    pub fn flush_to_disk(&mut self, db_name: &str, table_name: &str, used_pages: usize) -> io::Result<()> {
+    pub fn flush_to_disk(
+        &mut self,
+        db_name: &str,
+        table_name: &str,
+        used_pages: usize,
+    ) -> io::Result<()> {
         let path = format!("database/base/{}/{}.dat", db_name, table_name);
         let mut file = File::options().write(true).open(&path)?;
         for (i, page) in self.pages.iter_mut().take(used_pages).enumerate() {
@@ -334,7 +430,11 @@ impl BufferManager {
     }
 
     pub fn load_csv_to_buffer(
-        &mut self, catalog: &Catalog, db_name: &str, table_name: &str, csv_path: &str,
+        &mut self,
+        catalog: &Catalog,
+        db_name: &str,
+        table_name: &str,
+        csv_path: &str,
     ) -> io::Result<()> {
         let used = self.load_csv_into_pages(catalog, db_name, table_name, csv_path)?;
         self.flush_to_disk(db_name, table_name, used)

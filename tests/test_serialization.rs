@@ -87,9 +87,7 @@ fn test_serialize_table_tuple_system_catalog() {
 #[test]
 fn test_serialize_column_tuple_roundtrip_int() {
     let dt = DataType::int();
-    let bytes = serialize_column_tuple(
-        200, 100, "id", 1, &dt, None, false, None, &[500, 501],
-    );
+    let bytes = serialize_column_tuple(200, 100, "id", 1, &dt, None, false, None, &[500, 501]);
     let (coid, toid, cname, cpos, rdt, tm, nullable, dv, coids) =
         deserialize_column_tuple(&bytes).expect("deserialize should succeed");
 
@@ -109,9 +107,7 @@ fn test_serialize_column_tuple_roundtrip_int() {
 fn test_serialize_column_tuple_varchar_with_modifier() {
     let dt = DataType::varchar(100);
     let tm = TypeModifier::VarcharLen(100);
-    let bytes = serialize_column_tuple(
-        201, 100, "email", 2, &dt, Some(&tm), true, None, &[],
-    );
+    let bytes = serialize_column_tuple(201, 100, "email", 2, &dt, Some(&tm), true, None, &[]);
     let (_, _, cname, cpos, rdt, rtm, nullable, _, _) =
         deserialize_column_tuple(&bytes).expect("deserialize should succeed");
 
@@ -151,7 +147,12 @@ fn test_serialize_column_tuple_default_value_variants() {
         let bytes = serialize_column_tuple(300, 100, "col", 1, &dt, None, true, Some(dv), &[]);
         let (_, _, _, _, _, _, _, rdv, _) =
             deserialize_column_tuple(&bytes).expect("deserialize should succeed");
-        assert_eq!(rdv.as_ref(), Some(dv), "DefaultValue roundtrip failed for {:?}", dv);
+        assert_eq!(
+            rdv.as_ref(),
+            Some(dv),
+            "DefaultValue roundtrip failed for {:?}",
+            dv
+        );
     }
 }
 
@@ -420,14 +421,24 @@ fn test_serialize_type_variable_length() {
 fn test_calculate_tuple_size_fixed_only() {
     let columns = vec![
         Column {
-            column_oid: 1, name: "id".into(), column_position: 1,
-            data_type: DataType::int(), type_modifier: None,
-            is_nullable: false, default_value: None, constraints: vec![],
+            column_oid: 1,
+            name: "id".into(),
+            column_position: 1,
+            data_type: DataType::int(),
+            type_modifier: None,
+            is_nullable: false,
+            default_value: None,
+            constraints: vec![],
         },
         Column {
-            column_oid: 2, name: "age".into(), column_position: 2,
-            data_type: DataType::int(), type_modifier: None,
-            is_nullable: true, default_value: None, constraints: vec![],
+            column_oid: 2,
+            name: "age".into(),
+            column_position: 2,
+            data_type: DataType::int(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+            constraints: vec![],
         },
     ];
     let (size, has_var) = calculate_tuple_size(&columns);
@@ -439,14 +450,24 @@ fn test_calculate_tuple_size_fixed_only() {
 fn test_calculate_tuple_size_with_variable() {
     let columns = vec![
         Column {
-            column_oid: 1, name: "id".into(), column_position: 1,
-            data_type: DataType::int(), type_modifier: None,
-            is_nullable: false, default_value: None, constraints: vec![],
+            column_oid: 1,
+            name: "id".into(),
+            column_position: 1,
+            data_type: DataType::int(),
+            type_modifier: None,
+            is_nullable: false,
+            default_value: None,
+            constraints: vec![],
         },
         Column {
-            column_oid: 2, name: "name".into(), column_position: 2,
-            data_type: DataType::text(), type_modifier: None,
-            is_nullable: true, default_value: None, constraints: vec![],
+            column_oid: 2,
+            name: "name".into(),
+            column_position: 2,
+            data_type: DataType::text(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+            constraints: vec![],
         },
     ];
     let (size, has_var) = calculate_tuple_size(&columns);

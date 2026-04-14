@@ -9,11 +9,13 @@ use std::fs;
 use std::path::Path;
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::page_manager::CatalogPageManager;
 use storage_manager::catalog::indexes::*;
+use storage_manager::catalog::page_manager::CatalogPageManager;
 use storage_manager::catalog::types::*;
-use storage_manager::catalog::{bootstrap_catalog, create_database_enhanced, create_table_enhanced};
-use storage_manager::layout::{CATALOG_PAGES_DIR, OID_COUNTER_FILE, INDEX_DIR_TEMPLATE};
+use storage_manager::catalog::{
+    bootstrap_catalog, create_database, create_table,
+};
+use storage_manager::layout::{CATALOG_PAGES_DIR, INDEX_DIR_TEMPLATE, OID_COUNTER_FILE};
 
 fn cleanup() {
     if Path::new(CATALOG_PAGES_DIR).exists() {
@@ -21,10 +23,6 @@ fn cleanup() {
     }
     if Path::new(OID_COUNTER_FILE).exists() {
         let _ = fs::remove_file(OID_COUNTER_FILE);
-    }
-    let catalog_json = "database/global/catalog.json";
-    if Path::new(catalog_json).exists() {
-        let _ = fs::remove_file(catalog_json);
     }
     if Path::new("database/base/idx_test_db").exists() {
         let _ = fs::remove_dir_all("database/base/idx_test_db");
@@ -41,10 +39,15 @@ fn setup_test_table() -> (Catalog, CatalogPageManager, BufferManager, u32) {
     let mut catalog = Catalog::new();
     catalog.page_backend_active = true;
 
-    create_database_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "idx_test_db", "admin", Encoding::UTF8,
-    ).expect("create database should succeed");
+    create_database(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "idx_test_db",
+        "admin",
+        Encoding::UTF8,
+    )
+    .expect("create database should succeed");
 
     let col_defs = vec![
         ColumnDefinition {
@@ -63,10 +66,16 @@ fn setup_test_table() -> (Catalog, CatalogPageManager, BufferManager, u32) {
         },
     ];
 
-    let table_oid = create_table_enhanced(
-        &mut catalog, &mut pm, &mut bm,
-        "idx_test_db", "items", col_defs, vec![],
-    ).expect("create table should succeed");
+    let table_oid = create_table(
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        "idx_test_db",
+        "items",
+        col_defs,
+        vec![],
+    )
+    .expect("create table should succeed");
 
     (catalog, pm, bm, table_oid)
 }
@@ -88,17 +97,26 @@ fn test_create_index_btree() {
     let id_oid = col_oids[0];
 
     let result = create_index(
-        &mut catalog, &mut pm, &mut bm,
-        table_oid, vec![id_oid], true, false, Some("idx_items_id".to_string()),
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        table_oid,
+        vec![id_oid],
+        true,
+        false,
+        Some("idx_items_id".to_string()),
     );
-    assert!(result.is_ok(), "create_index should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "create_index should succeed: {:?}",
+        result.err()
+    );
 
     let index_oid = result.unwrap();
     assert!(index_oid > 0, "Index OID should be positive");
 
     // Verify pg_index has the entry
-    let indexes = get_indexes_for_table(&pm, &mut bm, table_oid)
-        .expect("should get indexes");
+    let indexes = get_indexes_for_table(&pm, &mut bm, table_oid).expect("should get indexes");
     assert!(indexes.len() >= 1, "Should have at least 1 index");
     let idx = indexes.iter().find(|i| i.index_oid == index_oid);
     assert!(idx.is_some(), "Should find the created index");
@@ -140,10 +158,19 @@ fn test_create_index_default_name() {
 
     // Create without explicit name
     let result = create_index(
-        &mut catalog, &mut pm, &mut bm,
-        table_oid, vec![col_oids[0]], false, false, None,
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        table_oid,
+        vec![col_oids[0]],
+        false,
+        false,
+        None,
     );
-    assert!(result.is_ok(), "create_index with default name should succeed");
+    assert!(
+        result.is_ok(),
+        "create_index with default name should succeed"
+    );
 
     let indexes = get_indexes_for_table(&pm, &mut bm, table_oid).unwrap();
     assert!(!indexes.is_empty(), "Should have an index");
@@ -173,16 +200,30 @@ fn test_drop_index() {
     };
 
     let index_oid = create_index(
-        &mut catalog, &mut pm, &mut bm,
-        table_oid, vec![col_oids[0]], false, false, Some("idx_to_drop".to_string()),
-    ).expect("create should succeed");
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        table_oid,
+        vec![col_oids[0]],
+        false,
+        false,
+        Some("idx_to_drop".to_string()),
+    )
+    .expect("create should succeed");
 
     let idx_file = "database/base/idx_test_db/indexes/idx_to_drop.idx";
-    assert!(Path::new(idx_file).exists(), "Index file should exist after creation");
+    assert!(
+        Path::new(idx_file).exists(),
+        "Index file should exist after creation"
+    );
 
     // Drop the index
     let result = drop_index(&mut catalog, &mut pm, &mut bm, index_oid);
-    assert!(result.is_ok(), "drop_index should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "drop_index should succeed: {:?}",
+        result.err()
+    );
 
     // Verify index is removed from pg_index
     let indexes = get_indexes_for_table(&pm, &mut bm, table_oid).unwrap();
@@ -230,14 +271,25 @@ fn test_btree_insert_and_lookup() {
     };
 
     create_index(
-        &mut catalog, &mut pm, &mut bm,
-        table_oid, vec![col_oids[0]], true, false, Some("idx_btree_test".to_string()),
-    ).expect("create index should succeed");
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        table_oid,
+        vec![col_oids[0]],
+        true,
+        false,
+        Some("idx_btree_test".to_string()),
+    )
+    .expect("create index should succeed");
 
     // Insert a key into the B-Tree
     let key = 42i32.to_le_bytes();
     let result = insert_index_entry(&mut bm, "idx_test_db", "idx_btree_test", &key, 1, 0);
-    assert!(result.is_ok(), "B-Tree insert should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "B-Tree insert should succeed: {:?}",
+        result.err()
+    );
 
     // Lookup should find it
     let found = index_lookup(&mut bm, "idx_test_db", "idx_btree_test", &key)
@@ -264,9 +316,16 @@ fn test_btree_multiple_inserts() {
     };
 
     create_index(
-        &mut catalog, &mut pm, &mut bm,
-        table_oid, vec![col_oids[0]], true, false, Some("idx_multi_test".to_string()),
-    ).expect("create index should succeed");
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        table_oid,
+        vec![col_oids[0]],
+        true,
+        false,
+        Some("idx_multi_test".to_string()),
+    )
+    .expect("create index should succeed");
 
     // Insert 100 keys
     for i in 0..100i32 {
@@ -297,7 +356,10 @@ fn test_index_lookup_nonexistent_file() {
     let mut bm = BufferManager::new();
     let result = index_lookup(&mut bm, "nonexistent_db", "nonexistent_idx", &[1, 2, 3, 4]);
     assert!(result.is_ok());
-    assert!(!result.unwrap(), "Should return false for non-existent index file");
+    assert!(
+        !result.unwrap(),
+        "Should return false for non-existent index file"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -317,9 +379,16 @@ fn test_index_creates_directory() {
     let idx_dir = INDEX_DIR_TEMPLATE.replace("{database}", "idx_test_db");
 
     create_index(
-        &mut catalog, &mut pm, &mut bm,
-        table_oid, vec![col_oids[0]], false, false, Some("idx_dir_test".to_string()),
-    ).expect("create index should succeed");
+        &mut catalog,
+        &mut pm,
+        &mut bm,
+        table_oid,
+        vec![col_oids[0]],
+        false,
+        false,
+        Some("idx_dir_test".to_string()),
+    )
+    .expect("create index should succeed");
 
     assert!(
         Path::new(&idx_dir).exists(),

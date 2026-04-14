@@ -15,10 +15,10 @@ use crate::catalog::types::{Constraint, DataType, Database, Index, Table};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CacheKey {
     Database(String),
-    Table(u32, String),   // (db_oid, table_name)
-    Constraints(u32),     // table_oid
-    Indexes(u32),         // table_oid
-    Type(u32),            // type_oid
+    Table(u32, String), // (db_oid, table_name)
+    Constraints(u32),   // table_oid
+    Indexes(u32),       // table_oid
+    Type(u32),          // type_oid
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -63,8 +63,10 @@ impl CatalogCache {
         }
     }
 
-    /// Default instance used by `#[serde(default = "...")]` and `Catalog::new()`.
-    pub fn default_instance() -> Self { Self::new(256) }
+    /// Default instance used by `Catalog::new()`.
+    pub fn default_instance() -> Self {
+        Self::new(256)
+    }
 
     // ──────────────────────────────────────────────────────────────
     // Database access
@@ -87,7 +89,8 @@ impl CatalogCache {
 
     pub fn invalidate_database(&mut self, name: &str) {
         self.databases.remove(name);
-        self.access_order.retain(|k| k != &CacheKey::Database(name.to_string()));
+        self.access_order
+            .retain(|k| k != &CacheKey::Database(name.to_string()));
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -138,7 +141,8 @@ impl CatalogCache {
 
     pub fn invalidate_constraints(&mut self, table_oid: u32) {
         self.constraints.remove(&table_oid);
-        self.access_order.retain(|k| k != &CacheKey::Constraints(table_oid));
+        self.access_order
+            .retain(|k| k != &CacheKey::Constraints(table_oid));
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -162,7 +166,8 @@ impl CatalogCache {
 
     pub fn invalidate_indexes(&mut self, table_oid: u32) {
         self.indexes.remove(&table_oid);
-        self.access_order.retain(|k| k != &CacheKey::Indexes(table_oid));
+        self.access_order
+            .retain(|k| k != &CacheKey::Indexes(table_oid));
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -206,11 +211,19 @@ impl CatalogCache {
             if let Some(oldest) = self.access_order.first().cloned() {
                 self.access_order.remove(0);
                 match &oldest {
-                    CacheKey::Database(n)       => { self.databases.remove(n); }
-                    CacheKey::Table(oid, n)      => { self.tables.remove(&(*oid, n.clone())); }
-                    CacheKey::Constraints(oid)   => { self.constraints.remove(oid); }
-                    CacheKey::Indexes(oid)       => { self.indexes.remove(oid); }
-                    CacheKey::Type(oid)          => {
+                    CacheKey::Database(n) => {
+                        self.databases.remove(n);
+                    }
+                    CacheKey::Table(oid, n) => {
+                        self.tables.remove(&(*oid, n.clone()));
+                    }
+                    CacheKey::Constraints(oid) => {
+                        self.constraints.remove(oid);
+                    }
+                    CacheKey::Indexes(oid) => {
+                        self.indexes.remove(oid);
+                    }
+                    CacheKey::Type(oid) => {
                         if let Some(dt) = self.types.remove(oid) {
                             self.type_names.remove(&dt.type_name);
                         }

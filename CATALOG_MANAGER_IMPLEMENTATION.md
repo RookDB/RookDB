@@ -563,7 +563,7 @@ exist in `pg_type` before inserting.
 
 ### 9.4 Database Operations
 
-**`create_database_enhanced(catalog, pm, bm, name, owner, encoding) → Result<db_oid>`**:
+**`create_database(catalog, pm, bm, name, owner, encoding) → Result<db_oid>`**:
 1. Validates name (non-empty, not duplicate)
 2. Allocates OID
 3. Creates `database/base/{name}/`
@@ -584,7 +584,7 @@ and prints a formatted table (name | owner | created_at).
 
 ### 9.5 Table Operations
 
-**`create_table_enhanced(catalog, pm, bm, db_name, table_name, col_defs, constraint_defs) → Result<table_oid>`**:
+**`create_table(catalog, pm, bm, db_name, table_name, col_defs, constraint_defs) → Result<table_oid>`**:
 1. Validates database exists and table name is unique
 2. Allocates table OID
 3. For each column definition:
@@ -766,11 +766,11 @@ The frontend CLI commands were updated to use the enhanced catalog APIs:
 ### table_cmd.rs
 - **CREATE TABLE**: Now accepts constraint definitions in the column spec
   (e.g., `id:INT:PRIMARY KEY`, `email:TEXT:UNIQUE`)
-- Calls `create_table_enhanced()` instead of `create_table()`
+- Calls `create_table()` instead of `create_table()`
 - Passes both `ColumnDefinition` and `ConstraintDefinition` vectors
 
 ### database_cmd.rs
-- **CREATE DATABASE**: Calls `create_database_enhanced()` with owner and encoding
+- **CREATE DATABASE**: Calls `create_database()` with owner and encoding
 - **SHOW DATABASES**: Uses `show_databases()` which reads from `pg_database`
 - **SHOW TABLES**: Uses `show_tables()` which reads from `pg_table`
 - **DROP DATABASE**: Uses `drop_database()` with cascading table drops
@@ -809,8 +809,8 @@ pub use types::{
 
 // Re-exports: catalog operations
 pub use catalog::{
-    bootstrap_catalog, create_database, create_database_enhanced,
-    create_table, create_table_enhanced, drop_database, drop_table,
+    bootstrap_catalog, create_database, create_database,
+    create_table, create_table, drop_database, drop_table,
     alter_table_add_column, get_table_metadata, init_catalog,
     init_catalog_page_storage, load_catalog, lookup_type_by_name,
     register_builtin_types, save_catalog, show_databases, show_tables,
@@ -927,7 +927,7 @@ Here's the complete flow:
    - ColumnDefinitions: [{name:"id", type:"INT"}, {name:"name", type:"TEXT"}]
    - ConstraintDefinitions: [PrimaryKey{cols:["id"]}, NotNull{col:"name"}]
 
-2. create_table_enhanced() is called:
+2. create_table() is called:
    a. Validates database exists, table name is unique
    b. Allocates table_oid = 10003 (from OID counter)
 
@@ -994,8 +994,8 @@ Here's the complete flow:
 ```
 Session 1:
   → bootstrap_catalog() creates everything
-  → create_database_enhanced("mydb", ...) writes to pg_database.dat
-  → create_table_enhanced("users", ...) writes to pg_table, pg_column, pg_constraint, pg_index
+  → create_database("mydb", ...) writes to pg_database.dat
+  → create_table("users", ...) writes to pg_table, pg_column, pg_constraint, pg_index
   → All writes go through BufferManager → pages marked dirty → flushed to disk
 
 Session 2 (restart):
