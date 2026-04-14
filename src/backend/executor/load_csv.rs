@@ -5,6 +5,72 @@ use std::io::{self, BufRead, BufReader};
 use crate::catalog::types::Catalog;
 use crate::heap::insert_tuple;
 
+/// Parse a CSV line while respecting bracket-delimited arrays and quoted fields.
+/// 
+/// Standard CSV parsers treat every comma as a field delimiter, but this breaks
+/// array fields like [item1,item2,item3]. This function correctly identifies
+/// field boundaries while ignoring commas inside brackets and quotes.
+/// 
+/// # Examples
+/// - `1,True,"text",0xABCD,[1,2,3]` → 5 fields
+/// - `42,"hello, world",@file.bin` → 3 fields (comma in quoted string ignored)
+/// - `[[1,2],[3,4]]` → 1 field (nested brackets handled)
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current_field = String::new();
+    let mut in_brackets: i32 = 0;  // Track nested brackets
+    let mut in_quotes = false;
+    let mut quote_char = ' ';
+    let mut escaped = false;
+
+    for ch in line.chars() {
+        if escaped {
+            current_field.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_quotes => {
+                escaped = true;
+                current_field.push(ch);
+            }
+            '"' | '\'' if !in_quotes => {
+                // Enter quoted string
+                in_quotes = true;
+                quote_char = ch;
+                current_field.push(ch);
+            }
+            c if in_quotes && c == quote_char => {
+                // Exit quoted string
+                in_quotes = false;
+                current_field.push(ch);
+            }
+            '[' if !in_quotes => {
+                in_brackets += 1;
+                current_field.push(ch);
+            }
+            ']' if !in_quotes => {
+                in_brackets = in_brackets.saturating_sub(1);
+                current_field.push(ch);
+            }
+            ',' if !in_quotes && in_brackets == 0 => {
+                // Field delimiter: only if not in quotes or brackets
+                fields.push(current_field.trim().to_string());
+                current_field.clear();
+            }
+            _ => current_field.push(ch),
+        }
+    }
+
+    // Don't forget the last field
+    if !current_field.is_empty() || !fields.is_empty() {
+        fields.push(current_field.trim().to_string());
+    }
+
+    fields
+}
+
 pub fn load_csv(
     catalog: &Catalog,
     db_name: &str,
@@ -54,16 +120,17 @@ pub fn load_csv(
             continue;
         }
 
-        // Split CSV fields by comma
-        let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
+        // Parse CSV fields, respecting bracket-delimited arrays and quoted fields
+        let values = parse_csv_line(&row);
+        let values_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
 
         // Validate number of columns
-        if values.len() != columns.len() {
+        if values_refs.len() != columns.len() {
             println!(
                 "Skipping row {}: expected {} columns, found {}",
                 i + 1,
                 columns.len(),
-                values.len()
+                values_refs.len()
             );
             continue;
         }
@@ -71,7 +138,7 @@ pub fn load_csv(
         // --- 4. Serialize row based on schema ---
         let mut tuple_bytes: Vec<u8> = Vec::new();
 
-        for (val, col) in values.iter().zip(columns.iter()) {
+        for (val, col) in values_refs.iter().zip(columns.iter()) {
             let type_str = col.data_type.as_ref().map(|s| s.as_str()).unwrap_or("UNKNOWN");
             match type_str {
                 "INT" => {

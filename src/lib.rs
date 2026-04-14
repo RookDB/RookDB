@@ -8,4 +8,5 @@ pub use backend::heap;
 pub use backend::layout;
 pub use backend::page;
 pub use backend::statistics;
+pub use backend::storage;
 pub use backend::table;

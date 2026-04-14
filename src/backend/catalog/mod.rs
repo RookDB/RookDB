@@ -6,5 +6,5 @@ pub use data_type::{DataType, Value};
 
 pub use catalog::{
     create_database, create_table, init_catalog, load_catalog, save_catalog, show_databases,
-    show_tables,
+    show_tables, clear_catalog,
 };

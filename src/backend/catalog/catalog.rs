@@ -47,40 +47,112 @@ pub fn init_catalog() {
 }
 
 /// Loads the catalog from disk into memory.
-/// Returns an empty catalog if the file is missing or invalid.
+/// Rebuilds catalog from metadata files in database/base,
+/// then syncs it back to catalog.json to keep them in sync.
 pub fn load_catalog() -> Catalog {
-    let catalog_path = Path::new(CATALOG_FILE);
+    // Rebuild from metadata files on disk (source of truth)
+    let catalog = rebuild_catalog_from_disk();
+    
+    // Sync the rebuilt catalog back to catalog.json
+    save_catalog(&catalog);
+    
+    catalog
+}
 
-    // Check if catalog file exists
-    if !catalog_path.exists() {
-        eprintln!("Catalog file does not exist at {}.", catalog_path.display());
-        return Catalog {
-            databases: HashMap::new(),
-        };
-    }
-
-    // Read the catalog file
-    let data = fs::read_to_string(catalog_path);
-    let data = match data {
-        Ok(content) => content,
-        Err(err) => {
-            eprintln!("Failed to read catalog file: {}", err);
-            return Catalog {
-                databases: HashMap::new(),
-            };
-        }
+/// Rebuilds the catalog by scanning database/base directory
+/// and loading metadata.json files from each table directory
+fn rebuild_catalog_from_disk() -> Catalog {
+    let mut catalog = Catalog {
+        databases: HashMap::new(),
     };
 
-    // Deserialize JSON into Catalog struct
-    match serde_json::from_str::<Catalog>(&data) {
-        Ok(catalog) => catalog,
-        Err(err) => {
-            eprintln!("Failed to parse catalog JSON: {}", err);
-            Catalog {
-                databases: HashMap::new(),
+    let base_dir = Path::new(DATABASE_DIR);
+    if !base_dir.exists() {
+        return catalog;
+    }
+
+    // Iterate through database directories
+    match fs::read_dir(base_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if let Some(db_name) = path.file_name() {
+                            let db_name = db_name.to_string_lossy().to_string();
+
+                            // Initialize database entry
+                            let mut database = Database {
+                                tables: HashMap::new(),
+                            };
+
+                            // Scan for table metadata files and .dat files
+                            if let Ok(table_entries) = fs::read_dir(&path) {
+                                for table_entry in table_entries {
+                                    if let Ok(table_entry) = table_entry {
+                                        let table_path = table_entry.path();
+                                        if table_path.is_file() {
+                                            if let Some(filename) = table_path.file_name() {
+                                                let filename = filename.to_string_lossy();
+                                                
+                                                // Look for metadata files
+                                                if filename.ends_with(".metadata.json") {
+                                                    // Extract table name from metadata filename
+                                                    let table_name = filename
+                                                        .trim_end_matches(".metadata.json")
+                                                        .to_string();
+
+                                                    // Load metadata
+                                                    if let Ok(metadata_content) = fs::read_to_string(&table_path) {
+                                                        if let Ok(table) = serde_json::from_str::<Table>(&metadata_content) {
+                                                            database.tables.insert(table_name, table);
+                                                        }
+                                                    }
+                                                } 
+                                                // Also look for .dat files without metadata (backward compatibility)
+                                                else if filename.ends_with(".dat") {
+                                                    let table_name = filename
+                                                        .trim_end_matches(".dat")
+                                                        .to_string();
+                                                    
+                                                    // Check if metadata already exists
+                                                    let metadata_path = format!(
+                                                        "{}/{}/{}.metadata.json",
+                                                        DATABASE_DIR, db_name, table_name
+                                                    );
+                                                    
+                                                    if !Path::new(&metadata_path).exists() {
+                                                        // Create a default metadata entry for backward compatibility
+                                                        let default_table = Table {
+                                                            columns: vec![],
+                                                            schema_version: Some(2),
+                                                        };
+                                                        
+                                                        if let Ok(metadata_json) = serde_json::to_string_pretty(&default_table) {
+                                                            let _ = fs::write(&metadata_path, metadata_json);
+                                                        }
+                                                        
+                                                        database.tables.insert(table_name, default_table);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !database.tables.is_empty() {
+                                catalog.databases.insert(db_name, database);
+                            }
+                        }
+                    }
+                }
             }
         }
+        Err(e) => eprintln!("Failed to read database directory: {}", e),
     }
+
+    catalog
 }
 
 // Persists the in-memory catalog state to disk.
@@ -197,10 +269,21 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
         columns,
         schema_version: Some(2),
     };
-    database.tables.insert(table_name.to_string(), new_table);
+    database.tables.insert(table_name.to_string(), new_table.clone());
 
     // Persist catalog changes
     save_catalog(catalog);
+
+    // Save table metadata to a separate metadata.json file
+    let metadata_path = format!(
+        "{}/{}/{}.metadata.json",
+        DATABASE_DIR, db_name, table_name
+    );
+    if let Ok(metadata_json) = serde_json::to_string_pretty(&new_table) {
+        if let Err(e) = fs::write(&metadata_path, metadata_json) {
+            eprintln!("Warning: Failed to write table metadata to {}: {}", metadata_path, e);
+        }
+    }
 
     // Construct table file path
     let table_file_path = TABLE_FILE_TEMPLATE
@@ -264,4 +347,21 @@ pub fn show_tables(catalog: &Catalog, db_name: &str) {
     } else {
         println!("Database '{}' not found.\n", db_name);
     }
+}
+
+/// Clears the catalog file, removing all database metadata
+pub fn clear_catalog() {
+    let catalog_path = Path::new(CATALOG_FILE);
+    
+    let empty_catalog = Catalog {
+        databases: HashMap::new(),
+    };
+    
+    let json = serde_json::to_string_pretty(&empty_catalog)
+        .expect("Failed to serialize empty catalog");
+    
+    fs::write(catalog_path, json)
+        .expect("Failed to clear catalog file");
+    
+    println!("Catalog cleared successfully.");
 }

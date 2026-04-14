@@ -14,6 +14,10 @@ pub struct Column {
     pub nullable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<u32>,
+    /// Per-column TOAST strategy: "PLAIN", "EXTENDED", "EXTERNAL", "MAIN"
+    /// If None, defaults to EXTENDED (global threshold-based)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toast_strategy: Option<String>,
 }
 
 impl Column {
@@ -24,6 +28,18 @@ impl Column {
             data_type: Some(data_type.to_string()),
             nullable: false,
             schema_version: Some(2),
+            toast_strategy: None, // Default: use global EXTENDED strategy
+        }
+    }
+
+    /// Create a column with a specific TOAST strategy
+    pub fn with_toast_strategy(name: String, data_type: DataType, strategy: &str) -> Self {
+        Column {
+            name,
+            data_type: Some(data_type.to_string()),
+            nullable: false,
+            schema_version: Some(2),
+            toast_strategy: Some(strategy.to_uppercase()),
         }
     }
 
@@ -32,6 +48,15 @@ impl Column {
         match &self.data_type {
             Some(type_str) => DataType::parse(type_str),
             None => Err("Column has no data type".to_string()),
+        }
+    }
+
+    /// Parse the TOAST strategy for this column
+    pub fn parse_toast_strategy(&self) -> crate::backend::storage::toast::ToastStrategy {
+        match &self.toast_strategy {
+            Some(s) => crate::backend::storage::toast::ToastStrategy::parse(s)
+                .unwrap_or(crate::backend::storage::toast::ToastStrategy::Extended),
+            None => crate::backend::storage::toast::ToastStrategy::Extended,
         }
     }
 }

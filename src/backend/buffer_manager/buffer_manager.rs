@@ -1,9 +1,78 @@
 use crate::catalog::types::Catalog;
-use crate::disk::{read_page, write_page};
-use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
-
+use crate::backend::disk::{read_page, write_page};
+use crate::backend::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
+use crate::backend::storage::literal_parser::parse_value_literal;
+use crate::backend::storage::tuple_codec::TupleCodec;
+use crate::backend::storage::toast::ToastManager;
+use crate::catalog::data_type::DataType;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
+
+/// Parse a CSV line while respecting bracket-delimited arrays and quoted fields.
+/// 
+/// Standard CSV parsers treat every comma as a field delimiter, but this breaks
+/// array fields like [item1,item2,item3]. This function correctly identifies
+/// field boundaries while ignoring commas inside brackets and quotes.
+/// 
+/// # Examples
+/// - `1,True,"text",0xABCD,[1,2,3]` → 5 fields
+/// - `42,"hello, world",@file.bin` → 3 fields (comma in quoted string ignored)
+/// - `[[1,2],[3,4]]` → 1 field (nested brackets handled)
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current_field = String::new();
+    let mut in_brackets: i32 = 0;  // Track nested brackets
+    let mut in_quotes = false;
+    let mut quote_char = ' ';
+    let mut escaped = false;
+
+    for ch in line.chars() {
+        if escaped {
+            current_field.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_quotes => {
+                escaped = true;
+                current_field.push(ch);
+            }
+            '\"' | '\'' if !in_quotes => {
+                // Enter quoted string
+                in_quotes = true;
+                quote_char = ch;
+                current_field.push(ch);
+            }
+            c if in_quotes && c == quote_char => {
+                // Exit quoted string
+                in_quotes = false;
+                current_field.push(ch);
+            }
+            '[' if !in_quotes => {
+                in_brackets += 1;
+                current_field.push(ch);
+            }
+            ']' if !in_quotes => {
+                in_brackets = in_brackets.saturating_sub(1);
+                current_field.push(ch);
+            }
+            ',' if !in_quotes && in_brackets == 0 => {
+                // Field delimiter: only if not in quotes or brackets
+                fields.push(current_field.trim().to_string());
+                current_field.clear();
+            }
+            _ => current_field.push(ch),
+        }
+    }
+
+    // Don't forget the last field
+    if !current_field.is_empty() || !fields.is_empty() {
+        fields.push(current_field.trim().to_string());
+    }
+
+    fields
+}
 
 pub struct BufferManager {
     pub pages: Vec<Page>, // In-memory pages (header + data)
@@ -121,44 +190,70 @@ impl BufferManager {
             self.allocate_page();
         }
 
+        // Create ONE ToastManager for the entire CSV load (reused across all rows)
+        let mut toast_manager = ToastManager::new();
+
         for (i, line) in lines.enumerate() {
             let row = line?;
             if row.trim().is_empty() {
                 continue;
             }
 
-            let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
-            if values.len() != columns.len() {
+            // Parse CSV fields, respecting bracket-delimited arrays and quoted fields
+            let values = parse_csv_line(&row);
+            let values_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+            
+            if values_refs.len() != columns.len() {
                 println!(
                     "Skipping row {}: expected {} columns, got {}",
                     i + 1,
                     columns.len(),
-                    values.len()
+                    values_refs.len()
                 );
                 continue;
             }
 
-            // Serialize tuple
-            let mut tuple_bytes: Vec<u8> = Vec::new();
-            for (val, col) in values.iter().zip(columns.iter()) {
-                let type_str = col.data_type.as_ref().map(|s| s.as_str()).unwrap_or("UNKNOWN");
-                match type_str {
-                    "INT" => {
-                        let num: i32 = val.parse().unwrap_or_default();
-                        tuple_bytes.extend_from_slice(&num.to_le_bytes());
+            // Build schema for encoding
+            let schema: Vec<(String, DataType)> = columns
+                .iter()
+                .map(|col| {
+                    let data_type = col
+                        .data_type
+                        .as_ref()
+                        .and_then(|type_str| DataType::parse(type_str).ok())
+                        .unwrap_or(DataType::Text);
+                    (col.name.clone(), data_type)
+                })
+                .collect();
+
+            // Parse and encode tuple using proper pipeline
+            let mut parsed_values = Vec::new();
+            let mut parse_error = false;
+            
+            for (val_str, (_, data_type)) in values_refs.iter().zip(schema.iter()) {
+                match parse_value_literal(val_str, data_type) {
+                    Ok(value) => parsed_values.push(value),
+                    Err(e) => {
+                        eprintln!("Error parsing value '{}' as {}: {}", val_str, data_type.to_string(), e);
+                        parse_error = true;
+                        break;
                     }
-                    "TEXT" => {
-                        let mut t = val.as_bytes().to_vec();
-                        if t.len() > 10 {
-                            t.truncate(10);
-                        } else if t.len() < 10 {
-                            t.extend(vec![b' '; 10 - t.len()]);
-                        }
-                        tuple_bytes.extend_from_slice(&t);
-                    }
-                    _ => continue,
                 }
             }
+            
+            if parse_error {
+                continue;
+            }
+
+            // Encode tuple with proper structure (header, null bitmap, var fields, etc.)
+            // Reuse the same toast_manager across all rows
+            let tuple_bytes = match TupleCodec::encode_tuple(&parsed_values, &schema, &mut toast_manager) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("Error encoding tuple: {}", e);
+                    continue;
+                }
+            };
 
             let tuple_len = tuple_bytes.len() as u32;
             let required = tuple_len + ITEM_ID_SIZE;
@@ -207,6 +302,14 @@ impl BufferManager {
             inserted_rows,
             used_pages - 1
         );
+
+        // Save TOAST chunks to disk
+        let toast_path = format!("database/base/{}/{}.toast", db_name, table_name);
+        if let Err(e) = toast_manager.save_to_disk(&toast_path) {
+            eprintln!("Warning: Failed to save TOAST chunks to disk: {}", e);
+        } else if inserted_rows > 0 {
+            println!("Saved TOAST chunks to {}.", toast_path);
+        }
 
         Ok(used_pages)
     }
