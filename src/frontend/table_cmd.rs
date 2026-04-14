@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{Catalog, Column, create_table, show_tables};
 use storage_manager::statistics::print_table_page_count;
+use storage_manager::storage::database_logger;
 
 /// Displays tables in the currently selected database
 pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
@@ -16,7 +17,10 @@ pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
             return;
         }
     };
+    
+    let table_count = catalog.databases.get(db).map(|d| d.tables.len()).unwrap_or(0);
     show_tables(catalog, db);
+    database_logger::log_show_tables(db, table_count);
 }
 
 pub fn create_table_cmd(
@@ -63,11 +67,22 @@ pub fn create_table_cmd(
             data_type: Some(parts[1].to_string()),
             nullable: false,
             schema_version: Some(2),
+            toast_strategy: None,
         });
     }
 
+    if columns.is_empty() {
+        println!("Table must have at least one column.");
+        database_logger::log_create_table_failed(&db, &table_name, "no columns defined");
+        return Ok(());
+    }
+
+    let column_count = columns.len();
     create_table(catalog, &db, &table_name, columns);
     buffer_manager.load_table_from_disk(&db, &table_name)?;
+    
+    println!("Table '{}' created successfully with {} columns.", table_name, column_count);
+    database_logger::log_create_table(&db, &table_name, column_count);
 
     Ok(())
 }
@@ -88,7 +103,19 @@ pub fn show_table_statistics_cmd(current_db: &Option<String>) -> io::Result<()> 
     io::stdin().read_line(&mut table_name)?;
     let table_name = table_name.trim();
 
-    print_table_page_count(db_name, table_name)?;
+    match print_table_page_count(db_name, table_name) {
+        Ok(_) => {
+            // Note: We'll need to get page_count and tuple_count from the statistics function
+            // For now, just log the operation
+            database_logger::log_show_table_statistics(db_name, table_name, 0, 0);
+        }
+        Err(e) => {
+            database_logger::log_error(
+                &format!("show_table_statistics: {}", table_name),
+                &e.to_string(),
+            );
+        }
+    }
 
     Ok(())
 }

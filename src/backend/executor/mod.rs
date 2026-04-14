@@ -3,3 +3,4 @@ pub mod seq_scan;
 
 pub use load_csv::load_csv;
 pub use seq_scan::show_tuples;
+pub use seq_scan::scan_tuples_indexed;
