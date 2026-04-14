@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 
 use crate::disk::{create_page, read_page, write_page};
-use crate::page::{ITEM_ID_SIZE, Page, page_free_space};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, page_free_space};
 use crate::table::{TABLE_HEADER_SIZE, page_count};
 
 /// Initialize a new table file
@@ -62,4 +62,63 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
 
     write_page(file, &mut page, last_page_num)?;
     Ok(())
+}
+
+/// Delete a tuple from a specific page and slot index.
+/// Returns the old tuple bytes (for TOAST cleanup) on success.
+/// The slot is marked as deleted by zeroing its length field.
+pub fn delete_tuple(file: &mut File, page_num: u32, slot_index: u32) -> io::Result<Vec<u8>> {
+    let mut page = Page::new();
+    read_page(file, &mut page, page_num)?;
+
+    let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+    let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+
+    if slot_index >= num_items {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Slot index {} out of range (page has {} tuples)",
+                slot_index, num_items
+            ),
+        ));
+    }
+
+    // Read old tuple data from the item-ID slot
+    let base = (PAGE_HEADER_SIZE + slot_index * ITEM_ID_SIZE) as usize;
+    let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
+    let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
+
+    if length == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Tuple at slot {} is already deleted", slot_index),
+        ));
+    }
+
+    let old_data = page.data[offset as usize..(offset + length) as usize].to_vec();
+
+    // Mark slot as deleted: zero the length field
+    page.data[base + 4..base + 8].copy_from_slice(&0u32.to_le_bytes());
+
+    write_page(file, &mut page, page_num)?;
+
+    Ok(old_data)
+}
+
+/// Update a tuple: deletes the old tuple and inserts new data.
+/// Returns the old tuple bytes (for TOAST cleanup).
+pub fn update_tuple(
+    file: &mut File,
+    page_num: u32,
+    slot_index: u32,
+    new_data: &[u8],
+) -> io::Result<Vec<u8>> {
+    // Step 1: Delete old tuple (get old bytes back)
+    let old_bytes = delete_tuple(file, page_num, slot_index)?;
+
+    // Step 2: Insert new tuple (may go into same page or a new one)
+    insert_tuple(file, new_data)?;
+
+    Ok(old_bytes)
 }
