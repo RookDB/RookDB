@@ -1,7 +1,6 @@
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
-use crate::types::{DataValue, serialize_nullable_row};
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
@@ -78,7 +77,7 @@ impl BufferManager {
         Ok(())
     }
 
-    /// Load CSV into memory using page-based allocation
+    /// Load CSV rows into the legacy page buffer and return the number of pages used.
     pub fn load_csv_into_pages(
         &mut self,
         catalog: &Catalog,
@@ -86,7 +85,7 @@ impl BufferManager {
         table_name: &str,
         csv_path: &str,
     ) -> io::Result<usize> {
-        // --- schema ---
+        // Fetch schema from catalog
         let db = catalog.databases.get(db_name).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -108,16 +107,13 @@ impl BufferManager {
             ));
         }
 
-        // --- read CSV ---
         let csv_file = File::open(csv_path)?;
         let reader = BufReader::new(csv_file);
         let mut lines = reader.lines();
         if let Some(Ok(_)) = lines.next() {} // skip header
 
         let mut inserted_rows = 0usize;
-        let mut current_page_index = self.pages.len() - 1; // DATA pages start at index 1
-
-        // Ensure first data page exists
+        let mut current_page_ix = self.pages.len() - 1;
         if self.pages.len() == 1 {
             self.allocate_page();
         }
@@ -139,68 +135,100 @@ impl BufferManager {
                 continue;
             }
 
-            let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
-            let optional_values: Vec<Option<&str>> = values.iter().map(|&v| Some(v)).collect();
-
-            let tuple_bytes = match serialize_nullable_row(&schema_types, &optional_values) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    println!("Skipping row {}: {}", i + 1, e);
-                    continue;
+            let mut tuple_bytes: Vec<u8> = Vec::new();
+            for (val, col) in values.iter().zip(columns.iter()) {
+                let type_name = col.data_type.type_name.to_uppercase();
+                match type_name.as_str() {
+                    "INT" | "INTEGER" => {
+                        let num: i32 = val.parse().unwrap_or_default();
+                        tuple_bytes.extend_from_slice(&num.to_le_bytes());
+                    }
+                    "BIGINT" => {
+                        let num: i64 = val.parse().unwrap_or_default();
+                        tuple_bytes.extend_from_slice(&num.to_le_bytes());
+                    }
+                    "FLOAT" | "REAL" => {
+                        let num: f32 = val.parse().unwrap_or_default();
+                        tuple_bytes.extend_from_slice(&num.to_le_bytes());
+                    }
+                    "DOUBLE" => {
+                        let num: f64 = val.parse().unwrap_or_default();
+                        tuple_bytes.extend_from_slice(&num.to_le_bytes());
+                    }
+                    "BOOL" | "BOOLEAN" => {
+                        let b: u8 = match val.to_lowercase().as_str() {
+                            "true" | "1" | "yes" => 1,
+                            _ => 0,
+                        };
+                        tuple_bytes.push(b);
+                    }
+                    t if t.starts_with("VARCHAR") => {
+                        // Extract max length from VARCHAR(n), default 255
+                        let max_len: usize = t
+                            .strip_prefix("VARCHAR(")
+                            .and_then(|s| s.strip_suffix(')'))
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(255);
+                        let mut bytes = val.as_bytes().to_vec();
+                        bytes.truncate(max_len);
+                        // store as 2-byte length prefix + data
+                        tuple_bytes.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+                        tuple_bytes.extend_from_slice(&bytes);
+                    }
+                    _ => {
+                        // Default TEXT: fixed 10-byte field
+                        let mut t = val.as_bytes().to_vec();
+                        if t.len() > 10 {
+                            t.truncate(10);
+                        } else {
+                            t.extend(vec![b' '; 10 - t.len()]);
+                        }
+                        tuple_bytes.extend_from_slice(&t);
+                    }
                 }
-            };
+            }
 
             let tuple_len = tuple_bytes.len() as u32;
-            let total_space_required = tuple_len + ITEM_ID_SIZE;
-
+            let required = tuple_len + ITEM_ID_SIZE;
 
             loop {
-                if current_page_index >= self.pages.len() {
+                if current_page_ix >= self.pages.len() {
                     self.allocate_page();
                 }
-
-                let page = &mut self.pages[current_page_index];
+                let page = &mut self.pages[current_page_ix];
                 let free = page_free_space(page)?;
-
-                if free < total_space_required {
-                    current_page_index += 1;
+                if free < required {
+                    current_page_ix += 1;
                     continue;
                 }
 
                 let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
                 let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-
                 let start = upper - tuple_len;
 
                 page.data[start as usize..upper as usize].copy_from_slice(&tuple_bytes);
-
-                let item_id_pos = lower as usize;
-                page.data[item_id_pos..item_id_pos + 4].copy_from_slice(&start.to_le_bytes());
-                page.data[item_id_pos + 4..item_id_pos + 8]
-                    .copy_from_slice(&tuple_len.to_le_bytes());
-
+                let ip = lower as usize;
+                page.data[ip..ip + 4].copy_from_slice(&start.to_le_bytes());
+                page.data[ip + 4..ip + 8].copy_from_slice(&tuple_len.to_le_bytes());
                 lower += ITEM_ID_SIZE;
                 upper = start;
-
                 page.data[0..4].copy_from_slice(&lower.to_le_bytes());
                 page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-                println!("Lower: {}", lower);
                 inserted_rows += 1;
                 break;
             }
         }
 
-        let used_pages = self.pages.len();
-        self.pages[0].data[0..4].copy_from_slice(&(used_pages as u32).to_le_bytes());
-
+        let used = self.pages.len();
+        self.pages[0].data[0..4].copy_from_slice(&(used as u32).to_le_bytes());
         println!(
             "Loaded {} rows into {} data pages.",
             inserted_rows,
-            used_pages - 1
+            used - 1
         );
-
-        Ok(used_pages)
+        Ok(used)
     }
+
 
     pub fn flush_to_disk(
         &mut self,

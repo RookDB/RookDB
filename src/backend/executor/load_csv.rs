@@ -2,12 +2,17 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 
+use crate::buffer_manager::BufferManager;
+use crate::catalog::page_manager::CatalogPageManager;
 use crate::catalog::types::Catalog;
 use crate::heap::insert_tuple;
 use crate::types::DataValue;
+use crate::types::datatype::DataType;
 
 pub fn load_csv(
     catalog: &Catalog,
+    pm: &mut CatalogPageManager,
+    bm: &mut BufferManager,
     db_name: &str,
     table_name: &str,
     file: &mut File,
@@ -70,15 +75,12 @@ pub fn load_csv(
         let mut row_ok = true;
 
         for (val, col) in values.iter().zip(columns.iter()) {
-            match DataValue::parse_and_encode(&col.data_type, val) {
+            let exec_type: DataType = (&col.data_type).into();
+
+            match DataValue::parse_and_encode(&exec_type, val) {
                 Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
                 Err(e) => {
-                    println!(
-                        "Skipping row {}: column '{}' — {}",
-                        i + 1,
-                        col.name,
-                        e
-                    );
+                    println!("Skipping row {}: column '{}' — {}", i + 1, col.name, e);
                     row_ok = false;
                     break;
                 }
