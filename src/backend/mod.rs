@@ -5,6 +5,7 @@ pub mod executor;
 pub mod heap;
 pub mod layout;
 pub mod page;
+pub mod query;
 pub mod statistics;
 pub mod table;
 pub mod types;
