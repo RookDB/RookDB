@@ -5,7 +5,8 @@ use crate::catalog::types::Catalog;
 use crate::disk::read_page;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
-use crate::types::{DataValue, deserialize_nullable_row};
+use crate::types::{deserialize_nullable_row};
+use crate::types::datatype::DataType;
 
 pub fn show_tuples(
     catalog: &Catalog,
@@ -39,7 +40,7 @@ pub fn show_tuples(
     // Print column header
     let header: Vec<String> = columns
         .iter()
-        .map(|c| format!("{} ({})", c.name, c.data_type))
+        .map(|c| format!("{} ({:?})", c.name, c.data_type))
         .collect();
     println!("{}", header.join(" | "));
 
@@ -62,7 +63,8 @@ pub fn show_tuples(
 
             // 5. Decode each column using its DataType
             let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
-            match deserialize_nullable_row(&schema_types, tuple_data) {
+            let exec_types: Vec<DataType> = schema_types.iter().map(|t| t.into()).collect();
+            match deserialize_nullable_row(&exec_types, tuple_data) {
                 Ok(values) => {
                     for (col, val_opt) in columns.iter().zip(values.iter()) {
                         match val_opt {
