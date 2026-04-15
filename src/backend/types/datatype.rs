@@ -12,6 +12,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
+use crate::catalog::types::CatalogDataType;
 
 /// A SQL column type descriptor.
 ///
@@ -232,5 +233,16 @@ impl<'de> Deserialize<'de> for DataType {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         raw.parse::<DataType>().map_err(serde::de::Error::custom)
+    }
+}
+
+// This function is to convert Catalog DataType to Actual table pages Datatype
+impl From<&CatalogDataType> for DataType {
+    fn from(dt: &CatalogDataType) -> Self {
+        match dt.type_name.as_str() {
+            "INT" => DataType::Int,
+            "BIGINT" => DataType::BigInt,
+            _ => panic!("Unsupported"),
+        }
     }
 }

@@ -2,15 +2,19 @@
 //! and selecting databases from the catalog.
 
 use std::io::{self, Write};
-use storage_manager::catalog::{Catalog, create_database, show_databases};
+use storage_manager::buffer_manager::BufferManager;
+use storage_manager::catalog::{Catalog, init_catalog_page_storage, show_databases};
 
 /// Displays all available databases
-pub fn show_databases_cmd(catalog: &Catalog) {
-    show_databases(catalog);
+pub fn show_databases_cmd(catalog: &Catalog, bm: &mut BufferManager) -> io::Result<()> {
+    let mut pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    show_databases(catalog, &mut pm, bm);
+    Ok(())
 }
 
 /// Creates a new database based on user input
-pub fn create_database_cmd(catalog: &mut Catalog) -> io::Result<()> {
+pub fn create_database_cmd(catalog: &mut Catalog, bm: &mut BufferManager) -> io::Result<()> {
     let mut db_name = String::new();
 
     // Prompt for database name
@@ -22,10 +26,20 @@ pub fn create_database_cmd(catalog: &mut Catalog) -> io::Result<()> {
     let db_name = db_name.trim();
     if db_name.is_empty() {
         println!("Database name cannot be empty.");
-    } else if create_database(catalog, db_name) {
-        println!("Database '{}' created successfully.", db_name);
     } else {
-        println!("Failed to create database '{}'.", db_name);
+        let mut pm = init_catalog_page_storage()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        match storage_manager::catalog::create_database(
+            catalog,
+            &mut pm,
+            bm,
+            db_name,
+            "admin",
+            storage_manager::catalog::types::Encoding::UTF8,
+        ) {
+            Ok(_) => println!("Database '{}' created successfully.", db_name),
+            Err(e) => println!("Failed to create database '{}': {:?}", db_name, e),
+        }
     }
     Ok(())
 }
