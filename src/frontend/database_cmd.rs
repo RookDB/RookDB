@@ -55,6 +55,8 @@ pub fn select_database_cmd(catalog: &Catalog, current_db: &mut Option<String>) -
     if catalog.databases.contains_key(&db_name) {
         *current_db = Some(db_name.clone());
         println!("Database '{}' selected.", db_name);
+        buffer_pool.preload_database(&db_name)?;
+println!("Buffer pool warmed with database '{}'.", db_name);
     } else {
         println!("Database '{}' does not exist.", db_name);
     }

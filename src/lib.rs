@@ -9,4 +9,10 @@ pub use backend::layout;
 pub use backend::page;
 pub use backend::statistics;
 pub use backend::table;
-pub use backend::types;
+pub use backend::buffer_manager::{
+    BufferPool,
+    PageId,
+    ReplacementPolicy,
+    LRUPolicy,
+    ClockPolicy,
+};
