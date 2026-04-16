@@ -7,7 +7,7 @@ use storage_manager::executor::show_tuples;
 use storage_manager::table::page_count;
 
 use storage_manager::executor::{AggFunc, AggReq};
-use storage_manager::executor::iterator::Executor;
+use storage_manager::executor::iterator::{Executor, ExecutorError};
 use storage_manager::executor::tuple::Tuple;
 use storage_manager::executor::hash_aggregator::execute_aggregation;
 use storage_manager::executor::expr::{Expr, ComparisonOperator};
@@ -17,8 +17,8 @@ struct MockScanner {
 }
 
 impl Executor for MockScanner {
-    fn next(&mut self) -> Option<Tuple> {
-        self.tuples.next()
+    fn next(&mut self) -> Result<Option<Tuple>, ExecutorError> {
+        Ok(self.tuples.next())
     }
 }
 
@@ -98,7 +98,15 @@ pub fn aggregate_query_cmd(_current_db: &Option<String>) -> io::Result<()> {
 
     println!("\nExecuting Aggregation...");
     let result = execute_aggregation(child_node, reqs, vec![0,1], Some(having_expr));
-    println!("Result: {:?}", result);
+    match result {
+        Ok(data) => {
+            println!("Result: {:?}", data);
+            println!("{{Status: 200, Message: \"Success\", Error: \"None\"}}");
+        }
+        Err(e) => {
+            println!("{{Status: {}, Message: \"Failed\", Error: \"{}\"}}", e.status_code(), e);
+        }
+    }
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::backend::executor::tuple::Tuple;
-use crate::backend::executor::iterator::Executor;
+use crate::backend::executor::iterator::{Executor, ExecutorError};
 use crate::backend::executor::value::Value;
 use crate::backend::catalog::types::Column;
 use crate::backend::buffer_manager::BufferManager;
@@ -17,10 +17,10 @@ pub struct SeqScan{
 }
 
 impl Executor for SeqScan{
-    fn next(&mut self) -> Option<Tuple>{
+    fn next(&mut self) -> Result<Option<Tuple>, ExecutorError>{
         //Explicitly start from page_id=1 to skip Header page.
         if self.current_page_id>=self.total_pages{
-            return None;
+            return Ok(None);
         }
 
         let curr_page=&self.buffer_pool.pages[self.current_page_id as usize];
@@ -90,6 +90,6 @@ impl Executor for SeqScan{
             
         }
         self.current_slot_idx+=1;
-        return Some(Tuple{values,is_null_bitmap: bitmap.to_vec()});
+        return Ok(Some(Tuple{values,is_null_bitmap: bitmap.to_vec()}));
     }
 }

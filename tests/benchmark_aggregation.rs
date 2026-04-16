@@ -2,7 +2,7 @@ use storage_manager::executor::AggFunc;
 use storage_manager::executor::AggReq;
 use storage_manager::executor::expr::{BinaryOperator, ComparisonOperator, Expr};
 use storage_manager::executor::hash_aggregator::execute_aggregation;
-use storage_manager::executor::iterator::Executor;
+use storage_manager::executor::iterator::{Executor, ExecutorError};
 use storage_manager::executor::tuple::Tuple;
 use storage_manager::executor::value::Value;
 
@@ -11,8 +11,8 @@ pub struct MockScanner {
 }
 
 impl Executor for MockScanner {
-    fn next(&mut self) -> Option<Tuple> {
-        self.tuples.next()
+    fn next(&mut self) -> Result<Option<Tuple>, ExecutorError> {
+        Ok(self.tuples.next())
     }
 }
 
@@ -32,7 +32,7 @@ fn test_basic_numerics() {
         AggReq { agg_type: AggFunc::Min, col_index: Some(0) },
         AggReq { agg_type: AggFunc::Max, col_index: Some(0) },
     ];
-    let result = execute_aggregation(child_node, reqs, vec![], None);
+    let result = execute_aggregation(child_node, reqs, vec![], None).unwrap();
     
     assert_eq!(result[0].values[0], Value::Int(150));      // SUM
     assert_eq!(result[0].values[1], Value::Int(30));   // AVG
@@ -55,7 +55,7 @@ fn test_duplicates() {
         AggReq { agg_type: AggFunc::SumDistinct, col_index: Some(0) },
         AggReq { agg_type: AggFunc::CountDistinct, col_index: Some(0) },
     ];
-    let result = execute_aggregation(child_node, reqs, vec![], None);
+    let result = execute_aggregation(child_node, reqs, vec![], None).unwrap();
     
     assert_eq!(result[0].values[0], Value::Int(60)); // Sum Distinct: 10 + 20 + 30 = 60
     assert_eq!(result[0].values[1], Value::Int(3));  // Count Distinct: 3 expected
@@ -75,7 +75,7 @@ fn test_null_handling() {
         AggReq { agg_type: AggFunc::CountStar, col_index: Some(0) },
         AggReq { agg_type: AggFunc::Sum, col_index: Some(0) },
     ];
-    let res = execute_aggregation(child, reqs, vec![], None);
+    let res = execute_aggregation(child, reqs, vec![], None).unwrap();
     
     assert_eq!(res[0].values[0], Value::Int(2));   // COUNT (ignores NULL)
     assert_eq!(res[0].values[1], Value::Int(4));   // COUNT(*) (includes NULL)
@@ -95,7 +95,7 @@ fn test_booleans() {
         AggReq { agg_type: AggFunc::BoolAnd, col_index: Some(0) },
         AggReq { agg_type: AggFunc::BoolOr, col_index: Some(0) },
     ];
-    let res = execute_aggregation(child, reqs, vec![], None);
+    let res = execute_aggregation(child, reqs, vec![], None).unwrap();
     
     assert_eq!(res[0].values[0], Value::Boolean(false)); // AND = false
     assert_eq!(res[0].values[1], Value::Boolean(true));  // OR = true
@@ -109,7 +109,7 @@ fn test_empty_table() {
         AggReq { agg_type: AggFunc::Sum, col_index: Some(0) },
         AggReq { agg_type: AggFunc::CountStar, col_index: Some(0) },
     ];
-    let res = execute_aggregation(child, reqs, vec![], None);
+    let res = execute_aggregation(child, reqs, vec![], None).unwrap();
     
     assert_eq!(res[0].values[0], Value::Null);   // Empty SUM is NULL
     assert_eq!(res[0].values[1], Value::Int(0)); // Empty COUNT(*) is 0
@@ -125,7 +125,7 @@ fn test_single_row_variance() {
         AggReq { agg_type: AggFunc::Variance, col_index: Some(0) },
         AggReq { agg_type: AggFunc::StdDev, col_index: Some(0) },
     ];
-    let res = execute_aggregation(child, reqs, vec![], None);
+    let res = execute_aggregation(child, reqs, vec![], None).unwrap();
     
     assert_eq!(res[0].values[0], Value::Null); // Cannot compute variance on 1 row
     assert_eq!(res[0].values[1], Value::Null);
@@ -140,7 +140,7 @@ fn test_group_by_single_column() {
     ];
     let child = Box::new(MockScanner { tuples: dummy_data.into_iter() });
     let reqs = vec![AggReq { agg_type: AggFunc::Sum, col_index: Some(1) }];
-    let res = execute_aggregation(child, reqs, vec![0], None);
+    let res = execute_aggregation(child, reqs, vec![0], None).unwrap();
     
     assert_eq!(res.len(), 2);
     let hr_res = res.iter().find(|t| t.values[0] == Value::Text("HR".to_string())).unwrap();
@@ -159,7 +159,7 @@ fn test_group_by_multiple_columns() {
     ];
     let child = Box::new(MockScanner { tuples: dummy_data.into_iter() });
     let reqs = vec![AggReq { agg_type: AggFunc::Sum, col_index: Some(2) }];
-    let res = execute_aggregation(child, reqs, vec![0, 1], None);
+    let res = execute_aggregation(child, reqs, vec![0, 1], None).unwrap();
     
     assert_eq!(res.len(), 2);
     let hr_staff = res.iter().find(|t| t.values[1] == Value::Text("Staff".to_string())).unwrap();
@@ -185,7 +185,7 @@ fn test_having_clause_filter() {
     
     let child = Box::new(MockScanner { tuples: dummy_data.into_iter() });
     let reqs = vec![AggReq { agg_type: AggFunc::Sum, col_index: Some(2) }];
-    let res = execute_aggregation(child, reqs, vec![0, 1], Some(having_expr));
+    let res = execute_aggregation(child, reqs, vec![0, 1], Some(having_expr)).unwrap();
     
     assert_eq!(res.len(), 1); // Only HR-Staff should remain (sum > 150)
     assert_eq!(res[0].values[1], Value::Text("Staff".to_string()));
@@ -215,7 +215,7 @@ fn test_having_column_to_column() {
     };
     
     let child = Box::new(MockScanner { tuples: dummy_data.into_iter() });
-    let res = execute_aggregation(child, reqs, vec![0], Some(expr));
+    let res = execute_aggregation(child, reqs, vec![0], Some(expr)).unwrap();
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].values[0], Value::Text("IT".to_string()));
     assert_eq!(res[0].values[1], Value::Int(300));
@@ -244,7 +244,7 @@ fn test_having_expr_to_constant() {
     };
     
     let child = Box::new(MockScanner { tuples: dummy_data.into_iter() });
-    let res = execute_aggregation(child, reqs, vec![0], Some(expr));
+    let res = execute_aggregation(child, reqs, vec![0], Some(expr)).unwrap();
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].values[0], Value::Int(20)); // Only age 20 remains
     assert_eq!(res[0].values[1], Value::Int(1));  // Count is 1
@@ -262,7 +262,7 @@ fn test_aggregation_overflow_handling() {
     
     // Checking SUM which invokes `checked_add` internally to safely return Null
     let reqs = vec![AggReq { agg_type: AggFunc::Sum, col_index: Some(0) }];
-    let result = execute_aggregation(child_node, reqs, vec![], None);
+    let result = execute_aggregation(child_node, reqs, vec![], None).unwrap();
     
     assert_eq!(result[0].values[0], Value::Null); // SUM overflows, returns Null as safely handled in backend
 }

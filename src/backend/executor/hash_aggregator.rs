@@ -1,5 +1,5 @@
 use crate::backend::executor::tuple::Tuple;
-use crate::backend::executor::iterator::Executor;
+use crate::backend::executor::iterator::{Executor, ExecutorError};
 use crate::backend::executor::value::Value;
 use crate::backend::executor::agg_func::{AggFunc,AggReq};
 use crate::backend::executor::expr::{Expr, evaluate};
@@ -69,7 +69,7 @@ impl AggregationState{
         return Self{results};
     }
     
-    pub fn update(&mut self, tuple:&Tuple, reqs:&[AggReq]){
+    pub fn update(&mut self, tuple:&Tuple, reqs:&[AggReq]) -> Result<(), ExecutorError> {
         for i in 0..reqs.len() {
             let req = &reqs[i];
             let state = &mut self.results[i];
@@ -100,7 +100,7 @@ impl AggregationState{
                                     let should_update = match (curr_min, tuple_val) {
                                         (Value::Int(curr), Value::Int(new)) => new < curr,
                                         (Value::Text(curr), Value::Text(new)) => new < curr,
-                                        _ => false, // Ignore type mismatches
+                                        _ => return Err(ExecutorError::TypeMismatch(format!("Unsupported type mapping: {:?}", tuple_val))),
                                     };
                                     
                                     if should_update {
@@ -125,7 +125,7 @@ impl AggregationState{
                                     let should_update = match (curr_max, tuple_val) {
                                         (Value::Int(curr), Value::Int(new)) => new > curr,
                                         (Value::Text(curr), Value::Text(new)) => new > curr,
-                                        _ => false, // Ignore type mismatches
+                                        _ => return Err(ExecutorError::TypeMismatch(format!("Unsupported type mapping: {:?}", tuple_val))),
                                     };
                                     
                                     if should_update {
@@ -156,9 +156,8 @@ impl AggregationState{
                                                 }
                                             }
                                         },
-                                        // Handle cases where current is already Null from a previous overflow
-                                        (Value::Null, _) => {}, 
-                                        _ => {}, // Ignore type mismatches
+                                        (Value::Null, _) => {}, // Keep poisoned
+                                        _ => return Err(ExecutorError::TypeMismatch(format!("Cannot aggregate mathematical types on: {:?}", tuple_val))),
                                     }
                                 } else {
                                     // It was None, so initialize it with the first value
@@ -185,9 +184,8 @@ impl AggregationState{
                                                 }
                                             }
                                         },
-                                        // Handle cases where current is already Null from a previous overflow
-                                        (Value::Null, _) => {}, 
-                                        _ => {}, // Ignore type mismatches
+                                        (Value::Null, _) => {}, // Keep poisoned
+                                        _ => return Err(ExecutorError::TypeMismatch(format!("Cannot aggregate mathematical types on: {:?}", tuple_val))),
 
                                     }
                                 } else {
@@ -236,6 +234,8 @@ impl AggregationState{
                                     *mean+=delta / *count as f64;
                                     let delta2=v_f64 - *mean;
                                     *m2+=delta * delta2;
+                                } else {
+                                    return Err(ExecutorError::TypeMismatch(format!("Cannot calculate variance/stddev on type: {:?}", tuple_val)));
                                 }
                             }
                         }
@@ -260,6 +260,8 @@ impl AggregationState{
                                     *mean+=delta / *count as f64;
                                     let delta2=v_f64 - *mean;
                                     *m2+=delta * delta2;
+                                } else {
+                                    return Err(ExecutorError::TypeMismatch(format!("Cannot calculate variance/stddev on type: {:?}", tuple_val)));
                                 }
                             }
                         }
@@ -277,6 +279,8 @@ impl AggregationState{
                                         //Initialize if none
                                         *bool_val=Some(*new_b);
                                     }
+                                } else {
+                                    return Err(ExecutorError::TypeMismatch(format!("Expected boolean for bool aggregator, got: {:?}", tuple_val)));
                                 }
                             }
                         }
@@ -294,6 +298,8 @@ impl AggregationState{
                                         //Initialize if none
                                         *bool_val=Some(*new_b);
                                     }
+                                } else {
+                                    return Err(ExecutorError::TypeMismatch(format!("Expected boolean for bool aggregator, got: {:?}", tuple_val)));
                                 }
                             }
                         }
@@ -301,6 +307,7 @@ impl AggregationState{
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -330,10 +337,10 @@ impl HashAggregator {
 }
 
 impl Executor for HashAggregator {
-    fn next(&mut self) -> Option<Tuple> {
+    fn next(&mut self) -> Result<Option<Tuple>, ExecutorError> {
         if !self.built {
             // 1. Drain the child iterator to build the state
-            while let Some(tuple) = self.child.next() {
+            while let Some(tuple) = self.child.next()? {
                 let mut hash_key=Vec::new();
                 for col_idx in &self.group_by_cols {
                     let tuple_val = &tuple.values[*col_idx];
@@ -344,7 +351,7 @@ impl Executor for HashAggregator {
                     AggregationState::new(&self.reqs)
                 });
 
-                agg_state.update(&tuple, &self.reqs);
+                agg_state.update(&tuple, &self.reqs)?;
             }
             self.built = true;
 
@@ -401,8 +408,10 @@ impl Executor for HashAggregator {
                             let mut sum_val = Some(0_i32);
                             for val in set {
                                 if let Some(current_sum) = sum_val {
-                                    if let Value::Int(v) = val {
-                                        sum_val = current_sum.checked_add(v);
+                                    match val {
+                                        Value::Int(v) => sum_val = current_sum.checked_add(v),
+                                        Value::Null => {},
+                                        _ => return Err(ExecutorError::TypeMismatch(format!("Cannot compute SumDistinct on non-integer type: {:?}", val))),
                                     }
                                 }
                             }
@@ -448,27 +457,27 @@ impl Executor for HashAggregator {
 
                 // 4. Apply HAVING clause if present
                 if let Some(ref expr) = self.having {
-                    let result = evaluate(expr, &output_tuple);
+                    let result = evaluate(expr, &output_tuple)?;
                     if let Value::Boolean(false) | Value::Null = result {
                         continue; // Skip this tuple
                     }
                 }
 
-                return Some(output_tuple);
+                return Ok(Some(output_tuple));
             }
         }
-        None
+        Ok(None)
     }
 }
 
-pub fn execute_aggregation(child: Box<dyn Executor>, reqs: Vec<AggReq>,group_by_cols: Vec<usize>, having: Option<Expr>) -> Vec<Tuple> {
+pub fn execute_aggregation(child: Box<dyn Executor>, reqs: Vec<AggReq>,group_by_cols: Vec<usize>, having: Option<Expr>) -> Result<Vec<Tuple>, ExecutorError> {
 
     let mut aggregator = HashAggregator::new(child, reqs, group_by_cols, having);
     let mut output_table = Vec::new();
     
-    while let Some(tuple) = aggregator.next() {
+    while let Some(tuple) = aggregator.next()? {
         output_table.push(tuple);
     }
     
-    output_table
+    Ok(output_table)
 }
