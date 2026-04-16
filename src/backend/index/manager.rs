@@ -153,6 +153,22 @@ impl AnyIndex {
         }
     }
 
+    /// Perform a point lookup directly against the persisted index file when
+    /// the algorithm supports efficient on-disk traversal.
+    pub fn search_on_disk(
+        path: &str,
+        algorithm: &IndexAlgorithm,
+        key: &IndexKey,
+    ) -> io::Result<Vec<RecordId>> {
+        match algorithm {
+            IndexAlgorithm::BPlusTree => BPlusTree::search_on_disk(path, key),
+            _ => {
+                let index = Self::load(path, algorithm)?;
+                index.search(key)
+            }
+        }
+    }
+
     pub fn delete(&mut self, key: &IndexKey, record_id: &RecordId) -> io::Result<bool> {
         match self {
             Self::StaticHash(i) => i.delete(key, record_id),

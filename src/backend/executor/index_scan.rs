@@ -42,8 +42,7 @@ pub fn index_scan(
         })?;
 
     let index_path = index_file_path(db_name, table_name, index_name);
-    let index = AnyIndex::load(&index_path, &entry.algorithm)?;
-    let mut record_ids = index.search(key)?;
+    let mut record_ids = AnyIndex::search_on_disk(&index_path, &entry.algorithm, key)?;
 
     // Clustered indexes should be read in physical RID order for page locality.
     if entry.is_clustered {

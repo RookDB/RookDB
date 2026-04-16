@@ -29,13 +29,15 @@
 //! | delete      | O(t · log_t n)      |
 //! | range_scan  | O(log n + k)        |
 
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use serde::{Deserialize, Serialize};
 
 use crate::index::config::BTREE_MIN_DEGREE;
 use crate::index::index_trait::{IndexKey, IndexTrait, RecordId, TreeBasedIndex};
 use crate::index::paged_store;
+use crate::page::PAGE_SIZE;
 
 // ─── Node ─────────────────────────────────────────────────────────────────────
 
@@ -63,6 +65,29 @@ impl BPlusNode {
             dead: false,
         }
     }
+}
+
+const BPLUS_DISK_MAGIC: [u8; 8] = *b"RDBIDXV1";
+const BPLUS_DISK_NODE_FORMAT_VERSION: u16 = 2;
+const BPLUS_DISK_HEADER_SIZE: usize = 64;
+const BPLUS_NODE_PAGE_HEADER_SIZE: usize = 16;
+
+#[derive(Debug, Clone)]
+struct DiskBPlusHeader {
+    root_page: u32,
+    node_page_count: u32,
+    entry_count: u64,
+    t: u32,
+}
+
+#[derive(Debug, Clone)]
+struct DiskBPlusNode {
+    is_leaf: bool,
+    dead: bool,
+    keys: Vec<IndexKey>,
+    values: Vec<Vec<RecordId>>,
+    children_pages: Vec<u32>,
+    next_leaf_page: Option<u32>,
 }
 
 // ─── Public index type ────────────────────────────────────────────────────────
@@ -98,11 +123,567 @@ impl BPlusTree {
         Self::new(BTREE_MIN_DEGREE)
     }
 
-    /// Load a persisted B+ Tree from the paged file at `path`.
-    pub fn load(path: &str) -> io::Result<Self> {
+    fn io_invalid_data(msg: impl Into<String>) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, msg.into())
+    }
+
+    fn read_header_page(file: &mut std::fs::File) -> io::Result<Vec<u8>> {
+        file.seek(SeekFrom::Start(0))?;
+        let mut page = vec![0u8; PAGE_SIZE];
+        file.read_exact(&mut page)?;
+        Ok(page)
+    }
+
+    fn parse_disk_version(header_page: &[u8]) -> io::Result<u16> {
+        if header_page.len() != PAGE_SIZE {
+            return Err(Self::io_invalid_data("invalid B+Tree header page length"));
+        }
+        if header_page[0..8] != BPLUS_DISK_MAGIC {
+            return Err(Self::io_invalid_data("invalid B+Tree index file magic"));
+        }
+
+        let header_size = u16::from_le_bytes([header_page[10], header_page[11]]) as usize;
+        if header_size > PAGE_SIZE {
+            return Err(Self::io_invalid_data("invalid B+Tree index header size"));
+        }
+
+        let stored_page_size = u32::from_le_bytes([
+            header_page[12],
+            header_page[13],
+            header_page[14],
+            header_page[15],
+        ]) as usize;
+        if stored_page_size != PAGE_SIZE {
+            return Err(Self::io_invalid_data(format!(
+                "B+Tree page size mismatch: expected {}, found {}",
+                PAGE_SIZE, stored_page_size
+            )));
+        }
+
+        Ok(u16::from_le_bytes([header_page[8], header_page[9]]))
+    }
+
+    fn parse_node_format_header(header_page: &[u8]) -> io::Result<DiskBPlusHeader> {
+        let root_page = u32::from_le_bytes([
+            header_page[16],
+            header_page[17],
+            header_page[18],
+            header_page[19],
+        ]);
+        let node_page_count = u32::from_le_bytes([
+            header_page[20],
+            header_page[21],
+            header_page[22],
+            header_page[23],
+        ]);
+        let entry_count = u64::from_le_bytes(
+            header_page[24..32]
+                .try_into()
+                .map_err(|_| Self::io_invalid_data("failed to decode B+Tree entry_count"))?,
+        );
+        let t = u32::from_le_bytes([
+            header_page[32],
+            header_page[33],
+            header_page[34],
+            header_page[35],
+        ]);
+
+        if node_page_count == 0 && root_page != 0 {
+            return Err(Self::io_invalid_data(
+                "B+Tree root page must be 0 when node page count is 0",
+            ));
+        }
+
+        Ok(DiskBPlusHeader {
+            root_page,
+            node_page_count,
+            entry_count,
+            t,
+        })
+    }
+
+    fn page_to_node_index(page_no: u32, node_page_count: usize, field: &str) -> io::Result<usize> {
+        if page_no == 0 {
+            return Err(Self::io_invalid_data(format!(
+                "{} cannot reference header page",
+                field
+            )));
+        }
+
+        let idx = usize::try_from(page_no - 1)
+            .map_err(|_| Self::io_invalid_data(format!("{} conversion overflow", field)))?;
+        if idx >= node_page_count {
+            return Err(Self::io_invalid_data(format!(
+                "{} points out of bounds: page {} (node pages={})",
+                field, page_no, node_page_count
+            )));
+        }
+        Ok(idx)
+    }
+
+    fn encode_key(key: &IndexKey, out: &mut Vec<u8>) -> io::Result<()> {
+        match key {
+            IndexKey::Int(v) => {
+                out.push(0);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            IndexKey::Float(v) => {
+                out.push(1);
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+            IndexKey::Text(text) => {
+                out.push(2);
+                let bytes = text.as_bytes();
+                let len_u32 = u32::try_from(bytes.len())
+                    .map_err(|_| Self::io_invalid_data("B+Tree text key length overflow"))?;
+                out.extend_from_slice(&len_u32.to_le_bytes());
+                out.extend_from_slice(bytes);
+            }
+        }
+        Ok(())
+    }
+
+    fn read_u32_from_payload(
+        page: &[u8],
+        cursor: &mut usize,
+        end: usize,
+        field: &str,
+    ) -> io::Result<u32> {
+        if *cursor + 4 > end {
+            return Err(Self::io_invalid_data(format!(
+                "truncated B+Tree payload while reading {}",
+                field
+            )));
+        }
+
+        let value = u32::from_le_bytes(
+            page[*cursor..*cursor + 4]
+                .try_into()
+                .map_err(|_| Self::io_invalid_data(format!("failed to decode {}", field)))?,
+        );
+        *cursor += 4;
+        Ok(value)
+    }
+
+    fn decode_key(page: &[u8], cursor: &mut usize, end: usize) -> io::Result<IndexKey> {
+        if *cursor >= end {
+            return Err(Self::io_invalid_data("truncated B+Tree key tag"));
+        }
+
+        let tag = page[*cursor];
+        *cursor += 1;
+
+        match tag {
+            0 => {
+                if *cursor + 8 > end {
+                    return Err(Self::io_invalid_data("truncated B+Tree INT key"));
+                }
+                let raw: [u8; 8] = page[*cursor..*cursor + 8]
+                    .try_into()
+                    .map_err(|_| Self::io_invalid_data("failed to decode B+Tree INT key"))?;
+                *cursor += 8;
+                Ok(IndexKey::Int(i64::from_le_bytes(raw)))
+            }
+            1 => {
+                if *cursor + 8 > end {
+                    return Err(Self::io_invalid_data("truncated B+Tree FLOAT key"));
+                }
+                let raw: [u8; 8] = page[*cursor..*cursor + 8]
+                    .try_into()
+                    .map_err(|_| Self::io_invalid_data("failed to decode B+Tree FLOAT key"))?;
+                *cursor += 8;
+                Ok(IndexKey::Float(f64::from_bits(u64::from_le_bytes(raw))))
+            }
+            2 => {
+                let text_len = Self::read_u32_from_payload(page, cursor, end, "B+Tree TEXT length")?
+                    as usize;
+                if *cursor + text_len > end {
+                    return Err(Self::io_invalid_data("truncated B+Tree TEXT key bytes"));
+                }
+                let text = String::from_utf8(page[*cursor..*cursor + text_len].to_vec())
+                    .map_err(|_| Self::io_invalid_data("B+Tree TEXT key contains invalid UTF-8"))?;
+                *cursor += text_len;
+                Ok(IndexKey::Text(text))
+            }
+            _ => Err(Self::io_invalid_data(format!(
+                "unsupported B+Tree key tag {}",
+                tag
+            ))),
+        }
+    }
+
+    fn serialize_node_page(&self, node_idx: usize) -> io::Result<Vec<u8>> {
+        let node = self
+            .nodes
+            .get(node_idx)
+            .ok_or_else(|| Self::io_invalid_data("B+Tree node index out of bounds during save"))?;
+
+        if node.is_leaf && !node.children.is_empty() {
+            return Err(Self::io_invalid_data("B+Tree leaf node cannot have children"));
+        }
+        if node.is_leaf && node.values.len() != node.keys.len() {
+            return Err(Self::io_invalid_data(
+                "B+Tree leaf values length must match keys length",
+            ));
+        }
+
+        let key_count = u16::try_from(node.keys.len())
+            .map_err(|_| Self::io_invalid_data("B+Tree key count overflow"))?;
+        let child_count = if node.is_leaf {
+            0u16
+        } else {
+            u16::try_from(node.children.len())
+                .map_err(|_| Self::io_invalid_data("B+Tree child count overflow"))?
+        };
+
+        let next_leaf_page = if node.is_leaf {
+            match node.next_leaf {
+                Some(next_idx) => u32::try_from(next_idx + 1)
+                    .map_err(|_| Self::io_invalid_data("B+Tree next_leaf page overflow"))?,
+                None => 0,
+            }
+        } else {
+            0
+        };
+
+        let mut payload = Vec::new();
+        for key in &node.keys {
+            Self::encode_key(key, &mut payload)?;
+        }
+
+        if node.is_leaf {
+            for rids in &node.values {
+                let rid_count = u32::try_from(rids.len())
+                    .map_err(|_| Self::io_invalid_data("B+Tree RID count overflow"))?;
+                payload.extend_from_slice(&rid_count.to_le_bytes());
+                for rid in rids {
+                    payload.extend_from_slice(&rid.page_no.to_le_bytes());
+                    payload.extend_from_slice(&rid.item_id.to_le_bytes());
+                }
+            }
+        } else {
+            for child_idx in &node.children {
+                let child_page = u32::try_from(child_idx + 1)
+                    .map_err(|_| Self::io_invalid_data("B+Tree child page overflow"))?;
+                payload.extend_from_slice(&child_page.to_le_bytes());
+            }
+        }
+
+        if payload.len() > PAGE_SIZE - BPLUS_NODE_PAGE_HEADER_SIZE {
+            return Err(Self::io_invalid_data(format!(
+                "B+Tree node {} payload is too large for a single page ({})",
+                node_idx,
+                payload.len()
+            )));
+        }
+
+        let payload_used = u32::try_from(payload.len())
+            .map_err(|_| Self::io_invalid_data("B+Tree payload length overflow"))?;
+
+        let mut page = vec![0u8; PAGE_SIZE];
+        page[0] = u8::from(node.is_leaf);
+        page[1] = u8::from(node.dead);
+        page[2..4].copy_from_slice(&key_count.to_le_bytes());
+        page[4..6].copy_from_slice(&child_count.to_le_bytes());
+        page[6..8].copy_from_slice(&0u16.to_le_bytes());
+        page[8..12].copy_from_slice(&next_leaf_page.to_le_bytes());
+        page[12..16].copy_from_slice(&payload_used.to_le_bytes());
+        page[BPLUS_NODE_PAGE_HEADER_SIZE..BPLUS_NODE_PAGE_HEADER_SIZE + payload.len()]
+            .copy_from_slice(&payload);
+
+        Ok(page)
+    }
+
+    fn parse_node_page(page: &[u8]) -> io::Result<DiskBPlusNode> {
+        if page.len() != PAGE_SIZE {
+            return Err(Self::io_invalid_data("invalid B+Tree node page length"));
+        }
+
+        let is_leaf = page[0] != 0;
+        let dead = page[1] != 0;
+        let key_count = u16::from_le_bytes([page[2], page[3]]) as usize;
+        let child_count = u16::from_le_bytes([page[4], page[5]]) as usize;
+        let next_leaf_raw = u32::from_le_bytes([page[8], page[9], page[10], page[11]]);
+        let payload_used = u32::from_le_bytes([page[12], page[13], page[14], page[15]]) as usize;
+
+        if payload_used > PAGE_SIZE - BPLUS_NODE_PAGE_HEADER_SIZE {
+            return Err(Self::io_invalid_data(
+                "B+Tree node payload exceeds page capacity",
+            ));
+        }
+
+        let mut cursor = BPLUS_NODE_PAGE_HEADER_SIZE;
+        let payload_end = BPLUS_NODE_PAGE_HEADER_SIZE + payload_used;
+
+        let mut keys = Vec::with_capacity(key_count);
+        for _ in 0..key_count {
+            keys.push(Self::decode_key(page, &mut cursor, payload_end)?);
+        }
+
+        let mut values = Vec::new();
+        let mut children_pages = Vec::new();
+
+        if is_leaf {
+            values.reserve(key_count);
+            for _ in 0..key_count {
+                let rid_count = Self::read_u32_from_payload(page, &mut cursor, payload_end, "RID count")?
+                    as usize;
+                let mut rids = Vec::with_capacity(rid_count);
+                for _ in 0..rid_count {
+                    let page_no =
+                        Self::read_u32_from_payload(page, &mut cursor, payload_end, "RID page_no")?;
+                    let item_id =
+                        Self::read_u32_from_payload(page, &mut cursor, payload_end, "RID item_id")?;
+                    rids.push(RecordId::new(page_no, item_id));
+                }
+                values.push(rids);
+            }
+        } else {
+            children_pages.reserve(child_count);
+            for _ in 0..child_count {
+                children_pages.push(Self::read_u32_from_payload(
+                    page,
+                    &mut cursor,
+                    payload_end,
+                    "child page",
+                )?);
+            }
+        }
+
+        if cursor != payload_end {
+            return Err(Self::io_invalid_data(
+                "B+Tree node payload parsing left trailing bytes",
+            ));
+        }
+
+        Ok(DiskBPlusNode {
+            is_leaf,
+            dead,
+            keys,
+            values,
+            children_pages,
+            next_leaf_page: if is_leaf && next_leaf_raw != 0 {
+                Some(next_leaf_raw)
+            } else {
+                None
+            },
+        })
+    }
+
+    fn read_node_page_from_file(file: &mut std::fs::File, page_no: u32) -> io::Result<DiskBPlusNode> {
+        if page_no == 0 {
+            return Err(Self::io_invalid_data("node page 0 is reserved for header"));
+        }
+        let offset = page_no as u64 * PAGE_SIZE as u64;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut page = vec![0u8; PAGE_SIZE];
+        file.read_exact(&mut page)?;
+        Self::parse_node_page(&page)
+    }
+
+    fn load_v1_entry_format(path: &str) -> io::Result<Self> {
         let mut index = Self::with_defaults();
         paged_store::load_entries_stream(path, |key, rid| index.insert(key, rid))?;
         Ok(index)
+    }
+
+    fn load_node_format(path: &str, header: &DiskBPlusHeader) -> io::Result<Self> {
+        let mut file = OpenOptions::new().read(true).open(path)?;
+
+        let node_page_count = usize::try_from(header.node_page_count)
+            .map_err(|_| Self::io_invalid_data("B+Tree node page count conversion overflow"))?;
+
+        if node_page_count == 0 {
+            return Ok(Self::with_defaults());
+        }
+
+        let root = Self::page_to_node_index(header.root_page, node_page_count, "root_page")?;
+
+        let mut disk_nodes = Vec::with_capacity(node_page_count);
+        for page_no in 1..=header.node_page_count {
+            disk_nodes.push(Self::read_node_page_from_file(&mut file, page_no)?);
+        }
+
+        let mut nodes = Vec::with_capacity(node_page_count);
+        for disk_node in &disk_nodes {
+            let mut children = Vec::with_capacity(disk_node.children_pages.len());
+            for &child_page in &disk_node.children_pages {
+                children.push(Self::page_to_node_index(
+                    child_page,
+                    node_page_count,
+                    "child pointer",
+                )?);
+            }
+
+            let next_leaf = match disk_node.next_leaf_page {
+                Some(next_page) => Some(Self::page_to_node_index(
+                    next_page,
+                    node_page_count,
+                    "next_leaf pointer",
+                )?),
+                None => None,
+            };
+
+            nodes.push(BPlusNode {
+                keys: disk_node.keys.clone(),
+                values: disk_node.values.clone(),
+                children,
+                next_leaf,
+                is_leaf: disk_node.is_leaf,
+                dead: disk_node.dead,
+            });
+        }
+
+        let t = usize::try_from(header.t)
+            .map_err(|_| Self::io_invalid_data("B+Tree minimum degree conversion overflow"))?;
+        if t < 2 {
+            return Err(Self::io_invalid_data(
+                "B+Tree minimum degree must be >= 2 in persisted header",
+            ));
+        }
+
+        let entry_count = usize::try_from(header.entry_count)
+            .map_err(|_| Self::io_invalid_data("B+Tree entry_count conversion overflow"))?;
+
+        Ok(Self {
+            nodes,
+            root,
+            t,
+            entry_count,
+        })
+    }
+
+    fn save_node_format(&self, path: &str) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+
+        file.write_all(&vec![0u8; PAGE_SIZE])?;
+
+        for node_idx in 0..self.nodes.len() {
+            let page = self.serialize_node_page(node_idx)?;
+            file.write_all(&page)?;
+        }
+
+        let root_page = u32::try_from(self.root + 1)
+            .map_err(|_| Self::io_invalid_data("B+Tree root page conversion overflow"))?;
+        let node_page_count = u32::try_from(self.nodes.len())
+            .map_err(|_| Self::io_invalid_data("B+Tree node page count overflow"))?;
+        let entry_count = u64::try_from(self.entry_count)
+            .map_err(|_| Self::io_invalid_data("B+Tree entry_count conversion overflow"))?;
+        let t_u32 = u32::try_from(self.t)
+            .map_err(|_| Self::io_invalid_data("B+Tree minimum degree conversion overflow"))?;
+
+        let mut header = vec![0u8; PAGE_SIZE];
+        header[0..8].copy_from_slice(&BPLUS_DISK_MAGIC);
+        header[8..10].copy_from_slice(&BPLUS_DISK_NODE_FORMAT_VERSION.to_le_bytes());
+        header[10..12].copy_from_slice(&(BPLUS_DISK_HEADER_SIZE as u16).to_le_bytes());
+        header[12..16].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
+        header[16..20].copy_from_slice(&root_page.to_le_bytes());
+        header[20..24].copy_from_slice(&node_page_count.to_le_bytes());
+        header[24..32].copy_from_slice(&entry_count.to_le_bytes());
+        header[32..36].copy_from_slice(&t_u32.to_le_bytes());
+
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&header)?;
+        file.flush()?;
+
+        Ok(())
+    }
+
+    /// Point lookup directly from disk using root-to-leaf traversal.
+    ///
+    /// This avoids loading the entire B+Tree into memory for a single key.
+    pub fn search_on_disk(path: &str, key: &IndexKey) -> io::Result<Vec<RecordId>> {
+        let mut file = OpenOptions::new().read(true).open(path)?;
+        let header_page = Self::read_header_page(&mut file)?;
+        let version = Self::parse_disk_version(&header_page)?;
+
+        if version == 1 {
+            // Backward compatibility with entry-stream format.
+            let loaded = Self::load_v1_entry_format(path)?;
+            return loaded.search(key);
+        }
+
+        if version != BPLUS_DISK_NODE_FORMAT_VERSION {
+            return Err(Self::io_invalid_data(format!(
+                "unsupported B+Tree on-disk version {}",
+                version
+            )));
+        }
+
+        let header = Self::parse_node_format_header(&header_page)?;
+        if header.node_page_count == 0 || header.root_page == 0 {
+            return Ok(Vec::new());
+        }
+
+        let node_page_count = usize::try_from(header.node_page_count)
+            .map_err(|_| Self::io_invalid_data("B+Tree node page count conversion overflow"))?;
+        let mut current_page = header.root_page;
+        let mut hops = 0usize;
+
+        loop {
+            if hops > node_page_count {
+                return Err(Self::io_invalid_data(
+                    "B+Tree traversal exceeded node count; possible cycle",
+                ));
+            }
+            hops += 1;
+
+            let node = Self::read_node_page_from_file(&mut file, current_page)?;
+            if node.dead {
+                return Err(Self::io_invalid_data(format!(
+                    "B+Tree traversal reached dead node page {}",
+                    current_page
+                )));
+            }
+
+            if node.is_leaf {
+                let pos = node.keys.partition_point(|k| k < key);
+                if pos < node.keys.len() && &node.keys[pos] == key {
+                    return Ok(node.values[pos].clone());
+                }
+                return Ok(Vec::new());
+            }
+
+            let slot = node.keys.partition_point(|k| k <= key);
+            if slot >= node.children_pages.len() {
+                return Err(Self::io_invalid_data(
+                    "B+Tree child slot out of bounds during traversal",
+                ));
+            }
+
+            let next_page = node.children_pages[slot];
+            let _ = Self::page_to_node_index(next_page, node_page_count, "child pointer")?;
+            current_page = next_page;
+        }
+    }
+
+    /// Load a persisted B+ Tree from the paged file at `path`.
+    pub fn load(path: &str) -> io::Result<Self> {
+        let mut file = OpenOptions::new().read(true).open(path)?;
+        let header_page = Self::read_header_page(&mut file)?;
+        let version = Self::parse_disk_version(&header_page)?;
+
+        if version == 1 {
+            return Self::load_v1_entry_format(path);
+        }
+
+        if version != BPLUS_DISK_NODE_FORMAT_VERSION {
+            return Err(Self::io_invalid_data(format!(
+                "unsupported B+Tree on-disk version {}",
+                version
+            )));
+        }
+
+        let header = Self::parse_node_format_header(&header_page)?;
+        Self::load_node_format(path, &header)
     }
 
     fn collect_entries(&self) -> Vec<(IndexKey, RecordId)> {
@@ -591,7 +1172,7 @@ impl IndexTrait for BPlusTree {
     }
 
     fn save(&self, path: &str) -> io::Result<()> {
-        paged_store::save_entries(path, self.all_entries()?.into_iter())
+        self.save_node_format(path)
     }
 
     fn entry_count(&self) -> usize {

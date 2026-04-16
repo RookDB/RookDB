@@ -304,8 +304,7 @@ pub fn search_index_cmd(current_db: &Option<String>) -> io::Result<()> {
     let search_key = parse_key(&value_str, col_type);
 
     let path = index_file_path(&db_name, &table_name, &index_name);
-    let index = AnyIndex::load(&path, &entry.algorithm)?;
-    let records = index.search(&search_key)?;
+    let records = AnyIndex::search_on_disk(&path, &entry.algorithm, &search_key)?;
 
     if records.is_empty() {
         println!("No records found for key '{}'.", value_str);

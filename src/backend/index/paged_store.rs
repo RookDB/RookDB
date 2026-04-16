@@ -13,10 +13,10 @@ const DATA_PAGE_PAYLOAD_CAPACITY: usize = PAGE_SIZE - DATA_PAGE_HEADER_SIZE;
 
 /// Keep index files bounded to avoid accidental unbounded disk growth.
 ///
-/// 64 MiB is enough for course-scale datasets while still preventing runaway
+/// 512 MiB is enough for course-scale datasets while still preventing runaway
 /// file growth that could stress memory and I/O.
-// pub const MAX_INDEX_FILE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
-pub const MAX_INDEX_FILE_SIZE_BYTES: u64 = 512 * 1024;
+pub const MAX_INDEX_FILE_SIZE_BYTES: u64 = 512 * 1024 * 1024;
+// pub const MAX_INDEX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 
 fn io_invalid_data(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
