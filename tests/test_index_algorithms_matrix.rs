@@ -189,7 +189,7 @@ fn test_lsm_and_skip_list_string_key_persistence_regression() {
 
         index
             .save(&path)
-            .expect("save should not fail with JSON key-serialization errors");
+            .expect("save should not fail for paged index persistence");
 
         let loaded = AnyIndex::load(&path, &algo).expect("load saved index failed");
         let found = loaded.search(&key).expect("search loaded index failed");

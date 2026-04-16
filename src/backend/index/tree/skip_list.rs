@@ -1,15 +1,10 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::io;
 
 use serde::{Deserialize, Serialize};
 
 use crate::index::index_trait::{IndexKey, IndexTrait, RecordId, TreeBasedIndex};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedSkipListIndex {
-    entries: Vec<(IndexKey, Vec<RecordId>)>,
-}
+use crate::index::paged_store;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct SkipListIndex {
@@ -25,27 +20,10 @@ impl SkipListIndex {
         }
     }
 
-    fn to_persisted(&self) -> PersistedSkipListIndex {
-        PersistedSkipListIndex {
-            entries: self
-                .entries
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        }
-    }
-
-    fn from_persisted(data: PersistedSkipListIndex) -> Self {
-        Self {
-            entries: data.entries.into_iter().collect(),
-        }
-    }
-
     pub fn load(path: &str) -> io::Result<Self> {
-        let data = fs::read_to_string(path)?;
-        let persisted: PersistedSkipListIndex = serde_json::from_str(&data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        Ok(Self::from_persisted(persisted))
+        let mut index = Self::new();
+        paged_store::load_entries_stream(path, |key, rid| index.insert(key, rid))?;
+        Ok(index)
     }
 }
 
@@ -76,12 +54,7 @@ impl IndexTrait for SkipListIndex {
     }
 
     fn save(&self, path: &str) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.to_persisted())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, json)
+        paged_store::save_entries(path, self.all_entries()?.into_iter())
     }
 
     fn entry_count(&self) -> usize {

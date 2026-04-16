@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 
-use serde_json::Value;
-
 use storage_manager::catalog::types::{Catalog, Column, Database, IndexAlgorithm, IndexEntry, Table};
 use storage_manager::heap::{init_table, insert_tuple_with_index_maintenance, insert_tuple_with_rid};
 use storage_manager::index::{
@@ -339,18 +337,13 @@ fn milestone3_persistence_and_validation_with_content_checks() {
             .expect_err("validation should fail after stale tamper");
         assert!(err.to_string().contains("stale entries"));
 
-        if matches!(algo, IndexAlgorithm::LsmTree | IndexAlgorithm::SkipList) {
-            let json = fs::read_to_string(&index_path).expect("read persisted json failed");
-            let parsed: Value = serde_json::from_str(&json).expect("parse persisted json failed");
-
-            if matches!(algo, IndexAlgorithm::LsmTree) {
-                assert!(parsed.get("memtable").is_some());
-                assert!(parsed.get("runs").is_some());
-            } else {
-                let entries_node = parsed.get("entries").expect("skip list entries missing");
-                assert!(entries_node.is_array(), "skip list persisted entries should be array");
-            }
-        }
+        let persisted = fs::read(&index_path).expect("read persisted index failed");
+        assert!(persisted.len() >= 8, "persisted index should include header");
+        assert_eq!(
+            &persisted[..8],
+            b"RDBIDXV1",
+            "persisted index should use paged binary format",
+        );
 
         let _ = fs::remove_file(index_path);
     }

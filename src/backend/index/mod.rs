@@ -2,6 +2,7 @@ pub mod config;
 pub mod hash;
 pub mod index_trait;
 pub mod manager;
+pub mod paged_store;
 pub mod tree;
 
 pub use config::{
