@@ -32,6 +32,7 @@ use crate::index::config::{DEFAULT_HASH_INDEX, DEFAULT_TREE_INDEX, HashIndexType
 use crate::heap::{init_table, insert_tuple};
 use crate::index::hash::{ChainedHashIndex, ExtendibleHashIndex, LinearHashIndex, StaticHashIndex};
 use crate::index::index_trait::{HashBasedIndex, IndexKey, IndexTrait, RecordId, TreeBasedIndex};
+use crate::index::paged_store;
 use crate::index::tree::{BPlusTree, BTree, LsmTreeIndex, RadixTree, SkipListIndex};
 use crate::layout::TABLE_FILE_TEMPLATE;
 use crate::page::{PAGE_HEADER_SIZE, ITEM_ID_SIZE};
@@ -162,10 +163,7 @@ impl AnyIndex {
     ) -> io::Result<Vec<RecordId>> {
         match algorithm {
             IndexAlgorithm::BPlusTree => BPlusTree::search_on_disk(path, key),
-            _ => {
-                let index = Self::load(path, algorithm)?;
-                index.search(key)
-            }
+            _ => paged_store::search_key(path, key),
         }
     }
 
