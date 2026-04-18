@@ -40,6 +40,7 @@ pub fn load_csv_cmd(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let db = match current_db {
         Some(db) => db.clone(),

@@ -1,8 +1,11 @@
-///! This file is to test load CSV file without using Buffer Manager.
+//! Load CSV data into a table file using the new TupleHeader-based encoding.
+
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 
 use crate::catalog::types::Catalog;
+use crate::executor::tuple_codec::encode_tuple;
+use crate::executor::value::Value;
 use crate::heap::insert_tuple;
 
 pub fn load_csv(
@@ -12,97 +15,81 @@ pub fn load_csv(
     file: &mut File,
     csv_path: &str,
 ) -> io::Result<()> {
-    // --- 1. Fetch table schema from catalog ---
     let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
-        )
+        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
     })?;
-
     let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
+        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
     })?;
+    let schema = &table.columns;
 
-    let columns = &table.columns;
-    if columns.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Table has no columns",
-        ));
+    if schema.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Table has no columns"));
     }
 
-    // --- 2. Open and read the CSV file ---
     let csv_file = File::open(csv_path)?;
     let reader = BufReader::new(csv_file);
-
     let mut lines = reader.lines();
 
     // Skip header line
-    if let Some(Ok(_header)) = lines.next() {
-        // println!("Header: {}", header);
-    }
+    lines.next();
 
-    // --- 3. Iterate through rows ---
-    let mut inserted = 0;
+    let mut inserted = 0usize;
     for (i, line) in lines.enumerate() {
         let row = line?;
         if row.trim().is_empty() {
             continue;
         }
 
-        // Split CSV fields by comma
-        let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
-
-        // Validate number of columns
-        if values.len() != columns.len() {
+        let raw_vals: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
+        if raw_vals.len() != schema.len() {
             println!(
                 "Skipping row {}: expected {} columns, found {}",
                 i + 1,
-                columns.len(),
-                values.len()
+                schema.len(),
+                raw_vals.len()
             );
             continue;
         }
 
-        // --- 4. Serialize row based on schema ---
-        let mut tuple_bytes: Vec<u8> = Vec::new();
+        // Parse each field into a typed Value
+        let values: Vec<Value> = raw_vals
+            .iter()
+            .zip(schema.iter())
+            .map(|(raw, col)| {
+                if raw.is_empty() || raw.to_uppercase() == "NULL" {
+                    return Value::Null;
+                }
+                match col.data_type.to_uppercase().as_str() {
+                    "INT" | "INTEGER" => raw
+                        .parse::<i64>()
+                        .map(Value::Int)
+                        .unwrap_or(Value::Null),
+                    "FLOAT" | "REAL" | "DOUBLE" => raw
+                        .parse::<f64>()
+                        .map(Value::Float)
+                        .unwrap_or(Value::Null),
+                    "BOOL" | "BOOLEAN" => match raw.to_lowercase().as_str() {
+                        "true" | "1" | "yes" => Value::Bool(true),
+                        "false" | "0" | "no" => Value::Bool(false),
+                        _ => Value::Null,
+                    },
+                    "DATE" => raw.parse::<i32>().map(Value::Date).unwrap_or(Value::Null),
+                    "TIMESTAMP" => raw.parse::<i64>().map(Value::Timestamp).unwrap_or(Value::Null),
+                    _ => Value::Text(raw.to_string()), // TEXT, VARCHAR(n), unknown
+                }
+            })
+            .collect();
 
-        for (val, col) in values.iter().zip(columns.iter()) {
-            match col.data_type.as_str() {
-                "INT" => {
-                    let num: i32 = val.parse().unwrap_or_default();
-                    tuple_bytes.extend_from_slice(&num.to_le_bytes());
-                }
-                "TEXT" => {
-                    let mut text_bytes = val.as_bytes().to_vec();
-                    if text_bytes.len() > 10 {
-                        text_bytes.truncate(10);
-                    } else if text_bytes.len() < 10 {
-                        text_bytes.extend(vec![b' '; 10 - text_bytes.len()]);
-                    }
-                    tuple_bytes.extend_from_slice(&text_bytes);
-                }
-                _ => {
-                    println!(
-                        "Unsupported column type '{}' in column '{}'",
-                        col.data_type, col.name
-                    );
-                    continue;
-                }
-            }
-        }
+        let tuple_bytes = encode_tuple(&values, schema);
 
-        // --- 5. Insert tuple into page system ---
         if let Err(e) = insert_tuple(file, &tuple_bytes) {
             println!("Failed to insert row {}: {}", i + 1, e);
         } else {
             inserted += 1;
         }
     }
-    println!("Total Number of rows inserted: {}", inserted);
+
+    println!("Total rows inserted: {}", inserted);
     Ok(())
 }

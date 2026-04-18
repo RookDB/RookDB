@@ -5,28 +5,20 @@ use crate::disk::{create_page, read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, Page, page_free_space};
 use crate::table::{TABLE_HEADER_SIZE, page_count};
 
-/// Initialize a new table file
+/// Initialize a new table file: write table header page then one empty data page.
 pub fn init_table(file: &mut File) -> io::Result<()> {
-    // Move cursor to the beginning of the file
     file.seek(SeekFrom::Start(0))?;
-
-    // Allocate 8192 bytes
     let mut zero_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
-
-    //  Write "1" into the first 4 bytes (little-endian u32)
-    // This can represent the total number of pages, e.g. 1
     zero_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
-
-    // Write the full buffer (header) to the file
     file.write_all(&zero_buf)?;
     file.flush()?;
     file.sync_all()?;
-
     create_page(file)?;
-
     Ok(())
 }
 
+/// Insert a raw tuple byte slice into the table, creating a new page if needed.
+/// Used by both the old CSV loader (raw bytes) and the new typed encoder.
 pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     let mut total_pages = page_count(file)?;
     let mut last_page_num = total_pages - 1;
@@ -49,14 +41,12 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
 
     let start = upper - data.len() as u32;
     page.data[start as usize..upper as usize].copy_from_slice(data);
-
     upper = start;
     page.data[4..8].copy_from_slice(&upper.to_le_bytes());
 
     page.data[lower as usize..lower as usize + 4].copy_from_slice(&start.to_le_bytes());
     page.data[lower as usize + 4..lower as usize + 8]
         .copy_from_slice(&(data.len() as u32).to_le_bytes());
-
     lower += ITEM_ID_SIZE;
     page.data[0..4].copy_from_slice(&lower.to_le_bytes());
 
