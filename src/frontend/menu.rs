@@ -8,52 +8,13 @@ use std::io::{self, Write};
 use storage_manager::catalog::{init_catalog, load_catalog};
 
 
-use storage_manager::{BufferPool, PageId, ReplacementPolicy, LRUPolicy, ClockPolicy};
+use storage_manager::{BufferPool, PageId, ReplacementPolicy, LRUPolicy, ClockPolicy, LRUKPolicy};
 // Command implementations
 use crate::frontend::buffer_test_cmd;
 use crate::frontend::database_cmd;
 
 /// Runs the buffer pool test menu
 pub fn run() -> io::Result<()> {
-    println!("--------------------------------------");
-    println!("RookDB Buffer Pool Testing Interface");
-    println!("--------------------------------------\n");
-
-     // -----------------------------
-    // INIT CATALOG
-    // -----------------------------
-    println!("Initializing Catalog...\n");
-    init_catalog();
-
-    println!("Loading Catalog...\n");
-    let mut catalog = load_catalog();
-
-
-    let mut input = String::new();
-
-    // -----------------------------
-    // BUFFER SIZE INPUT
-    // -----------------------------
-    print!("Enter buffer pool size: ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut input)?;
-    let pool_size: usize = input.trim().parse().unwrap_or(3);
-    input.clear();
-
-    // -----------------------------
-    // FILE PATH INPUT
-    // -----------------------------
-    print!("Enter table file path (e.g., database/base/db1/table.dat): ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut input)?;
-    let file_path = input.trim().to_string();
-    input.clear();
-
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(file_path)?;
 
     // -----------------------------
     // POLICY SELECTION
@@ -61,6 +22,7 @@ pub fn run() -> io::Result<()> {
     println!("\nChoose Replacement Policy:");
     println!("1. LRU");
     println!("2. Clock");
+    println!("3. LRU-K");
 
     print!("Enter choice: ");
     io::stdout().flush()?;
@@ -72,6 +34,10 @@ input.clear();
         "2" => {
             println!("Using Clock Replacement Policy");
             Box::new(ClockPolicy::new())
+        }
+        "3" =>{
+            println!("Using LRU-K Replacement Policy");
+            Box::new(LRUKPolicy::new(3))
         }
         _ => {
             println!("Using LRU Replacement Policy");
@@ -111,7 +77,7 @@ input.clear();
         println!("4. Show Tables");
         println!("5. Create Table");
         println!("6. Load CSV");
-        println!("7. Show Tuples");
+        println!("7. Select tuples");
         println!("8. Show Table Statistics");
         println!("9. Exit");
         println!("=============================");

@@ -4,6 +4,7 @@ pub mod frame;
 pub mod policy;
 pub mod lru;
 pub mod clock;
+pub mod lru_k;
 pub mod stats;
 pub const PAGE_SIZE: usize = 8192;
 pub const BUFFER_SIZE: usize = 128 * 1024 * 1024; // example: 64MB
@@ -15,3 +16,4 @@ pub use frame::PageId;
 pub use policy::ReplacementPolicy;
 pub use lru::LRUPolicy;
 pub use clock::ClockPolicy;
+pub use lru_k::LRUKPolicy;
