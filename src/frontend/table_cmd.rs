@@ -60,6 +60,7 @@ pub fn create_table_cmd(
         columns.push(Column {
             name: name.to_string(),
             data_type: dtype.to_string(),
+            toast_strategy: "plain".to_string(),
         });
     }
 

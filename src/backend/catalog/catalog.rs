@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::catalog::types::*;
@@ -206,8 +207,26 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
         }
     }
 
+    // find if any columns need toast tables
+    let mut columns = columns;
+    let mut needs_toast = false;
+    for col in columns.iter_mut() {
+        let is_varlen = matches!(col.data_type.as_str(), "JSON" | "JSONB" | "XML")
+            || col.data_type.starts_with("UDT:");
+
+        if is_varlen {
+            if col.toast_strategy == "plain" {
+                col.toast_strategy = "extended".to_string();
+            }
+            needs_toast = true;
+        }
+    }
+
     // Insert table metadata into catalog
-    let new_table = Table { columns };
+    let new_table = Table {
+        columns,
+        has_toast_table: needs_toast,
+    };
     database.tables.insert(table_name.to_string(), new_table);
 
     // Persist catalog changes
@@ -247,6 +266,40 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
         }
     } else {
         println!("Table data file '{}' already exists.", table_file_path);
+    }
+
+    // Create and initialize TOAST table file if needed
+    if needs_toast {
+        let toast_file_path = TOAST_TABLE_FILE_TEMPLATE
+            .replace("{database}", db_name)
+            .replace("{table}", table_name);
+        let toast_path = Path::new(&toast_file_path);
+        if !toast_path.exists() {
+            match OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .truncate(true)
+                .open(&toast_file_path)
+            {
+                Ok(mut file) => {
+                    if let Err(e) = init_table(&mut file) {
+                        eprintln!("Failed to initialize TOAST table: {}", e);
+                    } else {
+                        // Write next_toast_value_id = 1 at bytes [4..8] of page 0
+                        let _ = file.seek(SeekFrom::Start(4));
+                        let _ = file.write_all(&1u32.to_le_bytes());
+                        println!("TOAST table created at '{}'.", toast_file_path);
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to create TOAST table file '{}': {}",
+                        toast_file_path, e
+                    );
+                }
+            }
+        }
     }
 
     println!(

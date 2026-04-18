@@ -1,0 +1,6 @@
+id,name,config
+1,alice,"<config><theme>dark</theme><lang>en</lang></config>"
+2,bob,"<config><theme>light</theme><lang>fr</lang></config>"
+3,carol,"<config><theme>dark</theme><notifications><email>true</email><sms>false</sms></notifications></config>"
+4,dave,"<config><theme>auto</theme><lang>de</lang></config>"
+5,eve,"<config><theme>light</theme><lang>en</lang><plugins><plugin name=""spell""/></plugins></config>"

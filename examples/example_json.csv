@@ -1,0 +1,6 @@
+id,name,metadata
+1,alice,"{""role"": ""admin"", ""level"": 5}"
+2,bob,"{""role"": ""user"", ""level"": 2}"
+3,carol,"{""role"": ""editor"", ""tags"": [""news"", ""tech""]}"
+4,dave,"{""role"": ""user"", ""level"": 1, ""prefs"": {""theme"": ""dark""}}"
+5,eve,"{""role"": ""admin"", ""level"": 10}"

@@ -9,12 +9,16 @@ use std::collections::HashMap;
 pub struct Column {
     pub name: String,
     pub data_type: String,
+    #[serde(default = "default_toast_strategy")]
+    pub toast_strategy: String,
 }
 
 /// Represents a table schema.
 #[derive(Serialize, Deserialize)]
 pub struct Table {
     pub columns: Vec<Column>,
+    #[serde(default)]
+    pub has_toast_table: bool,
 }
 
 /// Represents a user-defined composite type definition stored in the catalog.
@@ -35,4 +39,9 @@ pub struct Database {
 #[derive(Serialize, Deserialize)]
 pub struct Catalog {
     pub databases: HashMap<String, Database>,
+}
+
+// returns the default toast strategy
+fn default_toast_strategy() -> String {
+    "plain".to_string()
 }

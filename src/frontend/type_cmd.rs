@@ -46,6 +46,7 @@ pub fn create_type_cmd(catalog: &mut Catalog, current_db: &Option<String>) -> io
         fields.push(Column {
             name: parts[0].to_string(),
             data_type,
+            toast_strategy: "plain".to_string(),
         });
     }
 

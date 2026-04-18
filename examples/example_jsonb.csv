@@ -1,0 +1,6 @@
+id,name,profile
+1,alice,"{""age"": 30, ""city"": ""NYC""}"
+2,bob,"{""age"": 25, ""city"": ""LA"", ""scores"": [88, 92, 75]}"
+3,carol,"{""age"": 40, ""active"": true}"
+4,dave,"{""age"": 22, ""city"": ""Chicago"", ""meta"": {""joined"": ""2024""}}"
+5,eve,"{""age"": 35, ""city"": ""Seattle"", ""active"": false}"

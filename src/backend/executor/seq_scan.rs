@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self};
 
 use crate::catalog::types::Catalog;
@@ -7,13 +7,34 @@ use crate::executor::jsonb::JsonbSerializer;
 use crate::executor::udt::UdtSerializer;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
+use crate::toast::toast_reader::detoast_value;
+use crate::toast::{TOAST_POINTER_TAG, ToastPointer};
 
 /// Reads a variable-length value from a tuple byte slice at a given cursor position.
 /// Returns (raw value bytes, new cursor position).
-fn deserialize_variable_length(tuple_data: &[u8], cursor: usize) -> (Vec<u8>, usize) {
-    let len = u32::from_le_bytes(tuple_data[cursor..cursor + 4].try_into().unwrap()) as usize;
-    let data = tuple_data[cursor + 4..cursor + 4 + len].to_vec();
-    (data, cursor + 4 + len)
+fn deserialize_variable_length(
+    tuple_data: &[u8],
+    cursor: usize,
+    toast_file: &mut Option<File>,
+) -> io::Result<(Vec<u8>, usize)> {
+    let total_len = u32::from_le_bytes(tuple_data[cursor..cursor + 4].try_into().unwrap()) as usize;
+    let tag = tuple_data[cursor + 4];
+
+    if tag == TOAST_POINTER_TAG {
+        // Toasted: parse the 18 byte pointer and detoast
+        let pointer = ToastPointer::from_bytes(&tuple_data[cursor + 5..cursor + 5 + 18]);
+        let data = detoast_value(
+            toast_file
+                .as_mut()
+                .expect("Toast file required but not open"),
+            &pointer,
+        )?;
+        Ok((data, cursor + 4 + total_len))
+    } else {
+        // Inline: copy the raw bytes
+        let data = tuple_data[cursor + 5..cursor + 4 + total_len].to_vec();
+        Ok((data, cursor + 4 + total_len))
+    }
 }
 
 pub fn show_tuples(
@@ -39,8 +60,16 @@ pub fn show_tuples(
 
     let columns = &table.columns;
 
+    // Open toast file if the table has one
+    let mut toast_file: Option<File> = if table.has_toast_table {
+        let toast_path = format!("database/base/{}/{}_toast.dat", db_name, table_name);
+        Some(OpenOptions::new().read(true).open(&toast_path)?)
+    } else {
+        None
+    };
+
     // 2. Read total number of pages
-    let mut total_pages = page_count(file)?; // total pages currently in file
+    let total_pages = page_count(file)?;
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
@@ -90,14 +119,14 @@ pub fn show_tuples(
                     }
                     "JSON" => {
                         let (json_bytes, new_cursor) =
-                            deserialize_variable_length(tuple_data, cursor);
+                            deserialize_variable_length(tuple_data, cursor, &mut toast_file)?;
                         let json = String::from_utf8_lossy(&json_bytes).to_string();
                         print!("{}={} ", col.name, json);
                         cursor = new_cursor;
                     }
                     "JSONB" => {
                         let (jsonb_bytes, new_cursor) =
-                            deserialize_variable_length(tuple_data, cursor);
+                            deserialize_variable_length(tuple_data, cursor, &mut toast_file)?;
                         match JsonbSerializer::from_binary(&jsonb_bytes) {
                             Ok((value, _)) => {
                                 let display = JsonbSerializer::to_display_string(&value);
@@ -111,7 +140,7 @@ pub fn show_tuples(
                     }
                     "XML" => {
                         let (xml_bytes, new_cursor) =
-                            deserialize_variable_length(tuple_data, cursor);
+                            deserialize_variable_length(tuple_data, cursor, &mut toast_file)?;
                         let xml = String::from_utf8_lossy(&xml_bytes).to_string();
                         print!("{}={} ", col.name, xml);
                         cursor = new_cursor;
@@ -119,7 +148,7 @@ pub fn show_tuples(
                     dt if dt.starts_with("UDT:") => {
                         let udt_name = &dt[4..];
                         let (udt_bytes, new_cursor) =
-                            deserialize_variable_length(tuple_data, cursor);
+                            deserialize_variable_length(tuple_data, cursor, &mut toast_file)?;
                         if let Some(udt_def) = db.types.get(udt_name) {
                             match UdtSerializer::to_display_string(udt_def, &udt_bytes) {
                                 Ok(display) => print!("{}={} ", col.name, display),

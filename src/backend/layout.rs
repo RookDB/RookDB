@@ -17,3 +17,6 @@ pub const TABLE_DIR_TEMPLATE: &str = "database/base/{database}";
 
 // File path for specific table
 pub const TABLE_FILE_TEMPLATE: &str = "database/base/{database}/{table}.dat";
+
+// File path for specific toast table
+pub const TOAST_TABLE_FILE_TEMPLATE: &str = "database/base/{database}/{table}_toast.dat";

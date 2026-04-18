@@ -192,7 +192,77 @@ During sequential scan, the deserializer checks each column's type from the cata
 
 ### Tuple Size Limit
 
-A single tuple must fit within one page: `PAGE_SIZE - PAGE_HEADER_SIZE - ITEM_ID_SIZE = 8192 - 8 - 8 = 8176 bytes`. Values that cause the tuple to exceed this limit are rejected at insertion time.
+Without TOAST, a single tuple must fit within one page: `PAGE_SIZE - PAGE_HEADER_SIZE - ITEM_ID_SIZE = 8192 - 8 - 8 = 8176 bytes`. Values that exceed this limit are automatically handled by the TOAST system described below.
+
+---
+
+## TOAST (The Oversized-Attribute Storage Technique)
+
+When a variable-length value exceeds **2048 bytes** (`TOAST_THRESHOLD`), RookDB stores it out-of-line in a separate **toast table** rather than inline in the heap tuple. The original value is replaced by an 18-byte **TOAST pointer** that references the external data.
+
+### TOAST Pointer
+
+The pointer is stored inline in place of the original value and has the following layout:
+
+```
+┌───────────┬─────────────┬────────────────┬───────────────┬─────────────┬─────────────┐
+│ tag (1B)  │ compress(1B)│ value_id (4B)  │ orig_size(4B) │ stored(4B)  │ chunks (4B) │
+└───────────┴─────────────┴────────────────┴───────────────┴─────────────┴─────────────┘
+Total: 18 bytes (TOAST_POINTER_SIZE)
+```
+
+| Field | Size | Description |
+|-------|------|-------------|
+| `tag` | 1 byte | `0x01` — identifies this as a TOAST pointer (vs. `0x00` for inline data) |
+| `compression` | 1 byte | `0x00` = uncompressed, `0x01` = LZ4 compressed |
+| `toast_value_id` | 4 bytes (u32 LE) | Unique identifier for the value in the toast table |
+| `original_size` | 4 bytes (u32 LE) | Original uncompressed byte count |
+| `stored_size` | 4 bytes (u32 LE) | Byte count as stored (after compression, if applied) |
+| `num_chunks` | 4 bytes (u32 LE) | Number of chunks the value was split into |
+
+### Compression
+
+TOAST uses **LZ4 block compression** (via the `lz4_flex` crate). When compression is enabled, the entire value is compressed before chunking. The compressed payload includes a prepended size header so the decompressor knows the original length.
+
+The compression flag is recorded in the TOAST pointer so the reader knows whether to decompress after reassembly.
+
+### Storing a TOASTed Value
+
+1. **Allocate a unique ID** — read the next available `toast_value_id` from the toast table header (offset 4), increment, and write back.
+2. **Compress (optional)** — if compression is enabled, the full value is LZ4-compressed.
+3. **Chunk** — the (possibly compressed) data is split into chunks of up to **2000 bytes** (`TOAST_CHUNK_SIZE`).
+4. **Write chunks** — each chunk is stored as a tuple in the toast table with the following layout:
+
+```
+┌──────────────────┬──────────────┬──────────────────┬──────────────────┐
+│ value_id (4B LE) │ chunk_seq(4B)│ chunk_len (4B LE)│ chunk_data (var) │
+└──────────────────┴──────────────┴──────────────────┴──────────────────┘
+```
+
+5. **Replace inline** — the original value in the heap tuple is replaced with the 18-byte TOAST pointer.
+
+The toast table is stored at: `database/base/{database}/{table}_toast.dat`
+
+### Retrieving a TOASTed Value (Detoasting)
+
+1. **Detect pointer** — during a sequential scan, if a variable-length column's inline data starts with tag `0x01`, it is recognized as a TOAST pointer.
+2. **Scan the toast table** — all data pages of the toast table are scanned, collecting chunks whose `toast_value_id` matches the pointer's `value_id`.
+3. **Sort by sequence** — collected chunks are sorted by `chunk_seq` to restore original ordering.
+4. **Reassemble** — chunk data is concatenated in sequence order.
+5. **Decompress (if needed)** — if the pointer's compression flag is `0x01`, the reassembled data is decompressed using LZ4.
+6. **Return** — the original value bytes are returned to the caller for display or further processing.
+
+### Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `TOAST_THRESHOLD` | 2048 bytes | Values larger than this are TOASTed |
+| `TOAST_CHUNK_SIZE` | 2000 bytes | Maximum data bytes per chunk |
+| `TOAST_INLINE_TAG` | `0x00` | Tag for inline (non-TOASTed) data |
+| `TOAST_POINTER_TAG` | `0x01` | Tag for a TOAST pointer |
+| `TOAST_POINTER_SIZE` | 18 bytes | Total size of a TOAST pointer |
+
+**Source**: `src/backend/toast/mod.rs`, `src/backend/toast/toast_writer.rs`, `src/backend/toast/toast_reader.rs`, `src/backend/toast/compression.rs`
 
 ---
 

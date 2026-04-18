@@ -4,16 +4,37 @@ use crate::executor::json_utils::validate_json;
 use crate::executor::jsonb::JsonbSerializer;
 use crate::executor::udt::UdtSerializer;
 use crate::executor::xml_utils::XmlValidator;
-use crate::page::{init_page, page_free_space, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
-
-use std::fs::File;
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
+use crate::toast::toast_writer::toast_value;
+use crate::toast::{TOAST_INLINE_TAG, TOAST_POINTER_TAG, TOAST_THRESHOLD};
+use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 
 /// Writes a variable-length value as [4-byte length prefix][data bytes] into a tuple byte vector.
-fn serialize_variable_length(tuple_bytes: &mut Vec<u8>, data: &[u8]) {
-    let len = data.len() as u32;
-    tuple_bytes.extend_from_slice(&len.to_le_bytes());
-    tuple_bytes.extend_from_slice(data);
+fn serialize_variable_length(
+    tuple_bytes: &mut Vec<u8>,
+    data: &[u8],
+    toast_strategy: &str,
+    toast_file: &mut Option<File>,
+) -> io::Result<()> {
+    let should_toast =
+        data.len() > TOAST_THRESHOLD && toast_file.is_some() && toast_strategy != "plain";
+    if should_toast {
+        let compress = toast_strategy == "extended";
+        let pointer = toast_value(toast_file.as_mut().unwrap(), data, compress)?;
+        let ptr_bytes = pointer.to_bytes();
+        let tagged_len = (1 + ptr_bytes.len()) as u32;
+        tuple_bytes.extend_from_slice(&tagged_len.to_le_bytes());
+        tuple_bytes.push(TOAST_POINTER_TAG);
+        tuple_bytes.extend_from_slice(&ptr_bytes);
+    } else {
+        let tagged_len = (1 + data.len()) as u32;
+        tuple_bytes.extend_from_slice(&tagged_len.to_le_bytes());
+        tuple_bytes.push(TOAST_INLINE_TAG);
+        tuple_bytes.extend_from_slice(data);
+    }
+
+    Ok(())
 }
 
 pub struct BufferManager {
@@ -126,6 +147,19 @@ impl BufferManager {
 
         let mut inserted_rows = 0usize;
 
+        // Open toast file if the table has one
+        let mut toast_file: Option<File> = if table.has_toast_table {
+            let toast_path = format!("database/base/{}/{}_toast.dat", db_name, table_name);
+            Some(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&toast_path)?,
+            )
+        } else {
+            None
+        };
+
         // Ensure first data page exists
         if self.pages.len() == 1 {
             self.allocate_page();
@@ -179,7 +213,12 @@ impl BufferManager {
                             skip_row = true;
                             break;
                         }
-                        serialize_variable_length(&mut tuple_bytes, val.as_bytes());
+                        serialize_variable_length(
+                            &mut tuple_bytes,
+                            val.as_bytes(),
+                            &col.toast_strategy,
+                            &mut toast_file,
+                        )?;
                     }
                     "JSONB" => {
                         let jsonb_value = match JsonbSerializer::parse(val) {
@@ -191,7 +230,12 @@ impl BufferManager {
                             }
                         };
                         let binary = JsonbSerializer::to_binary(&jsonb_value);
-                        serialize_variable_length(&mut tuple_bytes, &binary);
+                        serialize_variable_length(
+                            &mut tuple_bytes,
+                            &binary,
+                            &col.toast_strategy,
+                            &mut toast_file,
+                        )?;
                     }
                     "XML" => {
                         if let Err(e) = XmlValidator::validate(val) {
@@ -199,17 +243,19 @@ impl BufferManager {
                             skip_row = true;
                             break;
                         }
-                        serialize_variable_length(&mut tuple_bytes, val.as_bytes());
+                        serialize_variable_length(
+                            &mut tuple_bytes,
+                            val.as_bytes(),
+                            &col.toast_strategy,
+                            &mut toast_file,
+                        )?;
                     }
                     dt if dt.starts_with("UDT:") => {
                         let udt_name = &dt[4..];
                         let udt_def = match db.types.get(udt_name) {
                             Some(d) => d,
                             None => {
-                                println!(
-                                    "Skipping row: UDT '{}' not found in database",
-                                    udt_name
-                                );
+                                println!("Skipping row: UDT '{}' not found in database", udt_name);
                                 skip_row = true;
                                 break;
                             }
@@ -223,7 +269,12 @@ impl BufferManager {
                                 break;
                             }
                         };
-                        serialize_variable_length(&mut tuple_bytes, &udt_bytes);
+                        serialize_variable_length(
+                            &mut tuple_bytes,
+                            &udt_bytes,
+                            &col.toast_strategy,
+                            &mut toast_file,
+                        )?;
                     }
                     _ => continue,
                 }
