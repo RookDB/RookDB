@@ -1,0 +1,12 @@
+engine=mysql
+rows_configured=100000
+setup_seconds=0
+create_seconds=0
+insert_seconds=0
+update_seconds=1
+delete_seconds=0
+rows_after_delete=90000
+avg_payload_len_after_delete=55.56
+database=rookbench
+host=127.0.0.1
+port=3306

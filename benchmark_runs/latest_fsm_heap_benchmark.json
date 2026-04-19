@@ -1,13 +1,13 @@
 {
-  "run_id_unix": 1774717734,
+  "run_id_unix": 1776596962,
   "system": {
-    "os_name": "Ubuntu",
-    "os_version": "24.04",
-    "kernel_version": "6.8.0-106-generic",
-    "architecture": "x86_64",
-    "cpu_brand": "12th Gen Intel(R) Core(TM) i5-12500H",
-    "logical_cores": 16,
-    "total_memory_bytes_sysinfo": 16437616640
+    "os_name": "Darwin",
+    "os_version": "14.5",
+    "kernel_version": "23.5.0",
+    "architecture": "aarch64",
+    "cpu_brand": "Apple M1",
+    "logical_cores": 8,
+    "total_memory_bytes_sysinfo": 8589934592
   },
   "config": {
     "small_tuples": 20000,
@@ -28,15 +28,15 @@
     "fsm_rebuild_search_found_page": true
   },
   "performance": {
-    "small_insert_seconds": 40.107093569,
-    "small_insert_tuples_per_sec": 498.6649048900071,
-    "large_insert_seconds": 4.058568741,
-    "large_insert_tuples_per_sec": 246.3922786123878,
-    "point_lookup_seconds": 0.201724622,
-    "point_lookup_ops_per_sec": 4957.253061552397,
-    "seq_scan_seconds": 3.42327239,
-    "seq_scan_tuples_per_sec": 6134.4811652572,
-    "fsm_rebuild_seconds": 0.0425053
+    "small_insert_seconds": 1.0608415,
+    "small_insert_tuples_per_sec": 18852.957769845918,
+    "large_insert_seconds": 0.076710333,
+    "large_insert_tuples_per_sec": 13036.053434939462,
+    "point_lookup_seconds": 0.023077416,
+    "point_lookup_ops_per_sec": 43332.407753103726,
+    "seq_scan_seconds": 0.446472542,
+    "seq_scan_tuples_per_sec": 47035.36729477084,
+    "fsm_rebuild_seconds": 0.009142958
   },
   "scalability": {
     "heap_page_count": 269,
