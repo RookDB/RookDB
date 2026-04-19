@@ -42,6 +42,7 @@
 9. [Performance Regimes](#9-performance-regimes)
 10. [Benchmark Summary Table (Extended)](#10-benchmark-summary-table-extended)
 11. [Test Summary](#11-test-summary)
+12. [Using the Programmatic API and Interface](#12-using-the-programmatic-api-and-interface)
 ---
  
 ## 1. System Architecture Overview  
@@ -1045,6 +1046,8 @@ Measures `ValueCodec::decode` for `DataType::Blob` across the same size range. D
 | **10MB** † | 10,485,760  | **1,815.77**  | 166.90    | **1**     | 1,730.46  | 2,097.42  | 2,097.42  |
 | **100MB** †| 104,857,600 | **82,933.90** | 8,125.28  | **0.01**  | 86,306.05 | 88,830.15 | 88,830.15 |
 
+![BLOB Encode/Decode Latency](docs/content/projects/variable-length/plots/plot1_blob_latency.png)
+
 **Key Insight:** BLOB encode and decode exhibit flat latency (~1.2–1.4 µs) from 10B through 10KB. This is consistent with cache-resident behavior: the payload fits within L1/L2 cache, and the measured latency is dominated by function-call overhead and the constant 4-byte header write — not by memcpy throughput. The transition to memory-bandwidth-limited behavior occurs between 10KB and 100KB, where encode climbs from 1.31 µs to 3.02 µs (×2.3). Beyond 1MB, latency scales linearly with size, confirming pure memcpy throughput dominance.
 
 **Takeaway:** Sub-threshold BLOBs are effectively free from a latency standpoint. Optimization effort should focus on values ≥100KB where memory bandwidth is the bottleneck.
@@ -1091,6 +1094,8 @@ Nested arrays exercise the recursive codec path. Each outer element is itself an
 | 1,000 × 4     | 122.57          | 8.23           | 8                | 137.97          | 6.45           | 7                |
 | 10,000 × 4    | 1,245.18        | 98.50          | 1                | 1,350.82        | 6.80           | 1                |
 
+![ARRAY Encode/Decode Latency](docs/content/projects/variable-length/plots/plot2_array_latency.png)
+
 **Key Insight:** `ARRAY<INT32>` encodes at approximately 16 ns/element (derived from the 10K-element slope), consistent with a bulk memcpy over a contiguous INT32 buffer. `ARRAY<TEXT>` decodes significantly slower than it encodes at scale (515 µs vs. 196 µs at 10K elements), reflecting per-element heap allocation cost during deserialization. Nested arrays show near-symmetric encode/decode performance, indicating the recursive codec path has negligible asymmetric overhead.
 
 **Takeaway:** For high-throughput ARRAY workloads, prefer fixed-length element types where possible. TEXT array decode is 2–3× slower than encode at scale due to per-element heap allocation during deserialization.
@@ -1136,6 +1141,8 @@ Benchmarks `ToastManager::store_large_value` — the full chunking pipeline. The
 | 10MB       | 33,052.53      | 2,538.78  | 0.03      |
 | 100MB      | 371,063.91     | 3,363.38  | 0.003     |
 
+![TOAST Manager Latency](docs/content/projects/variable-length/plots/plot3_toast_latency.png)
+
 **Key Insight:** TOAST pointer operations are size-independent and constant at ~1.2–1.75 µs regardless of the represented value size. This is expected: the pointer is a fixed-width 16-byte struct encoding chunk metadata, not the data itself. `should_use_toast` is equally O(1), performing a single integer comparison — latency stays flat at ~1.2 µs across 16 KB to 100 MB inputs. Value storage, by contrast, scales linearly: the 13KB→100MB range spans ~7,500× in size and ~3,490× in latency (106 µs → 371,064 µs), confirming O(n/chunk_size) chunking behavior.
 
 **Takeaway:** TOAST pointer indirection costs are negligible. All performance impact of TOAST is concentrated in `store_large_value`, which must be treated as a bulk I/O operation rather than a metadata update.
@@ -1180,6 +1187,8 @@ Benchmarks `TupleCodec::decode_tuple_with_toast` on the same `(INT32, BLOB)` sch
 | 10MB       | 10,485,760  | 35,703.28      | 4,489.73  | 0.03      |
 | 100MB      | 104,857,600 | 469,301.43     | 7,222.83  | 0.002     |
 
+![Tuple INT + BLOB Latency](docs/content/projects/variable-length/plots/plot4_tuple_blob_latency.png)
+
 ### Tuple Encode — INT + ARRAY\<INT32\>
 
 Benchmarks the full tuple encode/decode round-trip for a `(INT32, ARRAY<INT32>)` schema. At sub-threshold array sizes the array is encoded inline; because INT32 elements pack at 4 bytes each, a 10,000-element array encodes to ~40 KB and triggers TOAST. Decode anomaly at 10,000 elements is a known measurement artifact.
@@ -1219,6 +1228,8 @@ Benchmarks `(INT32, ARRAY<ARRAY<INT32>>)` with 4 inner elements per outer elemen
 
 † Anomalous. Preserved as measured.
 
+![Tuple ARRAY Latency](docs/content/projects/variable-length/plots/plot5_tuple_array_latency.png)
+
 **Key Insight:** The TOAST activation at the 4KB→10KB boundary introduces a ~54× encode latency increase (1.80 µs → 98.15 µs) and ~70× decode increase (1.39 µs → 97.22 µs). This is not a marginal cost increase — it is a categorical regime change involving chunk allocation, HashMap insertion, and pointer indirection in place of a single inline memcpy. Applications must architect data layouts to avoid inadvertent TOAST activation on hot-path tuples.
 
 **Takeaway:** The 8,192-byte TOAST threshold is the most critical performance boundary in the system. Tuple schemas with fields that hover near this boundary exhibit non-deterministic latency (either ~1.80 µs or ~98 µs depending on payload size at runtime).
@@ -1255,6 +1266,8 @@ Both datasets use an identical schema: `(id INT32, data1 BOOL, data2 TEXT, data3
 |-----------|------------|--------------------|-------------------|------------|
 | **Encode**| 2.42 µs    | 304.11 µs          | +12,456.4%        | 125.6× slower |
 | **Decode**| 1.52 µs    | 297.60 µs          | +19,536.4%        | 196.4× slower |
+
+![TOAST Overhead Comparison](docs/content/projects/variable-length/plots/plot6_toast_overhead.png)
 
 **Key Insight:** Activating TOAST on multiple fields within a single tuple (one 12KB BLOB and an array of four 12KB BLOBs) incurs a ~125× to ~196× latency penalty compared to keeping payloads small and inline. This demonstrates that while TOAST prevents page overflow and engine crashes, the cost of multi-chunk allocation, tree traversal, and fragmentation is severe. 
 
@@ -1468,4 +1481,168 @@ The following table enumerates all tests in the RookDB BLOB, ARRAY, TOAST, and T
 
 ---
 
-*Report generated from RookDB benchmark suite — storage_manager v0.1.0. All benchmark values are measured; no extrapolation applied. Anomalous outlier values are preserved without modification and flagged inline.*
+## 12. Using the Programmatic API and Interface
+
+### Introduction
+
+RookDB exposes two non-interactive entry points for variable-length storage operations. The lower layer is the free-function CRUD API in `src/backend/storage/variable_length_api.rs`. The upper layer is the trait-based wrapper in `src/backend/storage/variable_length_interface.rs`, which binds a database, table, and schema into one reusable object.
+
+This layer is intended for tests, examples, and future query-engine code. It uses the same tuple codec, heap file format, and TOAST file handling as the interactive commands in `data_cmd.rs`, but without any terminal prompts.
+
+| Entry Point | File | Form | Caller Supplies | Best Use Case | Notes |
+|-------------|------|------|-----------------|---------------|-------|
+| Free-function API | `api.rs`* | Free functions | Full table identity on every call: `db`, `table`, ordered `schema`, and the operation-specific payload such as values or `(page_num, slot_index)` | Low-level integration code, storage-focused tests, and one-off operations where explicit call boundaries matter and repeating full table metadata each time is acceptable | This is the core programmatic storage surface. It performs tuple encoding/decoding, heap writes, TOAST creation for oversized values, and TOAST cleanup during update/delete without adding any wrapper abstraction |
+| Trait-based interface | `interface.rs`* | Trait + wrapper | A one-time table binding through `TableStore::new(db, table, schema)`, followed by only per-call values or heap location plus `Catalog` for reads | Repeated CRUD flows on the same table, cleaner examples, and higher-level components that benefit from a reusable table-scoped object instead of threading `db`, `table`, and `schema` through every call | This is an ergonomic layer over the API, not a second implementation. It keeps the same heap format, tuple codec, and TOAST behavior, but packages them behind `PersistentVariableLengthStore` and `TableStore` |
+
+*api.rs refers to variable_lenth_api.rs
+
+*interface.rs refers to variable_length_interface.rs
+
+
+| Structural Aspect | Free-Function API | Trait-Based Interface |
+|-------------------|-------------------|-----------------------|
+| Abstraction unit | Individual CRUD function call | One table-scoped object implementing a trait |
+| Context ownership | Caller owns and passes `db`, `table`, and `schema` every time | `TableStore` stores `db`, `table`, and `schema` once at construction |
+| Public surface | `insert_tuple_api`, `read_tuples_api`, `read_tuple_by_location_api`, `update_tuple_api`, `delete_tuple_api` | `PersistentVariableLengthStore::{insert, read_all, get, update, delete}` implemented by `TableStore` |
+| Insert call shape | `insert_tuple_api(db, table, values, schema)` | `store.insert(values)` |
+| Read-all call shape | `read_tuples_api(catalog, db, table, schema)` | `store.read_all(catalog)` |
+| Point-read call shape | `read_tuple_by_location_api(catalog, db, table, schema, page_num, slot_index)` | `store.get(catalog, page_num, slot_index)` |
+| Update call shape | `update_tuple_api(db, table, page_num, slot_index, new_values, schema)` | `store.update(page_num, slot_index, new_values)` |
+| Delete call shape | `delete_tuple_api(db, table, page_num, slot_index, schema)` | `store.delete(page_num, slot_index)` |
+| Where behavior lives | Directly in `variable_length_api.rs` | Delegates straight into the free-function API; no separate storage logic |
+| TOAST / heap semantics | Full implementation: tuple encode/decode, heap mutation, TOAST persistence and cleanup | Identical semantics because each trait method forwards to the same API functions |
+| Best mental model | Stateless utility layer with explicit parameters | Thin object-oriented facade over the same storage engine |
+
+### 12.1 Free-Function API
+
+The API layer provides schema-aware CRUD functions over a single table:
+
+| Function | Purpose | Input Shape | Output | How it Works |
+|----------|---------|-------------|--------|--------------|
+| `insert_tuple_api(db, table, values, schema)` | Insert one row | Logical values in schema order | `InsertResult` | Encodes the tuple, TOASTs oversized variable-length fields, writes tuple bytes to heap, then persists `.toast` state |
+| `read_tuples_api(catalog, db, table, schema)` | Full-table scan | Catalog plus table identity | `Vec<TupleRecord>` | Scans live heap tuples, decodes them through the tuple codec, and reconstructs TOAST-backed values transparently |
+| `read_tuple_by_location_api(catalog, db, table, schema, page_num, slot_index)` | Read one tuple by physical location | Catalog plus page/slot location | `Option<TupleRecord>` | Reuses the read path, then filters for the requested `(page_num, slot_index)` |
+| `update_tuple_api(...)` | Replace one tuple | Page/slot location plus replacement values | `UpdateResult` | Encodes the new row, deletes the old heap slot, inserts the replacement tuple, then frees old TOAST values |
+| `delete_tuple_api(db, table, page_num, slot_index, schema)` | Delete one tuple | Page/slot location | `DeleteResult` | Marks the heap slot deleted, extracts referenced TOAST ids from old tuple bytes, and frees those TOAST values |
+
+**Operational model:** insert and update require the caller to provide values in schema order. Read operations require a `Catalog` because scan-time decoding rebuilds the typed schema from catalog metadata. Delete and update operate by heap location, so the common pattern is: read or scan first, find the target tuple's `(page_num, slot_index)`, then call delete or update.
+
+### 12.2 Trait-Based Interface
+
+The interface layer introduces:
+
+| Component | Kind | Responsibility | Storage Behavior |
+|-----------|------|----------------|------------------|
+| `PersistentVariableLengthStore` | Trait | Defines the common table-scoped operations: `insert`, `read_all`, `update`, `delete`, and `get` | Abstract contract only |
+| `TableStore` | Concrete struct | Stores `db`, `table`, and `schema`, then forwards all operations to the API layer | Same heap, tuple codec, and TOAST behavior as the free-function API |
+
+This wrapper removes repeated parameter passing. Instead of supplying `db`, `table`, and `schema` to every call, the caller constructs one `TableStore` and reuses it. The underlying storage behavior is unchanged: `TableStore::insert()` still ends up calling `insert_tuple_api`, `TableStore::read_all()` still performs a decoded scan, and `TableStore::delete()` still cleans up TOAST values.
+
+
+
+| Choice | Prefer It When | Tradeoff |
+|--------|----------------|----------|
+| Free-function API | You want explicit control and do not mind passing table metadata on each call | More parameter repetition |
+| `TableStore` interface | You are repeatedly working with the same table and want a cleaner object-like surface | Adds a wrapper layer, but not new behavior |
+
+### 12.3 Example: Insert, Read, and Delete Using the API
+
+The example below shows the typical lifecycle with the free-function API. It assumes the table already exists on disk and that the schema matches the catalog definition exactly.
+
+```rust
+use crate::backend::catalog::{load_catalog, DataType, Value};
+use crate::backend::storage::variable_length_api::{
+    delete_tuple_api, insert_tuple_api, read_tuple_by_location_api, read_tuples_api,
+};
+
+fn api_example() -> std::io::Result<()> {
+    let schema = vec![
+        ("id".to_string(), DataType::Int32),
+        ("payload".to_string(), DataType::Blob),
+    ];
+
+    let values = vec![
+        Value::Int32(1),
+        Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+    ];
+
+    // 1. Insert one tuple into database/base/test/table1.dat
+    let insert_result = insert_tuple_api("test", "table1", &values, &schema)?;
+    println!(
+        "inserted {} bytes, total pages now {}",
+        insert_result.tuple_bytes, insert_result.total_pages
+    );
+
+    // 2. Read live tuples back through the catalog-driven scan path
+    let catalog = load_catalog();
+    let rows = read_tuples_api(&catalog, "test", "table1", &schema)?;
+
+    // 3. Find the tuple we inserted and capture its heap location
+    let row = rows
+        .iter()
+        .find(|r| r.values[0] == Value::Int32(1))
+        .expect("inserted row not found");
+
+    println!("row lives at page {}, slot {}", row.page_num, row.slot_index);
+
+    // 4. Read exactly that tuple by location
+    let fetched = read_tuple_by_location_api(
+        &catalog,
+        "test",
+        "table1",
+        &schema,
+        row.page_num,
+        row.slot_index,
+    )?;
+    println!("fetched tuple = {:?}", fetched.unwrap().values);
+
+    // 5. Delete the same tuple and free any old TOAST values it referenced
+    let delete_result = delete_tuple_api(
+        "test",
+        "table1",
+        row.page_num,
+        row.slot_index,
+        &schema,
+    )?;
+    println!(
+        "deleted tuple at ({}, {}), freed {} TOAST values",
+        delete_result.page_num,
+        delete_result.slot_index,
+        delete_result.toast_values_freed
+    );
+
+    Ok(())
+}
+```
+
+**What this example demonstrates:**
+
+- Insert is schema-driven and automatically TOAST-aware.
+- Read returns both decoded values and the physical heap location of each live tuple.
+- Delete uses the physical heap location, not a logical key.
+- If the tuple contained oversized `BLOB` or `ARRAY` fields, delete also removes their TOAST chunks.
+
+### 12.4 Example: Using the Interface Wrapper
+
+pseudocode- Assume `schema` and `values` are already prepared and valid for `test.table1`:
+
+```text
+  store = TableStore("test", "table1", schema)
+
+  store.insert(values)
+
+  rows = store.read_all(catalog)
+  for tuple in &results {
+        println!("Page: {}, Slot: {}, Values: {:?}", tuple.page_num, tuple.slot_index, tuple.values);
+
+      // assert_eq!(tuple.values.len(), 2);
+    }
+
+print row.values
+```
+
+The point is not new storage behavior. The point is that `db`, `table`, and `schema` are bound once into `store`, so every later call becomes smaller and easier to read.
+
+**Takeaway:** for repeated work on `test.table1`, the trait-based interface is just a smaller, cleaner way to use the same storage engine.
+
+---

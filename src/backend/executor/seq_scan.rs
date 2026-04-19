@@ -203,46 +203,60 @@ pub fn scan_tuples_indexed(
     Ok(results)
 }
 
-/// Helper function to display a value based on its type
-fn display_value(col_name: &str, value: &Value) {
+/// Format a decoded value for full tuple display.
+///
+/// `show_tuples` is meant to surface the fully reconstructed value, including
+/// detoasted BLOBs and recursively decoded ARRAY contents, so this formatter
+/// avoids preview truncation.
+fn format_value_full(value: &Value) -> String {
     match value {
-        Value::Null => {
-            print!("{}=NULL ", col_name);
-        }
-        Value::Int32(n) => {
-            print!("{}={} ", col_name, n);
-        }
-        Value::Boolean(b) => {
-            print!("{}={} ", col_name, if *b { "true" } else { "false" });
-        }
-        Value::Text(s) => {
-            print!("{}='{}' ", col_name, s);
-        }
+        Value::Null => "NULL".to_string(),
+        Value::Int32(n) => n.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Text(s) => format!("'{}'", s),
         Value::Blob(bytes) => {
-            // Display blob size and first few bytes in hex
-            if bytes.is_empty() {
-                print!("{}=<empty blob> ", col_name);
-            } else {
-                let preview = bytes
-                    .iter()
-                    .take(8)
-                    .map(|b| format!("{:02X}", b))
-                    .collect::<Vec<_>>()
-                    .join("");
-                if bytes.len() > 8 {
-                    print!("{}=<blob:{} bytes, starts:0x{}...> ", col_name, bytes.len(), preview);
-                } else {
-                    print!("{}=<blob:{} bytes:0x{}> ", col_name, bytes.len(), preview);
-                }
-            }
+            let hex = bytes
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join("");
+            format!("0x{}", hex)
         }
         Value::Array(elements) => {
-            // Display array element count and types
-            if elements.is_empty() {
-                print!("{}=<empty array> ", col_name);
-            } else {
-                print!("{}=<array:{} elements> ", col_name, elements.len());
-            }
+            let rendered = elements
+                .iter()
+                .map(format_value_full)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{}]", rendered)
         }
+    }
+}
+
+/// Helper function to display a value based on its type
+fn display_value(col_name: &str, value: &Value) {
+    print!("{}={} ", col_name, format_value_full(value));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_value_full;
+    use crate::catalog::data_type::Value;
+
+    #[test]
+    fn format_value_full_expands_blob_contents() {
+        let rendered = format_value_full(&Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(rendered, "0xDEADBEEF");
+    }
+
+    #[test]
+    fn format_value_full_expands_nested_arrays() {
+        let rendered = format_value_full(&Value::Array(vec![
+            Value::Int32(1),
+            Value::Blob(vec![0xAA, 0x55]),
+            Value::Array(vec![Value::Text("hi".to_string()), Value::Boolean(true)]),
+        ]));
+
+        assert_eq!(rendered, "[1, 0xAA55, ['hi', true]]");
     }
 }
