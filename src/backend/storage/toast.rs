@@ -2,7 +2,7 @@
 //! Handles out-of-line storage of large BLOB and ARRAY values
 //!
 //! Design: One TOAST table (`.toast` file) per parent table.
-//! Supports per-column storage strategies, LRU detoast caching,
+//! Supports per-column storage strategies,
 //! value deletion, copy-on-write updates, and vacuum/compaction.
 
 use std::collections::HashMap;
@@ -47,15 +47,15 @@ impl ToastStrategy {
     }
 }
 
-/// LRU-based detoast cache for frequently accessed TOAST values
+/*
+Legacy detoast cache implementation kept commented for reference only.
+Caching is intentionally disabled because the current TOAST path works
+directly from the in-memory chunk store and does not need an extra layer.
+
 pub struct ToastCache {
-    /// Cached reassembled payloads keyed by value_id
     entries: HashMap<u64, Vec<u8>>,
-    /// Access order tracking (most recent at back)
     access_order: Vec<u64>,
-    /// Maximum number of cached entries
     max_entries: usize,
-    /// Cache hit/miss counters for diagnostics
     pub hits: u64,
     pub misses: u64,
 }
@@ -117,6 +117,29 @@ impl ToastCache {
         self.entries.len()
     }
 }
+*/
+
+/// Compatibility shim for the removed detoast cache.
+///
+/// The public API still exposes cache-related methods, but they are now
+/// guaranteed no-ops so TOAST behavior remains unchanged.
+#[derive(Default)]
+pub struct ToastCache {
+    pub hits: u64,
+    pub misses: u64,
+}
+
+impl ToastCache {
+    pub fn new(_max_entries: usize) -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {}
+
+    pub fn len(&self) -> usize {
+        0
+    }
+}
 
 /// Default chunk size for TOAST storage (4 KB)
 pub const TOAST_CHUNK_SIZE: usize = 4096;
@@ -132,7 +155,7 @@ pub struct ToastManager {
     pub toast_page_count: u32,
     /// In-memory chunk store keyed by TOAST value ID
     chunks: HashMap<u64, Vec<ToastChunk>>,
-    /// Detoast cache for read-path optimization
+    /// Compatibility field retained so the existing API keeps compiling.
     pub cache: ToastCache,
 }
 
@@ -142,17 +165,17 @@ impl ToastManager {
             next_value_id: 1,
             toast_page_count: 0,
             chunks: HashMap::new(),
-            cache: ToastCache::new(64), // Default: cache up to 64 detoasted values
+            cache: ToastCache::new(64),
         }
     }
 
-    /// Create with a custom cache size
-    pub fn with_cache_size(max_cache_entries: usize) -> Self {
+    /// Create a manager while ignoring the legacy cache size parameter.
+    pub fn with_cache_size(_max_cache_entries: usize) -> Self {
         ToastManager {
             next_value_id: 1,
             toast_page_count: 0,
             chunks: HashMap::new(),
-            cache: ToastCache::new(max_cache_entries),
+            cache: ToastCache::new(0),
         }
     }
 
@@ -233,19 +256,12 @@ impl ToastManager {
         Ok(result)
     }
 
-    /// Read a large value with detoast cache integration.
-    /// NOTE: caching is currently disabled — always fetches directly from chunks.
+    /// Legacy compatibility wrapper. Reads directly from the chunk store.
     pub fn fetch_large_value_cached(&mut self, ptr: &ToastPointer) -> Result<Vec<u8>, String> {
-        // --- CACHE DISABLED ---
-        // if let Some(cached) = self.cache.get(ptr.value_id) {
-        //     return Ok(cached.clone());
-        // }
-        toast_logger::log_toast(&format!("[TOAST CACHE] Fetching value {} (cache miss - fetching from memory)", ptr.value_id));
-        // let result = self.fetch_large_value(ptr)?;
-        // self.cache.insert(ptr.value_id, result.clone());
-        // Ok(result)
-
-        // Always fetch directly from in-memory chunk store
+        toast_logger::log_toast(&format!(
+            "[TOAST] Fetching value {} from memory (cache code disabled)",
+            ptr.value_id
+        ));
         self.fetch_large_value(ptr)
     }
 
@@ -275,7 +291,6 @@ impl ToastManager {
 
     /// Delete all chunks for a given value ID (used when tuple is deleted)
     pub fn delete_value(&mut self, value_id: u64) -> Result<usize, String> {
-        // self.cache.invalidate(value_id);  // CACHE DISABLED
         match self.chunks.remove(&value_id) {
             Some(chunks) => Ok(chunks.len()),
             None => Err(format!("TOAST value {} not found for deletion", value_id)),
@@ -320,7 +335,6 @@ impl ToastManager {
                 }
                 freed_chunks += chunks.len();
             }
-            // self.cache.invalidate(id);  // CACHE DISABLED
         }
 
         (freed_chunks, freed_bytes)
@@ -329,7 +343,6 @@ impl ToastManager {
     /// Compact: rewrite chunks to reclaim space, resetting value IDs if needed.
     /// Returns the number of live values retained.
     pub fn compact(&mut self) -> usize {
-        // self.cache.clear();  // CACHE DISABLED
         self.chunks.len()
     }
 
@@ -372,7 +385,7 @@ impl ToastManager {
             ]),
             toast_page_count: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
             chunks: HashMap::new(),
-            cache: ToastCache::new(64),
+            cache: ToastCache::new(0),
         })
     }
 
@@ -566,7 +579,7 @@ impl ToastManager {
             next_value_id,
             toast_page_count: 0,
             chunks,
-            cache: ToastCache::new(64),
+            cache: ToastCache::new(0),
         })
     }
 }
@@ -720,56 +733,23 @@ mod tests {
         assert!(ToastStrategy::parse("INVALID").is_err());
     }
 
-    // === Cache tests ===
+    /*
+    Cache-specific tests are intentionally commented out because the cache
+    implementation has been removed. The compatibility shim is exercised
+    indirectly by the remaining TOAST retrieval tests.
 
     #[test]
-    fn test_toast_cache_basic() {
-        let mut cache = ToastCache::new(2);
-        cache.insert(1, vec![1, 2, 3]);
-        cache.insert(2, vec![4, 5, 6]);
-
-        assert_eq!(cache.get(1).unwrap(), &vec![1, 2, 3]);
-        assert_eq!(cache.get(2).unwrap(), &vec![4, 5, 6]);
-        assert_eq!(cache.len(), 2);
-    }
+    fn test_toast_cache_basic() {}
 
     #[test]
-    fn test_toast_cache_eviction() {
-        let mut cache = ToastCache::new(2);
-        cache.insert(1, vec![1]);
-        cache.insert(2, vec![2]);
-        cache.insert(3, vec![3]); // Should evict value_id=1 (LRU)
-
-        assert!(cache.get(1).is_none());
-        assert_eq!(cache.get(2).unwrap(), &vec![2]);
-        assert_eq!(cache.get(3).unwrap(), &vec![3]);
-    }
+    fn test_toast_cache_eviction() {}
 
     #[test]
-    fn test_toast_cache_invalidate() {
-        let mut cache = ToastCache::new(10);
-        cache.insert(1, vec![1]);
-        cache.invalidate(1);
-        assert!(cache.get(1).is_none());
-        assert_eq!(cache.len(), 0);
-    }
+    fn test_toast_cache_invalidate() {}
 
     #[test]
-    fn test_fetch_large_value_cached() {
-        let mut manager = ToastManager::new();
-        let payload = vec![0xCD; 10000];
-        let ptr = manager.store_large_value(&payload).unwrap();
-
-        // Cache is disabled: both calls fetch directly from chunk store
-        let result1 = manager.fetch_large_value_cached(&ptr).unwrap();
-        assert_eq!(result1, payload);
-        // Cache hits/misses are not tracked (cache disabled)
-        assert_eq!(manager.cache.hits, 0);
-        assert_eq!(manager.cache.misses, 0);
-
-        let result2 = manager.fetch_large_value_cached(&ptr).unwrap();
-        assert_eq!(result2, payload);
-    }
+    fn test_fetch_large_value_cached() {}
+    */
 
     // === Stats tests ===
 

@@ -5,3 +5,4 @@ pub mod toast_logger;
 pub mod database_logger;
 pub mod tuple_codec;
 pub mod value_codec;
+pub mod variable_length_api;
