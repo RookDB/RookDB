@@ -288,9 +288,9 @@ Adds raw data to the file.
 Data inserted in the file.
 
 **Implementation:**
-1. Get the **total number of pages** in the file using [`page_count`](#6page_count-api) API.
-2. Read the **last page** into memory using [`read_page`](#8-read_page-api) API.
-3. Check **free space** in the page using [`page_free_space`](#10-page_free_space-api) API.
+1. Get the **total number of pages** in the file using [`page_count`](#4page_count-api) API.
+2. Read the **last page** into memory using [`read_page`](#2-read_page-api) API.
+3. Check **free space** in the page using [`page_free_space`](#5-page_free_space-api) API.
 4. If the last page has enough free space to store the data and its ItemId 
 (i.e., if `free_space >= data.size() + ITEM_ID_SIZE`):
     a. Calculate the **insertion offset** from the upper pointer.
@@ -299,7 +299,7 @@ Data inserted in the file.
     c. Update the **upper pointer** in the page header to the new start of free space.
     d. Write the **ItemId entry** (offset and length of the data) at the position indicated by the lower pointer.
     e. Update the **lower pointer** in the page header to account for the newly added ItemId (`lower += ITEM_ID_SIZE`).
-    f. Write the updated page back to disk using [`write_page`](#9write_page-api) API.
+    f. Write the updated page back to disk using [`write_page`](#3write_page-api) API.
 5. If the last page does not have enough free space:
     a. Create a new page in the file and add the tuple in the new page.
 
@@ -307,41 +307,3 @@ Data inserted in the file.
 * [Code Documentation](https://hemanth-sunkireddy.github.io/Storage-Manager/storage_manager/all.html)
 * **Reference**: [Postgres Internals – Page Layouts & Data](https://www.postgresql.org/docs/current/storage-page-layout.html)
 > **Note:** Some APIs have undergone slight implementation changes during development. So, some of the implementation steps might not aligned with the actual code functions.
-
----
-
-## FSM and Heap Backend Functions (Current)
-
-This section summarizes newly introduced backend functions used by the FSM + Heap integration and their purpose.
-
-### Heap Manager APIs
-
-- `HeapManager::create(file_path) -> io::Result<Self>`
-    - Creates heap file, initializes table header + first page, and initializes FSM sidecar.
-- `HeapManager::open(file_path) -> io::Result<Self>`
-    - Opens an existing heap file and FSM state for normal operations.
-- `HeapManager::insert_tuple(tuple_data) -> io::Result<(u32, u32)>`
-    - Uses FSM-driven page search for insertion and returns `(page_id, slot_id)`.
-- `HeapManager::get_tuple(page_id, slot_id) -> io::Result<Vec<u8>>`
-    - Point-lookup by tuple coordinate.
-- `HeapManager::delete_tuple(page_id, slot_id) -> io::Result<u32>`
-    - Marks tuple slot deleted and returns reclaimed bytes.
-- `HeapManager::scan() -> HeapScanIterator`
-    - Sequential tuple scan across data pages.
-- `HeapManager::flush() -> io::Result<()>`
-    - Persists in-memory state to disk.
-
-### FSM APIs
-
-- `FSM::open(fsm_path, heap_page_count) -> io::Result<Self>`
-    - Opens/initializes FSM file for the associated heap.
-- `FSM::build_from_heap(heap_file, fsm_path) -> io::Result<Self>`
-    - Rebuilds FSM tree state from heap free-space values.
-- `FSM::fsm_search_avail(min_category) -> io::Result<Option<u32>>`
-    - Finds a heap page candidate with enough free space.
-- `FSM::fsm_set_avail(heap_page_id, new_free_bytes) -> io::Result<()>`
-    - Updates leaf availability and bubbles up max values.
-- `FSM::fsm_vacuum_update(heap_page_id, reclaimed_bytes) -> io::Result<()>`
-    - Updates free-space state after delete/vacuum-style reclamation.
-- `FSM::sync() -> io::Result<()>`
-    - Flushes FSM changes to disk.

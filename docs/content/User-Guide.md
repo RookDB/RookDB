@@ -91,39 +91,3 @@ Displays storage statistics like total number of pages.
 ## Exit
 
 Exit from RookDB.
-
----
-
-## Frontend / CLI Changes
-
-The CLI now exposes a stable flow for working with Heap + FSM-backed table storage:
-
-1. Create/select database.
-2. Create table with supported schema types (`INT`, `TEXT`).
-3. Load data (`LOAD CSV`) into heap pages.
-4. Show tuples (sequential scan path).
-5. Show table statistics (page-level state).
-
-These commands route into backend APIs that update both heap pages and FSM metadata.
-
-## Benchmark Commands
-
-### Internal FSM + Heap Benchmark
-
-Run from repo root:
-
-```bash
-cargo run --release --bin benchmark_fsm_heap
-```
-
-Outputs are written under `benchmark_runs/` including history and latest JSON snapshots.
-
-### Cross-Database Benchmark Suite
-
-Run from repo root:
-
-```bash
-./benchmarks/run_all_benchmarks.sh
-```
-
-This orchestrates SQLite, MySQL, PostgreSQL (`pgbench`), and PostgreSQL FSM metrics collection and writes a combined report to `benchmark_runs/benchmark_comparison.csv`.
