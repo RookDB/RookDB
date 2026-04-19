@@ -225,7 +225,7 @@ And so on up to Level-2.
 ```rust
 pub struct FSMPage {
     tree: [u8; FSM_NODES_PER_PAGE],  // 4,080 bytes: binary max-tree
-    fp_next_slot: u16,                // 2 bytes: next sequential slot hint
+    fp_next_slot: u16, // Currently unused                // 2 bytes: next sequential slot hint (currently unused)
 }
 ```
 
@@ -238,17 +238,17 @@ FSM Search for a page:
   │
   ├─ Start at Level 2 root, read tree[0]
   ├─ Descend to Level 1:
-  │   └─ Check children starting from fp_next_slot
+  │   └─ Check children sequentially (ignoring unused fp_next_slot)
   │       ├─ If tree[fp_next_slot] >= required_category:
   │       │   └─ Use this page
   │       └─ Else:
   │           └─ Wrap around and scan from 0
   │
   ├─ Reach Level 0 leaf:
-  │   └─ Repeat same logic with that page's fp_next_slot
+  │   └─ Repeat sequential logic
   │
   └─ On successful find:
-      └─ Advance fp_next_slot = (fp_next_slot + 1) % FSM_SLOTS_PER_PAGE
+      └─ Advance `fp_next_slot` (deferred to future implementation)
          (for next search, start from next sequential position)
 ```
 
@@ -541,17 +541,17 @@ pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<u32>>
 2. Traverse Level 2 → Level 1:
    ├─ For each child slot:
    │   ├─ If tree[slot] >= min_category:
-   │   │   ├─ Prefer slot at fp_next_slot (sequential hint)
+   │   │   ├─ Search slots sequentially from 0
    │   │   ├─ If not available, try next sequential slot
    │   │   └─ Descend to Level 1 page
    │   
 3. Traverse Level 1 → Level 0:
    ├─ Repeat same logic: find first child with category >= min_category
-   ├─ Prefer fp_next_slot to avoid always starting at 0
+   ├─ Search sequentially from 0 (`fp_next_slot` reserved for future)
    
 4. Reach Level-0 leaf page:
    ├─ Compute heap_page_id = (fsm_page_no × FSM_SLOTS_PER_PAGE) + slot
-   ├─ Advance fp_next_slot: fp_next_slot = (fp_next_slot + 1) % FSM_SLOTS_PER_PAGE
+   ├─ Advance `fp_next_slot` (deferred to future implementation): fp_next_slot = (fp_next_slot + 1) % FSM_SLOTS_PER_PAGE
    ├─ Mark all visited FSM pages as dirty (for eventual flush)
    
 5. Return Some(heap_page_id)
@@ -792,7 +792,7 @@ Avg Disk I/O per Insert:       ~3.0 reads + ~2.0 writes
 ```rust
 pub struct FSMPage {
     tree: [u8; FSM_NODES_PER_PAGE],  // 4,080 bytes
-    fp_next_slot: u16,
+    fp_next_slot: u16, // Currently unused
 }
 ```
 
@@ -859,7 +859,7 @@ Check tree[0] (root) = 250 >= 200 ✓
 | **Page Find Time** | O(log N) = O(3) | 3-level tree, constant height |
 | **Page Found Correctness** | category >= requested | Binary max-tree bubble-up |
 | **Contiguous Free Tracking** | Accurate within category resolution | Updated after every insert/delete |
-| **Sequential Fills** | Pages fill in order, then wrap | `fp_next_slot` hint |
+| **Sequential Fills** | Pages fill in order, then wrap | Sequential traversal |
 | **No Implicit Scanning** | FSM never scans all pages | O(log N) traversal only |
 | **Crash Recovery** | FSM can be rebuilt from heap | Treated as hint, not durability critical |
 | **Multi-Page Scalability** | Scales to 4M+ pages | Tree height stays constant |

@@ -229,7 +229,7 @@ Planned enhancement: export CSV from JSON and generate comparison graphs (baseli
 ## Innovative/Experimental Directions (Bonus)
 
 - Compare first-fit vs. hint-guided page selection variants.
-- Evaluate `fp_next_slot` based load-spreading behavior under mixed insert sizes.
+- Evaluate sequential insertion without `fp_next_slot` load-spreading under mixed insert sizes.
 - Measure impact of different tuple size distributions (uniform vs. skewed).
 - Add repeated-run median/p95 reporting for more stable benchmarking.
 
@@ -269,7 +269,7 @@ Key integration scenarios validated:
 
 ## Known Limitations / Next Milestones
 
-- Improve use of fp_next_slot hint during search for better load spreading across equal candidates.
+- Implement `fp_next_slot` hint for multi-threaded load spreading (currently unused).
 - Expand multi-level page addressing beyond current practical ranges.
 - Add vacuum timestamp lifecycle updates in header metadata.
 - Add graph-based benchmark reporting (throughput and latency trends across runs).

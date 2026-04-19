@@ -142,7 +142,7 @@ Total tuples displayed: 3
 ## 9. Free Space Management (FSM) (`src/backend/fsm/fsm.rs`)
 - **3-Level Binary Max-Tree**: Tree-based structure replacing O(N) scan layouts. Stored safely inside a `.fsm` persistence sidecar fork avoiding main file cluster intrusion.
 - **Constant-Time I/O Space Discovery (`fsm_search_avail`)**: Rapid lookup resolving exact target heap pages fitting arbitrary payloads. Requires exactly 3 bounded page reads (O(1) I/O) while leveraging O(log N) binary max-tree cpu-checks internally, completely avoiding raw header sequence scanning.
-- **Load Balancing/Spreading (`fp_next_slot`)**: Incorporating sequential slot hints driving horizontal data ingestion eliminating hot-spots linearly.
+- **Load Balancing/Spreading (`fp_next_slot`)**: Currently, insertions are purely sequential. Horizon data ingestion eliminating hot-spots via `fp_next_slot` is reserved for future implementation.
 - **Auto-Bubble Capacity Resolvers (`fsm_set_avail`)**: Updating a leaf slot capacity recursively updates max parent nodes, notifying the tree roots exactly how much space is left across subsets.
 - **Compaction Readiness (`fsm_vacuum_update`)**: Integration hooking natively into vacuuming modules marking pages as refreshed effortlessly.
 - **Fault-Tolerant Native Reconstruction (`build_from_heap`)**: If a `.fsm` sidecar drops out of scope or is deleted, FSM rebuilds the layout completely seamlessly from the primary heap data without logging exceptions.
@@ -210,7 +210,7 @@ Total tuples displayed: 3
 
 ✓ **Efficient Page Selection**
 - `fsm_search_avail(min_category)`: 3 bounded I/O reads, O(log N) CPU
-- `fp_next_slot`: Sequential hint for load spreading
+- `fp_next_slot`: Currently unused, reserved for future load spreading
 - Fallback: allocate new page if all existing pages fragmented
 
 ✓ **Automatic Category Updates**

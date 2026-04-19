@@ -1109,7 +1109,7 @@ User calls: hm.insert_tuple(50_bytes)
   ├─ FSM::fsm_search_avail(2)
   │   ├─ Read FSM Level-2 root
   │   ├─ Traverse Level 2 → Level 1 → Level 0
-  │   ├─ fp_next_slot provides load-spreading hint
+  │   ├─ fp_next_slot is reserved for future load-spreading
   │   ├─ Compute heap_page_id from level-0 slot
   │   └─ Return Some(page_id=47)
   │
