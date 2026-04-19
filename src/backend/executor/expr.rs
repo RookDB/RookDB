@@ -24,35 +24,34 @@ pub fn evaluate(expr: &Expr, tuple: &Tuple) -> Result<Value, ExecutorError> {
             let right_val=evaluate(right,tuple)?;
             match op {
                 BinaryOperator::Add=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Int(l + r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Int(l + r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Mathematical operator applied to incompatible types".to_string())),
                     }
                 }
                 BinaryOperator::Sub=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Int(l - r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Int(l - r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Mathematical operator applied to incompatible types".to_string())),
                     }
                 }
                 BinaryOperator::Mul=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Int(l * r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Int(l * r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Mathematical operator applied to incompatible types".to_string())),
                     }
                 }
                 BinaryOperator::Div=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => {
+                            if r == 0 { return Ok(Value::Null); }
                             return Ok(Value::Float(OrderedFloat(l as f64 / r as f64)));
                         }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Mathematical operator applied to incompatible types".to_string())),
                     }
                 }
             }
@@ -62,51 +61,45 @@ pub fn evaluate(expr: &Expr, tuple: &Tuple) -> Result<Value, ExecutorError> {
             let right_val=evaluate(right,tuple)?;
             match op {
                 ComparisonOperator::Eq=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Boolean(l==r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Boolean(l == r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Comparative operator applied to incompatible types".to_string())),
                     }
                 }
                 ComparisonOperator::Neq=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Boolean(l!=r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Boolean(l != r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Comparative operator applied to incompatible types".to_string())),
                     }
                 }
                 ComparisonOperator::Lt=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Boolean(l<r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Boolean(l < r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Comparative operator applied to incompatible types".to_string())),
                     }
                 }
                 ComparisonOperator::Gt=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Boolean(l>r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Boolean(l > r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Comparative operator applied to incompatible types".to_string())),
                     }
                 }
                 ComparisonOperator::Leq=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Boolean(l<=r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Boolean(l <= r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Comparative operator applied to incompatible types".to_string())),
                     }
                 }
                 ComparisonOperator::Geq=>{
-                    match (left_val,right_val) {
-                        (Value::Int(l), Value::Int(r))=>{
-                            return Ok(Value::Boolean(l>=r));
-                        }
-                        _ => return Err(ExecutorError::TypeMismatch("Mathematical or comparative operator applied to incompatible types".to_string())),
+                    match (left_val, right_val) {
+                        (Value::Int(l), Value::Int(r)) => return Ok(Value::Boolean(l >= r)),
+                        (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                        _ => return Err(ExecutorError::TypeMismatch("Comparative operator applied to incompatible types".to_string())),
                     }
                 }
             }

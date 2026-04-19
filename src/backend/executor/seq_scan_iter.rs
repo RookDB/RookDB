@@ -16,6 +16,18 @@ pub struct SeqScan{
     schema: Vec<Column>,
 }
 
+impl SeqScan{
+    pub fn new(table_name: String, buffer_pool: Arc<BufferManager>, total_pages: u32, schema: Vec<Column>) -> Self {
+        Self {
+            _table_name: table_name,
+            buffer_pool,
+            current_page_id: 1, // Start after header
+            current_slot_idx: 0,
+            total_pages,
+            schema,
+        }
+    }
+}
 impl Executor for SeqScan{
     fn next(&mut self) -> Result<Option<Tuple>, ExecutorError>{
         //Explicitly start from page_id=1 to skip Header page.
@@ -79,6 +91,15 @@ impl Executor for SeqScan{
                         } else {
                             // FIX: Keep columns aligned if data is truncated
                             values.push(Value::Null); 
+                        }
+                    }
+                    "BOOL" => {
+                        if cursor + 1 <= tuple_data.len() {
+                            let val = tuple_data[cursor] != 0;
+                            values.push(Value::Boolean(val));
+                            cursor += 1;
+                        } else {
+                            values.push(Value::Null);
                         }
                     }
                     _ => {

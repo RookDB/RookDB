@@ -8,6 +8,7 @@ pub const PAGE_HEADER_SIZE: u32 = 8;
 pub const ITEM_ID_SIZE: u32 = 8;
 
 // Represents a single database page
+#[derive(Clone)]
 pub struct Page {
     // Raw page bytes
     pub data: Vec<u8>,

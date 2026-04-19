@@ -63,7 +63,7 @@ pub fn run() -> io::Result<()> {
             "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
-            "9" => data_cmd::aggregate_query_cmd(&current_db)?,
+            "9" => data_cmd::aggregate_query_cmd(&mut buffer_manager, &current_db)?,
             "10" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;

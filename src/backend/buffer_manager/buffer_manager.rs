@@ -5,6 +5,7 @@ use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 
+#[derive(Clone)]
 pub struct BufferManager {
     pub pages: Vec<Page>, // In-memory pages (header + data)
 }
@@ -138,26 +139,44 @@ impl BufferManager {
                 continue;
             }
 
-            // Serialize tuple
+            // Serialize tuple with null bitmap
             let mut tuple_bytes: Vec<u8> = Vec::new();
-            for (val, col) in values.iter().zip(columns.iter()) {
+            let bitmap_len = (columns.len() + 7) / 8;
+            let mut bitmap = vec![0u8; bitmap_len];
+            let mut data_bytes = Vec::new();
+
+            for (j, (val, col)) in values.iter().zip(columns.iter()).enumerate() {
+                let val_str = val.trim();
+                if val_str.is_empty() || val_str.eq_ignore_ascii_case("null") {
+                    let byte_idx = j / 8;
+                    let bit_idx = j % 8;
+                    bitmap[byte_idx] |= 1 << bit_idx;
+                    continue;
+                }
+
                 match col.data_type.as_str() {
                     "INT" => {
-                        let num: i32 = val.parse().unwrap_or_default();
-                        tuple_bytes.extend_from_slice(&num.to_le_bytes());
+                        let num: i32 = val_str.parse().unwrap_or_default();
+                        data_bytes.extend_from_slice(&num.to_le_bytes());
                     }
                     "TEXT" => {
-                        let mut t = val.as_bytes().to_vec();
+                        let mut t = val_str.as_bytes().to_vec();
                         if t.len() > 10 {
                             t.truncate(10);
                         } else if t.len() < 10 {
                             t.extend(vec![b' '; 10 - t.len()]);
                         }
-                        tuple_bytes.extend_from_slice(&t);
+                        data_bytes.extend_from_slice(&t);
+                    }
+                    "BOOL" => {
+                        let is_true = val_str.eq_ignore_ascii_case("true") || val_str == "1" || val_str.eq_ignore_ascii_case("t");
+                        data_bytes.push(if is_true { 1 } else { 0 });
                     }
                     _ => continue,
                 }
             }
+            tuple_bytes.extend(bitmap);
+            tuple_bytes.extend(data_bytes);
 
             let tuple_len = tuple_bytes.len() as u32;
             let required = tuple_len + ITEM_ID_SIZE;

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 /// Represents a column within a table.
 #[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Column {
     pub name: String,
     pub data_type: String,
