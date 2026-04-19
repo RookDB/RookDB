@@ -14,6 +14,20 @@ fn test_save_catalog() {
     // Step 2: Load catalog into memory
     let mut catalog = load_catalog();
 
+    // Setup cleanup guard to remove the test database from catalog json when test ends
+    struct CatalogCleanup(&'static str);
+    impl Drop for CatalogCleanup {
+        fn drop(&mut self) {
+            let mut cat = load_catalog();
+            if cat.databases.remove(self.0).is_some() {
+                let _ = save_catalog(&cat);
+            }
+            // Also clean up any directory it might have created
+            let _ = std::fs::remove_dir_all(format!("database/base/{}", self.0));
+        }
+    }
+    let _cleanup = CatalogCleanup("test_db");
+
     // Step 3: Ensure a test database exists
     let db_name = "test_db";
     if !catalog.databases.contains_key(db_name) {

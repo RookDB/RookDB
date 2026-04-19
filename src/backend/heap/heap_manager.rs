@@ -1,7 +1,7 @@
 /// HeapManager - High-level API for table operations.
 /// 
 /// This module provides a complete interface for:
-/// - Inserting tuples using FSM-guided page selection (not append-only)
+/// - Inserting tuples using FSM-guided page selection 
 /// - Retrieving tuples by (page_id, slot_id)
 /// - Sequential scans across all pages
 /// - Automatic allocation of new pages with FSM registration
@@ -20,6 +20,8 @@ use crate::backend::page::{Page, PAGE_SIZE, PAGE_HEADER_SIZE, ITEM_ID_SIZE,
                             init_page, page_free_space, get_tuple_count, get_slot_entry};
 use crate::backend::disk::{read_page, write_page, read_header_page, update_header_page};
 use crate::heap::types::HeaderMetadata;
+use crate::backend::instrumentation::HEAP_METRICS;
+use std::sync::atomic::Ordering;
 
 // ─────────────────────────────────────────────────────────────────────────
 // HeapScanIterator - Sequential Scan
@@ -152,6 +154,11 @@ pub struct HeapManager {
 }
 
 impl HeapManager {
+    /// Vacuum update to expose vacuuming logic internally
+    pub fn vacuum_page(&mut self, page_id: u32, reclaimed_bytes: u32) -> io::Result<()> {
+        self.fsm.fsm_vacuum_update(page_id, reclaimed_bytes)
+    }
+
     /// Create a new heap file and initialize with empty pages.
     /// 
     /// # Arguments
@@ -263,9 +270,6 @@ impl HeapManager {
             header.page_count, header.fsm_page_count, header.total_tuples
         );
 
-        // Derive FSM path 
-        // Note: We use .fsm suffix directly. 
-        // If file_path is "table.dat", fsm_path is "table.dat.fsm"
         let mut fsm_path = file_path.to_string_lossy().into_owned();
         if !fsm_path.ends_with(".fsm") {
             fsm_path.push_str(".fsm");
@@ -273,7 +277,13 @@ impl HeapManager {
         let fsm_path = PathBuf::from(fsm_path);
 
         // Open/rebuild FSM
-        let fsm = FSM::open(fsm_path.clone(), header.page_count)?;
+        let fsm = if !fsm_path.exists() || std::fs::metadata(&fsm_path)?.len() == 0 {
+            log::trace!("[HeapManager::open] FSM missing or empty, rebuilding...");
+            file_handle.seek(std::io::SeekFrom::Start(0))?;
+            FSM::build_from_heap(&mut file_handle, fsm_path.clone())?
+        } else {
+            FSM::open(fsm_path.clone(), header.page_count)?
+        };
         
         // ===== SYNC FSM PAGE COUNT TO HEADER =====
         // Calculate actual FSM page count based on current heap size
@@ -416,7 +426,7 @@ impl HeapManager {
                 .open(&self.file_path)?;
             
             if let Err(e) = read_page(&mut file, &mut page, page_id) {
-                eprintln!("[ERROR] Failed to read page {}: {}", page_id, e);
+                log::error!("[ERROR] Failed to read page {}: {}", page_id, e);
                 return Err(e);
             }
 
@@ -451,7 +461,7 @@ impl HeapManager {
             // Sync updated header to disk
             match update_header_page(&mut self.file_handle, &self.header) {
                 Ok(_) => log::trace!("[HeapManager::insert_tuple] Header updated on disk"),
-                Err(e) => eprintln!("[WARN] Failed to update header on disk: {}", e),
+                Err(e) => log::warn!("[WARN] Failed to update header on disk: {}", e),
             }
 
             log::trace!(
@@ -478,6 +488,7 @@ impl HeapManager {
     /// # Returns
     /// Tuple data or error
     pub fn get_tuple(&mut self, page_id: u32, slot_id: u32) -> io::Result<Vec<u8>> {
+        HEAP_METRICS.get_tuple_calls.fetch_add(1, Ordering::Relaxed);
         log::trace!(
             "[HeapManager::get_tuple] Retrieving tuple (page={}, slot={})",
             page_id, slot_id
@@ -580,9 +591,10 @@ impl HeapManager {
         // Write page back
         write_page(&mut file, &mut page, page_id)?;
 
-        // Calculate new free space and update FSM
-        let new_free = page_free_space(&page)?;
-        self.fsm.fsm_set_avail(page_id, new_free)?;
+        // As per the data lifecycle:
+        // During a DELETE we simply mark the tuple's Item Pointer as dead (length=0, offset=0).
+        // We DO NOT update the FSM because contiguous free space hasn't changed.
+        // It remains hidden until a future VACUUM compacts the page.
 
         // Decrement tuple counter
         if self.header.total_tuples > 0 {
@@ -632,8 +644,7 @@ impl HeapManager {
 
     /// Allocate a new heap page and register with FSM.
     fn allocate_new_page(&mut self) -> io::Result<u32> {
-        log::trace!("[HeapManager::allocate_new_page] Allocating new page");
-
+        HEAP_METRICS.allocate_page_calls.fetch_add(1, Ordering::Relaxed);
         let new_page_id = self.header.page_count;
 
         // Create and initialize empty slotted page

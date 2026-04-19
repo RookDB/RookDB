@@ -14,11 +14,11 @@ pub fn run() -> io::Result<()> {
     println!("--------------------------------------\n");
 
     // Ensure catalog file exists
-    println!("Initializing Catalog File...\n");
+    log::info!("Initializing Catalog File...");
     init_catalog();
 
     // Load catalog metadata into memory
-    println!("Loading Catalog...\n");
+    log::info!("Loading Catalog...");
     let mut catalog = load_catalog();
 
     // Initialize buffer manager
@@ -28,7 +28,7 @@ pub fn run() -> io::Result<()> {
     let mut current_db: Option<String> = None;
 
     loop {
-        println!("\n╔════════════════════════════════════════╗");
+        println!("╔════════════════════════════════════════╗");
         println!("║          ROOKDB MAIN MENU              ║");
         println!("╠════════════════════════════════════════╣");
         println!("║  Database Operations:                  ║");

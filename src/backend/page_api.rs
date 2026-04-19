@@ -3,6 +3,8 @@ use std::io;
 use std::fs::File;
 
 use crate::backend::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE};
+use crate::backend::instrumentation::HEAP_METRICS;
+use std::sync::atomic::Ordering;
 
 /// Get the lower pointer (insertion point) from a page header
 pub fn get_lower(page: &Page) -> io::Result<u32> {
@@ -75,6 +77,7 @@ pub fn get_tuple_count(page: &Page) -> io::Result<u32> {
 
 /// Get free space available in a page (in bytes)
 pub fn get_free_space(page: &Page) -> io::Result<u32> {
+    HEAP_METRICS.page_free_space_calls.fetch_add(1, Ordering::Relaxed);
     let lower = get_lower(page)?;
     let upper = get_upper(page)?;
     
@@ -188,7 +191,7 @@ pub fn reset_page(page: &mut Page) -> io::Result<()> {
 /// Print debug information for page operations
 fn debug_print_page(msg: &str) {
     if cfg!(debug_assertions) {
-        println!("[PAGE_API] {}", msg);
+        log::trace!("[PAGE_API] {}", msg);
     }
 }
 

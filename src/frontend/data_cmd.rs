@@ -10,7 +10,7 @@ use storage_manager::backend::disk::read_header_page;
 pub fn load_csv_cmd(
     current_db: &Option<String>,
 ) -> io::Result<()> {
-    println!("\n[CSV LOAD COMMAND] Starting CSV load operation");
+    log::info!("Starting CSV load operation");
 
     let db = match current_db {
         Some(db) => db.clone(),
@@ -38,7 +38,7 @@ pub fn load_csv_cmd(
     let csv_path = csv_path.trim();
 
     // --- 1. VALIDATE CSV PATH FIRST ---
-    println!("\n[CSV LOAD COMMAND] Verifying CSV path: '{}'", csv_path);
+    log::info!("Verifying CSV path: '{}'", csv_path);
     
     if csv_path.is_empty() {
         println!("CSV path cannot be empty");
@@ -59,29 +59,29 @@ pub fn load_csv_cmd(
         return Ok(());
     }
 
-    println!("CSV file verified successfully: '{}'", csv_path);
+    log::info!("CSV file verified successfully: '{}'", csv_path);
 
     // Load catalog and insert data using the improved load_csv function
     let catalog = load_catalog();
     
-    println!("\n[CSV LOAD COMMAND] Starting data insertion...\n");
+    log::info!("Starting data insertion...\n");
 
     // Use the improved load_csv function with validation (HeapManager handles FSM)
     match load_csv(&catalog, &db, &table, csv_path) {
         Ok(inserted_count) => {
             if inserted_count == 0 {
-                println!("\nWARNING: No data was inserted from the CSV file.");
+                log::warn!("No data was inserted from the CSV file.");
                 println!("   Please check:");
                 println!("   1. CSV file is not empty (excluding header)");
                 println!("   2. Data types match the table schema");
                 println!("   3. Each row has the correct number of columns");
             } else {
-                println!("\nSuccessfully inserted {} rows from CSV", inserted_count);
+                log::info!("Successfully inserted {} rows from CSV", inserted_count);
                 println!("\n FSM fork file has been created/updated");
             }
         }
         Err(e) => {
-            println!("\nError during CSV loading: {}", e);
+            log::error!("Error during CSV loading: {}", e);
             println!("\nThis usually means:");
             if e.kind() == io::ErrorKind::NotFound {
                 println!("  - The CSV file path is incorrect");
@@ -106,7 +106,7 @@ pub fn load_csv_cmd(
 pub fn insert_tuple_cmd(
     current_db: &Option<String>,
 ) -> io::Result<()> {
-    println!("\n[INSERT TUPLE COMMAND] Starting single tuple insertion");
+    log::info!("Starting single tuple insertion");
 
     let db = match current_db {
         Some(db) => db.clone(),
@@ -147,13 +147,13 @@ pub fn insert_tuple_cmd(
     };
 
     // Display schema
-    println!("\n[INSERT TUPLE COMMAND] Table schema:");
+    log::trace!("Table schema:");
     for (idx, col) in table_schema.columns.iter().enumerate() {
         println!("  {}: {} (type: {})", idx + 1, col.name, col.data_type);
     }
 
     // Collect values
-    println!("\n[INSERT TUPLE COMMAND] Enter values for each column:");
+    println!("Enter values for each column:");
     let mut values = Vec::new();
     
     for col in &table_schema.columns {
@@ -169,18 +169,18 @@ pub fn insert_tuple_cmd(
     let value_refs: Vec<&str> = values.iter().map(|v| v.as_str()).collect();
 
     // Insert tuple using HSM-aware insert (with FSM)
-    println!("\n[INSERT TUPLE COMMAND] Inserting tuple...");
+    log::info!("Inserting tuple...");
     match insert_single_tuple(&catalog, &db, table, &value_refs) {
         Ok(success) => {
             if success {
-                println!("Tuple inserted successfully!");
-                println!(" FSM fork file updated");
+                log::info!("Tuple inserted successfully!");
+                log::info!("FSM fork file updated");
             } else {
-                println!("Failed to insert tuple. Please check your data types and values.");
+                log::error!("Failed to insert tuple. Please check your data types and values.");
             }
         }
         Err(e) => {
-            println!("Error inserting tuple: {}", e);
+            log::error!("Error inserting tuple: {}", e);
         }
     }
 
@@ -188,7 +188,7 @@ pub fn insert_tuple_cmd(
 }
 
 pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
-    println!("\n[SHOW TUPLES COMMAND] Starting tuple display");
+    log::debug!("Starting tuple display");
 
     let db = match current_db {
         Some(db) => db.clone(),
@@ -212,7 +212,7 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let path = format!("database/base/{}/{}.dat", db, table);
     
     if !Path::new(&path).exists() {
-        println!("Table file not found: '{}'", path);
+        log::warn!("Table file not found: '{}'", path);
         println!("Make sure the table exists. Try creating the table first.");
         return Ok(());
     }
@@ -220,7 +220,7 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
         Ok(f) => f,
         Err(e) => {
-            println!("Failed to open table file: {}", e);
+            log::error!("Failed to open table file: {}", e);
             return Ok(());
         }
     };
@@ -232,7 +232,7 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
             println!("Tuple display completed");
         }
         Err(e) => {
-            println!("Error displaying tuples: {}", e);
+            log::error!("Error displaying tuples: {}", e);
         }
     }
 
@@ -259,13 +259,13 @@ pub fn check_heap_cmd(current_db: &Option<String>) -> io::Result<()> {
     let heap_path = PathBuf::from(format!("database/base/{}/{}.dat", db, table));
     
     if !heap_path.exists() {
-        println!("Heap file not found: {:?}", heap_path);
+        log::warn!("Heap file not found: {:?}", heap_path);
         println!("Table may not exist. Try creating the table first.");
         return Ok(());
     }
 
     println!("\n╔════════════════════════════════════════╗");
-    println!("║         HEAP DIAGNOSTICS");
+    println!("║         HEAP DIAGNOSTICS               ║"); 
     println!("╚════════════════════════════════════════╝");
     
 
@@ -294,25 +294,19 @@ pub fn check_heap_cmd(current_db: &Option<String>) -> io::Result<()> {
                                     .as_secs() - header.last_vacuum as u64) 
                              });
                     
-                    // Calculate average tuple size if tuples are present
-                    if header.page_count > 1 && header.total_tuples > 0 {
-                        let tuples_per_page = (header.total_tuples as f64) / (header.page_count as f64);
-                        if tuples_per_page > 0.0 {
-                            let avg_tuple_size = (8184.0 / tuples_per_page) as u32;
-                            println!("Est. Avg Tuple:    {} bytes", avg_tuple_size);
-                        }
-                    }
+                    
                     
                     println!("\nHeap is healthy and accessible");
+                    storage_manager::backend::instrumentation::StatsSnapshot::capture().print_table();
                 }
                 Err(e) => {
-                    println!("Warning: Could not read header: {}", e);
+                    log::warn!("Could not read header: {}", e);
                     println!("   Heap file may need FSM rebuild");
                 }
             }
         }
         Err(e) => {
-            println!("Error opening heap file: {}", e);
+            log::error!("Error opening heap file: {}", e);
         }
     }
 

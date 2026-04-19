@@ -17,7 +17,7 @@ impl BufferManager {
         init_page(&mut header);
         pages.push(header);
 
-        println!("Buffer Manager initialized with header page only.");
+        log::info!("Buffer Manager initialized with header page only.");
 
         Self { pages }
     }
@@ -38,7 +38,7 @@ impl BufferManager {
         let file_size = metadata.len();
         let total_pages = (file_size as usize) / PAGE_SIZE;
 
-        println!(
+        log::info!(
             "Loading table '{}' ({} bytes, {} pages)...",
             table_name, file_size, total_pages
         );
@@ -46,7 +46,7 @@ impl BufferManager {
         // Load all pages from disk
         self.pages = read_all_pages(&mut file)?;
 
-        println!(
+        log::info!(
             "Loaded {} pages (1 header + {} data).",
             self.pages.len(),
             self.pages.len().saturating_sub(1)

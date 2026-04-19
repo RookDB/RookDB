@@ -21,8 +21,8 @@ pub fn load_csv(
     table_name: &str,
     csv_path: &str,
 ) -> io::Result<u32> {
-    println!("\n[CSV LOADER] Starting CSV load operation");
-    println!("[CSV LOADER] Database: '{}', Table: '{}', CSV: '{}'", db_name, table_name, csv_path);
+    log::info!(" Starting CSV load operation");
+    log::info!(" Database: '{}', Table: '{}', CSV: '{}'", db_name, table_name, csv_path);
 
     // --- 1. Fetch table schema from catalog ---
     let db = catalog.databases.get(db_name).ok_or_else(|| {
@@ -47,19 +47,19 @@ pub fn load_csv(
         ));
     }
 
-    println!("[CSV LOADER] Found table with {} columns", columns.len());
+    log::info!(" Found table with {} columns", columns.len());
 
     // --- 2. VALIDATE ALL DATA TYPES BEFORE LOADING ---
-    println!("[CSV LOADER] Validating schema data types...");
+    log::info!(" Validating schema data types...");
     for (idx, col) in columns.iter().enumerate() {
-        println!("[CSV LOADER]   Column {}: '{}' → {}", idx + 1, col.name, col.data_type);
+        log::info!("   Column {}: '{}' → {}", idx + 1, col.name, col.data_type);
         
         match DataType::from_str(&col.data_type) {
             Ok(dt) => {
-                println!("[CSV LOADER]   Supported data type: {:?}", dt);
+                log::info!("   Supported data type: {:?}", dt);
             }
             Err(e) => {
-                println!("[CSV LOADER]   VALIDATION FAILED: {}", e);
+                log::info!("   VALIDATION FAILED: {}", e);
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Column '{}' has unsupported type '{}'. Supported types: INT, TEXT",
@@ -68,17 +68,17 @@ pub fn load_csv(
             }
         }
     }
-    println!("[CSV LOADER] All data types validated successfully");
+    log::info!(" All data types validated successfully");
 
     // --- 3. Open and read the CSV file ---
-    println!("[CSV LOADER] Opening CSV file: '{}'", csv_path);
+    log::info!(" Opening CSV file: '{}'", csv_path);
     let csv_file = match File::open(csv_path) {
         Ok(f) => {
-            println!("[CSV LOADER] CSV file opened successfully");
+            log::info!(" CSV file opened successfully");
             f
         }
         Err(e) => {
-            println!("[CSV LOADER] Failed to open CSV file: {}", e);
+            log::info!(" Failed to open CSV file: {}", e);
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("Failed to open CSV file '{}': {}", csv_path, e),
@@ -90,20 +90,20 @@ pub fn load_csv(
     let mut lines = reader.lines();
 
     // Skip header line
-    println!("[CSV LOADER] Reading CSV header...");
+    log::info!(" Reading CSV header...");
     if let Some(Ok(header)) = lines.next() {
-        println!("[CSV LOADER] Header: {}", header);
+        log::info!(" Header: {}", header);
     }
 
     // --- 3a. Open HeapManager for FSM-aware insertion ---
     let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
     let mut heap_manager = match HeapManager::open(table_path.clone()) {
         Ok(hm) => {
-            println!("[CSV LOADER] Opened HeapManager (FSM will be created/updated)");
+            log::info!(" Opened HeapManager (FSM will be created/updated)");
             hm
         }
         Err(e) => {
-            println!("[CSV LOADER] CRITICAL: Failed to open HeapManager: {}", e);
+            log::info!(" CRITICAL: Failed to open HeapManager: {}", e);
             return Err(e);
         }
     };
@@ -119,14 +119,14 @@ pub fn load_csv(
         let row = match line {
             Ok(r) => r,
             Err(e) => {
-                println!("[CSV LOADER] Line {}: Error reading line: {}", line_idx, e);
+                log::info!(" Line {}: Error reading line: {}", line_idx, e);
                 failed += 1;
                 continue;
             }
         };
 
         if row.trim().is_empty() {
-            println!("[CSV LOADER] Line {}: Skipping empty row", line_idx);
+            log::debug!("Line {}: Skipping empty row", line_idx);
             skipped += 1;
             continue;
         }
@@ -136,7 +136,7 @@ pub fn load_csv(
 
         // Validate number of columns
         if values.len() != columns.len() {
-            println!(
+            log::warn!(
                 "[CSV LOADER] Line {}: Expected {} columns, found {}. Skipping row.",
                 line_idx,
                 columns.len(),
@@ -152,7 +152,7 @@ pub fn load_csv(
             match DataType::from_str(&col.data_type) {
                 Ok(data_type) => {
                     if let Err(validation_err) = data_type.validate_value(val) {
-                        println!(
+                        log::warn!(
                             "[CSV LOADER] Line {}, Column {} ('{}'): {} Value: '{}'",
                             line_idx, col_idx + 1, col.name, validation_err, val
                         );
@@ -168,7 +168,7 @@ pub fn load_csv(
         }
 
         if !validation_passed {
-            println!("[CSV LOADER] Line {}: Validation failed. Skipping row.", line_idx);
+            log::error!("Line {}: Validation failed. Skipping row.", line_idx);
             failed += 1;
             continue;
         }
@@ -184,7 +184,7 @@ pub fn load_csv(
                             tuple_bytes.extend_from_slice(&bytes);
                         }
                         Err(e) => {
-                            println!("[CSV LOADER] Line {}: Serialization error for column '{}': {}", 
+                            log::error!("Line {}: Serialization error for column '{}': {}", 
                                 line_idx, col.name, e);
                             validation_passed = false;
                             break;
@@ -192,7 +192,7 @@ pub fn load_csv(
                     }
                 }
                 Err(e) => {
-                    println!("[CSV LOADER] Line {}: Invalid data type for column '{}': {}", 
+                    log::error!("Line {}: Invalid data type for column '{}': {}", 
                         line_idx, col.name, e);
                     validation_passed = false;
                     break;
@@ -210,26 +210,26 @@ pub fn load_csv(
             Ok(_page_slot) => {
                 inserted += 1;
                 if inserted % 100 == 0 {
-                    println!("[CSV LOADER] Inserted {} rows so far...", inserted);
+                    log::info!("Inserted {} rows so far...", inserted);
                 }
             }
             Err(e) => {
-                println!("[CSV LOADER] Line {}: Failed to insert row: {}", line_idx, e);
+                log::error!("Line {}: Failed to insert row: {}", line_idx, e);
                 failed += 1;
             }
         }
     }
 
-    println!("\n[CSV LOADER] ═══════════════════════════════════");
-    println!("[CSV LOADER] CSV Load Summary:");
-    println!("[CSV LOADER] Successfully inserted: {}", inserted);
-    println!("[CSV LOADER] Skipped (formatting): {}", skipped);
-    println!("[CSV LOADER] Failed (validation/insert): {}", failed);
-    println!("[CSV LOADER] Total rows processed: {}", inserted + skipped + failed);
-    println!("[CSV LOADER] ═══════════════════════════════════\n");
+    log::info!("═══════════════════════════════════");
+    log::info!(" CSV Load Summary:");
+    log::info!(" Successfully inserted: {}", inserted);
+    log::info!(" Skipped (formatting): {}", skipped);
+    log::info!(" Failed (validation/insert): {}", failed);
+    log::info!(" Total rows processed: {}", inserted + skipped + failed);
+    log::info!(" ═══════════════════════════════════\n");
 
     if inserted == 0 && (skipped > 0 || failed > 0) {
-        println!("WARNING: No rows were inserted. Please check your CSV file format and data types.");
+        log::warn!("WARNING: No rows were inserted. Please check your CSV file format and data types.");
     }
 
     Ok(inserted)
@@ -242,7 +242,7 @@ pub fn insert_single_tuple(
     table_name: &str,
     values: &[&str],
 ) -> io::Result<bool> {
-    println!("\n[TUPLE INSERT] Starting single tuple insertion");
+    log::info!(" Starting single tuple insertion");
 
     let db = catalog.databases.get(db_name).ok_or_else(|| {
         io::Error::new(
@@ -261,7 +261,7 @@ pub fn insert_single_tuple(
     let columns = &table.columns;
 
     if values.len() != columns.len() {
-        println!("[TUPLE INSERT] Expected {} values, got {}", columns.len(), values.len());
+        log::info!(" Expected {} values, got {}", columns.len(), values.len());
         return Ok(false);
     }
 
@@ -270,12 +270,12 @@ pub fn insert_single_tuple(
         match DataType::from_str(&col.data_type) {
             Ok(data_type) => {
                 if let Err(e) = data_type.validate_value(val) {
-                    println!("[TUPLE INSERT] Column '{}': {}", col.name, e);
+                    log::info!(" Column '{}': {}", col.name, e);
                     return Ok(false);
                 }
             }
             Err(e) => {
-                println!("[TUPLE INSERT] Column '{}' has invalid type: {}", col.name, e);
+                log::info!(" Column '{}' has invalid type: {}", col.name, e);
                 return Ok(false);
             }
         }
@@ -289,13 +289,13 @@ pub fn insert_single_tuple(
                 match data_type.serialize_value(val) {
                     Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
                     Err(e) => {
-                        println!("[TUPLE INSERT] Failed to serialize column '{}': {}", col.name, e);
+                        log::info!(" Failed to serialize column '{}': {}", col.name, e);
                         return Ok(false);
                     }
                 }
             }
             Err(e) => {
-                println!("[TUPLE INSERT] Invalid type for column '{}': {}", col.name, e);
+                log::info!(" Invalid type for column '{}': {}", col.name, e);
                 return Ok(false);
             }
         }
@@ -308,17 +308,17 @@ pub fn insert_single_tuple(
         Ok(mut heap_manager) => {
             match heap_manager.insert_tuple(&tuple_bytes) {
                 Ok((page_id, slot_id)) => {
-                    println!("[TUPLE INSERT] Successfully inserted at (page={}, slot={})", page_id, slot_id);
+                    log::info!(" Successfully inserted at (page={}, slot={})", page_id, slot_id);
                     Ok(true)
                 }
                 Err(e) => {
-                    println!("[TUPLE INSERT] Failed to insert tuple: {}", e);
+                    log::info!(" Failed to insert tuple: {}", e);
                     Ok(false)
                 }
             }
         }
         Err(e) => {
-            println!("[TUPLE INSERT] Failed to open HeapManager: {}", e);
+            log::info!(" Failed to open HeapManager: {}", e);
             Ok(false)
         }
     }

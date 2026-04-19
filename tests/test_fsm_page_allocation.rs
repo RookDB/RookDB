@@ -7,8 +7,17 @@ fn test_fsm_page_allocation() {
     use std::fs;
     use std::io::Write;
     
-    // Clean up from previous runs
-    let _ = fs::remove_dir_all("database/base/test_fsm_alloc");
+    // Setup drop guard to ensure cleanup after test completes or panics
+    struct TestCleanup(&'static str);
+    impl Drop for TestCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(format!("database/base/{}", self.0));
+            // Ensure no leftover file chunks
+            let _ = fs::remove_file(format!("database/base/{}/gd.csv", self.0));
+        }
+    }
+    let _cleanup = TestCleanup("test_fsm_alloc");
+    let _ = fs::remove_dir_all("database/base/test_fsm_alloc"); // Clean up from previous runs if any
     
     // Use the provided load_csv with HeapManager for proper FSM integration
     use storage_manager::catalog::{init_catalog, load_catalog, create_database, create_table, Column, save_catalog};

@@ -76,6 +76,8 @@ impl FSMPage {
 
     /// Serialize FSM page to exactly FSM_PAGE_SIZE bytes.
     pub fn serialize(&self) -> Vec<u8> {
+        use crate::backend::instrumentation::FSM_METRICS;
+        FSM_METRICS.fsm_serialize_page_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut buf = vec![0u8; FSM_PAGE_SIZE];
         
         // Write tree array
@@ -95,6 +97,8 @@ impl FSMPage {
 
     /// Deserialize FSM page from exactly FSM_PAGE_SIZE bytes.
     pub fn deserialize(bytes: &[u8]) -> io::Result<Self> {
+        use crate::backend::instrumentation::FSM_METRICS;
+        FSM_METRICS.fsm_deserialize_page_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if bytes.len() < FSM_PAGE_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -256,6 +260,8 @@ impl FSM {
                 ]);
 
                 let free_bytes = if upper >= lower {
+                    // Start of calculating contiguous free space
+                    // Only contiguous gap between upper and lower is available for inserts
                     upper - lower
                 } else {
                     0
@@ -320,6 +326,25 @@ impl FSM {
     /// Read FSM page at logical position (level, page_no, slot) into FSMPage struct.
     /// 
     /// If the page doesn't exist in the file yet, returns an empty FSMPage.
+    fn logical_to_physical(level: u32, page_no: u32) -> u64 {
+        let f = FSM_SLOTS_PER_PAGE as u64;
+        let dist_l1 = 1 + f;
+        let dist_l2 = 1 + f + f * f;
+        match level {
+            2 => page_no as u64 * dist_l2,
+            1 => {
+                let parent_l2 = page_no as u64 / f;
+                parent_l2 * dist_l2 + 1 + (page_no as u64 % f) * dist_l1
+            }
+            0 => {
+                let parent_l1 = page_no as u64 / f;
+                let parent_l2 = parent_l1 / f;
+                parent_l2 * dist_l2 + 1 + (parent_l1 % f) * dist_l1 + 1 + (page_no as u64 % f)
+            }
+            _ => panic!("Invalid FSM level"),
+        }
+    }
+
     pub fn read_fsm_page(
         &mut self,
         level: u32,
@@ -334,7 +359,7 @@ impl FSM {
             level, page_no, slot
         );
 
-        let block_offset = page_no as u64 * FSM_PAGE_SIZE as u64;
+        let block_offset = Self::logical_to_physical(level, page_no) * FSM_PAGE_SIZE as u64;
 
         // Check if file is large enough
         let file_size = self.fsm_file.metadata()?.len();
@@ -378,7 +403,7 @@ impl FSM {
             level, page_no, slot
         );
 
-        let block_offset = page_no as u64 * FSM_PAGE_SIZE as u64;
+        let block_offset = Self::logical_to_physical(level, page_no) * FSM_PAGE_SIZE as u64;
         
         // Get current file size
         let current_size = self.fsm_file.metadata()?.len();
@@ -422,7 +447,7 @@ impl FSM {
     /// # Algorithm
     /// 1. Read root FSM page (Level 2)
     /// 2. If root value < min_category: return None
-    /// 3. Traverse Level 2 → Level 1 → Level 0 using fp_next_slot hint
+    /// 3. Traverse Level 2 → Level 1 → Level 0 
     /// 4. Compute heap page ID from (fsm_page_no, slot)
     /// 5. Advance fp_next_slot on each visited FSM page
     /// 6. Return Some(heap_page_id)
@@ -524,22 +549,40 @@ impl FSM {
             
             log::trace!("[FSM::search_tree] Level {} (page_no={}): Searching internal nodes", level, page_no);
             
-            // Search internal nodes to find a child with space
-            let num_children = FSM_NODES_PER_PAGE / 2; // Internal nodes in first half
+            let leaves_start = FSM_NODES_PER_PAGE / 2; // leaves start at index 2040
+            let mut idx = 0; // root of this FSM page
             
-            for child_idx in 0..num_children {
-                let child_category = fsm_page.tree[child_idx];
-                if child_category >= min_category {
-                    log::trace!("[FSM::search_tree] Child {} has category {} >= {}, recursing", 
-                        child_idx, child_category, min_category);
-                    // This child subtree may have sufficient space, recurse
-                    if let Some(result) = self.search_tree_for_available_page(
-                        level - 1,
-                        child_idx as u32,
-                        min_category,
-                    )? {
-                        return Ok(Some(result));
-                    }
+            // Check if even the root has space
+            if fsm_page.tree[0] < min_category {
+                return Ok(None);
+            }
+            
+            while idx < leaves_start {
+                let left = 2 * idx + 1;
+                let right = 2 * idx + 2;
+                
+                if left < FSM_NODES_PER_PAGE && fsm_page.tree[left] >= min_category {
+                    idx = left;
+                } else if right < FSM_NODES_PER_PAGE && fsm_page.tree[right] >= min_category {
+                    idx = right;
+                } else {
+                    break;
+                }
+            }
+            
+            if idx >= leaves_start {
+                let leaf_offset = idx - leaves_start;
+                // leaf_offset is the index among the leaves (0 to 2039)
+                // for level L, its leaves refer to Level L-1 pages.
+                // Each Level L page spans FSM_SLOTS_PER_PAGE Level L-1 pages
+                let next_page_no = page_no * (FSM_SLOTS_PER_PAGE as u32) + leaf_offset as u32;
+                
+                if let Some(result) = self.search_tree_for_available_page(
+                    level - 1,
+                    next_page_no,
+                    min_category,
+                )? {
+                    return Ok(Some(result));
                 }
             }
             
@@ -631,56 +674,46 @@ impl FSM {
         );
 
         // Step 3: Propagate changes up to Level 1
-        // Each Level 1 FSM page has 2040 nodes representing children at Level 0
-        if fsm_page_no < (FSM_NODES_PER_PAGE / 2) as u32 {
-            let mut level1_page = self.read_fsm_page(1, 0, 0)?;
+        let mut curr_val = new_level0_root;
+        let mut curr_page_no = fsm_page_no;
+
+        for level in 1..FSM_LEVELS {
+            let parent_page_no = curr_page_no / FSM_SLOTS_PER_PAGE;
+            let slot = (curr_page_no % FSM_SLOTS_PER_PAGE) as usize;
             
-            // Correct: use leaf index in level1, not direct fsm_page_no
-            // Leaves in level 1 start at FSM_NODES_PER_PAGE/2
-            let level1_leaf_index = (FSM_NODES_PER_PAGE / 2) + (fsm_page_no as usize);
+            let mut page = self.read_fsm_page(level, parent_page_no, 0)?;
+            let leaf_idx = FSM_NODES_PER_PAGE / 2 + slot;
             
-            if level1_page.tree[level1_leaf_index] != new_level0_root {
-                level1_page.tree[level1_leaf_index] = new_level0_root;
+            if page.tree[leaf_idx] != curr_val {
+                page.tree[leaf_idx] = curr_val;
                 
-                // Bubble up within Level 1 using correct parent formula
-                let mut idx = level1_leaf_index;
+                let mut idx = leaf_idx;
                 while idx > 0 {
-                    let parent_idx = (idx - 1) / 2;
-                    let left_child = 2 * parent_idx + 1;
-                    let right_child = 2 * parent_idx + 2;
+                    let p_idx = (idx - 1) / 2;
+                    let l_idx = 2 * p_idx + 1;
+                    let r_idx = 2 * p_idx + 2;
                     
-                    let new_val = if right_child < FSM_NODES_PER_PAGE {
-                        level1_page.tree[left_child].max(level1_page.tree[right_child])
-                    } else if left_child < FSM_NODES_PER_PAGE {
-                        level1_page.tree[left_child]
+                    let new_val = if r_idx < FSM_NODES_PER_PAGE {
+                        page.tree[l_idx].max(page.tree[r_idx])
+                    } else if l_idx < FSM_NODES_PER_PAGE {
+                        page.tree[l_idx]
                     } else {
                         0
                     };
                     
-                    if level1_page.tree[parent_idx] != new_val {
-                        level1_page.tree[parent_idx] = new_val;
-                        idx = parent_idx;
+                    if page.tree[p_idx] != new_val {
+                        page.tree[p_idx] = new_val;
+                        idx = p_idx;
                     } else {
                         break;
                     }
                 }
                 
-                self.write_fsm_page(1, 0, 0, &level1_page)?;
-                
-                // Step 4: Update Level 2 root
-                let new_level1_root = level1_page.root_value();
-                let mut root_page = self.read_fsm_page(2, 0, 0)?;
-                
-                if root_page.tree[0] != new_level1_root {
-                    root_page.tree[0] = new_level1_root;
-                    root_page.set_root_value(new_level1_root);
-                    self.write_fsm_page(2, 0, 0, &root_page)?;
-                    
-                    log::trace!(
-                        "[FSM::fsm_set_avail] Updated root to {}",
-                        new_level1_root
-                    );
-                }
+                self.write_fsm_page(level, parent_page_no, 0, &page)?;
+                curr_val = page.root_value();
+                curr_page_no = parent_page_no;
+            } else {
+                break;
             }
         }
 
@@ -692,6 +725,8 @@ impl FSM {
     /// Update free space after a tuple is deleted or page is vacuumed.
     /// Wrapper around fsm_set_avail for Project 10 integration.
     pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, reclaimed_bytes: u32) -> io::Result<()> {
+        use crate::backend::instrumentation::FSM_METRICS;
+        FSM_METRICS.fsm_vacuum_update_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         log::trace!(
             "[FSM::fsm_vacuum_update] Recording vacuumed bytes: page_id={}, bytes={}",
             heap_page_id, reclaimed_bytes

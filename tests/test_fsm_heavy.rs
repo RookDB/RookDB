@@ -7,23 +7,40 @@ use storage_manager::backend::instrumentation::StatsSnapshot;
 
 const DB_NAME: &str = "test_fsm_heavy";
 
-// Helper to create path
-fn get_test_path(table_name: &str) -> PathBuf {
-    PathBuf::from(format!("database/base/{}/{}.dat", DB_NAME, table_name))
+
+
+// Drop guard for automatic directory cleanup
+struct TestCleanup {
+    path: PathBuf,
+}
+impl Drop for TestCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
-// Ensure the db dir exists
-fn setup_db_dir() {
-    let _ = fs::create_dir_all(format!("database/base/{}", DB_NAME));
+// Ensure the db dir exists and return guard
+fn setup_db_dir(test_id: &str) -> (PathBuf, TestCleanup) {
+    // Unique DB name to avoid parallel test collisions
+    let unique_db = format!("{}_{}", DB_NAME, test_id);
+    let db_path = PathBuf::from(format!("database/base/{}", unique_db));
+    let _ = fs::remove_dir_all(&db_path);
+    let _ = fs::create_dir_all(&db_path);
+    (db_path, TestCleanup { path: PathBuf::from(format!("database/base/{}", unique_db)) })
+}
+
+// Helper to create path
+fn get_test_path(db_path: &PathBuf, table_name: &str) -> PathBuf {
+    db_path.join(format!("{}.dat", table_name))
 }
 
 /// 1. INSERTION - Large number of insertions and time taken
 /// 9. Time and space for various operations
 #[test]
 fn test_large_insertions() {
-    setup_db_dir();
+    let (db_path, _guard) = setup_db_dir("large_insert");
     let table_name = "large_insert";
-    let file_path = get_test_path(table_name);
+    let file_path = get_test_path(&db_path, table_name);
     let _ = fs::remove_file(&file_path);
     let _ = fs::remove_file(file_path.with_extension("dat.fsm"));
 
@@ -55,9 +72,9 @@ fn test_large_insertions() {
 /// (VACUUM garbage collection would be needed for that), but slot entries are marked invalid.
 #[test]
 fn test_update_delete_fsm_deallocation() {
-    setup_db_dir();
+    let (db_path, _guard) = setup_db_dir("upd_del_fsm");
     let table_name = "upd_del_fsm";
-    let file_path = get_test_path(table_name);
+    let file_path = get_test_path(&db_path, table_name);
     let _ = fs::remove_file(&file_path);
     let _ = fs::remove_file(file_path.with_extension("dat.fsm"));
 
@@ -90,9 +107,9 @@ fn test_update_delete_fsm_deallocation() {
 /// Verify that when space is requested, FSM marks it as used, never handing it blindly again without updates.
 #[test]
 fn test_allocation_accuracy() {
-    setup_db_dir();
+    let (db_path, _guard) = setup_db_dir("alloc_accuracy");
     let table_name = "alloc_accuracy";
-    let file_path = get_test_path(table_name);
+    let file_path = get_test_path(&db_path, table_name);
     let _ = fs::remove_file(&file_path);
     let _ = fs::remove_file(file_path.with_extension("dat.fsm"));
 
@@ -109,9 +126,9 @@ fn test_allocation_accuracy() {
 /// 5. Fragmentation Management (Bubble up logic and category correctness)
 #[test]
 fn test_fragmentation_management() {
-    setup_db_dir();
+    let (db_path, _guard) = setup_db_dir("frag_mgmt");
     let table_name = "frag_mgmt";
-    let file_path = get_test_path(table_name);
+    let file_path = get_test_path(&db_path, table_name);
     let fsm_path = file_path.with_extension("dat.fsm");
     let _ = fs::remove_file(&file_path);
     let _ = fs::remove_file(&fsm_path);
@@ -138,9 +155,9 @@ fn test_fragmentation_management() {
 /// 6. Persistence (System crash recovery)
 #[test]
 fn test_persistence_fsm_recovery() {
-    setup_db_dir();
+    let (db_path, _guard) = setup_db_dir("fsm_persistence");
     let table_name = "fsm_persistence";
-    let file_path = get_test_path(table_name);
+    let file_path = get_test_path(&db_path, table_name);
     let fsm_path = file_path.with_extension("dat.fsm");
     let _ = fs::remove_file(&file_path);
     let _ = fs::remove_file(&fsm_path);
@@ -166,9 +183,9 @@ fn test_persistence_fsm_recovery() {
 /// App writes past the chunk logically -> FSM/HM rejects tuples > PAGESIZE
 #[test]
 fn test_boundary_violations() {
-    setup_db_dir();
+    let (db_path, _guard) = setup_db_dir("boundary_viol");
     let table_name = "boundary_viol";
-    let file_path = get_test_path(table_name);
+    let file_path = get_test_path(&db_path, table_name);
     let _ = fs::remove_file(&file_path);
     let _ = fs::remove_file(file_path.with_extension("dat.fsm"));
 

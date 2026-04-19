@@ -100,7 +100,7 @@ pub fn verify_csv_path(csv_path: &str) -> RookResult<()> {
     
     if !csv_path.ends_with(".csv") {
         debug_print_error(&format!("CSV file doesn't end with .csv: '{}'", csv_path));
-        println!("Warning: File does not have .csv extension. Continuing anyway...");
+        log::error!("Warning: File does not have .csv extension. Continuing anyway...");
     }
     
     validate_file_path(csv_path)?;
@@ -111,23 +111,23 @@ pub fn verify_csv_path(csv_path: &str) -> RookResult<()> {
 
 /// Print graceful error message and guidance
 pub fn print_error_with_guidance(error: &RookDBError) {
-    println!("\n{}", error);
+    log::error!("\n{}", error);
     
     match error {
         RookDBError::FileNotFound(_) => {
-            println!("Please check that the file path is correct and the file exists.");
+            log::error!("Please check that the file path is correct and the file exists.");
         }
         RookDBError::InvalidPath(_) => {
-            println!("Please provide a valid file path.");
+            log::error!("Please provide a valid file path.");
         }
         RookDBError::InvalidDataType(_) => {
-            println!("Supported data types are: INT, TEXT");
+            log::error!("Supported data types are: INT, TEXT");
         }
         RookDBError::ValidationError(_) => {
-            println!("Please check your input data and try again.");
+            log::error!("Please check your input data and try again.");
         }
         RookDBError::DiskFull(_) => {
-            println!("Check disk space and file permissions.");
+            log::error!("Check disk space and file permissions.");
         }
         _ => {}
     }
@@ -170,7 +170,7 @@ pub fn safe_write_file(path: &str, content: &str) -> RookResult<()> {
 /// Print debug information for error operations
 fn debug_print_error(msg: &str) {
     if cfg!(debug_assertions) {
-        println!("[ERROR_HANDLER] {}", msg);
+        log::debug!("[ERROR_HANDLER] {}", msg);
     }
 }
 

@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 
-use crate::disk::{create_page, read_page, write_page};
+use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, Page};
 use crate::table::{TABLE_HEADER_SIZE, page_count};
 
@@ -26,8 +26,9 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
 
     file.seek(SeekFrom::Start(0))?;
 
-    // Create initial header
-    let header = HeaderMetadata::new();
+    // Initialize header metadata correctly for memory bounds
+    let mut header = HeaderMetadata::new();
+    header.page_count = 2; // 1 header page + 1 empty slotted page
     let header_bytes = header.serialize()?;
 
     // Create header page with metadata
@@ -36,12 +37,17 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
 
     file.write_all(&header_page_buf)?;
     file.flush()?;
+
+    // Create first data page dynamically instead of using legacy create_page
+    let mut page = Page::new();
+    crate::page::init_page(&mut page);
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(&page.data)?;
+
+    file.flush()?;
     file.sync_all()?;
 
-    // Create first data page
-    create_page(file)?;
-
-    println!("[init_table] New table initialized with HeaderMetadata");
+    log::info!("[init_table] New table initialized with HeaderMetadata and data page");
 
     Ok(())
 }
@@ -51,8 +57,18 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     let mut total_pages = page_count(file)?;
     // If table is empty (only header), create first data page
     if total_pages == 1 {
-        create_page(file)?;
+        let mut new_page = Page::new();
+        crate::page::init_page(&mut new_page);
+        
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(&new_page.data)?;
+
+        // Update header block
         total_pages = 2;
+        if let Ok(mut latest_header) = crate::disk::read_header_page(file) {
+            latest_header.page_count = 2;
+            crate::disk::update_header_page(file, &latest_header)?;
+        }
     }
     
     let mut last_page_num = total_pages - 1;
@@ -70,13 +86,20 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     let free_space = upper.saturating_sub(lower);
 
     if required > free_space {
-        create_page(file)?;
         total_pages += 1;
         last_page_num = total_pages - 1;
         
-        // Initialize new page
+        // Initialize new page instead of legacy create_page
         page = Page::new();
         crate::page::init_page(&mut page);
+        
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(&page.data)?;
+
+        if let Ok(mut latest_header) = crate::disk::read_header_page(file) {
+            latest_header.page_count = total_pages;
+            crate::disk::update_header_page(file, &latest_header)?;
+        }
     }
 
     // Re-read lower/upper because we might have a new page

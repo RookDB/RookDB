@@ -21,7 +21,7 @@ pub struct HeaderMetadata {
 impl HeaderMetadata {
     /// Create a new header with initial state (1 page = Page 0 + Page 1 for data).
     pub fn new() -> Self {
-        println!("[HeaderMetadata::new] Creating initial header metadata");
+        log::trace!("[HeaderMetadata::new] Creating initial header metadata");
         Self {
             page_count: 1,           // Page 0 only initially
             fsm_page_count: 0,       // Will be set by FSM::build_from_heap
@@ -42,7 +42,7 @@ impl HeaderMetadata {
         buf.write_all(&self.total_tuples.to_le_bytes())?;
         buf.write_all(&self.last_vacuum.to_le_bytes())?;
         
-        println!(
+        log::trace!(
             "[HeaderMetadata::serialize] Serialized: page_count={}, fsm_page_count={}, total_tuples={}, last_vacuum={}",
             self.page_count, self.fsm_page_count, self.total_tuples, self.last_vacuum
         );
@@ -82,7 +82,7 @@ impl HeaderMetadata {
         cursor.read_exact(&mut buf)?;
         let last_vacuum = u32::from_le_bytes(buf);
 
-        println!(
+        log::trace!(
             "[HeaderMetadata::deserialize] Deserialized: page_count={}, fsm_page_count={}, total_tuples={}, last_vacuum={}",
             page_count, fsm_page_count, total_tuples, last_vacuum
         );

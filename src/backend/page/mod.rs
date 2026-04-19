@@ -113,7 +113,7 @@ pub fn get_tuple_count(page: &Page) -> std::io::Result<u32> {
     }
     
     let tuple_count = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
-    println!("[page::get_tuple_count] Computing tuple_count: ({} - {}) / {} = {}", 
+log::trace!("[page::get_tuple_count] Computing tuple_count: ({} - {}) / {} = {}", 
              lower, PAGE_HEADER_SIZE, ITEM_ID_SIZE, tuple_count);
     
     Ok(tuple_count)
@@ -173,7 +173,7 @@ pub fn get_slot_entry(page: &Page, slot_id: u32) -> std::io::Result<(u32, u32)> 
         ));
     }
     
-    println!("[page::get_slot_entry] Slot {}: offset={}, length={}", 
+    log::trace!("[page::get_slot_entry] Slot {}: offset={}, length={}", 
              slot_id, offset, length);
     
     Ok((offset, length))
