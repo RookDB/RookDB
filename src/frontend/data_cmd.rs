@@ -2,11 +2,12 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::load_catalog;
+use storage_manager::catalog::Catalog;
 use storage_manager::executor::show_tuples;
 use storage_manager::table::page_count;
 
 pub fn load_csv_cmd(
+    catalog: &mut Catalog,
     buffer_manager: &mut BufferManager,
     current_db: &Option<String>,
 ) -> io::Result<()> {
@@ -30,8 +31,7 @@ pub fn load_csv_cmd(
     io::stdin().read_line(&mut csv_path)?;
     let csv_path = csv_path.trim();
 
-    let catalog = load_catalog();
-    buffer_manager.load_csv_to_buffer(&catalog, &db, table, csv_path)?;
+    buffer_manager.load_csv_to_buffer(catalog, &db, table, csv_path)?;
 
     let path = format!("database/base/{}/{}.dat", db, table);
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
@@ -58,7 +58,7 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let path = format!("database/base/{}/{}.dat", db, table);
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
 
-    let catalog = load_catalog();
+    let catalog = storage_manager::catalog::load_catalog();
     show_tuples(&catalog, &db, table, &mut file)?;
 
     Ok(())

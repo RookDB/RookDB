@@ -43,7 +43,6 @@ pub fn run() -> io::Result<()> {
         println!("8. Show Table Statistics");
         println!("9. Exit");
         println!("10. Sort Table");
-        println!("11. Create Ordered Table");
         println!("12. Range Scan");
         println!("13. ORDER BY Query");
         println!("=============================================");
@@ -63,7 +62,7 @@ pub fn run() -> io::Result<()> {
             "3" => database_cmd::select_database_cmd(&catalog, &mut current_db)?,
             "4" => table_cmd::show_tables_cmd(&catalog, &current_db),
             "5" => table_cmd::create_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
-            "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
+            "6" => data_cmd::load_csv_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
             "9" => {
@@ -71,9 +70,6 @@ pub fn run() -> io::Result<()> {
                 break;
             }
             "10" => sort_cmd::sort_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
-            "11" => {
-                sort_cmd::create_ordered_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?
-            }
             "12" => sort_cmd::range_scan_cmd(&mut catalog, &current_db)?,
             "13" => sort_cmd::order_by_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
             _ => println!("Invalid option."),

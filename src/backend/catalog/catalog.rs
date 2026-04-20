@@ -10,7 +10,7 @@ use crate::catalog::types::*;
 
 use crate::heap::init_table;
 use crate::layout::*;
-use crate::ordered::ordered_file::{init_ordered_table, SortKeyEntry};
+use crate::ordered::ordered_file::{SortKeyEntry, init_ordered_table};
 
 /// Initializes the catalog and required directory structure on disk.
 /// Creates the catalog file if it does not already exist.
@@ -204,6 +204,9 @@ pub fn create_table(
         columns,
         file_type: sort_keys.as_ref().map(|_| "ordered".to_string()),
         sort_keys: sort_keys.clone(),
+        delta_enabled: sort_keys.as_ref().map(|_| true),
+        delta_merge_threshold_tuples: sort_keys.as_ref().map(|_| 500),
+        delta_current_tuples: sort_keys.as_ref().map(|_| 0),
     };
     database.tables.insert(table_name.to_string(), new_table);
 

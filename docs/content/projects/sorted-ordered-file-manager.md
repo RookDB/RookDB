@@ -15,6 +15,7 @@ This component introduces a new layer between the Buffer Manager and the Executo
 
 - **In-memory and external merge sorting** of heap tables into ordered files
 - **Ordered file maintenance** with sorted insertion and page splitting
+- **Deferred insertion (delta store)** for write-heavy ordered-table ingestion
 - **Ordered scan** for full sequential iteration in sort order
 - **Range scan** with binary search-based seek for efficient key-range queries
 - **ORDER BY execution** that detects pre-sorted tables to avoid redundant work
@@ -31,7 +32,7 @@ The sorting and ordered file layer sits between the existing Buffer Manager and 
 
 ```
 +-------------------+
-|   CLI / Frontend   |  Options 10-13: sort, create ordered, range scan, ORDER BY
+|   CLI / Frontend   |  Option 5 table-type menu + options 10, 12, 13
 +-------------------+
          |
 +-------------------+
@@ -95,6 +96,24 @@ When a sorted insertion targets a full page, a **50/50 page split** occurs:
 3. Shift all subsequent pages forward by one position in the file
 4. Update `page_count` in the header
 
+### Deferred Insertion (Delta Store)
+
+For ordered tables, inserts can be deferred instead of doing immediate in-place sorted insertion.
+
+- New tuples are first appended to an unsorted sidecar file: `database/base/{db_name}/{table_name}.delta`
+- The main ordered file (`{table_name}.dat`) stays sorted and is used as the base run
+- Merge policy is tuple-count based: merge when `delta_current_tuples >= 500`
+
+Merge workflow:
+1. Read tuples from base ordered file + delta sidecar
+2. Sort merged tuples with `TupleComparator`
+3. Rewrite base ordered file in sorted order
+4. Truncate/reset the `.delta` file
+
+Files created/used in this process:
+- `database/base/{db_name}/{table_name}.dat` (base table file, persistent)
+- `database/base/{db_name}/{table_name}.delta` (deferred-insert buffer, persistent sidecar that is emptied after merge)
+
 ### External Merge Sort
 
 For tables that exceed available memory, a two-phase **external multi-way merge sort** is used:
@@ -111,7 +130,7 @@ For tables that exceed available memory, a two-phase **external multi-way merge 
 - Flush output pages as they fill
 - Repeat merge passes until one run remains
 
-Temporary files are stored as `database/base/{db_name}/.sort_tmp_{table_name}_run_{N}.dat` and are cleaned up after the sort completes.
+Temporary files are stored as `database/base/{db_name}/.sort_tmp_{table_name}_run_{N}.dat` and are cleaned up after the sort completes. These are external-sort artifacts and are different from the deferred-insertion sidecar `database/base/{db_name}/{table_name}.delta`.
 
 ### Catalog Changes
 
@@ -325,7 +344,8 @@ Now accepts optional sort keys. If provided, calls `init_ordered_table()` instea
 
 ## CLI Options
 
-Four new menu options are added (options 10-13):
+Top-level sort menu options are available as 10, 12, and 13.
+Table creation type (sorted/unsorted) is selected inside option 5.
 
 ```
 ========== RookDB Storage Manager ==========
@@ -340,11 +360,28 @@ Choose an option:
 8. Show Table Statistics
 9. Exit
 10. Sort Table
-11. Create Ordered Table
 12. Range Scan
 13. ORDER BY Query
 =============================================
 Enter your choice:
+```
+
+Create Table flow:
+
+```
+> 5
+Enter table name: employees
+Enter columns in the format:- column_name:data_type
+Press Enter on an empty line to finish
+Enter column (name:type): id:INT
+Enter column (name:type): name:TEXT
+Enter column (name:type):
+
+Select table type:
+1. Sorted Table
+2. Unsorted Table
+Enter your choice (1/2): 1
+Enter sort columns (format: col1:ASC,col2:DESC): id:ASC
 ```
 
 ### Option 10: Sort Table
@@ -358,19 +395,6 @@ Enter sort columns (format: col1:ASC,col2:DESC): id:ASC
 ```
 
 Output: `Table 'employees' sorted by [id ASC]. File type changed to ordered.`
-
-### Option 11: Create Ordered Table
-
-Creates a new table that maintains sort order from creation.
-
-```
-> 11
-Enter table name: employees_sorted
-Enter columns (format: col1:type,col2:type): id:INT,name:TEXT
-Enter sort columns (format: col1:ASC,col2:DESC): id:ASC
-```
-
-Output: `Ordered table 'employees_sorted' created with sort key [id ASC].`
 
 ### Option 12: Range Scan
 
@@ -397,50 +421,6 @@ Enter sort columns (format: col1:ASC,col2:DESC): name:ASC,id:DESC
 ```
 
 Output: all tuples displayed in the specified sort order.
-
----
-
-## Module Structure
-
-### New Files
-
-```
-src/
-  backend/
-    sorting/                        # NEW module
-      mod.rs                        # Module declarations and re-exports
-      comparator.rs                 # TupleComparator
-      in_memory_sort.rs             # in_memory_sort()
-      external_sort.rs              # ExternalSortState, SortedRun, MergeEntry,
-                                    # generate_sorted_runs(), merge_runs(), external_sort()
-    ordered/                        # NEW module
-      mod.rs                        # Module declarations and re-exports
-      ordered_file.rs               # OrderedFileHeader, FileType, SortKeyEntry,
-                                    # read/write header, init_ordered_table()
-      sorted_insert.rs              # sorted_insert(), find_insert_page/slot(), split_page()
-      scan.rs                       # OrderedScanIterator, RangeScanIterator,
-                                    # ordered_scan(), range_scan()
-    executor/
-      order_by.rs                   # NEW: order_by_execute(), create_ordered_file_from_heap()
-  frontend/
-    sort_cmd.rs                     # NEW: CLI handlers for options 10-13
-```
-
-### Modified Files
-
-| File | Change |
-|------|--------|
-| `src/backend/mod.rs` | Added `pub mod sorting;` and `pub mod ordered;` |
-| `src/backend/catalog/types.rs` | Added `SortKey`, `SortDirection`, `Clone` on `Column`, extended `Table` |
-| `src/backend/catalog/mod.rs` | Added re-exports for `SortKey`, `SortDirection` |
-| `src/backend/catalog/catalog.rs` | Updated `create_table` signature (5th arg: sort_keys) |
-| `src/backend/executor/mod.rs` | Added `pub mod order_by;` and re-exports |
-| `src/backend/executor/seq_scan.rs` | Added ordered file indicator in `show_tuples` |
-| `src/backend/buffer_manager/buffer_manager.rs` | Added `pool_size`, sorted CSV loading for ordered tables |
-| `src/frontend/mod.rs` | Added `pub mod sort_cmd;` |
-| `src/frontend/menu.rs` | Added options 10-13 |
-| `src/frontend/table_cmd.rs` | Updated `create_table` call with 5th arg `None` |
-| `src/lib.rs` | Added `pub use backend::sorting;` and `pub use backend::ordered;` |
 
 ---
 
@@ -490,7 +470,7 @@ src/
 | Executor: create_ordered_file_from_heap | Complete |
 | Catalog extensions (sort_keys, file_type) | Complete |
 | Buffer manager: sorted CSV loading | Complete |
-| CLI options 10-13 | Complete |
+| CLI table-type menu + options 10, 12, 13 | Complete |
 | Unit tests (71 new tests) | Complete |
 | Integration tests (6 end-to-end scenarios) | Complete |
 | Temp file cleanup | Complete |

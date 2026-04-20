@@ -117,9 +117,11 @@ pub fn init_ordered_table(file: &mut File, sort_keys: &[SortKeyEntry]) -> io::Re
     // writes the incremented page_count back. So we must ensure page_count
     // starts at 1 (header page only) before calling it.
 
-    // Write a temporary header with page_count = 1 so create_page works correctly
+    // Write a full temporary header page with page_count = 1 so create_page works correctly
+    let mut temp_header = vec![0u8; PAGE_SIZE];
+    temp_header[0..4].copy_from_slice(&1u32.to_le_bytes());
     file.seek(SeekFrom::Start(0))?;
-    file.write_all(&1u32.to_le_bytes())?;
+    file.write_all(&temp_header)?;
     file.flush()?;
 
     create_page(file)?;

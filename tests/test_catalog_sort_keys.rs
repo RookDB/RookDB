@@ -9,7 +9,7 @@ use std::fs;
 
 use storage_manager::catalog::types::{Catalog, Column, Database, SortDirection, SortKey};
 use storage_manager::catalog::{create_table, save_catalog};
-use storage_manager::ordered::ordered_file::{read_ordered_file_header, FileType};
+use storage_manager::ordered::ordered_file::{FileType, read_ordered_file_header};
 
 #[test]
 fn test_create_ordered_table_persists_sort_keys() {
@@ -64,6 +64,9 @@ fn test_create_ordered_table_persists_sort_keys() {
         .unwrap();
     assert_eq!(table.file_type.as_deref(), Some("ordered"));
     assert!(table.sort_keys.is_some());
+    assert_eq!(table.delta_enabled, Some(true));
+    assert_eq!(table.delta_merge_threshold_tuples, Some(500));
+    assert_eq!(table.delta_current_tuples, Some(0));
     let keys = table.sort_keys.as_ref().unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].column_index, 0);
@@ -121,6 +124,9 @@ fn test_create_heap_table_no_sort_keys() {
         .unwrap();
     assert!(table.sort_keys.is_none());
     assert!(table.file_type.is_none());
+    assert!(table.delta_enabled.is_none());
+    assert!(table.delta_merge_threshold_tuples.is_none());
+    assert!(table.delta_current_tuples.is_none());
 
     // Cleanup
     let _ = fs::remove_dir_all(format!("database/base/{}", db_name));

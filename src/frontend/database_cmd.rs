@@ -2,7 +2,7 @@
 //! and selecting databases from the catalog.
 
 use std::io::{self, Write};
-use storage_manager::catalog::{create_database, show_databases, Catalog};
+use storage_manager::catalog::{Catalog, create_database, show_databases};
 
 /// Displays all available databases
 pub fn show_databases_cmd(catalog: &Catalog) {

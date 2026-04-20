@@ -6,9 +6,10 @@ use std::io::Write;
 
 use storage_manager::catalog::types::{Catalog, Column, Database, SortDirection, SortKey, Table};
 use storage_manager::executor::order_by::{create_ordered_file_from_heap, order_by_execute};
-use storage_manager::ordered::ordered_file::{read_ordered_file_header, FileType};
+use storage_manager::ordered::append_delta_tuple;
+use storage_manager::ordered::ordered_file::{FileType, read_ordered_file_header};
 use storage_manager::ordered::scan::ordered_scan;
-use storage_manager::page::{init_page, Page, ITEM_ID_SIZE, PAGE_SIZE};
+use storage_manager::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page};
 
 /// Helper: build a tuple from (i32, &str) for schema (INT, TEXT).
 fn make_tuple(id: i32, name: &str) -> Vec<u8> {
@@ -61,6 +62,9 @@ fn setup_test_env(
         columns: columns.clone(),
         sort_keys: None,
         file_type: None,
+        delta_enabled: None,
+        delta_merge_threshold_tuples: None,
+        delta_current_tuples: None,
     };
     let mut tables = HashMap::new();
     tables.insert(table_name.to_string(), table);
@@ -303,5 +307,94 @@ fn test_order_by_empty_table() {
     assert_eq!(result_tuples.len(), 0);
 
     // Cleanup
+    let _ = fs::remove_dir_all(format!("database/base/{}", db_name));
+}
+
+#[test]
+fn test_order_by_already_sorted_includes_deferred_delta_rows() {
+    let db_name = "test_order_by_db5";
+    let table_name = "test_order_by_tbl5";
+    let columns = vec![
+        Column {
+            name: "id".to_string(),
+            data_type: "INT".to_string(),
+        },
+        Column {
+            name: "name".to_string(),
+            data_type: "TEXT".to_string(),
+        },
+    ];
+
+    let tuples: Vec<Vec<u8>> = vec![make_tuple(10, "a"), make_tuple(30, "c")];
+    let (mut catalog, file_path) = setup_test_env(db_name, table_name, columns, &tuples);
+
+    let sort_keys = vec![SortKey {
+        column_index: 0,
+        direction: SortDirection::Ascending,
+    }];
+
+    create_ordered_file_from_heap(&mut catalog, db_name, table_name, sort_keys.clone(), 64)
+        .unwrap();
+    append_delta_tuple(db_name, table_name, &make_tuple(20, "b")).unwrap();
+
+    // Should take already-sorted path and still show delta rows in logical output.
+    order_by_execute(&mut catalog, db_name, table_name, sort_keys, 64).unwrap();
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&file_path)
+        .unwrap();
+    let result_tuples = ordered_scan(&mut file, &catalog, db_name, table_name).unwrap();
+    let ids: Vec<i32> = result_tuples.iter().map(|t| extract_int(t)).collect();
+    assert_eq!(ids, vec![10, 20, 30]);
+
+    let _ = fs::remove_file(format!("database/base/{}/{}.delta", db_name, table_name));
+    let _ = fs::remove_dir_all(format!("database/base/{}", db_name));
+}
+
+#[test]
+fn test_order_by_resort_with_deferred_delta_rows() {
+    let db_name = "test_order_by_db6";
+    let table_name = "test_order_by_tbl6";
+    let columns = vec![
+        Column {
+            name: "id".to_string(),
+            data_type: "INT".to_string(),
+        },
+        Column {
+            name: "name".to_string(),
+            data_type: "TEXT".to_string(),
+        },
+    ];
+
+    let tuples: Vec<Vec<u8>> = vec![make_tuple(10, "a"), make_tuple(30, "c")];
+    let (mut catalog, file_path) = setup_test_env(db_name, table_name, columns, &tuples);
+
+    let asc_keys = vec![SortKey {
+        column_index: 0,
+        direction: SortDirection::Ascending,
+    }];
+    create_ordered_file_from_heap(&mut catalog, db_name, table_name, asc_keys, 64).unwrap();
+    append_delta_tuple(db_name, table_name, &make_tuple(20, "b")).unwrap();
+
+    let desc_keys = vec![SortKey {
+        column_index: 0,
+        direction: SortDirection::Descending,
+    }];
+
+    // Should re-sort base and still include deferred rows in final logical order.
+    order_by_execute(&mut catalog, db_name, table_name, desc_keys, 64).unwrap();
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&file_path)
+        .unwrap();
+    let result_tuples = ordered_scan(&mut file, &catalog, db_name, table_name).unwrap();
+    let ids: Vec<i32> = result_tuples.iter().map(|t| extract_int(t)).collect();
+    assert_eq!(ids, vec![30, 20, 10]);
+
+    let _ = fs::remove_file(format!("database/base/{}/{}.delta", db_name, table_name));
     let _ = fs::remove_dir_all(format!("database/base/{}", db_name));
 }

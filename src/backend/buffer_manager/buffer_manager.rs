@@ -1,8 +1,8 @@
+use crate::catalog::save_catalog;
 use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
-use crate::ordered::ordered_file::{FileType, SortKeyEntry};
-use crate::page::{init_page, page_free_space, Page, ITEM_ID_SIZE, PAGE_SIZE};
-use crate::sorting::comparator::TupleComparator;
+use crate::ordered::{append_delta_tuple, merge_if_needed};
+use crate::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page, page_free_space};
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
@@ -233,132 +233,130 @@ impl BufferManager {
 
     pub fn load_csv_to_buffer(
         &mut self,
-        catalog: &Catalog,
+        catalog: &mut Catalog,
         db_name: &str,
         table_name: &str,
         csv_path: &str,
     ) -> io::Result<()> {
-        let used = self.load_csv_into_pages(catalog, db_name, table_name, csv_path)?;
-
-        // Check if table is ordered - if so, sort tuples before flushing
-        let db = catalog.databases.get(db_name);
-        let is_ordered = db
+        let is_ordered = catalog
+            .databases
+            .get(db_name)
             .and_then(|d| d.tables.get(table_name))
             .and_then(|t| t.file_type.as_ref())
             .map(|ft| ft == "ordered")
             .unwrap_or(false);
 
         if is_ordered {
-            if let Some(table) = db.and_then(|d| d.tables.get(table_name)) {
-                if let Some(sort_keys) = &table.sort_keys {
-                    let comparator = TupleComparator::new(table.columns.clone(), sort_keys.clone());
+            let tuples = parse_csv_tuples(catalog, db_name, table_name, csv_path)?;
 
-                    // Extract all tuples from data pages
-                    let mut all_tuples: Vec<Vec<u8>> = Vec::new();
-                    for page_idx in 1..self.pages.len() {
-                        let page = &self.pages[page_idx];
-                        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-                        let num_items = (lower - crate::page::PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+            for tuple in &tuples {
+                append_delta_tuple(db_name, table_name, tuple)?;
+            }
 
-                        for i in 0..num_items {
-                            let base = (crate::page::PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
-                            let offset =
-                                u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap())
-                                    as usize;
-                            let length = u32::from_le_bytes(
-                                page.data[base + 4..base + 8].try_into().unwrap(),
-                            ) as usize;
-                            all_tuples.push(page.data[offset..offset + length].to_vec());
-                        }
+            if let Some(db) = catalog.databases.get_mut(db_name) {
+                if let Some(table) = db.tables.get_mut(table_name) {
+                    let existing = table.delta_current_tuples.unwrap_or(0);
+                    table.delta_current_tuples = Some(existing + tuples.len() as u64);
+                    if table.delta_enabled.is_none() {
+                        table.delta_enabled = Some(true);
                     }
-
-                    // Sort tuples
-                    all_tuples.sort_by(|a, b| comparator.compare(a, b));
-
-                    // Clear data pages and rewrite sorted tuples
-                    self.pages.truncate(1); // keep header page
-
-                    let mut current_page = Page::new();
-                    init_page(&mut current_page);
-
-                    for tuple in &all_tuples {
-                        let tuple_len = tuple.len() as u32;
-                        let required = tuple_len + ITEM_ID_SIZE;
-                        let free = {
-                            let lower =
-                                u32::from_le_bytes(current_page.data[0..4].try_into().unwrap());
-                            let upper =
-                                u32::from_le_bytes(current_page.data[4..8].try_into().unwrap());
-                            upper - lower
-                        };
-
-                        if required > free {
-                            self.pages.push(current_page);
-                            current_page = Page::new();
-                            init_page(&mut current_page);
-                        }
-
-                        let mut lower =
-                            u32::from_le_bytes(current_page.data[0..4].try_into().unwrap());
-                        let mut upper =
-                            u32::from_le_bytes(current_page.data[4..8].try_into().unwrap());
-
-                        let start = upper - tuple_len;
-                        current_page.data[start as usize..upper as usize].copy_from_slice(tuple);
-
-                        current_page.data[lower as usize..lower as usize + 4]
-                            .copy_from_slice(&start.to_le_bytes());
-                        current_page.data[lower as usize + 4..lower as usize + 8]
-                            .copy_from_slice(&tuple_len.to_le_bytes());
-
-                        lower += ITEM_ID_SIZE;
-                        upper = start;
-
-                        current_page.data[0..4].copy_from_slice(&lower.to_le_bytes());
-                        current_page.data[4..8].copy_from_slice(&upper.to_le_bytes());
+                    if table.delta_merge_threshold_tuples.is_none() {
+                        table.delta_merge_threshold_tuples = Some(500);
                     }
+                }
+            }
 
-                    self.pages.push(current_page);
+            save_catalog(catalog);
+            let merged = merge_if_needed(catalog, db_name, table_name)?;
+            if merged {
+                println!("Delta reached threshold; merged into ordered base file.");
+            } else {
+                println!(
+                    "Buffered {} tuples into delta store for ordered table.",
+                    tuples.len()
+                );
+            }
 
-                    // Write ordered file header into page 0
-                    let total_page_count = self.pages.len() as u32;
-                    let sort_key_entries: Vec<SortKeyEntry> = sort_keys
-                        .iter()
-                        .map(|sk| SortKeyEntry {
-                            column_index: sk.column_index,
-                            direction: match sk.direction {
-                                crate::catalog::types::SortDirection::Ascending => 0,
-                                crate::catalog::types::SortDirection::Descending => 1,
-                            },
-                        })
-                        .collect();
+            return Ok(());
+        }
 
-                    // Build ordered header into page 0
-                    let header_page = &mut self.pages[0];
-                    header_page.data[0..4].copy_from_slice(&total_page_count.to_le_bytes());
-                    header_page.data[4] = FileType::Ordered.to_u8();
-                    header_page.data[5..9]
-                        .copy_from_slice(&(sort_key_entries.len() as u32).to_le_bytes());
-                    for (i, key) in sort_key_entries.iter().enumerate() {
-                        let base = 9 + i * 5;
-                        header_page.data[base..base + 4]
-                            .copy_from_slice(&key.column_index.to_le_bytes());
-                        header_page.data[base + 4] = key.direction;
+        let used = self.load_csv_into_pages(catalog, db_name, table_name, csv_path)?;
+        self.flush_to_disk(db_name, table_name, used)?;
+        Ok(())
+    }
+}
+
+fn parse_csv_tuples(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    csv_path: &str,
+) -> io::Result<Vec<Vec<u8>>> {
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Database '{}' not found", db_name),
+        )
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Table '{}' not found", table_name),
+        )
+    })?;
+
+    let columns = &table.columns;
+    let csv_file = File::open(csv_path)?;
+    let reader = BufReader::new(csv_file);
+    let mut lines = reader.lines();
+    if let Some(Ok(_)) = lines.next() {}
+
+    let mut tuples = Vec::new();
+
+    for (i, line) in lines.enumerate() {
+        let row = line?;
+        if row.trim().is_empty() {
+            continue;
+        }
+
+        let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
+        if values.len() != columns.len() {
+            println!(
+                "Skipping row {}: expected {} columns, found {}",
+                i + 1,
+                columns.len(),
+                values.len()
+            );
+            continue;
+        }
+
+        let mut tuple_bytes: Vec<u8> = Vec::new();
+        for (val, col) in values.iter().zip(columns.iter()) {
+            match col.data_type.as_str() {
+                "INT" => {
+                    let num: i32 = val.parse().unwrap_or_default();
+                    tuple_bytes.extend_from_slice(&num.to_le_bytes());
+                }
+                "TEXT" => {
+                    let mut text_bytes = val.as_bytes().to_vec();
+                    if text_bytes.len() > 10 {
+                        text_bytes.truncate(10);
+                    } else if text_bytes.len() < 10 {
+                        text_bytes.extend(vec![b' '; 10 - text_bytes.len()]);
                     }
-
+                    tuple_bytes.extend_from_slice(&text_bytes);
+                }
+                _ => {
                     println!(
-                        "Sorted {} tuples for ordered table before flushing.",
-                        all_tuples.len()
+                        "Unsupported column type '{}' in column '{}'",
+                        col.data_type, col.name
                     );
-
-                    let used = self.pages.len();
-                    self.flush_to_disk(db_name, table_name, used)?;
-                    return Ok(());
                 }
             }
         }
 
-        self.flush_to_disk(db_name, table_name, used)?;
-        Ok(())
+        tuples.push(tuple_bytes);
     }
+
+    Ok(tuples)
 }

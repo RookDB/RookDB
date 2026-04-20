@@ -48,6 +48,18 @@ column_name:data_type
 ```
 
 3. Press Enter on an empty line to finish
+4. Select table type from menu:
+
+```
+1. Sorted Table
+2. Unsorted Table
+```
+
+5. If sorted table is selected, enter sort keys in format:
+
+```
+col1:ASC,col2:DESC
+```
 
 Supported Types:
 - INT

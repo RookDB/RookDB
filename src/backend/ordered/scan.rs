@@ -10,9 +10,10 @@ use std::cmp::Ordering;
 use std::fs::File;
 use std::io;
 
-use crate::catalog::types::{Catalog, Column, SortKey};
+use crate::catalog::types::{Catalog, Column, SortDirection, SortKey};
 use crate::disk::read_page;
-use crate::page::{Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE};
+use crate::ordered::delta_store::scan_all_delta_tuples;
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::sorting::comparator::TupleComparator;
 use crate::table::page_count;
 
@@ -297,9 +298,9 @@ impl RangeScanIterator {
 /// Scans all tuples from an ordered file in sorted order.
 pub fn ordered_scan(
     file: &mut File,
-    _catalog: &Catalog,
-    _db_name: &str,
-    _table_name: &str,
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
 ) -> io::Result<Vec<Vec<u8>>> {
     let total_pages = page_count(file)?;
     let mut iter = OrderedScanIterator::new(total_pages);
@@ -307,6 +308,35 @@ pub fn ordered_scan(
 
     while let Some(tuple) = iter.next(file)? {
         results.push(tuple);
+    }
+
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Database '{}' not found", db_name),
+        )
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Table '{}' not found", table_name),
+        )
+    })?;
+
+    if table.file_type.as_deref() == Some("ordered") {
+        let mut delta_tuples = scan_all_delta_tuples(db_name, table_name)?;
+        if !delta_tuples.is_empty() {
+            results.append(&mut delta_tuples);
+
+            let sort_keys = table.sort_keys.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Ordered table missing sort keys",
+                )
+            })?;
+            let comparator = TupleComparator::new(table.columns.clone(), sort_keys.clone());
+            results.sort_by(|a, b| comparator.compare(a, b));
+        }
     }
 
     Ok(results)
@@ -366,16 +396,31 @@ pub fn range_scan(
 
     let col_type = &columns[key_col_idx].data_type;
 
-    // Serialize start/end values
-    let start_key = start_value.map(|v| serialize_value(v, col_type));
-    let end_key = end_value.map(|v| serialize_value(v, col_type));
+    // Serialize start/end values and normalize to natural [low, high] order.
+    let mut start_key_raw = start_value.map(|v| serialize_value(v, col_type));
+    let mut end_key_raw = end_value.map(|v| serialize_value(v, col_type));
+
+    if let (Some(start), Some(end)) = (&start_key_raw, &end_key_raw) {
+        if compare_serialized_values(start, end, col_type) == Ordering::Greater {
+            std::mem::swap(&mut start_key_raw, &mut end_key_raw);
+        }
+    }
+
+    // Convert natural bounds to comparator-space bounds.
+    // Ascending: start=low, end=high
+    // Descending: start=high, end=low
+    let (effective_start_key, effective_end_key) = match sort_keys[0].direction {
+        SortDirection::Ascending => (start_key_raw.clone(), end_key_raw.clone()),
+        SortDirection::Descending => (end_key_raw.clone(), start_key_raw.clone()),
+    };
 
     let total_pages = page_count(file)?;
+    let comparator = TupleComparator::new(columns.clone(), sort_keys.clone());
 
     let mut iter = RangeScanIterator::new(
         key_col_idx as u32,
-        start_key,
-        end_key,
+        effective_start_key.clone(),
+        effective_end_key.clone(),
         columns.clone(),
         sort_keys.clone(),
         total_pages,
@@ -386,6 +431,24 @@ pub fn range_scan(
     let mut results = Vec::new();
     while let Some(tuple) = iter.next(file)? {
         results.push(tuple);
+    }
+
+    let mut delta_tuples = scan_all_delta_tuples(db_name, table_name)?;
+    if !delta_tuples.is_empty() {
+        delta_tuples.retain(|tuple| {
+            let ge_start = effective_start_key
+                .as_ref()
+                .map(|start| comparator.compare_key(tuple, 0, start) != Ordering::Less)
+                .unwrap_or(true);
+            let le_end = effective_end_key
+                .as_ref()
+                .map(|end| comparator.compare_key(tuple, 0, end) != Ordering::Greater)
+                .unwrap_or(true);
+            ge_start && le_end
+        });
+
+        results.append(&mut delta_tuples);
+        results.sort_by(|a, b| comparator.compare(a, b));
     }
 
     Ok(results)
@@ -408,5 +471,21 @@ fn serialize_value(value: &str, data_type: &str) -> Vec<u8> {
             bytes
         }
         _ => Vec::new(),
+    }
+}
+
+fn compare_serialized_values(a: &[u8], b: &[u8], data_type: &str) -> Ordering {
+    match data_type {
+        "INT" => {
+            if a.len() < 4 || b.len() < 4 {
+                Ordering::Equal
+            } else {
+                let av = i32::from_le_bytes(a[0..4].try_into().unwrap());
+                let bv = i32::from_le_bytes(b[0..4].try_into().unwrap());
+                av.cmp(&bv)
+            }
+        }
+        "TEXT" => a.cmp(b),
+        _ => Ordering::Equal,
     }
 }

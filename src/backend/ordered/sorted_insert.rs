@@ -8,7 +8,7 @@ use std::io::{self, Seek, SeekFrom, Write as IoWrite};
 
 use crate::disk::{read_page, write_page};
 use crate::ordered::ordered_file::{read_ordered_file_header, write_ordered_file_header};
-use crate::page::{init_page, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, init_page};
 use crate::sorting::comparator::TupleComparator;
 
 /// Binary search across pages of an ordered file to find the correct page

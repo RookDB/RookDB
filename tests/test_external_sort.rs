@@ -6,7 +6,7 @@ use std::io::Write;
 
 use storage_manager::catalog::types::{Catalog, Column, Database, SortDirection, SortKey, Table};
 use storage_manager::disk::read_page;
-use storage_manager::page::{init_page, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
+use storage_manager::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, init_page};
 use storage_manager::sorting::external_sort::external_sort;
 use storage_manager::table::page_count;
 
@@ -59,6 +59,9 @@ fn setup_test_env(
         columns: columns.clone(),
         sort_keys: None,
         file_type: None,
+        delta_enabled: None,
+        delta_merge_threshold_tuples: None,
+        delta_current_tuples: None,
     };
     let mut tables = HashMap::new();
     tables.insert(table_name.to_string(), table);

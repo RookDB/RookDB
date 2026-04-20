@@ -1,7 +1,6 @@
-//! CLI handlers for sort-related commands (options 10-13).
+//! CLI handlers for sort-related commands (options 10, 12, 13).
 //!
 //! - Option 10: Sort Table (convert heap to ordered)
-//! - Option 11: Create Ordered Table
 //! - Option 12: Range Scan
 //! - Option 13: ORDER BY Query
 
@@ -9,8 +8,8 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
+use storage_manager::catalog::Catalog;
 use storage_manager::catalog::types::{Column, SortDirection, SortKey};
-use storage_manager::catalog::{create_table, Catalog};
 use storage_manager::executor::{create_ordered_file_from_heap, order_by_execute};
 use storage_manager::ordered::range_scan;
 
@@ -67,100 +66,6 @@ pub fn sort_table_cmd(
             println!("Error sorting table: {}", e);
         }
     }
-
-    Ok(())
-}
-
-/// Option 11: Create a new table that maintains sort order.
-pub fn create_ordered_table_cmd(
-    catalog: &mut Catalog,
-    buffer_manager: &mut BufferManager,
-    current_db: &Option<String>,
-) -> io::Result<()> {
-    let db = match current_db {
-        Some(db) => db.clone(),
-        None => {
-            println!("No database selected. Please select a database first.");
-            return Ok(());
-        }
-    };
-
-    let mut table_name = String::new();
-    print!("Enter table name: ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut table_name)?;
-    let table_name = table_name.trim().to_string();
-
-    print!("\nEnter columns (format: col1:type,col2:type): ");
-    io::stdout().flush()?;
-    let mut col_input = String::new();
-    io::stdin().read_line(&mut col_input)?;
-    let col_input = col_input.trim();
-
-    let columns: Vec<Column> = col_input
-        .split(',')
-        .filter_map(|part| {
-            let parts: Vec<&str> = part.trim().split(':').collect();
-            if parts.len() == 2 {
-                Some(Column {
-                    name: parts[0].trim().to_string(),
-                    data_type: parts[1].trim().to_uppercase(),
-                })
-            } else {
-                println!("Invalid column format: '{}'. Skipping.", part.trim());
-                None
-            }
-        })
-        .collect();
-
-    if columns.is_empty() {
-        println!("No valid columns provided.");
-        return Ok(());
-    }
-
-    let mut sort_input = String::new();
-    print!("Enter sort columns (format: col1:ASC,col2:DESC): ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut sort_input)?;
-    let sort_input = sort_input.trim();
-
-    // Parse sort keys against the column list we just built
-    let sort_keys = match parse_sort_keys_from_columns(&columns, sort_input) {
-        Ok(keys) => keys,
-        Err(e) => {
-            println!("Error parsing sort keys: {}", e);
-            return Ok(());
-        }
-    };
-
-    create_table(
-        catalog,
-        &db,
-        &table_name,
-        columns.clone(),
-        Some(sort_keys.clone()),
-    );
-    buffer_manager.load_table_from_disk(&db, &table_name)?;
-
-    let desc = sort_keys
-        .iter()
-        .map(|sk| {
-            let col_name = columns
-                .get(sk.column_index as usize)
-                .map(|c| c.name.as_str())
-                .unwrap_or("?");
-            let dir = match sk.direction {
-                SortDirection::Ascending => "ASC",
-                SortDirection::Descending => "DESC",
-            };
-            format!("{} {}", col_name, dir)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    println!(
-        "Ordered table '{}' created with sort key [{}].",
-        table_name, desc
-    );
 
     Ok(())
 }
@@ -330,7 +235,10 @@ fn parse_sort_keys(
 }
 
 /// Parse sort key string against a column list.
-fn parse_sort_keys_from_columns(columns: &[Column], input: &str) -> Result<Vec<SortKey>, String> {
+pub(crate) fn parse_sort_keys_from_columns(
+    columns: &[Column],
+    input: &str,
+) -> Result<Vec<SortKey>, String> {
     let mut keys = Vec::new();
 
     for part in input.split(',') {
@@ -362,7 +270,7 @@ fn parse_sort_keys_from_columns(columns: &[Column], input: &str) -> Result<Vec<S
                 return Err(format!(
                     "Invalid direction '{}'. Use ASC or DESC.",
                     direction_str
-                ))
+                ));
             }
         };
 

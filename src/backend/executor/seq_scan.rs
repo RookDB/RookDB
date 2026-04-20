@@ -3,8 +3,8 @@ use std::io::{self};
 
 use crate::catalog::types::{Catalog, SortDirection};
 use crate::disk::read_page;
-use crate::ordered::ordered_file::{read_ordered_file_header, FileType};
-use crate::page::{Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE};
+use crate::ordered::ordered_scan;
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
 
 pub fn show_tuples(
@@ -30,36 +30,47 @@ pub fn show_tuples(
 
     let columns = &table.columns;
 
-    // 2. Read total number of pages
-    let total_pages = page_count(file)?; // total pages currently in file
-
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
 
-    // Check if this is an ordered file and print sort order indicator
-    if let Ok(header) = read_ordered_file_header(file) {
-        if header.file_type == FileType::Ordered {
-            if let Some(sort_keys) = &table.sort_keys {
-                let parts: Vec<String> = sort_keys
-                    .iter()
-                    .map(|sk| {
-                        let col_name = if (sk.column_index as usize) < columns.len() {
-                            &columns[sk.column_index as usize].name
-                        } else {
-                            "?"
-                        };
-                        let dir = match sk.direction {
-                            SortDirection::Ascending => "ASC",
-                            SortDirection::Descending => "DESC",
-                        };
-                        format!("{} {}", col_name, dir)
-                    })
-                    .collect();
-                println!("[Ordered by: {}]", parts.join(", "));
-            }
+    if table.file_type.as_deref() == Some("ordered") {
+        if let Some(sort_keys) = &table.sort_keys {
+            let parts: Vec<String> = sort_keys
+                .iter()
+                .map(|sk| {
+                    let col_name = if (sk.column_index as usize) < columns.len() {
+                        &columns[sk.column_index as usize].name
+                    } else {
+                        "?"
+                    };
+                    let dir = match sk.direction {
+                        SortDirection::Ascending => "ASC",
+                        SortDirection::Descending => "DESC",
+                    };
+                    format!("{} {}", col_name, dir)
+                })
+                .collect();
+            println!("[Ordered by: {}]", parts.join(", "));
         }
+
+        let total_pages = page_count(file)?;
+        let tuples = ordered_scan(file, catalog, db_name, table_name)?;
+        println!("Total pages: {}", total_pages);
+        println!("Logical tuples (base + delta): {}", tuples.len());
+
+        for (i, tuple) in tuples.iter().enumerate() {
+            print!("Tuple {}: ", i + 1);
+            print_decoded_tuple(tuple, columns);
+            println!();
+        }
+
+        println!("\n=== End of tuples ===\n");
+        return Ok(());
     }
 
+    // Heap table: page-by-page physical layout scan.
+    let total_pages = page_count(file)?;
     println!("Total pages: {}", total_pages);
+
     // 3. Loop through each page
     for page_num in 1..total_pages {
         let mut page = Page::new();
@@ -81,37 +92,38 @@ pub fn show_tuples(
             let tuple_data = &page.data[offset as usize..(offset + length) as usize];
 
             print!("Tuple {}: ", i + 1);
-
-            // 5. Decode each column
-            let mut cursor = 0usize;
-            for col in columns {
-                match col.data_type.as_str() {
-                    "INT" => {
-                        if cursor + 4 <= tuple_data.len() {
-                            let val = i32::from_le_bytes(
-                                tuple_data[cursor..cursor + 4].try_into().unwrap(),
-                            );
-                            print!("{}={} ", col.name, val);
-                            cursor += 4;
-                        }
-                    }
-                    "TEXT" => {
-                        if cursor + 10 <= tuple_data.len() {
-                            let text_bytes = &tuple_data[cursor..cursor + 10];
-                            let text = String::from_utf8_lossy(text_bytes).trim().to_string();
-                            print!("{}='{}' ", col.name, text);
-                            cursor += 10;
-                        }
-                    }
-                    _ => {
-                        print!("{}=<unsupported> ", col.name);
-                    }
-                }
-            }
+            print_decoded_tuple(tuple_data, columns);
             println!();
         }
     }
 
     println!("\n=== End of tuples ===\n");
     Ok(())
+}
+
+fn print_decoded_tuple(tuple_data: &[u8], columns: &[crate::catalog::types::Column]) {
+    let mut cursor = 0usize;
+    for col in columns {
+        match col.data_type.as_str() {
+            "INT" => {
+                if cursor + 4 <= tuple_data.len() {
+                    let val =
+                        i32::from_le_bytes(tuple_data[cursor..cursor + 4].try_into().unwrap());
+                    print!("{}={} ", col.name, val);
+                    cursor += 4;
+                }
+            }
+            "TEXT" => {
+                if cursor + 10 <= tuple_data.len() {
+                    let text_bytes = &tuple_data[cursor..cursor + 10];
+                    let text = String::from_utf8_lossy(text_bytes).trim().to_string();
+                    print!("{}='{}' ", col.name, text);
+                    cursor += 10;
+                }
+            }
+            _ => {
+                print!("{}=<unsupported> ", col.name);
+            }
+        }
+    }
 }

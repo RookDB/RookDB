@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 
 use storage_manager::catalog::types::{Column, SortDirection, SortKey};
-use storage_manager::sorting::comparator::{column_byte_size, TupleComparator};
+use storage_manager::sorting::comparator::{TupleComparator, column_byte_size};
 
 /// Helper: build a tuple from (i32, &str) for schema (INT, TEXT).
 fn make_tuple_int_text(id: i32, name: &str) -> Vec<u8> {

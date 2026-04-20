@@ -5,11 +5,12 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 
 use storage_manager::catalog::types::{Catalog, Column, Database, SortDirection, SortKey, Table};
+use storage_manager::ordered::append_delta_tuple;
 use storage_manager::ordered::ordered_file::{
-    write_ordered_file_header, FileType, OrderedFileHeader, SortKeyEntry,
+    FileType, OrderedFileHeader, SortKeyEntry, write_ordered_file_header,
 };
 use storage_manager::ordered::scan::{ordered_scan, range_scan};
-use storage_manager::page::{init_page, Page, ITEM_ID_SIZE, PAGE_SIZE};
+use storage_manager::page::{ITEM_ID_SIZE, PAGE_SIZE, Page, init_page};
 
 /// Helper: build a 14-byte tuple (INT, TEXT).
 fn make_tuple(id: i32, name: &str) -> Vec<u8> {
@@ -71,6 +72,15 @@ fn create_ordered_file_with_tuples(
     table_name: &str,
     tuples: &[Vec<u8>],
 ) -> (Catalog, String) {
+    create_ordered_file_with_tuples_direction(db_name, table_name, tuples, SortDirection::Ascending)
+}
+
+fn create_ordered_file_with_tuples_direction(
+    db_name: &str,
+    table_name: &str,
+    tuples: &[Vec<u8>],
+    direction: SortDirection,
+) -> (Catalog, String) {
     let global_dir = "database/global";
     let db_dir = format!("database/base/{}", db_name);
     fs::create_dir_all(global_dir).unwrap();
@@ -122,22 +132,33 @@ fn create_ordered_file_with_tuples(
     let total_pages = data_page_count + 1;
 
     // Write ordered header
+    let dir_u8 = match direction {
+        SortDirection::Ascending => 0,
+        SortDirection::Descending => 1,
+    };
     let header = OrderedFileHeader {
         page_count: total_pages,
         file_type: FileType::Ordered,
         sort_key_count: 1,
         sort_keys: vec![SortKeyEntry {
             column_index: 0,
-            direction: 0,
+            direction: dir_u8,
         }],
     };
     write_ordered_file_header(&mut file, &header).unwrap();
 
     // Set up catalog
+    let catalog_sort_keys = vec![SortKey {
+        column_index: 0,
+        direction,
+    }];
     let table = Table {
         columns: schema(),
-        sort_keys: Some(sort_keys_id_asc()),
+        sort_keys: Some(catalog_sort_keys),
         file_type: Some("ordered".to_string()),
+        delta_enabled: Some(true),
+        delta_merge_threshold_tuples: Some(500),
+        delta_current_tuples: Some(0),
     };
     let mut tables = HashMap::new();
     tables.insert(table_name.to_string(), table);
@@ -154,6 +175,7 @@ fn create_ordered_file_with_tuples(
 
 fn cleanup(db_name: &str, table_name: &str) {
     let _ = fs::remove_file(format!("database/base/{}/{}.dat", db_name, table_name));
+    let _ = fs::remove_file(format!("database/base/{}/{}.delta", db_name, table_name));
     let _ = fs::remove_dir(format!("database/base/{}", db_name));
 }
 
@@ -226,6 +248,9 @@ fn test_ordered_scan_empty_table() {
         columns: schema(),
         sort_keys: Some(sort_keys_id_asc()),
         file_type: Some("ordered".to_string()),
+        delta_enabled: Some(true),
+        delta_merge_threshold_tuples: Some(500),
+        delta_current_tuples: Some(0),
     };
     let mut tables = HashMap::new();
     tables.insert(tbl.to_string(), table);
@@ -259,6 +284,34 @@ fn test_ordered_scan_large() {
 
     let ids: Vec<i32> = result.iter().map(|t| extract_int(t)).collect();
     assert_eq!(ids, (1..=100).collect::<Vec<i32>>());
+
+    cleanup(db, tbl);
+}
+
+#[test]
+fn test_ordered_scan_includes_delta_sorted() {
+    let db = "test_os_delta_db1";
+    let tbl = "test_os_delta_tbl1";
+
+    let base = vec![
+        make_tuple(10, "a"),
+        make_tuple(30, "b"),
+        make_tuple(50, "c"),
+    ];
+    let (catalog, file_path) = create_ordered_file_with_tuples(db, tbl, &base);
+
+    append_delta_tuple(db, tbl, &make_tuple(40, "d")).unwrap();
+    append_delta_tuple(db, tbl, &make_tuple(20, "e")).unwrap();
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&file_path)
+        .unwrap();
+
+    let result = ordered_scan(&mut file, &catalog, db, tbl).expect("ordered_scan failed");
+    let ids: Vec<i32> = result.iter().map(|t| extract_int(t)).collect();
+    assert_eq!(ids, vec![10, 20, 30, 40, 50]);
 
     cleanup(db, tbl);
 }
@@ -426,6 +479,43 @@ fn test_range_scan_wrong_column_errors() {
     // "name" is not the leading sort key (id is)
     let result = range_scan(&mut file, &catalog, db, tbl, "name", Some("a"), Some("z"));
     assert!(result.is_err());
+
+    cleanup(db, tbl);
+}
+
+#[test]
+fn test_range_scan_desc_with_delta_normalized_bounds() {
+    let db = "test_rs_desc_db1";
+    let tbl = "test_rs_desc_tbl1";
+
+    let tuples: Vec<Vec<u8>> = vec![
+        make_tuple(50, "a"),
+        make_tuple(40, "b"),
+        make_tuple(30, "c"),
+        make_tuple(20, "d"),
+        make_tuple(10, "e"),
+    ];
+    let (catalog, file_path) =
+        create_ordered_file_with_tuples_direction(db, tbl, &tuples, SortDirection::Descending);
+
+    append_delta_tuple(db, tbl, &make_tuple(35, "x")).unwrap();
+    append_delta_tuple(db, tbl, &make_tuple(15, "y")).unwrap();
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&file_path)
+        .unwrap();
+
+    let result = range_scan(&mut file, &catalog, db, tbl, "id", Some("15"), Some("35"))
+        .expect("range_scan failed");
+    let ids: Vec<i32> = result.iter().map(|t| extract_int(t)).collect();
+    assert_eq!(ids, vec![35, 30, 20, 15]);
+
+    let result_reversed = range_scan(&mut file, &catalog, db, tbl, "id", Some("35"), Some("15"))
+        .expect("range_scan failed");
+    let ids_reversed: Vec<i32> = result_reversed.iter().map(|t| extract_int(t)).collect();
+    assert_eq!(ids_reversed, vec![35, 30, 20, 15]);
 
     cleanup(db, tbl);
 }

@@ -37,6 +37,15 @@ pub struct Table {
     /// File type: "heap" or "ordered" (None defaults to "heap")
     #[serde(default)]
     pub file_type: Option<String>,
+    /// Whether deferred insertion delta store is enabled.
+    #[serde(default)]
+    pub delta_enabled: Option<bool>,
+    /// Tuple-count threshold for triggering base+delta merge.
+    #[serde(default)]
+    pub delta_merge_threshold_tuples: Option<u64>,
+    /// Current tuple count buffered in delta store.
+    #[serde(default)]
+    pub delta_current_tuples: Option<u64>,
 }
 
 /// Represents a database containing multiple tables.

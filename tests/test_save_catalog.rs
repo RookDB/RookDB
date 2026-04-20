@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use storage_manager::catalog::{init_catalog, load_catalog, save_catalog, Column, Database, Table};
+use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
 
 use storage_manager::layout::CATALOG_FILE;
 
@@ -44,6 +44,9 @@ fn test_save_catalog() {
         ],
         sort_keys: None,
         file_type: None,
+        delta_enabled: None,
+        delta_merge_threshold_tuples: None,
+        delta_current_tuples: None,
     };
 
     let db = catalog.databases.get_mut(db_name).unwrap();

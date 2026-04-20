@@ -6,10 +6,10 @@ use std::io::Write;
 use storage_manager::catalog::types::{Column, SortDirection, SortKey};
 use storage_manager::disk::read_page;
 use storage_manager::ordered::ordered_file::{
-    read_ordered_file_header, FileType, OrderedFileHeader, SortKeyEntry,
+    FileType, OrderedFileHeader, SortKeyEntry, read_ordered_file_header,
 };
 use storage_manager::ordered::sorted_insert::{find_insert_slot, sorted_insert};
-use storage_manager::page::{init_page, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
+use storage_manager::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, init_page};
 use storage_manager::sorting::comparator::TupleComparator;
 use storage_manager::table::page_count;
 

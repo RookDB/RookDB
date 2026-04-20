@@ -15,11 +15,11 @@ use storage_manager::catalog::types::{Catalog, Column, Database, SortDirection, 
 use storage_manager::disk::read_page;
 use storage_manager::executor::order_by::create_ordered_file_from_heap;
 use storage_manager::ordered::ordered_file::{
-    write_ordered_file_header, FileType, OrderedFileHeader, SortKeyEntry,
+    FileType, OrderedFileHeader, SortKeyEntry, write_ordered_file_header,
 };
 use storage_manager::ordered::scan::{ordered_scan, range_scan};
 use storage_manager::ordered::sorted_insert::sorted_insert;
-use storage_manager::page::{init_page, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
+use storage_manager::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, init_page};
 use storage_manager::sorting::comparator::TupleComparator;
 use storage_manager::sorting::external_sort::external_sort;
 use storage_manager::table::page_count;
@@ -89,6 +89,9 @@ fn setup_heap_table(
         columns: columns.clone(),
         sort_keys: None,
         file_type: None,
+        delta_enabled: None,
+        delta_merge_threshold_tuples: None,
+        delta_current_tuples: None,
     };
     let mut tables = HashMap::new();
     tables.insert(table_name.to_string(), table);
@@ -219,6 +222,9 @@ fn create_ordered_file_with_tuples(
         columns,
         sort_keys: Some(sort_keys_catalog),
         file_type: Some("ordered".to_string()),
+        delta_enabled: Some(true),
+        delta_merge_threshold_tuples: Some(500),
+        delta_current_tuples: Some(0),
     };
     let mut tables = HashMap::new();
     tables.insert(table_name.to_string(), table);

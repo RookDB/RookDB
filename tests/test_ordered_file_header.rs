@@ -1,11 +1,11 @@
 //! Tests for ordered file header: write, read, init_ordered_table.
 
-use std::fs::{remove_file, OpenOptions};
+use std::fs::{OpenOptions, remove_file};
 use std::io::Write;
 
 use storage_manager::ordered::ordered_file::{
-    init_ordered_table, read_ordered_file_header, write_ordered_file_header, FileType,
-    OrderedFileHeader, SortKeyEntry,
+    FileType, OrderedFileHeader, SortKeyEntry, init_ordered_table, read_ordered_file_header,
+    write_ordered_file_header,
 };
 use storage_manager::page::PAGE_SIZE;
 

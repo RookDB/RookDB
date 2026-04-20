@@ -15,9 +15,9 @@ use crate::catalog::save_catalog;
 use crate::catalog::types::{Catalog, Column, SortDirection, SortKey};
 use crate::disk::{read_page, write_page};
 use crate::ordered::ordered_file::{
-    write_ordered_file_header, FileType, OrderedFileHeader, SortKeyEntry,
+    FileType, OrderedFileHeader, SortKeyEntry, write_ordered_file_header,
 };
-use crate::page::{init_page, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, init_page};
 use crate::sorting::comparator::TupleComparator;
 use crate::table::page_count;
 
