@@ -69,7 +69,7 @@ pub fn run() -> io::Result<()> {
             "6" => data_cmd::load_csv_cmd(&current_db)?,
             "7" => data_cmd::insert_tuple_cmd(&current_db)?,
             "8" => data_cmd::show_tuples_cmd(&current_db)?,
-            "9" => table_cmd::show_table_statistics_cmd(&current_db)?,
+            "9" => table_cmd::show_table_statistics_cmd(&catalog, &current_db)?,
             "10" => data_cmd::check_heap_cmd(&current_db)?,
             "11" => {
                 println!("\n╔═══════════════════════════════════╗");

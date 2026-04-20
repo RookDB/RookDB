@@ -5,12 +5,11 @@
 /// - Each heap page maps to one u8 free-space category (0-255) where:
 ///   category = floor(free_bytes × 255 / PAGE_SIZE)
 /// - 3-level tree: Level 2 (root) covers billions of pages, Level 0 (leaves)
-/// - fp_next_slot hint spreads concurrent inserts across pages
 /// - FSM fork is treated as a hint; can be rebuilt from heap after crash
 ///
 /// Constants (for 8KB pages):
-/// - FSM_NODES_PER_PAGE: 4080 bytes (binary max-tree array)
-/// - FSM_SLOTS_PER_PAGE: 2040 usable leaf slots (covers ~4M heap pages → ~32GB)
+/// - FSM_NODES_PER_PAGE: 7999 bytes (binary max-tree array)
+/// - FSM_SLOTS_PER_PAGE: 4000 usable leaf slots 
 /// - FSM_LEVELS: 3 (Level 0=leaves, Level 2=root, constant height)
 
 use std::fs::{File, OpenOptions};
@@ -22,10 +21,13 @@ use std::path::PathBuf;
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Size of binary max-tree node array in one FSM page (bytes)
-pub const FSM_NODES_PER_PAGE: usize = 4080;
+pub const FSM_NODES_PER_PAGE: usize = 7999;
 
 /// Number of leaf slots (heap pages) one Level-0 FSM page covers
-pub const FSM_SLOTS_PER_PAGE: u32 = 2040;
+pub const FSM_SLOTS_PER_PAGE: u32 = 4000;
+
+/// Number of internal nodes in the FSM page tree
+pub const FSM_NON_LEAF_NODES: usize = (FSM_SLOTS_PER_PAGE as usize) - 1;
 
 /// Number of tree levels (constant height)
 pub const FSM_LEVELS: u32 = 3;
@@ -43,15 +45,11 @@ pub const FSM_PAGE_SIZE: usize = 8192;
 /// Layout:
 /// - tree[0]: root of this FSM page's subtree
 /// - tree[1..]: internal and leaf nodes (index 0 is root, leaves occupy the right half)
-/// - fp_next_slot: load-spreading hint (round-robin across search directions)
+
 #[derive(Clone, Debug)]
 pub struct FSMPage {
     /// Binary max-tree stored as array of u8 (0-255 categories)
     pub tree: [u8; FSM_NODES_PER_PAGE],
-    
-    /// Hint for next search: cycles through FSM_SLOTS_PER_PAGE slots
-    /// Used to spread concurrent inserts and reduce contention
-    pub fp_next_slot: u16,
 }
 
 impl FSMPage {
@@ -60,7 +58,6 @@ impl FSMPage {
         log::trace!("[FSMPage::new] Creating new FSM page");
         Self {
             tree: [0u8; FSM_NODES_PER_PAGE],
-            fp_next_slot: 0,
         }
     }
 
@@ -83,13 +80,9 @@ impl FSMPage {
         // Write tree array
         buf[0..FSM_NODES_PER_PAGE].copy_from_slice(&self.tree);
         
-        // Write fp_next_slot as u16 (little-endian) at offset FSM_NODES_PER_PAGE
-        let fp_bytes = self.fp_next_slot.to_le_bytes();
-        buf[FSM_NODES_PER_PAGE..FSM_NODES_PER_PAGE + 2].copy_from_slice(&fp_bytes);
-        
         log::trace!(
-            "[FSMPage::serialize] Serialized FSMPage: fp_next_slot={}, root_value={}",
-            self.fp_next_slot, self.tree[0]
+            "[FSMPage::serialize] Serialized FSMPage: root_value={}",
+            self.tree[0]
         );
         
         buf
@@ -113,24 +106,14 @@ impl FSMPage {
         let mut tree = [0u8; FSM_NODES_PER_PAGE];
         tree.copy_from_slice(&bytes[0..FSM_NODES_PER_PAGE]);
 
-        let mut fp_bytes = [0u8; 2];
-        fp_bytes.copy_from_slice(&bytes[FSM_NODES_PER_PAGE..FSM_NODES_PER_PAGE + 2]);
-        let fp_next_slot = u16::from_le_bytes(fp_bytes);
-
         log::trace!(
-            "[FSMPage::deserialize] Deserialized FSMPage: fp_next_slot={}, root_value={}",
-            fp_next_slot, tree[0]
+            "[FSMPage::deserialize] Deserialized FSMPage: root_value={}",
+            tree[0]
         );
 
         Ok(Self {
             tree,
-            fp_next_slot,
         })
-    }
-
-    /// Advance fp_next_slot to the next slot (round-robin).
-    pub fn advance_fp_next_slot(&mut self) {
-        self.fp_next_slot = (self.fp_next_slot + 1) % (FSM_SLOTS_PER_PAGE as u16);
     }
 }
 
@@ -222,53 +205,36 @@ impl FSM {
             fsm_page_count
         );
 
-        // Create FSM handle and reset file contents
-        let mut fsm = FSM::open(fsm_path.clone(), page_count)?;
-        fsm.fsm_file.set_len(0)?;
-        fsm.fsm_file.seek(SeekFrom::Start(0))?;
+        // Map of (level, log_page) -> FSMPage to build in memory
+        let mut in_memory_pages: std::collections::HashMap<(u32, u32), FSMPage> = std::collections::HashMap::new();
 
-        // Initialize FSM with empty pages (all zeros)
-        let empty_page = FSMPage::new();
-        let empty_bytes = empty_page.serialize();
-
-        for _ in 0..fsm_page_count {
-            fsm.fsm_file.write_all(&empty_bytes)?;
-        }
-
-        // Scan heap pages and fully rebuild FSM categories (leaf + bubble-up)
+        // Scan heap pages and fully rebuild FSM categories in memory
         log::trace!("[FSM::build_from_heap] Scanning heap pages...");
 
+        // Optimized read: just read first 8 bytes of each page
         for heap_page_id in 1..page_count {
-            // Read heap page
-            let mut page_bytes = vec![0u8; 8192]; // PAGE_SIZE
-            let offset = heap_page_id as u64 * 8192;
+            let mut page_bytes = [0u8; 8];
+            let offset = heap_page_id as u64 * 8192; // PAGE_SIZE
             heap_file.seek(SeekFrom::Start(offset))?;
 
             if let Ok(_) = heap_file.read_exact(&mut page_bytes) {
                 // Calculate free space in this page
-                let lower = u32::from_le_bytes([
-                    page_bytes[0],
-                    page_bytes[1],
-                    page_bytes[2],
-                    page_bytes[3],
-                ]);
-                let upper = u32::from_le_bytes([
-                    page_bytes[4],
-                    page_bytes[5],
-                    page_bytes[6],
-                    page_bytes[7],
-                ]);
+                let lower = u32::from_le_bytes(page_bytes[0..4].try_into().unwrap());
+                let upper = u32::from_le_bytes(page_bytes[4..8].try_into().unwrap());
 
                 let free_bytes = if upper >= lower {
-                    // Start of calculating contiguous free space
-                    // Only contiguous gap between upper and lower is available for inserts
                     upper - lower
                 } else {
                     0
                 };
 
-                // Write this page's free-space into FSM and propagate max values upward.
-                fsm.fsm_set_avail(heap_page_id, free_bytes)?;
+                let category = Self::bytes_to_category(free_bytes);
+
+                let log_l0 = heap_page_id / FSM_SLOTS_PER_PAGE as u32;
+                let slot_l0 = (heap_page_id % FSM_SLOTS_PER_PAGE as u32) as usize;
+
+                let leaf_page = in_memory_pages.entry((0, log_l0)).or_insert_with(FSMPage::new);
+                leaf_page.tree[FSM_NON_LEAF_NODES + slot_l0] = category;
 
                 if heap_page_id % 1000 == 0 {
                     log::trace!(
@@ -279,7 +245,66 @@ impl FSM {
             }
         }
 
+        // Bubble up Level 0 -> Level 1
+        let max_l0 = page_count / FSM_SLOTS_PER_PAGE as u32;
+        for log_l0 in 0..=max_l0 {
+            if let Some(page_l0) = in_memory_pages.get_mut(&(0, log_l0)) {
+                // Bubble up internally
+                for i in (0..FSM_NON_LEAF_NODES).rev() {
+                    page_l0.tree[i] = std::cmp::max(page_l0.tree[2 * i + 1], page_l0.tree[2 * i + 2]);
+                }
+                
+                // Bubble up to Level 1
+                let root_val = page_l0.tree[0];
+                let log_l1 = log_l0 / FSM_SLOTS_PER_PAGE as u32;
+                let slot_l1 = (log_l0 % FSM_SLOTS_PER_PAGE as u32) as usize;
+                
+                let page_l1 = in_memory_pages.entry((1, log_l1)).or_insert_with(FSMPage::new);
+                page_l1.tree[FSM_NON_LEAF_NODES + slot_l1] = root_val;
+            }
+        }
+
+        // Bubble up Level 1 -> Level 2
+        let max_l1 = max_l0 / FSM_SLOTS_PER_PAGE as u32;
+        for log_l1 in 0..=max_l1 {
+            if let Some(page_l1) = in_memory_pages.get_mut(&(1, log_l1)) {
+                // Bubble up internally
+                for i in (0..FSM_NON_LEAF_NODES).rev() {
+                    page_l1.tree[i] = std::cmp::max(page_l1.tree[2 * i + 1], page_l1.tree[2 * i + 2]);
+                }
+
+                // Bubble up to Level 2
+                let root_val = page_l1.tree[0];
+                let log_l2 = log_l1 / FSM_SLOTS_PER_PAGE as u32;
+                let slot_l2 = (log_l1 % FSM_SLOTS_PER_PAGE as u32) as usize;
+
+                let page_l2 = in_memory_pages.entry((2, log_l2)).or_insert_with(FSMPage::new);
+                page_l2.tree[FSM_NON_LEAF_NODES + slot_l2] = root_val;
+            }
+        }
+
+        // Bubble up Level 2 internally
+        let max_l2 = max_l1 / FSM_SLOTS_PER_PAGE as u32;
+        for log_l2 in 0..=max_l2 {
+            if let Some(page_l2) = in_memory_pages.get_mut(&(2, log_l2)) {
+                for i in (0..FSM_NON_LEAF_NODES).rev() {
+                    page_l2.tree[i] = std::cmp::max(page_l2.tree[2 * i + 1], page_l2.tree[2 * i + 2]);
+                }
+            }
+        }
+
+        // Create FSM handle and reset file contents
+        let mut fsm = FSM::open(fsm_path.clone(), page_count)?;
+        fsm.fsm_file.set_len(0)?; // Truncate to ensure clean build
+        
         log::trace!("[FSM::build_from_heap] Writing FSM pages to disk...");
+        
+        // Write out our populated pages
+        // The highest block needed establishes file size.
+        for (&(level, log_page), page) in &in_memory_pages {
+             fsm.write_fsm_page(level, log_page, 0, page)?;
+        }
+
         fsm.sync()?;
 
         log::trace!(
@@ -302,7 +327,6 @@ impl FSM {
     }
 
     /// Compute required FSM fork page count for given heap page count.
-    /// Formula: We need FSM_SLOTS_PER_PAGE² = 2040² ≈ 4.16M heap pages per full tree.
     /// For small counts, we calculate based on 3-level tree structure.
     pub fn calculate_fsm_page_count(heap_pages: u32) -> u32 {
         if heap_pages == 0 {
@@ -490,7 +514,7 @@ impl FSM {
         }
     }
 
-    /// Recursively search FSM tree for a page with free space >= min_category
+    /// search FSM tree for a page with free space >= min_category
     /// Returns Ok(Option<u32>) where u32 is the page_id, or None if not found
     fn search_tree_for_available_page(
         &mut self,
@@ -508,39 +532,43 @@ impl FSM {
             // Get the starting heap page ID for this FSM page
             let start_heap_page = page_no * FSM_SLOTS_PER_PAGE;
             
-            log::trace!("[FSM::search_tree] Level 0 (page_no={}): Searching {} leaf slots starting from heap_page={}",
+            log::trace!("[FSM::search_tree] Level 0 (page_no={}): Searching tree of {} leaves starting from heap_page={}",
                 page_no, FSM_SLOTS_PER_PAGE, start_heap_page);
+
+            // Check if even the root has space
+            if fsm_page.tree[0] < min_category {
+                return Ok(None);
+            }
+
+            let mut idx = 0; // root of this FSM page
             
-            // Search through leaves (right half of tree array)
-            for slot in 0..FSM_SLOTS_PER_PAGE {
-                let heap_page_id = start_heap_page + slot;
+            while idx < FSM_NON_LEAF_NODES {
+                let left = 2 * idx + 1;
+                let right = 2 * idx + 2;
                 
-                // IMPORTANT: Skip heap page 0 - it's the header page, not a data page!
-                if heap_page_id == 0 {
-                    continue;
-                }
-                
-                let leaf_index = FSM_NODES_PER_PAGE / 2 + slot as usize;
-                if leaf_index >= FSM_NODES_PER_PAGE {
+                if left < FSM_NODES_PER_PAGE && fsm_page.tree[left] >= min_category {
+                    idx = left;
+                } else if right < FSM_NODES_PER_PAGE && fsm_page.tree[right] >= min_category {
+                    idx = right;
+                } else {
                     break;
                 }
-                
-                let category = fsm_page.tree[leaf_index];
-                
-                // DEBUG: Only print details for pages with category > 0
-                if category > 0 && slot < 10 {
-                    log::trace!("[FSM::search_tree] heap_page {} has category {}", heap_page_id, category);
-                }
-                
-                if category >= min_category {
+            }
+
+            if idx >= FSM_NON_LEAF_NODES {
+                let leaf_offset = idx - FSM_NON_LEAF_NODES;
+                let heap_page_id = start_heap_page + leaf_offset as u32;
+
+                // IMPORTANT: Skip heap page 0 - it's the header page, not a data page!
+                if heap_page_id > 0 {
                     log::trace!(
                         "[FSM::search_tree] Found heap page {} with category {} >= {}",
-                        heap_page_id, category, min_category
+                        heap_page_id, fsm_page.tree[idx], min_category
                     );
                     return Ok(Some(heap_page_id));
                 }
             }
-            
+
             log::trace!("[FSM::search_tree] No suitable leaf found in Level 0 page_no={}", page_no);
             Ok(None)
         } else {
@@ -549,7 +577,6 @@ impl FSM {
             
             log::trace!("[FSM::search_tree] Level {} (page_no={}): Searching internal nodes", level, page_no);
             
-            let leaves_start = FSM_NODES_PER_PAGE / 2; // leaves start at index 2040
             let mut idx = 0; // root of this FSM page
             
             // Check if even the root has space
@@ -557,7 +584,7 @@ impl FSM {
                 return Ok(None);
             }
             
-            while idx < leaves_start {
+            while idx < FSM_NON_LEAF_NODES {
                 let left = 2 * idx + 1;
                 let right = 2 * idx + 2;
                 
@@ -570,9 +597,9 @@ impl FSM {
                 }
             }
             
-            if idx >= leaves_start {
-                let leaf_offset = idx - leaves_start;
-                // leaf_offset is the index among the leaves (0 to 2039)
+            if idx >= FSM_NON_LEAF_NODES {
+                let leaf_offset = idx - FSM_NON_LEAF_NODES;
+                // leaf_offset is the index among the leaves (0 to 3999)
                 // for level L, its leaves refer to Level L-1 pages.
                 // Each Level L page spans FSM_SLOTS_PER_PAGE Level L-1 pages
                 let next_page_no = page_no * (FSM_SLOTS_PER_PAGE as u32) + leaf_offset as u32;
@@ -626,7 +653,7 @@ impl FSM {
 
         // Step 1: Update the leaf in Level 0 FSM page
         let mut leaf_page = self.read_fsm_page(0, fsm_page_no, 0)?;
-        let leaf_index = FSM_NODES_PER_PAGE / 2 + slot_within_page;
+        let leaf_index = FSM_NON_LEAF_NODES + slot_within_page;
 
         log::trace!(
             "[FSM::fsm_set_avail] Updating leaf at index {} from {} to {}",
@@ -682,7 +709,7 @@ impl FSM {
             let slot = (curr_page_no % FSM_SLOTS_PER_PAGE) as usize;
             
             let mut page = self.read_fsm_page(level, parent_page_no, 0)?;
-            let leaf_idx = FSM_NODES_PER_PAGE / 2 + slot;
+            let leaf_idx = FSM_NON_LEAF_NODES + slot;
             
             if page.tree[leaf_idx] != curr_val {
                 page.tree[leaf_idx] = curr_val;
@@ -737,12 +764,12 @@ impl FSM {
     }
 
     /// Convert free bytes to free-space category (0-255).
-    /// Formula: category = floor(free_bytes × 255 / FSM_PAGE_SIZE)
+    /// Formula: category = floor(free_bytes × 255 / PAGE_SIZE)
     fn bytes_to_category(free_bytes: u32) -> u8 {
-        if free_bytes >= FSM_PAGE_SIZE as u32 {
+        if free_bytes >= crate::backend::page::PAGE_SIZE as u32 {
             return 255;
         }
-        ((free_bytes as f64 * 255.0) / (FSM_PAGE_SIZE as f64)) as u8
+        ((free_bytes * 255) / crate::backend::page::PAGE_SIZE as u32) as u8
     }
 }
 
@@ -754,34 +781,18 @@ mod tests {
     fn test_fsm_page_new() {
         let page = FSMPage::new();
         assert_eq!(page.root_value(), 0);
-        assert_eq!(page.fp_next_slot, 0);
     }
 
     #[test]
     fn test_fsm_page_serialize_deserialize() {
         let mut page = FSMPage::new();
         page.tree[0] = 100;
-        page.fp_next_slot = 500;
 
         let bytes = page.serialize();
         assert_eq!(bytes.len(), FSM_PAGE_SIZE);
 
         let page2 = FSMPage::deserialize(&bytes).unwrap();
         assert_eq!(page2.tree[0], 100);
-        assert_eq!(page2.fp_next_slot, 500);
-    }
-
-    #[test]
-    fn test_fsm_page_advance_fp_next_slot() {
-        let mut page = FSMPage::new();
-        page.fp_next_slot = 0;
-        page.advance_fp_next_slot();
-        assert_eq!(page.fp_next_slot, 1);
-
-        // Test wrap-around
-        page.fp_next_slot = FSM_SLOTS_PER_PAGE as u16 - 1;
-        page.advance_fp_next_slot();
-        assert_eq!(page.fp_next_slot, 0);
     }
 
     #[test]

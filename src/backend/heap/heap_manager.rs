@@ -8,7 +8,6 @@
 /// 
 /// Key Design:
 /// - Encapsulates FSM complexity; FSM-driven inserts spread load across pages
-/// - Uses fp_next_slot for load-spreading hint
 /// - Header persistence survives crashes; FSM fork is a hint (can be rebuilt)
 
 use std::fs::{File, OpenOptions};
@@ -115,6 +114,16 @@ impl Iterator for HeapScanIterator {
                 Err(e) => return Some(Err(e)),
             };
 
+            // Check if slot is a dead slot (deleted)
+            if offset == 0 && length == 0 {
+                log::trace!(
+                    "[HeapScanIterator::next] Skipping dead slot id={} on page={}",
+                    slot_id, page_id
+                );
+                self.current_slot += 1;
+                continue;
+            }
+
             // Validate bounds
             if offset as usize + length as usize > PAGE_SIZE {
                 return Some(Err(io::Error::new(
@@ -181,7 +190,12 @@ impl HeapManager {
         }
 
         // Create new file
-        let mut file_handle = File::create(&file_path)?;
+        let mut file_handle = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&file_path)?;
 
         // Create initial header
         let header = HeaderMetadata::new();
@@ -420,12 +434,7 @@ impl HeapManager {
 
             // Read the target page (reopen file to ensure clean state)
             let mut page = Page::new();
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&self.file_path)?;
-            
-            if let Err(e) = read_page(&mut file, &mut page, page_id) {
+            if let Err(e) = read_page(&mut self.file_handle, &mut page, page_id) {
                 log::error!("[ERROR] Failed to read page {}: {}", page_id, e);
                 return Err(e);
             }
@@ -439,6 +448,8 @@ impl HeapManager {
                 );
                 // Track that this page failed for this insert attempt
                 failed_pages.push(page_id);
+                // Update FSM to reflect the actual free space so we don't hit it again
+                self.fsm.fsm_set_avail(page_id, current_free)?;
                 // Page doesn't have space, loop will try next page on next iteration
                 continue;
             }
@@ -450,7 +461,7 @@ impl HeapManager {
             let new_free = page_free_space(&page)?;
 
             // Write page back using the same file handle
-            write_page(&mut file, &mut page, page_id)?;
+            write_page(&mut self.file_handle, &mut page, page_id)?;
 
             // Update FSM with new free space
             self.fsm.fsm_set_avail(page_id, new_free)?;
@@ -502,13 +513,9 @@ impl HeapManager {
             ));
         }
 
-        // Read page (reopen file for clean state)
+        // Read page
         let mut page = Page::new();
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.file_path)?;
-        read_page(&mut file, &mut page, page_id)?;
+        read_page(&mut self.file_handle, &mut page, page_id)?;
 
         // Validate slot_id
         let tuple_count = get_tuple_count(&page)?;
@@ -521,6 +528,14 @@ impl HeapManager {
 
         // Get slot entry
         let (offset, length) = get_slot_entry(&page, slot_id)?;
+
+        // Check if the tuple is dead
+        if offset == 0 && length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Tuple at page {}, slot {} is deleted or slot is unused", page_id, slot_id),
+            ));
+        }
 
         // Validate bounds
         if offset as usize + length as usize > PAGE_SIZE {
@@ -568,14 +583,10 @@ impl HeapManager {
 
         // Read page
         let mut page = Page::new();
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.file_path)?;
-        read_page(&mut file, &mut page, page_id)?;
+        read_page(&mut self.file_handle, &mut page, page_id)?;
 
         // Get the tuple data to calculate freed bytes
-        let (_offset, length) = get_slot_entry(&page, slot_id)?;
+        let (offset, length) = get_slot_entry(&page, slot_id)?;
         let freed_bytes = (length + ITEM_ID_SIZE) as u32;
 
         log::trace!(
@@ -584,12 +595,32 @@ impl HeapManager {
         );
 
         // Update the slot directory entry to mark as deleted (set length to 0)
-        let slot_offset = PAGE_HEADER_SIZE as usize + (slot_id as usize) * ITEM_ID_SIZE as usize;
-        page.data[slot_offset..slot_offset + 4].copy_from_slice(&0u32.to_le_bytes()); // offset = 0
-        page.data[slot_offset + 4..slot_offset + 8].copy_from_slice(&0u32.to_le_bytes()); // length = 0
+        let slot_offset = PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE;
+        page.data[slot_offset as usize..slot_offset as usize + 4].copy_from_slice(&0u32.to_le_bytes()); // offset = 0
+        page.data[slot_offset as usize + 4..slot_offset as usize + 8].copy_from_slice(&0u32.to_le_bytes()); // length = 0
+
+        // Optimization: If this is the last tuple in the data region or slot array, roll back pointers
+        let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+
+        let tuple_count = get_tuple_count(&page)?;
+
+        // If the tuple data was exactly at the 'upper' bound, we can reclaim the data space
+        if offset == upper {
+            upper += length;
+            page.data[4..8].copy_from_slice(&upper.to_le_bytes());
+            log::trace!("[HeapManager::delete_tuple] Reclaimed data space, upper moved to {}", upper);
+        }
+
+        // If the slot is exactly at the end of the slot array, we can reclaim the slot array space
+        if slot_id == tuple_count - 1 && lower == slot_offset + ITEM_ID_SIZE {
+            lower -= ITEM_ID_SIZE;
+            page.data[0..4].copy_from_slice(&lower.to_le_bytes());
+            log::trace!("[HeapManager::delete_tuple] Reclaimed slot space, lower moved to {}", lower);
+        }
 
         // Write page back
-        write_page(&mut file, &mut page, page_id)?;
+        write_page(&mut self.file_handle, &mut page, page_id)?;
 
         // As per the data lifecycle:
         // During a DELETE we simply mark the tuple's Item Pointer as dead (length=0, offset=0).
@@ -686,8 +717,35 @@ impl HeapManager {
         let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
 
+        // Step 1: Look for a dead slot in the slot directory to reuse
+        let tuple_count = match get_tuple_count(page) {
+            Ok(c) => c,
+            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+        };
+
+        let mut reused_slot_id = None;
+        for i in 0..tuple_count {
+            let offset_bytes = &page.data[(PAGE_HEADER_SIZE as usize + i as usize * ITEM_ID_SIZE as usize)
+                ..(PAGE_HEADER_SIZE as usize + i as usize * ITEM_ID_SIZE as usize + 4)];
+            let length_bytes = &page.data[(PAGE_HEADER_SIZE as usize + i as usize * ITEM_ID_SIZE as usize + 4)
+                ..(PAGE_HEADER_SIZE as usize + i as usize * ITEM_ID_SIZE as usize + 8)];
+            
+            let slot_offset = u32::from_le_bytes(offset_bytes.try_into().unwrap());
+            let slot_length = u32::from_le_bytes(length_bytes.try_into().unwrap());
+
+            if slot_offset == 0 && slot_length == 0 {
+                reused_slot_id = Some(i);
+                break;
+            }
+        }
+
         // Verify space is available
-        let required = data.len() as u32 + ITEM_ID_SIZE;
+        let required = if reused_slot_id.is_some() {
+            data.len() as u32 // Reusing slot, only need data space
+        } else {
+            data.len() as u32 + ITEM_ID_SIZE // Expanding lower, need data + slot space
+        };
+
         if upper - lower < required {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -706,18 +764,26 @@ impl HeapManager {
         upper = data_start;
         page.data[4..8].copy_from_slice(&upper.to_le_bytes());
 
-        // Write slot entry at lower end
-        let slot_offset_offset = lower as usize;
-        page.data[slot_offset_offset..slot_offset_offset + 4] .copy_from_slice(&data_start.to_le_bytes());
-        page.data[slot_offset_offset + 4..slot_offset_offset + 8]
-            .copy_from_slice(&(data.len() as u32).to_le_bytes());
+        // Write slot entry
+        let (slot_id, slot_offset_offset) = match reused_slot_id {
+            Some(id) => {
+                log::trace!("[HeapManager::insert_into_page] Reusing dead slot_id={}", id);
+                (id, PAGE_HEADER_SIZE as usize + id as usize * ITEM_ID_SIZE as usize)
+            }
+            None => {
+                let current_lower = lower as usize;
+                
+                // Update lower pointer (moved past the new slot)
+                lower += ITEM_ID_SIZE;
+                page.data[0..4].copy_from_slice(&lower.to_le_bytes());
 
-        // Update lower pointer (moved past the new slot)
-        lower += ITEM_ID_SIZE;
-        page.data[0..4].copy_from_slice(&lower.to_le_bytes());
+                let id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE - 1;
+                (id, current_lower)
+            }
+        };
 
-        // Calculate slot_id
-        let slot_id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE - 1;
+        page.data[slot_offset_offset..slot_offset_offset + 4].copy_from_slice(&data_start.to_le_bytes());
+        page.data[slot_offset_offset + 4..slot_offset_offset + 8].copy_from_slice(&(data.len() as u32).to_le_bytes());
 
         log::trace!(
             "[HeapManager::insert_into_page] Inserted at slot_id={}",
@@ -731,20 +797,14 @@ impl HeapManager {
     /// For tuple sizing (min_category): use CEILING to ensure pages with at least that much free space
     /// For page reporting (current free bytes): use FLOOR
     /// If sizing_for_tuple is true, rounds UP so a 22-byte tuple doesn't match a page with 0 bytes free
-    fn bytes_to_category(free_bytes: u32) -> u8 {
-        // Use ceiling division for better granularity at small sizes
-        // This ensures that a request for 22 bytes gets min_category that only matches pages with real free space
-        let category = if free_bytes == 0 {
-            0
-        } else {
-            // Ceiling division: (a + b - 1) / b instead of a / b
-            ((free_bytes as f64 * 255.0 + PAGE_SIZE as f64 - 1.0) / PAGE_SIZE as f64).floor() as u8
-        };
-        log::trace!(
-            "[HeapManager::bytes_to_category] {} bytes → category {}",
-            free_bytes, category
-        );
-        category
+    fn bytes_to_category(required_bytes: u32) -> u8 {
+        if required_bytes == 0 {
+            return 0;
+        }
+        if required_bytes >= PAGE_SIZE as u32 {
+            return 255;
+        }
+        ((required_bytes * 255 + PAGE_SIZE as u32 - 1) / PAGE_SIZE as u32) as u8
     }
 }
 

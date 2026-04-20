@@ -225,7 +225,7 @@ And so on up to Level-2.
 ```rust
 pub struct FSMPage {
     tree: [u8; FSM_NODES_PER_PAGE],  // 4,080 bytes: binary max-tree
-    fp_next_slot: u16, // Currently unused                // 2 bytes: next sequential slot hint (currently unused)
+
 }
 ```
 
@@ -238,8 +238,8 @@ FSM Search for a page:
   │
   ├─ Start at Level 2 root, read tree[0]
   ├─ Descend to Level 1:
-  │   └─ Check children sequentially (ignoring unused fp_next_slot)
-  │       ├─ If tree[fp_next_slot] >= required_category:
+
+
   │       │   └─ Use this page
   │       └─ Else:
   │           └─ Wrap around and scan from 0
@@ -248,7 +248,7 @@ FSM Search for a page:
   │   └─ Repeat sequential logic
   │
   └─ On successful find:
-      └─ Advance `fp_next_slot` (deferred to future implementation)
+
          (for next search, start from next sequential position)
 ```
 
@@ -256,35 +256,35 @@ FSM Search for a page:
 
 ```
 Page 1 Insert (searching for category ≥ 50):
-  Level 1 FSM page: fp_next_slot = 0
+
   ├─ Check tree[0] = 60 ✓ >= 50 → Use this page
-  └─ Advance: fp_next_slot = 1
+
 
 Page 2 Insert (same search):
-  Level 1 FSM page: fp_next_slot = 1
+
   ├─ Check tree[1] = 45 ✗ < 50
   ├─ Check tree[2] = 55 ✓ >= 50 → Use this page
-  └─ Advance: fp_next_slot = 3
+
 
 Page 3 Insert (same search):
-  Level 1 FSM page: fp_next_slot = 3
+
   ├─ Check tree[3] = 40 ✗ < 50
   ├─ ... (wrap around, rescan from 0)
   ├─ Check tree[0] = 60 ✓ >= 50 → Use this page
-  └─ Advance: fp_next_slot = 1
+
 ```
 
 ### 4.3 Future Use: Concurrent Insert Optimization
 
 **For Future Phases (Multi-Threaded Inserts):**
 
-`fp_next_slot` could potentially be enhanced to **spread concurrent inserts** across different pages, reducing lock contention:
+
 
 ```
-Thread 1 gets fp_next_slot = 0 → searches pages 0, 1, 2, ...
-Thread 2 gets fp_next_slot = N/4 → searches pages N/4, N/4+1, ...
-Thread 3 gets fp_next_slot = N/2 → searches pages N/2, N/2+1, ...
-Thread 4 gets fp_next_slot = 3N/4 → searches pages 3N/4, 3N/4+1, ...
+
+
+
+
 ```
 
 This would naturally spread load across pages without explicit coordination.
@@ -547,11 +547,11 @@ pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<u32>>
    │   
 3. Traverse Level 1 → Level 0:
    ├─ Repeat same logic: find first child with category >= min_category
-   ├─ Search sequentially from 0 (`fp_next_slot` reserved for future)
+
    
 4. Reach Level-0 leaf page:
    ├─ Compute heap_page_id = (fsm_page_no × FSM_SLOTS_PER_PAGE) + slot
-   ├─ Advance `fp_next_slot` (deferred to future implementation): fp_next_slot = (fp_next_slot + 1) % FSM_SLOTS_PER_PAGE
+
    ├─ Mark all visited FSM pages as dirty (for eventual flush)
    
 5. Return Some(heap_page_id)
@@ -608,7 +608,7 @@ pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32) -> io::R
 6. Write updated Level-0 FSM page to disk
 
 7. If Level-0 root changed:
-   ├─ Recursively call fsm_set_avail(level_0_page_no, new_root_category)
+   ├─ Iteratively propagate the new maximum category up to the parent nodes using a loop.
    │   (This propagates up to Level 1, then Level 2)
 
 8. All FSM pages updated; tree is consistent
@@ -792,7 +792,7 @@ Avg Disk I/O per Insert:       ~3.0 reads + ~2.0 writes
 ```rust
 pub struct FSMPage {
     tree: [u8; FSM_NODES_PER_PAGE],  // 4,080 bytes
-    fp_next_slot: u16, // Currently unused
+
 }
 ```
 
@@ -890,3 +890,12 @@ Check tree[0] (root) = 250 >= 200 ✓
 - **Design Doc:** [design-doc.md](Design-Doc.md) for system overview
 - **Heap Manager Doc:** [heap-manager.md](heap-manager.md) for page layout details
 - **Tests:** [tests.md](tests.md) for FSM correctness verification
+### Future Work: Concurrent Access (fp_next_slot)
+
+To optimize concurrent insertions and reduce contention on FSM pages, an `fp_next_slot` pointer could be introduced in the `FSMPage` struct as future work.
+
+Currently, the FSM uses a purely greedy search to traverse the binary max-heap. All concurrent backends looking for free space traverse from the root downwards in exactly the same way, always finding the first block (leftmost branch usually) with enough space. This causes heavy contention, as multiple transactions might attempt to lock and insert tuples into the same heap page.
+
+By adding `fp_next_slot`, we could keep track of where the last successful search ended or round-robin requests. 
+For instance, a backend could start searching the tree from `fp_next_slot` instead of the root, effectively spreading out insertions across different heap pages, minimizing lock waits and maximizing write throughput. This would be implemented efficiently by caching the `fp_next_slot` hint, falling back to a full tree search only when no sufficient space is found from the hint onwards.
+
