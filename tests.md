@@ -312,7 +312,7 @@ assert!(result.is_ok(), "Should be able to insert after deletion");
 2. **FSM Update (Automatic):**
    - After `delete_tuple()`, internal call to `fsm_set_avail(page_id, new_free_space)`
    - Computes new category: `floor(new_free_space × 255 / PAGE_SIZE)`
-   - Bubbles up through tree (3 levels × 4 updates = 12 I/Os)
+   - Bubbles up through tree (3 levels × 4 updates = 6 I/Os)
    - Next `fsm_search_avail()` finds the page again
 
 **Verifies:**
@@ -1041,7 +1041,7 @@ RookDB's comprehensive test suite validates:
 ✓ **Durability** - Catalog persistence, FSM recovery from heap
 ✓ **Safety** - Boundary violation handling, error recovery
 
-**Result: 50/50 tests passing (100% success rate), comprehensive coverage of all systems.**
+**Result: 53/53 tests passing (100% success rate), comprehensive coverage of all systems.**
 
 ---
 

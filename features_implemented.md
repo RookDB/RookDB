@@ -437,7 +437,7 @@ RUST_LOG=trace cargo run
 [TRACE] slot_entry_value: (offset=8134, length=58)
 [TRACE] writing bytes [8..16]: [0x96, 0x1F, 0x00, 0x00, 0x3A, 0x00, ...]
 [TRACE] page_write_complete: 8192 bytes written to disk
-[TRACE] fsm_leaf_index: 47 (heap_page_id=47, FSM_SLOTS_PER_PAGE=2040)
+[TRACE] fsm_leaf_index: 47 (heap_page_id=47, FSM_SLOTS_PER_PAGE=4000)
 [TRACE] category_value: floor(26 * 255 / 8192) = 0
 [TRACE] fsm_tree[node_47] = 0x00
 [TRACE] parent_node_88: max(tree[88], tree[89]) = 3
@@ -746,3 +746,8 @@ RUST_LOG=debug cargo test -- --nocapture
 
 
     
+### Recent Fixes & Robustness Improvements
+1. **Phantom Yields for Deleted Tuples**: Solved by ignoring `offset == 0 && length == 0` during scans (`HeapScanIterator::next()`) and failing gracefully inside targeted retrieval (`HeapManager::get_tuple()`). 
+2. **Slot Directory Exhaustion (Dead Tuple Leak) & `insert_into_page()`** Optimization: Prevented unbounded expansion of `lower` pointer by inspecting and reusing dead tuple slots (`0..tuple_count`). Now only expands when no dead slots exist, optimizing continuous data space accurately.
+3. **Tail Pointer Rollback Optimization in `delete_tuple()`**: When deleting the tuple perfectly bounded to `upper` or the slot strictly bounded to `lower`, boundaries dynamically rollback. Reclaims sequential space continuously exactly as PostgreSQL abort rollbacks behave.
+4. **Improved Table Statistics (`CHECK_HEAP`)**: The diagnostic tool exposes exact fragmentation limits (largest contiguous block), specific tuple allocations, slot contents, and dead counts across active blocks per page constraints.

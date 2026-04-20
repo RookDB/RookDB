@@ -1173,3 +1173,17 @@ The Heap Manager implements a sophisticated page-oriented storage system that:
 5. **Provides Clean APIs:** Compaction team can safely integrate via 3 facade functions
 
 The architecture balances **performance** (fast inserts) with **simplicity** (minimal per-insert logic), deferring optimization (compaction) to future phases.
+
+### Advanced Optimization Details
+
+**Phantom Yields for Deleted Tuples**:
+- `HeapScanIterator::next()` ignores `offset == 0 && length == 0` during scans, incrementing `current_slot` automatically.
+- `HeapManager::get_tuple()` handles retrieving dead tuples proactively by throwing `io::ErrorKind::NotFound`.
+
+**Slot Directory Exhaustion & Tuple Leak**:
+- `insert_into_page()` loops through `0..tuple_count` looking for a dead slot. If a slot void exists, it breaks early replacing the newly appended tuple over the dead slot id (`reused_slot_id`).
+- Reduces unbounded index array expansion, saving `ITEM_ID_SIZE` bytes and subtracting solely real payload lengths from free space calculation.
+
+**Tail Pointer Rollback Optimization (`delete_tuple`)**:
+- **Data Reclaiming**: Rolls continuous space backwards manually (`upper += length`) if the deletion perfectly abuts the `upper` margin.
+- **Slot Reclaiming**: Rolls the `lower` bound downwards (`lower -= ITEM_ID_SIZE`) obliterating dead slots if perfectly positioned at the tail end of the storage directory.

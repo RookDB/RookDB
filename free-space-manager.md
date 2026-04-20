@@ -16,7 +16,7 @@ RookDB uses a **PostgreSQL-style 3-level binary max-tree** to efficiently track 
 - **How Many Pages:** Exactly **1 page**
 - **What It Stores:** A single binary max-tree array that holds the maximum free-space category across the entire heap
 - **Tree Structure:** `tree[0]` = root node = max(all descendants)
-- **Coverage:** Up to ~4 million heap pages (practical limit for most databases)
+- **Coverage:** Up to ~64 billion heap pages (practical limit for most databases)
 
 #### Level 1 (Internal/Intermediate)
 - **How Many Pages:** Multiple pages (grows as heap grows)
@@ -201,8 +201,8 @@ Logical Address (level, page_no, slot) → Physical Disk Block
 **Calculation:**
 ```
 For a heap page H:
-  level_0_page_no = H / FSM_SLOTS_PER_PAGE         (≈ H / 2040)
-  slot_in_l0 = H mod FSM_SLOTS_PER_PAGE             (≈ H mod 2040)
+  level_0_page_no = H / FSM_SLOTS_PER_PAGE         (≈ H / 4000)
+  slot_in_l0 = H mod FSM_SLOTS_PER_PAGE             (≈ H mod 4000)
   
 For a Level-1 page tracking L0:
   level_1_page_no = level_0_page_no / FSM_SLOTS_PER_PAGE
@@ -532,7 +532,7 @@ pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<u32>>
 - `Some(page_id)`: Found a suitable page
 - `None`: No page has enough free space (need to allocate)
 
-**Algorithm (O(log N) = O(3) disk reads):**
+**Algorithm (O(log N) = O(\log N) disk reads):**
 
 ```
 1. Read Level-2 (root) FSM page
@@ -801,7 +801,7 @@ pub struct FSMPage {
 Index 0:           Root node (max of entire subtree)
 Index 1-3:         Level 1 of tree (parents of leaves)
 Index 4-2039:      Leaves (direct free-space categories for heap pages)
-Index 2040+:       Unused (padding to fill 8 KB page)
+Index 4000+:       Unused (padding to fill 8 KB page)
 ```
 
 ### 11.2 How `tree[]` is Indexed
@@ -856,7 +856,7 @@ Check tree[0] (root) = 250 >= 200 ✓
 
 | Property | Guarantee | Why |
 |----------|-----------|-----|
-| **Page Find Time** | O(log N) = O(3) | 3-level tree, constant height |
+| **Page Find Time** | O(log N) = O(\log N) | 3-level tree, constant height |
 | **Page Found Correctness** | category >= requested | Binary max-tree bubble-up |
 | **Contiguous Free Tracking** | Accurate within category resolution | Updated after every insert/delete |
 | **Sequential Fills** | Pages fill in order, then wrap | Sequential traversal |

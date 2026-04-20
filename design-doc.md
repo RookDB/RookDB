@@ -27,7 +27,7 @@ The FSM (Free Space Manager) sidecar file is a dedicated companion file to the h
 **Why It Exists:**
 
 1. **No Heap Page Intrusion:** Adding metadata to heap pages would consume precious tuple storage space. The sidecar keeps heap pages pristine.
-2. **Efficient Searches:** The binary max-tree enables O(log N) page searches by free-space category, replacing a naive O(N) linear scan of all pages.
+2. **Efficient Searches:** The binary max-tree enables O(\log N) for internal and O(N) for leaves page searches by free-space category, replacing a naive O(N) linear scan of all pages.
 3. **Rebuild on Crash:** The FSM file is treated as a hint-like structure. If corrupted or deleted, it can be rebuilt from the heap file without data loss or WAL complexity.
 4. **Scalability:** A single byte per heap page (free-space category 0–255) means 1 MB of FSM overhead covers an 8 GB table.
 
@@ -36,9 +36,9 @@ The FSM (Free Space Manager) sidecar file is a dedicated companion file to the h
 The FSM fork is organized as a flat sequence of 8 KB pages, conceptually arranged as a 3-level tree:
 
 ```
-Level 2 (Root):       Block 0       ← 1 page covering up to ~4M heap pages
-Level 1 (Internal):   Blocks 1..N   ← Multiple pages, each covering 2040 heap pages
-Level 0 (Leaves):     Blocks N+1.. ← Multiple pages, each tracking 2040 heap pages directly
+Level 2 (Root):       Block 0       ← 1 page covering up to ~64B heap pages
+Level 1 (Internal):   Blocks 1..N   ← Multiple pages, each covering 4000 heap pages
+Level 0 (Leaves):     Blocks N+1.. ← Multiple pages, each tracking 4000 heap pages directly
 ```
 
 Each FSM page contains a binary max-tree array where the root (index 0) holds the maximum free-space category among all descendants. Leaves directly store free-space categories (0–255) for heap pages.
@@ -138,7 +138,7 @@ FindPage(min_category):
 
 **Why Appropriate:**
 
-- **Scalability:** O(log N) search; O(1) rejection via root when table is full
+- **Scalability:** O(\log N) for internal and O(N) for leaves search; O(1) rejection via root when table is full
 
 - **Memory efficiency:** 1 byte/page overhead (e.g., 1 MB FSM covers an 8 GB table)
 - **Self-correcting:** corrupted parent nodes are rebuilt in-place during traversal; no WAL logging required
@@ -164,15 +164,15 @@ Layout (simplified with F=4):
 
 **FSM page constants (8 KB page):**
 
-- `FSM_NODES_PER_PAGE: usize = 4080` - bytes in the binary max-tree array
-- `FSM_SLOTS_PER_PAGE: u32 = 2040` - usable leaf slots per Level-0 FSM page
+- `FSM_NODES_PER_PAGE: usize = 7999` - bytes in the binary max-tree array
+- `FSM_SLOTS_PER_PAGE: u32 = 4000` - usable leaf slots per Level-0 FSM page
 - `FSM_LEVELS: u32 = 3` - Level 0 = leaves, Level 2 = root
 
 **Benefits:**
 
 - No intrusive overhead written to heap pages
 - Treated as a hint: can be rebuilt from the heap after a crash without WAL
-- Constant-height 3-level tree covers up to 2040² ≈ 4 M heap pages (~32 GB at 8 KB/page)
+- Constant-height 3-level tree covers up to 4000² ≈ 4 M heap pages (~500 TB at 8 KB/page)
 
 #### Slotted Page Layout (Heap Pages 1+)
 
@@ -249,19 +249,19 @@ The slotted page format is already tuple-efficient. The FSM layer operates *abov
 
 ### Time Complexity
 
-**FSM Tree Search (`fsm_search_avail`): O(log N)**
+**FSM Tree Search (`fsm_search_avail`): O(\log N) for internal and O(N) for leaves**
 
 - **Tree Traversal:** The 3-level tree (Level 2 root → Level 1 → Level 0 leaves) requires 3 disk reads in the worst case, regardless of the number of heap pages.
 - **Per Page Count:** If the heap has N pages:
-  - Leaves required: ≈ N / FSM_SLOTS_PER_PAGE ≈ N / 2040
-  - Level-1 pages: ≈ (N / 2040) / 2040 ≈ N / 4,161,600
+  - Leaves required: ≈ N / FSM_SLOTS_PER_PAGE ≈ N / 4000
+  - Level-1 pages: ≈ (N / 4000) / 4000 ≈ N / 16,000,000
   - Level-2 pages: 1 (root)
-  - Depth: ≈ log₂₀₄₀(N) ≈ 3 for N up to ~4 million pages
-- **Result:** O(log N) = O(1) for practical table sizes (even a 32 TB table only needs 3 I/Os)
+  - Depth: ≈ log₂₀₄₀(N) ≈ 3 for N up to ~64 billion pages
+- **Result:** O(\log N) for internal and O(N) for leaves = O(1) for practical table sizes (even a 32 TB table only needs 3 I/Os)
 
 ### I/O Complexity
 
-**FSM Tree Search: O(log N) disk reads**
+**FSM Tree Search: O(\log N) for internal and O(N) for leaves disk reads**
 
 - **Read 1:** Root FSM page (Level 2)
 - **Read 2:** One Level-1 FSM page (selected via tree navigation)
@@ -274,9 +274,9 @@ The slotted page format is already tuple-efficient. The FSM layer operates *abov
 
 ### Space Complexity
 
-**FSM Tree: O(N / 2040) pages, 1 byte per heap page**
+**FSM Tree: O(N / 4000) pages, 1 byte per heap page**
 
-- **FSM Fork Size:** For N heap pages, approximately N / 2040 FSM pages required
+- **FSM Fork Size:** For N heap pages, approximately N / 4000 FSM pages required
   - Example: 1M heap pages → ~500 FSM pages → 4 MB FSM fork
   - 1B heap pages (8 TB table) → ~500K FSM pages → 4 GB FSM fork
 - **In-Memory Overhead:** Minimal. Only the current heap page and up to 3 FSM pages are cached (per-insertion). No full-tree materialization in memory.
@@ -296,8 +296,8 @@ The slotted page format is already tuple-efficient. The FSM layer operates *abov
 
 ```rust
 // ── FSM layout constants ──────────────────────────────────────────────────
-const FSM_NODES_PER_PAGE: usize = 4080; // binary max-tree array (bytes)
-const FSM_SLOTS_PER_PAGE: u32  = 2040; // usable leaf nodes per FSM page
+const FSM_NODES_PER_PAGE: usize = 7999; // binary max-tree array (bytes)
+const FSM_SLOTS_PER_PAGE: u32  = 4000; // usable leaf nodes per FSM page
 const FSM_LEVELS: u32          = 3;    // Level 0 = leaves, Level 2 = root
 
 /// One disk page in the FSM fork.
@@ -1377,7 +1377,7 @@ mod tests {
 
 This design implements RookDB's Free Space Manager and Heap File Manager (Project 6) with:
 
-1. **Scalability**: O(log N) FSM tree search; O(1) early-exit via root node when table is full
+1. **Scalability**: O(\log N) for internal and O(N) for leaves FSM tree search; O(1) early-exit via root node when table is full
 
 3. **Modularity**: Clear Project 6/10 separation; FSM fork is a pure sidecar with no heap-page overhead
 4. **Persistence**: FSM fork treated as a hint - rebuilt from heap on crash without WAL; header survives crashes
