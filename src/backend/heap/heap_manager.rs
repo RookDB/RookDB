@@ -238,7 +238,7 @@ impl HeapManager {
 
         // Register first data page with FSM
         let initial_free = PAGE_SIZE as u32 - PAGE_HEADER_SIZE;
-        manager.fsm.fsm_set_avail(1, initial_free)?;
+        manager.fsm.fsm_set_avail(1, initial_free, None)?;
 
         // Persist changes
         manager.flush()?;
@@ -386,8 +386,8 @@ impl HeapManager {
             log::trace!("[HeapManager::insert_tuple] Attempt {}/3", attempt + 1);
             
             // Get a page to try
-            let page_id = match self.fsm.fsm_search_avail(min_category)? {
-                Some(pid) => {
+            let (page_id, mut fsm_page_opt) = match self.fsm.fsm_search_avail(min_category)? {
+                Some((pid, fsm_page)) => {
                     // Check if this page failed before
                     if failed_pages.contains(&pid) {
                         log::trace!(
@@ -400,14 +400,14 @@ impl HeapManager {
                             continue;
                         } else {
                             log::trace!("[HeapManager::insert_tuple] Final attempt: allocating new page");
-                            self.allocate_new_page()?
+                            (self.allocate_new_page()?, None)
                         }
                     } else {
                         log::trace!(
                             "[HeapManager::insert_tuple] FSM search returned page: {}",
                             pid
                         );
-                        pid
+                        (pid, Some(fsm_page))
                     }
                 }
                 None => {
@@ -416,7 +416,7 @@ impl HeapManager {
                         continue;
                     } else {
                         log::trace!("[HeapManager::insert_tuple] Final attempt: allocating new page");
-                        self.allocate_new_page()?
+                        (self.allocate_new_page()?, None)
                     }
                 }
             };
@@ -449,7 +449,7 @@ impl HeapManager {
                 // Track that this page failed for this insert attempt
                 failed_pages.push(page_id);
                 // Update FSM to reflect the actual free space so we don't hit it again
-                self.fsm.fsm_set_avail(page_id, current_free)?;
+                self.fsm.fsm_set_avail(page_id, current_free, fsm_page_opt.as_mut())?;
                 // Page doesn't have space, loop will try next page on next iteration
                 continue;
             }
@@ -464,7 +464,7 @@ impl HeapManager {
             write_page(&mut self.file_handle, &mut page, page_id)?;
 
             // Update FSM with new free space
-            self.fsm.fsm_set_avail(page_id, new_free)?;
+            self.fsm.fsm_set_avail(page_id, new_free, fsm_page_opt.as_mut())?;
 
             // Increment tuple counter
             self.header.total_tuples += 1;
@@ -646,7 +646,7 @@ impl HeapManager {
 
     /// Search for a page with available space (for testing/debugging).
     pub fn fsm_search_for_page(&mut self, min_category: u8) -> io::Result<Option<u32>> {
-        self.fsm.fsm_search_avail(min_category)
+        self.fsm.fsm_search_avail(min_category).map(|opt| opt.map(|(pid, _)| pid))
     }
 
     /// Persist all changes to disk.
@@ -696,7 +696,7 @@ impl HeapManager {
 
         // Register new page with FSM (full free space)
         let initial_free = PAGE_SIZE as u32 - PAGE_HEADER_SIZE;
-        self.fsm.fsm_set_avail(new_page_id, initial_free)?;
+        self.fsm.fsm_set_avail(new_page_id, initial_free, None)?;
 
         log::trace!(
             "[HeapManager::allocate_new_page] New page_id={}, total_pages={}",

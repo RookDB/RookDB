@@ -363,22 +363,37 @@ impl FSM {
     /// Read FSM page at logical position (level, page_no, slot) into FSMPage struct.
     /// 
     /// If the page doesn't exist in the file yet, returns an empty FSMPage.
-    fn logical_to_physical(level: u32, page_no: u32) -> u64 {
+    fn logical_to_physical(&self, level: u32, page_no: u32) -> u64 {
+        // Store pages contiguously by active levels to avoid sparse 3-level padding
+        // when the heap only needs Level 0.
+        let heap_pages = self.heap_page_count as u64;
         let f = FSM_SLOTS_PER_PAGE as u64;
-        let dist_l1 = 1 + f;
-        let dist_l2 = 1 + f + f * f;
-        match level {
-            2 => page_no as u64 * dist_l2,
-            1 => {
-                let parent_l2 = page_no as u64 / f;
-                parent_l2 * dist_l2 + 1 + (page_no as u64 % f) * dist_l1
+
+        if heap_pages <= f {
+            match level {
+                0 => page_no as u64,
+                _ => panic!("Invalid FSM level for single-level tree"),
             }
-            0 => {
-                let parent_l1 = page_no as u64 / f;
-                let parent_l2 = parent_l1 / f;
-                parent_l2 * dist_l2 + 1 + (parent_l1 % f) * dist_l1 + 1 + (page_no as u64 % f)
+        } else {
+            let l0_count = heap_pages.div_ceil(f);
+            let l1_count = l0_count.div_ceil(f);
+            let threshold_l2 = f.saturating_mul(f);
+
+            if heap_pages <= threshold_l2 {
+                match level {
+                    1 => page_no as u64,
+                    0 => l1_count + page_no as u64,
+                    _ => panic!("Invalid FSM level for two-level tree"),
+                }
+            } else {
+                let l2_count = l1_count.div_ceil(f);
+                match level {
+                    2 => page_no as u64,
+                    1 => l2_count + page_no as u64,
+                    0 => l2_count + l1_count + page_no as u64,
+                    _ => panic!("Invalid FSM level for three-level tree"),
+                }
             }
-            _ => panic!("Invalid FSM level"),
         }
     }
 
@@ -396,7 +411,7 @@ impl FSM {
             level, page_no, slot
         );
 
-        let block_offset = Self::logical_to_physical(level, page_no) * FSM_PAGE_SIZE as u64;
+        let block_offset = self.logical_to_physical(level, page_no) * FSM_PAGE_SIZE as u64;
 
         // Check if file is large enough
         let file_size = self.fsm_file.metadata()?.len();
@@ -440,7 +455,7 @@ impl FSM {
             level, page_no, slot
         );
 
-        let block_offset = Self::logical_to_physical(level, page_no) * FSM_PAGE_SIZE as u64;
+        let block_offset = self.logical_to_physical(level, page_no) * FSM_PAGE_SIZE as u64;
         
         // Get current file size
         let current_size = self.fsm_file.metadata()?.len();
@@ -448,8 +463,9 @@ impl FSM {
         // If file is too small, pad it with empty pages
         if block_offset + FSM_PAGE_SIZE as u64 > current_size {
             self.fsm_file.seek(SeekFrom::End(0))?;
-            let empty_page = FSMPage::new();
-            let empty_bytes = empty_page.serialize();
+            
+            // Avoid calling serialize() on an empty FSMPage to prevent double-serialization logs
+            let empty_bytes = vec![0u8; FSM_PAGE_SIZE];
             
             let mut pages_to_write = ((block_offset + FSM_PAGE_SIZE as u64 - current_size) / FSM_PAGE_SIZE as u64) as u64;
             while pages_to_write > 0 {
@@ -488,7 +504,7 @@ impl FSM {
     /// 4. Compute heap page ID from (fsm_page_no, slot)
     /// 5. Advance fp_next_slot on each visited FSM page
     /// 6. Return Some(heap_page_id)
-    pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<u32>> {
+    pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, FSMPage)>> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS.fsm_search_avail_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -510,12 +526,12 @@ impl FSM {
         // The search function will read the root page natively avoiding redundant IO
         let result = self.search_tree_for_available_page(root_level, 0, min_category)?;
         
-        if let Some(page_id) = result {
+        if let Some((page_id, fsm_page)) = result {
             log::trace!(
                 "[FSM::fsm_search_avail] Found page with sufficient space: page_id={}",
                 page_id
             );
-            Ok(Some(page_id))
+            Ok(Some((page_id, fsm_page)))
         } else {
             log::trace!("[FSM::fsm_search_avail] No page found with sufficient space");
             Ok(None)
@@ -523,13 +539,13 @@ impl FSM {
     }
 
     /// search FSM tree for a page with free space >= min_category
-    /// Returns Ok(Option<u32>) where u32 is the page_id, or None if not found
+    /// Returns Ok(Option<(u32, FSMPage)>) where u32 is the page_id, or None if not found
     fn search_tree_for_available_page(
         &mut self,
         level: u32,
         page_no: u32,
         min_category: u8,
-    ) -> io::Result<Option<u32>> {
+    ) -> io::Result<Option<(u32, FSMPage)>> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS.fsm_search_tree_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -581,7 +597,7 @@ impl FSM {
                     "[FSM::search_tree] Found heap page {} with category {} >= {}",
                     heap_page_id, fsm_page.tree[idx], min_category
                 );
-                return Ok(Some(heap_page_id));
+                return Ok(Some((heap_page_id, fsm_page)));
             }
 
             log::trace!("[FSM::search_tree] No suitable leaf found in Level 0 page_no={}", page_no);
@@ -641,7 +657,7 @@ impl FSM {
     /// 2. Update the leaf node with new category
     /// 3. Bubble-up changes within Level 0 FSM page
     /// 4. Propagate up to Level 1 and Level 2 if roots changed
-    pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32) -> io::Result<()> {
+    pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32, cached_page: Option<&mut FSMPage>) -> io::Result<()> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS.fsm_set_avail_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -668,7 +684,14 @@ impl FSM {
         );
 
         // Step 1: Update the leaf in Level 0 FSM page
-        let mut leaf_page = self.read_fsm_page(0, fsm_page_no, 0)?;
+        let mut owned_leaf;
+        let leaf_page = if let Some(page) = cached_page {
+            page
+        } else {
+            owned_leaf = self.read_fsm_page(0, fsm_page_no, 0)?;
+            &mut owned_leaf
+        };
+        
         let leaf_index = FSM_NON_LEAF_NODES + slot_within_page;
 
         if leaf_page.tree[leaf_index] == category {
@@ -792,7 +815,7 @@ impl FSM {
             heap_page_id, reclaimed_bytes
         );
         // Delegate to fsm_set_avail
-        self.fsm_set_avail(heap_page_id, reclaimed_bytes)?;
+        self.fsm_set_avail(heap_page_id, reclaimed_bytes, None)?;
         Ok(())
     }
 
@@ -806,6 +829,8 @@ impl FSM {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_fsm_page_new() {
@@ -844,5 +869,24 @@ mod tests {
         // Exceed Level 1 -> requires Level 2
         let count_l2 = FSM::calculate_fsm_page_count(threshold_l2 + 1);
         assert!(count_l2 > threshold_l2 / FSM_SLOTS_PER_PAGE);
+    }
+
+    #[test]
+    fn test_small_heap_uses_single_fsm_block_on_disk() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("rookdb_fsm_small_{nanos}.fsm"));
+
+        let mut fsm = FSM::open(path.clone(), 15).unwrap();
+        let page = FSMPage::new();
+        fsm.write_fsm_page(0, 0, 0, &page).unwrap();
+        fsm.sync().unwrap();
+
+        let file_size = fs::metadata(&path).unwrap().len();
+        assert_eq!(file_size, FSM_PAGE_SIZE as u64);
+
+        fs::remove_file(path).unwrap();
     }
 }
