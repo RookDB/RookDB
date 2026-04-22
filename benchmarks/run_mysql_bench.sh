@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BENCH_DIR="$ROOT_DIR/benchmark_runs"
+
 if ! command -v mysql >/dev/null 2>&1; then
   echo "[SKIP] mysql command not found."
   exit 0
@@ -12,9 +15,9 @@ MYSQL_PORT="${MYSQL_PORT:-3306}"
 MYSQL_USER="${MYSQL_USER:-root}"
 MYSQL_PASSWORD="${MYSQL_PASSWORD:-}"
 MYSQL_DATABASE="${MYSQL_DATABASE:-rookbench}"
-OUT_FILE="benchmark_runs/mysql_benchmark.txt"
+OUT_FILE="$BENCH_DIR/mysql_benchmark.txt"
 
-mkdir -p benchmark_runs
+mkdir -p "$BENCH_DIR"
 
 MYSQL_ARGS=(
   "-h${MYSQL_HOST}"

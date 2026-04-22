@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BENCH_DIR="$ROOT_DIR/benchmark_runs"
+
 if ! command -v psql >/dev/null 2>&1; then
   echo "[SKIP] psql command not found."
   exit 0
@@ -12,10 +15,10 @@ PGPORT="${PGPORT:-5432}"
 PGUSER="${PGUSER:-postgres}"
 PGDATABASE="${PGDATABASE:-rookbench}"
 
-CSV_OUT="benchmark_runs/postgres_fsm_metrics.csv"
-SUMMARY_OUT="benchmark_runs/postgres_fsm_summary.txt"
+CSV_OUT="$BENCH_DIR/postgres_fsm_metrics.csv"
+SUMMARY_OUT="$BENCH_DIR/postgres_fsm_summary.txt"
 
-mkdir -p benchmark_runs
+mkdir -p "$BENCH_DIR"
 
 PSQL_ARGS=(
   "-h" "$PGHOST"

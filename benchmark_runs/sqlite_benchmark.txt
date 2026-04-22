@@ -7,4 +7,4 @@ update_seconds=1
 delete_seconds=0
 rows_after_delete=90000
 avg_payload_len_after_delete=55.56
-database_file=benchmark_runs/sqlite_bench.db
+database_file=/Users/hellgamerhell/Downloads/DATA System/RookDB/benchmark_runs/sqlite_bench.db

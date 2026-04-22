@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BENCH_DIR="$ROOT_DIR/benchmark_runs"
+
 if ! command -v pgbench >/dev/null 2>&1; then
   echo "[SKIP] pgbench command not found."
   exit 0
@@ -21,10 +24,10 @@ PGBENCH_CLIENTS="${PGBENCH_CLIENTS:-8}"
 PGBENCH_JOBS="${PGBENCH_JOBS:-4}"
 PGBENCH_TIME="${PGBENCH_TIME:-30}"
 
-OUT_FILE="benchmark_runs/pgbench_results.txt"
-SCRIPT_FILE="benchmarks/sql/pgbench_custom.sql"
+OUT_FILE="$BENCH_DIR/pgbench_results.txt"
+SCRIPT_FILE="$ROOT_DIR/benchmarks/sql/pgbench_custom.sql"
 
-mkdir -p benchmark_runs
+mkdir -p "$BENCH_DIR"
 
 PSQL_ARGS=(
   "-h" "$PGHOST"

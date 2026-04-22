@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BENCH_DIR="$ROOT_DIR/benchmark_runs"
+
 if ! command -v sqlite3 >/dev/null 2>&1; then
   echo "[SKIP] sqlite3 command not found."
   exit 0
 fi
 
 ROWS="${BENCH_ROWS:-100000}"
-DB_FILE="${SQLITE_DB_FILE:-benchmark_runs/sqlite_bench.db}"
-OUT_FILE="benchmark_runs/sqlite_benchmark.txt"
+DB_FILE="${SQLITE_DB_FILE:-$BENCH_DIR/sqlite_bench.db}"
+OUT_FILE="$BENCH_DIR/sqlite_benchmark.txt"
 
-mkdir -p benchmark_runs
+mkdir -p "$BENCH_DIR"
 rm -f "$DB_FILE"
 
 now_s() {

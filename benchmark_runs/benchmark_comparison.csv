@@ -1,6 +1,6 @@
 engine,rows_configured,insert_seconds,update_seconds,delete_seconds,rows_after_delete,avg_payload_len_after_delete,small_insert_tps,large_insert_tps,lookup_ops_per_sec,seq_scan_tps,fsm_rebuild_seconds,avg_fsm_free_bytes,pgbench_tps,pgbench_latency_ms
-rookdb_fsm_heap,21000,NA,NA,NA,NA,NA,18852.957769845918,13036.053434939462,43332.407753103726,47035.36729477084,0.009142958,NA,NA,NA
+rookdb_fsm_heap,21000,NA,NA,NA,NA,NA,21291.086140807,16930.29706965847,515331.100231899,2167611.487226111,0.005375125,NA,NA,NA
 sqlite,100000,0,1,0,90000,55.56,NA,NA,NA,NA,NA,NA,NA,NA
-mysql,100000,0,1,0,90000,55.56,NA,NA,NA,NA,NA,NA,NA,NA
+mysql,100000,1,0,0,90000,55.56,NA,NA,NA,NA,NA,NA,NA,NA
 postgres_fsm,1000,0,0,0,900,55.56,NA,NA,NA,NA,NA,2269.71,NA,NA
 pgbench,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,3867.890925,2.068

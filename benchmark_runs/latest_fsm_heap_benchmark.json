@@ -1,5 +1,5 @@
 {
-  "run_id_unix": 1776596962,
+  "run_id_unix": 1776859982,
   "system": {
     "os_name": "Darwin",
     "os_version": "14.5",
@@ -28,15 +28,15 @@
     "fsm_rebuild_search_found_page": true
   },
   "performance": {
-    "small_insert_seconds": 1.0608415,
-    "small_insert_tuples_per_sec": 18852.957769845918,
-    "large_insert_seconds": 0.076710333,
-    "large_insert_tuples_per_sec": 13036.053434939462,
-    "point_lookup_seconds": 0.023077416,
-    "point_lookup_ops_per_sec": 43332.407753103726,
-    "seq_scan_seconds": 0.446472542,
-    "seq_scan_tuples_per_sec": 47035.36729477084,
-    "fsm_rebuild_seconds": 0.009142958
+    "small_insert_seconds": 0.93936025,
+    "small_insert_tuples_per_sec": 21291.086140807,
+    "large_insert_seconds": 0.059065709,
+    "large_insert_tuples_per_sec": 16930.29706965847,
+    "point_lookup_seconds": 0.0019405,
+    "point_lookup_ops_per_sec": 515331.100231899,
+    "seq_scan_seconds": 0.009688083,
+    "seq_scan_tuples_per_sec": 2167611.487226111,
+    "fsm_rebuild_seconds": 0.005375125
   },
   "scalability": {
     "heap_page_count": 269,

@@ -10,3 +10,5 @@ run_id_unix,output_file,small_tuples,large_tuples,lookup_samples,inserted_total,
 1776596284,benchmark_runs/latest_fsm_heap_benchmark.json,20000,1000,1000,21000,14868.5113,4594.7577,22265.3101,29674.4064,0.007123,true,true,true
 1776596388,benchmark_runs/latest_fsm_heap_benchmark.json,20000,1000,1000,21000,15027.1639,13281.1751,26114.0359,32158.1097,0.005887,true,true,true
 1776596962,benchmark_runs/latest_fsm_heap_benchmark.json,20000,1000,1000,21000,18852.9578,13036.0534,43332.4078,47035.3673,0.009143,true,true,true
+1776620140,benchmark_runs/latest_fsm_heap_benchmark.json,20000,1000,1000,21000,21265.6556,16456.1535,77746.6411,2166632.8431,0.006503,true,true,true
+1776859982,/Users/hellgamerhell/Downloads/DATA System/RookDB/benchmark_runs/latest_fsm_heap_benchmark.json,20000,1000,1000,21000,21291.0861,16930.2971,515331.1002,2167611.4872,0.005375,true,true,true

@@ -7,10 +7,11 @@ cd "$ROOT_DIR"
 # Ensure Homebrew PostgreSQL tools are reachable on macOS.
 export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
 
-OUT_CSV="${1:-benchmark_runs/benchmark_comparison.csv}"
+BENCH_DIR="$ROOT_DIR/benchmark_runs"
+OUT_CSV="${1:-$BENCH_DIR/benchmark_comparison.csv}"
 RUN_BENCHMARKS="${RUN_BENCHMARKS:-1}"
 
-mkdir -p benchmark_runs
+mkdir -p "$BENCH_DIR"
 
 kv_get() {
   local file="$1"
@@ -45,11 +46,11 @@ if [[ "$RUN_BENCHMARKS" == "1" ]]; then
   ./benchmarks/run_all_benchmarks.sh
 fi
 
-rook_json="benchmark_runs/latest_fsm_heap_benchmark.json"
-sqlite_txt="benchmark_runs/sqlite_benchmark.txt"
-mysql_txt="benchmark_runs/mysql_benchmark.txt"
-pg_summary_txt="benchmark_runs/postgres_fsm_summary.txt"
-pgbench_txt="benchmark_runs/pgbench_results.txt"
+rook_json="$BENCH_DIR/latest_fsm_heap_benchmark.json"
+sqlite_txt="$BENCH_DIR/sqlite_benchmark.txt"
+mysql_txt="$BENCH_DIR/mysql_benchmark.txt"
+pg_summary_txt="$BENCH_DIR/postgres_fsm_summary.txt"
+pgbench_txt="$BENCH_DIR/pgbench_results.txt"
 
 rook_small_tuples="$(json_get "$rook_json" small_tuples)"
 rook_large_tuples="$(json_get "$rook_json" large_tuples)"

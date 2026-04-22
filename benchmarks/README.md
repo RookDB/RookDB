@@ -7,7 +7,7 @@ This folder contains practical benchmark scripts to compare RookDB with:
 - PostgreSQL `pgbench`
 - PostgreSQL free-space map metrics (`pg_freespacemap` extension)
 
-All scripts write outputs in `benchmark_runs/`.
+All scripts write outputs in the repository root folder `benchmark_runs/` (one canonical location).
 
 ## Quick Start
 
@@ -77,13 +77,13 @@ This runs:
 
 ## Output Files
 
-- `benchmark_runs/sqlite_benchmark.txt`
-- `benchmark_runs/mysql_benchmark.txt`
-- `benchmark_runs/pgbench_results.txt`
-- `benchmark_runs/postgres_fsm_metrics.csv`
-- `benchmark_runs/postgres_fsm_summary.txt`
-- `benchmark_runs/latest_fsm_heap_benchmark.json`
-- `benchmark_runs/benchmark_comparison.csv`
+- `<repo>/benchmark_runs/sqlite_benchmark.txt`
+- `<repo>/benchmark_runs/mysql_benchmark.txt`
+- `<repo>/benchmark_runs/pgbench_results.txt`
+- `<repo>/benchmark_runs/postgres_fsm_metrics.csv`
+- `<repo>/benchmark_runs/postgres_fsm_summary.txt`
+- `<repo>/benchmark_runs/latest_fsm_heap_benchmark.json`
+- `<repo>/benchmark_runs/benchmark_comparison.csv`
 
 ## Notes
 
