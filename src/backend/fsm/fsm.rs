@@ -502,8 +502,7 @@ impl FSM {
     /// 2. If root value < min_category: return None
     /// 3. Traverse Level 2 → Level 1 → Level 0 
     /// 4. Compute heap page ID from (fsm_page_no, slot)
-    /// 5. Advance fp_next_slot on each visited FSM page
-    /// 6. Return Some(heap_page_id)
+    /// 5. Return Some(heap_page_id)
     pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, FSMPage)>> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS.fsm_search_avail_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

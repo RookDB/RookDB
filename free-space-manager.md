@@ -1,70 +1,43 @@
 # Free Space Manager (FSM) - Deep Dive & Integrations
 
 **Project:** 6. Free Space Manager and Heap File Manager  
-**Date:** 13th March, 2026  
+**Date:** 22th April, 2026  
 **Scope:** FSM tree mechanics, integration APIs, and operational guarantees
 
 ---
 
 ## 1. FSM Tree Structure Overview
 
-### 1.1 The 3-Level Binary Max-Tree
+### 1.1 The Dynamic 3-Level Binary Max-Tree
 
-RookDB uses a **PostgreSQL-style 3-level binary max-tree** to efficiently track free space availability across all heap pages. Each level serves a distinct purpose:
+RookDB uses a **PostgreSQL-style binary max-tree** to efficiently track free space availability across all heap pages. The tree grows dynamically in height (levels) as the heap expands to avoid unnecessary overhead and sparse files:
 
-#### Level 2 (Root)
-- **How Many Pages:** Exactly **1 page**
-- **What It Stores:** A single binary max-tree array that holds the maximum free-space category across the entire heap
-- **Tree Structure:** `tree[0]` = root node = max(all descendants)
-- **Coverage:** Up to ~64 billion heap pages (practical limit for most databases)
+#### Initial Phase: Level 0 Only (0-4000 pages)
+- **Structure:** The FSM starts with only **1 level (Level 0)**.
+- **Coverage:** A single Level-0 page tracks the free space of up to 4000 heap pages.
+- **Why?** For small tables, introducing Level 1 and 2 is pure overhead. This single page acts as the root and leaf simultaneously.
 
-#### Level 1 (Internal/Intermediate)
-- **How Many Pages:** Multiple pages (grows as heap grows)
-- **Typical Range:** 1–2,000+ pages depending on heap size
-- **What Each Page Stores:** A binary max-tree with up to 2,040 leaf nodes
-- **What Each Leaf Represents:** Pointer to a Level-0 FSM page or heap page group
-- **Tree Structure:** Each Level-1 page contains `tree[0]` (root of that page's subtree) and internal nodes pointing to children
+#### Two-Level Phase: Levels 0 and 1 (4,001 - 16,000,000 pages)
+- **Structure:** When the 4001st heap page is added, the FSM introduces a second Level-0 page AND a new **Level-1 root page**.
+- **What Each Page Stores:** 
+  - The Level-1 page stores a binary max-tree pointing to the Level-0 pages.
+  - The Level-0 pages continue tracking individual heap pages.
 
-#### Level 0 (Leaves)
-- **How Many Pages:** Multiple pages (1 Level-0 page per 2,040 heap pages)
-- **Example:** 1M heap pages → ~500 Level-0 FSM pages
-- **What Each Page Stores:** Direct free-space categories (0–255) for heap pages
-- **Mapping:** Each leaf slot in a Level-0 page corresponds to one heap page
-  - Slot 0 → Heap page 0
-  - Slot 1 → Heap page 1
-  - ...
-  - Slot 2,039 → Heap page 2,039
+#### Three-Level Phase: Levels 0, 1, and 2 (> 16,000,000 pages)
+- **Structure:** Reaching 16 million pages triggers the creation of a **Level-2 root page**.
+- **Coverage:** Up to ~64 billion heap pages ( practical limit ).
+- **Roles:** Level-2 points to Level-1, Level-1 points to Level-0, Level-0 points to heap pages.
 
-### 1.2 Visual Tree Diagram
+### 1.2 Visual Tree Diagrams
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Level 2 (Root): 1 page                                 │
-│  ┌──────────────────────────────────────────────────────┐
-│  │ tree[0] = 200  (max free-space category in heap)    │
-│  │ tree[1] = 180  ┐                                     │
-│  │ tree[2] = 150  │ Internal nodes (parents of L1)     │
-│  └──────────────────────────────────────────────────────┘
-└─────────────────────────────────────────────────────────┘
-       │                           │
-       │                           │
-  ┌────▼─────────────┐       ┌─────▼──────────────┐
-  │  Level 1: Page 0 │       │  Level 1: Page 1   │
-  │ tree[0] = 180    │       │ tree[0] = 150      │
-  │ tree[1] = 200    │       │ tree[1] = 145      │
-  │ tree[2] = 175    │       │ tree[2] = 150      │
-  └────┬──────┬──────┘       └─────┬──────┬───────┘
-       │      │                    │      │
-  ┌────▼──┐ ┌─▼────┐          ┌───▼──┐ ┌─▼────┐
-  │ L0:0  │ │ L0:1 │          │ L0:2 │ │ L0:3 │
-  │ 200   │ │ 150  │          │ 145  │ │ 150  │
-  │ 180   │ │ 170  │          │ 120  │ │ 140  │
-  │ 175   │ │ 155  │          │ 115  │ │ 150  │
-  └───┬───┘ └──┬───┘          └───┬──┘ └──┬───┘
-      │        │                  │       │
-   [0-2,039] [2,040-4,079]   [4,080-6,119] [6,120-8,159]
-   Heap Pages    Heap Pages      Heap Pages   Heap Pages
-```
+**FSM Level Tree Structure:**
+![FSM Level Tree Structure](./FSM_Level_Tree_Structure.png)
+
+**FSM Page Layout:**
+![FSM Page Layout](./FSM_Page_Layout.png)
+
+**FSM Insertion:**
+![FSM Insertion](./FSM_Insertion.png)
 
 **Key Points:**
 - Each node in a Level-1 or Level-0 page is 1 byte (8-bit unsigned integer 0–255)
@@ -100,12 +73,12 @@ The FSM does NOT store the exact number of free bytes per page. Instead, it quan
 
 **Formula:**
 ```
-category = floor(free_bytes × 255 / PAGE_SIZE)
+category = floor(free_bytes / 32) (max 255)
 ```
 
 **For an 8 KB page:**
 ```
-category = floor(free_bytes × 255 / 8192)
+category = floor(free_bytes /32 ) (max 255)
 ```
 
 **Resolution:** Each category step represents ~32 bytes (8192 / 256 ≈ 32)
@@ -114,19 +87,19 @@ category = floor(free_bytes × 255 / 8192)
 
 | Free Bytes | Calculation | Category | Interpretation |
 |------------|-------------|----------|------------------|
-| 0          | 0 × 255 / 8192 = 0 | 0 | Page is full |
-| 500        | 500 × 255 / 8192 ≈ 15.6 → 15 | 15 | ~2% free |
-| 1,024      | 1024 × 255 / 8192 ≈ 31.9 → 31 | 31 | ~12.5% free |
-| 2,048      | 2048 × 255 / 8192 ≈ 63.8 → 63 | 63 | ~25% free |
-| 4,096      | 4096 × 255 / 8192 ≈ 127.5 → 127 | 127 | ~50% free |
-| 7,000      | 7000 × 255 / 8192 ≈ 218.8 → 218 | 218 | ~85.5% free |
-| 8,176      | 8176 × 255 / 8192 ≈ 254.4 → 254 | 254 | ~99.8% free (nearly empty) |
-| 8,184      | 8184 × 255 / 8192 ≈ 255.0 → 255 | 255 | Page is completely empty |
+| 0          | 0 / 32 = 0 | 0 | Page is full |
+| 500        | 500 / 32 ≈ 15.6 → 15 | 15 | ~2% free |
+| 1,024      | 1024 / 32 = 32 | 32 | ~12.5% free |
+| 2,048      | 2048 / 32 = 64 | 64 | ~25% free |
+| 4,096      | 4096 / 32 = 128 | 128 | ~50% free |
+| 7,000      | 7000 / 32 ≈ 218.8 → 218 | 218 | ~85.5% free |
+| 8,159      | 8159 / 32 ≈ 254.9 → 254 | 254 | ~99.2% free |
+| 8,176      | 8176 / 32 ≈ 255.5 → 255 | 255 | ~99.8% free (nearly empty) |
+| 8,184      | 8184 / 32 = 255.75 → 255 | 255 | Page is completely empty |
 
 ### 2.3 Why Quantization?
 
 1. **Memory Efficiency:** 1 byte per page vs. 4–8 bytes if storing exact free bytes
-   - For 1M heap pages: 1 MB FSM overhead instead of 4–8 MB
    
 2. **Search Efficiency:** Binary search is faster on quantized categories
    - "Find any page with ≥100 bytes free" → "Find any page with category ≥12"
@@ -180,14 +153,6 @@ build_from_heap(heap_path):
   └─ Return FSM handle with initialized state
 ```
 
-**How Many Pages Are Created Initially?**
-
-For a heap with `N` pages:
-- **Level-0 FSM pages:** ⌈N / 2,040⌉
-  - Example: 10,000 heap pages → 5 Level-0 pages
-- **Level-1 FSM pages:** ⌈(N / 2,040) / 2,040⌉
-  - Example: 10,000 heap pages → 1 Level-1 page
-- **Level-2 FSM pages:** 1 (always)
 
 ### 3.2 How Pages Are Linked Together
 
@@ -195,105 +160,97 @@ The FSM uses **logical addressing**, not physical pointers:
 
 **Level Mapping:**
 ```
-Logical Address (level, page_no, slot) → Physical Disk Block
+Logical Address (level, page_no) → Physical Disk Block Offset
 ```
 
-**Calculation:**
+**Logical Coordinate Calculation:**
 ```
 For a heap page H:
-  level_0_page_no = H / FSM_SLOTS_PER_PAGE         (≈ H / 4000)
-  slot_in_l0 = H mod FSM_SLOTS_PER_PAGE             (≈ H mod 4000)
+  level_0_page_no = H / FSM_SLOTS_PER_PAGE             (≈ H / 4000)
+  slot_in_l0      = H % FSM_SLOTS_PER_PAGE             (≈ H % 4000)
   
 For a Level-1 page tracking L0:
   level_1_page_no = level_0_page_no / FSM_SLOTS_PER_PAGE
-  slot_in_l1 = level_0_page_no mod FSM_SLOTS_PER_PAGE
+  slot_in_l1      = level_0_page_no % FSM_SLOTS_PER_PAGE
 
-And so on up to Level-2.
+For a Level-2 page tracking L1:
+  level_2_page_no = level_1_page_no / FSM_SLOTS_PER_PAGE
+  slot_in_l2      = level_1_page_no % FSM_SLOTS_PER_PAGE
 ```
 
-**No Physical Pointers:** Pages don't store file offsets or addresses. Instead, the address is computed deterministically from the page number, enabling easy FSM reconstruction if files are corrupted.
+**Physical File Layout Calculation:**
+To avoid sparse 3-level padding for small heaps, RookDB stores pages contiguously by active levels based on `heap_page_count`.
+
+For example, when `heap_page_count <= 4000` (1 level tree):
+```
+Physical block = page_no (Level 0 only)
+```
+When `heap_page_count <= 16,000,000` (2 level tree):
+```
+L0_count = ceil(heap_page_count / 4000)
+L1_count = ceil(L0_count / 4000)
+
+If Level == 1: Physical block = page_no
+If Level == 0: Physical block = L1_count + page_no
+```
+This formula dynamically packs the file tightly, completely eliminating huge padding bytes normally required for a deep static tree.
+
+**No Physical Pointers:** Pages don't store file offsets or addresses. Instead, the address is computed deterministically from the page number and overall heap size.
 
 ---
 
-## 4. The `next_slot` Variable: Sequential Slot Tracking
+## 4. Future Work: The `fp_next_slot` Variable for Sequential Slot Tracking
 
-### 4.1 What `next_slot` Does (NOT Load Balancing)
+### 4.1 What `fp_next_slot` Will Do 
 
-**Clarification:** `next_slot` is used to **avoid rescanning from slot 0 every time** when searching for available pages. It provides a **sequential tracking hint**, NOT load balancing.
+**Clarification:** `fp_next_slot` will be used to **avoid rescanning from slot 0 every time** when searching for available pages. It provides a **sequential tracking hint**, NOT load balancing. 
 
-**Data Structure:**
+Currently, our max-tree correctly directs us to the available space without rescanning, starting its search from the root node. However, keeping track of the last successfully filled spot (`fp_next_slot`) can further optimize search speed when sequentially filling many tuples into a single newly allocated page. 
+
+**Future Data Structure Adjustment:**
 ```rust
 pub struct FSMPage {
     tree: [u8; FSM_NODES_PER_PAGE],  // 4,080 bytes: binary max-tree
-
+    // fp_next_slot: u16,            // track index for faster intra-page sequential inserts
 }
 ```
 
-### 4.2 How `next_slot` Works
+### 4.2 Handling Intra-Page Searches
 
-**Current Implementation (Sequential Within Page):**
-
-```
-FSM Search for a page:
-  │
-  ├─ Start at Level 2 root, read tree[0]
-  ├─ Descend to Level 1:
-
-
-  │       │   └─ Use this page
-  │       └─ Else:
-  │           └─ Wrap around and scan from 0
-  │
-  ├─ Reach Level 0 leaf:
-  │   └─ Repeat sequential logic
-  │
-  └─ On successful find:
-
-         (for next search, start from next sequential position)
-```
-
-**Example Trace:**
-
-```
-Page 1 Insert (searching for category ≥ 50):
-
-  ├─ Check tree[0] = 60 ✓ >= 50 → Use this page
-
-
-Page 2 Insert (same search):
-
-  ├─ Check tree[1] = 45 ✗ < 50
-  ├─ Check tree[2] = 55 ✓ >= 50 → Use this page
-
-
-Page 3 Insert (same search):
-
-  ├─ Check tree[3] = 40 ✗ < 50
-  ├─ ... (wrap around, rescan from 0)
-  ├─ Check tree[0] = 60 ✓ >= 50 → Use this page
-
-```
-
-### 4.3 Future Use: Concurrent Insert Optimization
-
-**For Future Phases (Multi-Threaded Inserts):**
-
-
-
-```
-
-
-
-
-```
-
-This would naturally spread load across pages without explicit coordination.
+**For the future:** We could attempt finding space beginning at `fp_next_slot` via a localized sub-tree traversal or scan, reducing array index navigation steps on hot inserts.
 
 ---
 
-## 5. Sequential Insertion Logic: Why Pages Fill Sequentially
+## 5. Sequential Insertion Logic: Greedy Max Binary Tree Routing
 
-### 5.1 Current Phase: Contiguous Free Space Only
+### 5.1 The Left-Preferred Greedy Search
+
+When `fsm_search_avail(min_category)` needs to find a heap page with enough free space, it traverses the binary max-tree top-down (root to leaf). At each internal node, the search algorithm dynamically looks at both left and right children:
+
+```rust
+while idx < FSM_NON_LEAF_NODES {
+    let left = 2 * idx + 1;
+    let right = 2 * idx + 2;
+
+    if left < FSM_NODES_PER_PAGE && fsm_page.tree[left] >= min_category {
+        idx = left;     // Greedily prefer the left path!
+    } else if right < FSM_NODES_PER_PAGE && fsm_page.tree[right] >= min_category {
+        idx = right;    // Fallback to the right path
+    } else {
+        break; // Should not occur since root indicated space is available
+    }
+}
+```
+
+### 5.2 Why "Greedy Left" Causes Sequential Fills
+
+Because the search checks the **left child first** and takes that path if space is available, it inherently directs new database inserts to the lowest possible leaf index (the lowest Page ID). 
+
+1. **Initial Pages First:** The FSM will continuously direct tuples to Page 1 until Page 1’s free space drops below the requested size category.
+2. **Spill Over:** Once the left child's maximum space falls below `min_category`, the search branches to the right child (Page 2), and begins filling it.
+3. **No Wasted Logic:** This means we achieve dense, sequential data packing without manually maintaining pointers or arrays of active pages.
+
+### 5.3 Contiguous Free Space Only
 
 **Key Principle:** RookDB **only inserts into the last contiguous free space** between `upper` and `lower` pointers.
 
@@ -491,25 +448,26 @@ If insert fails due to fragmentation:
 
 ## 8. FSM Functions: Detailed Operation Reference
 
-### 8.1 `FSM::build_from_heap(heap_path)`
+### 8.1 `FSM::build_from_heap(heap_file, fsm_path)`
 
-**Purpose:** Initialize or rebuild FSM from heap file
+**Purpose:** Initialize or rebuild FSM from an open heap file
 
 **Signature:**
 ```rust
-pub fn build_from_heap(heap_path: PathBuf) -> io::Result<Self>
+pub fn build_from_heap(heap_file: &mut File, fsm_path: PathBuf) -> io::Result<Self>
 ```
 
 **Inputs:**
-- `heap_path`: Path to `<table>.dat` file
+- `heap_file`: Mutable reference to an open `<table>.dat` file
+- `fsm_path`: Path to `<table>.dat.fsm` file to create/update
 
 **Outputs:**
 - Initialized `FSM` struct with loaded `.fsm` fork
 
 **Side Effects:**
-- Creates or overwrites `<table>.dat.fsm`
-- Scans all heap pages (expensive O(N) operation)
-- Computes and stores all free-space categories
+- Truncates and overwrites `<table>.dat.fsm` if it exists.
+- Scans all heap pages (expensive O(N) operation) reading only the header bytes per page to calculate valid offsets.
+- Builds an in-memory mapped hash structure before committing all tree structures cleanly to disk.
 
 **When Called:**
 - Table creation
@@ -522,81 +480,88 @@ pub fn build_from_heap(heap_path: PathBuf) -> io::Result<Self>
 
 **Signature:**
 ```rust
-pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<u32>>
+pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, FSMPage)>>
 ```
 
 **Inputs:**
 - `min_category`: Minimum required free-space category (0–255)
 
 **Outputs:**
-- `Some(page_id)`: Found a suitable page
+- `Some((page_id, fsm_page))`: Found a suitable page. Returns the modified Level-0 FSM page alongside the ID to save I/O during eventual updates.
 - `None`: No page has enough free space (need to allocate)
 
-**Algorithm (O(log N) = O(\log N) disk reads):**
+**Algorithm (O(log M) disk reads max):**
 
 ```
-1. Read Level-2 (root) FSM page
-   ├─ If tree[0] < min_category: return None (entire heap is full)
-   
-2. Traverse Level 2 → Level 1:
-   ├─ For each child slot:
-   │   ├─ If tree[slot] >= min_category:
-   │   │   ├─ Search slots sequentially from 0
-   │   │   ├─ If not available, try next sequential slot
-   │   │   └─ Descend to Level 1 page
-   │   
-3. Traverse Level 1 → Level 0:
-   ├─ Repeat same logic: find first child with category >= min_category
+1. Determine active root level:
+   ├─ Based on heap_page_count, establish whether to read Level 0, 1, or 2 as root.
 
-   
+2. Start recursive search `search_tree_for_available_page(root_level, page_no)`:
+   ├─ Read active root FSM page.
+   ├─ If root_value < min_category: return None.
+
+3. Traverse active FSM pages:
+   ├─ Sequentially scan children preferring the left branch (greedy tree).
+   ├─ Drill down Level_N → Level_N-1.
+
 4. Reach Level-0 leaf page:
-   ├─ Compute heap_page_id = (fsm_page_no × FSM_SLOTS_PER_PAGE) + slot
-
-   ├─ Mark all visited FSM pages as dirty (for eventual flush)
+   ├─ Compute starting heap_page_id = fsm_page_no × FSM_SLOTS_PER_PAGE.
+   ├─ Check leaf. If `heap_page_id == 0`, skip (page 0 is a DB header page).
    
-5. Return Some(heap_page_id)
+5. Return Some((heap_page_id, Level0_FSMPage))
 ```
 
 **Guarantees:**
-- Returns a page whose category >= min_category
-- Does NOT guarantee the page will have enough contiguous space (due to fragmentation)
-  - → Insertion may still fail (handled by 3-attempt retry)
+- Returns a page whose category >= `min_category`.
+- Does NOT guarantee the page will have enough contiguous space (due to internal page fragmentation in the database).
+  - → Insertion may still fail (handled by 3-attempt retry).
 
 **I/O Cost:**
-- **Best case:** 3 disk reads (all FSM pages cached)
-- **Worst case:** 3 disk reads + 1 heap page read
+- **Best case:** 1-3 disk reads (depending on tree depth and cache).
 
-### 8.3 `FSM::fsm_set_avail(heap_page_id, new_free_bytes)`
+### 8.3 `FSM::fsm_set_avail(heap_page_id, new_free_bytes, cached_page)`
 
 **Purpose:** Update FSM after insertion or deletion changes available space
 
 **Signature:**
 ```rust
-pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32) -> io::Result<()>
+pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32, cached_page: Option<&mut FSMPage>) -> io::Result<()>
 ```
 
 **Inputs:**
 - `heap_page_id`: Which heap page changed
 - `new_free_bytes`: New contiguous free space (bytes)
+- `cached_page`: Optional Level-0 cached FSM page returned from `fsm_search_avail` (saves a disk read)
 
 **Outputs:**
-- FSM tree updated; all changes propagated to disk
+- FSM tree updated; changes propagated to disk if necessary
 
 **Algorithm:**
 
 ```
-1. Quantize: category = floor(new_free_bytes × 255 / PAGE_SIZE)
+1. Quantize: category = floor(new_free_bytes / 32)
 
 2. Locate Level-0 FSM page:
-   ├─ level_0_page_no = heap_page_id / FSM_SLOTS_PER_PAGE
-   ├─ slot_in_l0 = heap_page_id mod FSM_SLOTS_PER_PAGE
+   ├─ fsm_page_no = heap_page_id / FSM_SLOTS_PER_PAGE
+   ├─ slot_in_l0 = heap_page_id % FSM_SLOTS_PER_PAGE
 
-3. Read Level-0 FSM page
+3. Retrieve Level-0 FSM page:
+   ├─ Use `cached_page` if provided, else read from disk.
 
-4. Update leaf: tree[leaf_index(slot_in_l0)] = category
+4. Check existing category:
+   ├─ If tree[leaf_index] == category:
+   │   └─ Return early (Category unchanged, no FSM writes needed)
 
-5. Bubble up within Level-0 page:
-   ├─ For each parent node:
+5. Update leaf: tree[leaf_index] = category
+
+6. Bubble up strictly within Level-0 page:
+   ├─ Recompute maximum paths backwards up to the root of Level-0.
+   ├─ Write updated Level-0 FSM page to disk.
+
+7. Parent Propagation:
+   ├─ If the Level-0 root changed, propagate the new maximum upwards.
+   ├─ Read parent (Level-1), bubble up. If root changed, read Level-2, etc.
+```
    │   ├─ old_value = tree[parent_index]
    │   ├─ new_value = max(tree[left_child], tree[right_child])
    │   ├─ If new_value != old_value:
@@ -605,18 +570,14 @@ pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32) -> io::R
    │   └─ Else:
    │       └─ Stop (no further ancestors change)
 
-6. Write updated Level-0 FSM page to disk
+8. Write updated Level-0 FSM page to disk
 
-7. If Level-0 root changed:
-   ├─ Iteratively propagate the new maximum category up to the parent nodes using a loop.
-   │   (This propagates up to Level 1, then Level 2)
-
-8. All FSM pages updated; tree is consistent
+9. All FSM pages updated; tree is consistent
 ```
 
 **I/O Cost:**
-- **Typical:** 2–4 disk writes (Level 0, Level 1, Level 2 pages)
-- **Why:** Bubble-up only modifies ancestors whose values actually change
+- **Typical:** 1–3 disk writes (Level 0, Level 1, Level 2 pages) depending on whether the highest local roots changed.
+- **Why:** Bubble-up only modifies ancestors whose values actually change. Short-circuiting keeps edits localized.
 
 ### 8.4 `FSM::fsm_vacuum_update(heap_page_id, reclaimed_bytes)`
 
@@ -632,7 +593,7 @@ pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, reclaimed_bytes: u32) -> 
 - `reclaimed_bytes`: Newly available contiguous space
 
 **Behavior:**
-- Delegates to `fsm_set_avail(heap_page_id, reclaimed_bytes)`
+- Delegates to `fsm_set_avail(heap_page_id, reclaimed_bytes, None)`
 - Triggers bubble-up as normal
 - **No special handling:** Treated as a regular free-space update
 
@@ -754,31 +715,68 @@ RookDB tracks how many times each FSM function is called to verify correctness:
 CHECK_HEAP <table_name>
 ```
 
-**Example Output:**
+**Example Output for 1 insert tuple:**
 ```
-=== Instrumentation: users ===
-fsm_search_avail calls:        1,234
-fsm_search_tree calls:         1,234
-read_fsm_page calls:           3,702
-write_fsm_page calls:          2,105
-serialize_fsm_page calls:      2,105
-deserialize_fsm_page calls:    3,702
-fsm_set_avail calls:           1,234
 
-=== FSM Statistics ===
-Total Heap Pages:              10,240
-FSM Fork Pages:                8
-FSM Root Value:                200/255
-Avg Free Category:             120/255
-Avg Disk I/O per Insert:       ~3.0 reads + ~2.0 writes
+Total Heap Pages:  2
+FSM Fork Pages:    1
+Total Tuples:      1
+
+╔══════════════════════════════════════════════════════════════╗
+║                    OPERATION METRICS                         ║
+╠══════════════════════════════════════════════════════════════╣
+║ FSM Operations:                                              ║
+║  - fsm_search_avail:            1 calls                      ║
+║  - fsm_search_tree:             1 calls                      ║
+║  - fsm_read_page:               1 calls                      ║
+║  - fsm_write_page:              1 calls                      ║
+║  - fsm_serialize_page:          1 calls                      ║
+║  - fsm_deserialize_page:        1 calls                      ║
+║  - fsm_set_avail:               1 calls                      ║
+║  - fsm_vacuum_update:           0 calls                      ║
+╠══════════════════════════════════════════════════════════════╣
+║ Heap Operations:                                             ║
+║  - insert_tuple:                1 calls                      ║
+║  - get_tuple:                   0 calls                      ║
+║  - allocate_page:               0 calls                      ║
+║  - write_page:                  1 calls                      ║
+║  - read_page:                   1 calls                      ║
+║  - page_free_space:             0 calls                      ║
+╚══════════════════════════════════════════════════════════════╝
 ```
+
+**Example Output for 5000 insert tuple:**
+```
+Total Heap Pages:  15
+FSM Fork Pages:    1
+Total Tuples:      5000
+
+╔══════════════════════════════════════════════════════════════╗
+║                    OPERATION METRICS                         ║
+╠══════════════════════════════════════════════════════════════╣
+║ FSM Operations:                                              ║
+║  - fsm_search_avail:         5026 calls                      ║
+║  - fsm_search_tree:          5026 calls                      ║
+║  - fsm_read_page:            5052 calls                      ║
+║  - fsm_write_page:           3450 calls                      ║
+║  - fsm_serialize_page:       3450 calls                      ║
+║  - fsm_deserialize_page:     5052 calls                      ║
+║  - fsm_set_avail:            5013 calls                      ║
+║  - fsm_vacuum_update:           0 calls                      ║
+╠══════════════════════════════════════════════════════════════╣
+║ Heap Operations:                                             ║
+║  - insert_tuple:             5000 calls                      ║
+║  - get_tuple:                   0 calls                      ║
+║  - allocate_page:              13 calls                      ║
+║  - write_page:               5000 calls                      ║
+║  - read_page:                5000 calls                      ║
+║  - page_free_space:             0 calls                      ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
 
 **How to Verify Correctness:**
 
-1. **Check fsm_search_avail calls:** Should match number of successful inserts
-2. **Check read/write balance:** Each search should trigger ~3 reads; each update ~2 writes
-3. **Check root value:** If > 0, heap has free space; if = 0, heap is full
-4. **Check average category:** Higher = more wasted space / fragmentation
 
 ---
 
@@ -806,7 +804,7 @@ Index 4000+:       Unused (padding to fill 8 KB page)
 
 ### 11.2 How `tree[]` is Indexed
 
-**Example (FSM_SLOTS_PER_PAGE = 2,040):**
+**Example (FSM_SLOTS_PER_PAGE = 4000):**
 
 ```
 tree[0]            = root
@@ -866,9 +864,7 @@ Check tree[0] (root) = 250 >= 200 ✓
 
 ---
 
-## 13. Checklists for Integration Teams
-
-### 13.1 Compaction Team Integration Checklist
+## 13. Compaction Team Integration Checklist
 
 - [ ] Call `insert_raw_tuple()` when moving tuples between pages
 - [ ] Call `update_page_free_space()` after in-place compaction
@@ -876,20 +872,8 @@ Check tree[0] (root) = 250 >= 200 ✓
 - [ ] Verify FSM counters match expected operation counts
 - [ ] Test that compacted pages become available again for new inserts
 
-### 13.2 Query Executor Integration Checklist
-
-- [ ] Inserts use `FSM::fsm_search_avail()` for page selection
-- [ ] Sequential scans use `HeapScanIterator` (not random access)
-- [ ] Deletion calls `delete_tuple()` which updates FSM
-- [ ] Retry logic handles insertion failures from fragmentation
-
 ---
 
-## References
-
-- **Design Doc:** [design-doc.md](Design-Doc.md) for system overview
-- **Heap Manager Doc:** [heap-manager.md](heap-manager.md) for page layout details
-- **Tests:** [tests.md](tests.md) for FSM correctness verification
 ### Future Work: Concurrent Access (fp_next_slot)
 
 To optimize concurrent insertions and reduce contention on FSM pages, an `fp_next_slot` pointer could be introduced in the `FSMPage` struct as future work.
@@ -898,4 +882,12 @@ Currently, the FSM uses a purely greedy search to traverse the binary max-heap. 
 
 By adding `fp_next_slot`, we could keep track of where the last successful search ended or round-robin requests. 
 For instance, a backend could start searching the tree from `fp_next_slot` instead of the root, effectively spreading out insertions across different heap pages, minimizing lock waits and maximizing write throughput. This would be implemented efficiently by caching the `fp_next_slot` hint, falling back to a full tree search only when no sufficient space is found from the hint onwards.
+
+### Optimization :
+- **Early Exit**: If the insert does not changes the category (e.g., from 15 to 15), we can skip the bubble-up entirely, This means for 95% of small inserts, fsm_set_avail will gracefully short-circuit, sparing you an unnecessary disk rewrite and bubble-up traversal.
+
+### Future Work: Delayed Updates and Pinning
+
+1. **Delayed Updates**: PostgreSQL typically doesn't update the FSM immediately after every single small insert. The FSM is mostly updated during VACUUM. We could implement similar delayed updates to reduce FSM write contention during burst inserts.
+2. **Pinning and State Retention**: Instead of releasing the page after `fsm_search_tree`, the page should be kept "pinned" in memory if we know we are about to call `fsm_set_avail`. By holding the reference, we avoid needing to re-read or re-deserialize it to update the value, reducing the deserializations from 6 to 3.
 
