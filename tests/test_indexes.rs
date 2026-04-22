@@ -90,9 +90,8 @@ fn test_create_index_btree() {
 
     // Get column OIDs
     let col_oids: Vec<u32> = {
-        let db = catalog.databases.get("idx_test_db").unwrap();
-        let table = db.tables.get("items").unwrap();
-        table.columns.iter().map(|c| c.column_oid).collect()
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        cols.iter().map(|c| c.column_oid).collect()
     };
     let id_oid = col_oids[0];
 
@@ -135,11 +134,10 @@ fn test_create_index_btree() {
         idx_file
     );
 
-    // Verify table's indexes list is updated
-    let db = catalog.databases.get("idx_test_db").unwrap();
-    let table = db.tables.get("items").unwrap();
+    // Verify table's indexes list via page scan
+    let indexes2 = get_indexes_for_table(&pm, &mut bm, table_oid).expect("should get indexes");
     assert!(
-        table.indexes.contains(&index_oid),
+        indexes2.iter().any(|i| i.index_oid == index_oid),
         "Table should reference the new index OID"
     );
 
@@ -151,9 +149,8 @@ fn test_create_index_default_name() {
     let (mut catalog, mut pm, mut bm, table_oid) = setup_test_table();
 
     let col_oids: Vec<u32> = {
-        let db = catalog.databases.get("idx_test_db").unwrap();
-        let table = db.tables.get("items").unwrap();
-        table.columns.iter().map(|c| c.column_oid).collect()
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        cols.iter().map(|c| c.column_oid).collect()
     };
 
     // Create without explicit name
@@ -194,9 +191,8 @@ fn test_drop_index() {
     let (mut catalog, mut pm, mut bm, table_oid) = setup_test_table();
 
     let col_oids: Vec<u32> = {
-        let db = catalog.databases.get("idx_test_db").unwrap();
-        let table = db.tables.get("items").unwrap();
-        table.columns.iter().map(|c| c.column_oid).collect()
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        cols.iter().map(|c| c.column_oid).collect()
     };
 
     let index_oid = create_index(
@@ -233,9 +229,8 @@ fn test_drop_index() {
     );
 
     // Table should no longer reference this index
-    let db = catalog.databases.get("idx_test_db").unwrap();
-    let table = db.tables.get("items").unwrap();
-    assert!(!table.indexes.contains(&index_oid));
+    let indexes2 = get_indexes_for_table(&pm, &mut bm, table_oid).unwrap();
+    assert!(!indexes2.iter().any(|i| i.index_oid == index_oid));
 
     // File should be removed
     assert!(
@@ -265,9 +260,8 @@ fn test_btree_insert_and_lookup() {
     let (mut catalog, mut pm, mut bm, table_oid) = setup_test_table();
 
     let col_oids: Vec<u32> = {
-        let db = catalog.databases.get("idx_test_db").unwrap();
-        let table = db.tables.get("items").unwrap();
-        table.columns.iter().map(|c| c.column_oid).collect()
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        cols.iter().map(|c| c.column_oid).collect()
     };
 
     create_index(
@@ -310,9 +304,8 @@ fn test_btree_multiple_inserts() {
     let (mut catalog, mut pm, mut bm, table_oid) = setup_test_table();
 
     let col_oids: Vec<u32> = {
-        let db = catalog.databases.get("idx_test_db").unwrap();
-        let table = db.tables.get("items").unwrap();
-        table.columns.iter().map(|c| c.column_oid).collect()
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        cols.iter().map(|c| c.column_oid).collect()
     };
 
     create_index(
@@ -371,9 +364,8 @@ fn test_index_creates_directory() {
     let (mut catalog, mut pm, mut bm, table_oid) = setup_test_table();
 
     let col_oids: Vec<u32> = {
-        let db = catalog.databases.get("idx_test_db").unwrap();
-        let table = db.tables.get("items").unwrap();
-        table.columns.iter().map(|c| c.column_oid).collect()
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        cols.iter().map(|c| c.column_oid).collect()
     };
 
     let idx_dir = INDEX_DIR_TEMPLATE.replace("{database}", "idx_test_db");

@@ -2,7 +2,6 @@
 //! Mirrors PostgreSQL's system catalog architecture with page-based storage.
 
 use crate::catalog::cache::CatalogCache;
-use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────
 // 1. TYPE SYSTEM
@@ -466,10 +465,6 @@ pub struct Table {
     pub table_oid: u32,
     pub table_name: String,
     pub db_oid: u32,
-    pub columns: Vec<Column>,
-    pub constraints: Vec<Constraint>,
-    /// OIDs of indexes that cover this table
-    pub indexes: Vec<u32>,
     pub table_type: TableType,
     pub statistics: TableStatistics,
 }
@@ -513,7 +508,6 @@ impl Encoding {
 pub struct Database {
     pub db_oid: u32,
     pub db_name: String,
-    pub tables: HashMap<String, Table>,
     pub owner: String,
     pub encoding: Encoding,
     pub created_at: u64,
@@ -527,7 +521,6 @@ pub struct Database {
 /// (infrastructure fields are re-initialised at load time as needed).
 #[derive(Debug)]
 pub struct Catalog {
-    pub databases: HashMap<String, Database>,
     pub oid_counter: u32,
     pub bootstrap_mode: bool,
     pub page_backend_active: bool,
@@ -537,7 +530,6 @@ pub struct Catalog {
 impl Catalog {
     pub fn new() -> Self {
         Catalog {
-            databases: HashMap::new(),
             oid_counter: crate::layout::USER_OID_START,
             bootstrap_mode: false,
             page_backend_active: false,

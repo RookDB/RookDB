@@ -9,7 +9,7 @@ use crate::catalog::types::Catalog;
 use crate::heap::insert_tuple;
 
 pub fn load_csv(
-    catalog: &Catalog,
+    catalog: &mut Catalog,
     pm: &mut CatalogPageManager,
     bm: &mut BufferManager,
     db_name: &str,
@@ -18,21 +18,14 @@ pub fn load_csv(
     csv_path: &str,
 ) -> io::Result<()> {
     // --- 1. Fetch table schema from catalog ---
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
+    let table_meta = crate::catalog::catalog::get_table_metadata(catalog, pm, bm, db_name, table_name).map_err(|e| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
+            format!("Could not fetch metadata for '{}.{}': {}", db_name, table_name, e),
         )
     })?;
 
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
-
-    let columns = &table.columns;
+    let columns = table_meta.columns;
     if columns.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -40,7 +33,7 @@ pub fn load_csv(
         ));
     }
 
-    let indexes = get_indexes_for_table(pm, bm, table.table_oid)
+    let indexes = get_indexes_for_table(pm, bm, table_meta.table_oid)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     // --- 2. Open and read the CSV file ---
@@ -110,8 +103,8 @@ pub fn load_csv(
                 t if t.starts_with("VARCHAR") => {
                     let max_len: usize = t
                         .strip_prefix("VARCHAR(")
-                        .and_then(|s| s.strip_suffix(')'))
-                        .and_then(|s| s.parse().ok())
+                        .and_then(|s: &str| s.strip_suffix(')'))
+                        .and_then(|s: &str| s.parse::<usize>().ok())
                         .unwrap_or(255);
                     let mut bytes = val.as_bytes().to_vec();
                     bytes.truncate(max_len);
@@ -119,7 +112,8 @@ pub fn load_csv(
                     field_bytes.extend_from_slice(&bytes);
                 }
                 _ => {
-                    // Default TEXT
+                    // Default TEXT: fixed 10-byte field (for backward compatibility with existing data)
+                    // If you need variable-length TEXT, use VARCHAR instead
                     let mut text_bytes = val.as_bytes().to_vec();
                     if text_bytes.len() > 10 {
                         text_bytes.truncate(10);
@@ -138,7 +132,7 @@ pub fn load_csv(
             catalog,
             pm,
             bm,
-            table.table_oid,
+            table_meta.table_oid,
             &tuple_map,
         ) {
             println!("Skipping row {}: Constraint violation: {:?}", i + 1, e);
@@ -172,6 +166,20 @@ pub fn load_csv(
             }
         }
     }
+    let final_page_count = crate::table::page_count(file)?;
+    
+    let new_row_count = table_meta.statistics.row_count + inserted as u64;
+    if let Err(e) = crate::catalog::update_table_statistics(
+        catalog,
+        pm,
+        bm,
+        table_meta.table_oid,
+        new_row_count,
+        final_page_count,
+    ) {
+        println!("Warning: Failed to update table statistics: {}", e);
+    }
+    
     println!("Total Number of rows inserted: {}", inserted);
     Ok(())
 }

@@ -6,7 +6,7 @@ use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{Catalog, init_catalog_page_storage, show_databases};
 
 /// Displays all available databases
-pub fn show_databases_cmd(catalog: &Catalog, bm: &mut BufferManager) -> io::Result<()> {
+pub fn show_databases_cmd(catalog: &mut Catalog, bm: &mut BufferManager) -> io::Result<()> {
     let mut pm = init_catalog_page_storage()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     show_databases(catalog, &mut pm, bm);
@@ -45,28 +45,32 @@ pub fn create_database_cmd(catalog: &mut Catalog, bm: &mut BufferManager) -> io:
 }
 
 /// Selects an existing database and updates the current context
-pub fn select_database_cmd(catalog: &Catalog, current_db: &mut Option<String>) -> io::Result<()> {
-    // Check if any databases exist
-    if catalog.databases.is_empty() {
+pub fn select_database_cmd(_catalog: &mut Catalog, bm: &mut BufferManager, current_db: &mut Option<String>) -> io::Result<()> {
+    let pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        
+    let records = pm.scan_catalog(bm, storage_manager::catalog::page_manager::CAT_DATABASE).unwrap_or_default();
+    if records.is_empty() {
         println!("No databases found.");
         return Ok(());
     }
 
-    // Display available databases
     println!("Available Databases:");
-    for db in catalog.databases.keys() {
-        println!("- {}", db);
+    let mut db_names = Vec::new();
+    for r in &records {
+        if let Ok((_, name, ..)) = storage_manager::catalog::serialize::deserialize_database_tuple(r) {
+            println!("- {}", name);
+            db_names.push(name);
+        }
     }
 
-    // Read database name from user
     let mut db_name = String::new();
     print!("Enter database name: ");
     io::stdout().flush()?;
     io::stdin().read_line(&mut db_name)?;
 
     let db_name = db_name.trim().to_string();
-    // Update selected database
-    if catalog.databases.contains_key(&db_name) {
+    if db_names.contains(&db_name) {
         *current_db = Some(db_name.clone());
         println!("Database '{}' selected.", db_name);
     } else {

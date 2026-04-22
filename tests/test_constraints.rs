@@ -145,9 +145,8 @@ fn test_add_primary_key_constraint() {
     assert!(pk_idx.unwrap().is_unique, "PK index should be unique");
 
     // Verify is_nullable was set to false for PK column
-    let db = catalog.databases.get("constraint_test_db").unwrap();
-    let table = db.tables.get("users").unwrap();
-    let id_col = table.columns.iter().find(|c| c.name == "id").unwrap();
+    let meta = storage_manager::catalog::get_table_metadata(&mut catalog, &mut pm, &mut bm, "constraint_test_db", "users").expect("should get metadata");
+    let id_col = meta.columns.iter().find(|c| c.name == "id").unwrap();
     assert!(!id_col.is_nullable, "PK column should be NOT NULL");
 
     cleanup();
@@ -237,11 +236,8 @@ fn test_add_not_null_constraint() {
 
     // Get the "name" column OID
     let name_col_oid = {
-        let db = catalog.databases.get("constraint_test_db").unwrap();
-        let table = db.tables.get("users").unwrap();
-        table
-            .columns
-            .iter()
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        cols.iter()
             .find(|c| c.name == "name")
             .unwrap()
             .column_oid
@@ -249,9 +245,8 @@ fn test_add_not_null_constraint() {
 
     // Should be nullable initially
     {
-        let db = catalog.databases.get("constraint_test_db").unwrap();
-        let table = db.tables.get("users").unwrap();
-        let name_col = table.columns.iter().find(|c| c.name == "name").unwrap();
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        let name_col = cols.iter().find(|c| c.name == "name").unwrap();
         assert!(
             name_col.is_nullable,
             "Column should be nullable before NOT NULL constraint"
@@ -266,9 +261,8 @@ fn test_add_not_null_constraint() {
     );
 
     // Verify is_nullable is now false
-    let db = catalog.databases.get("constraint_test_db").unwrap();
-    let table = db.tables.get("users").unwrap();
-    let name_col = table.columns.iter().find(|c| c.name == "name").unwrap();
+    let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+    let name_col = cols.iter().find(|c| c.name == "name").unwrap();
     assert!(
         !name_col.is_nullable,
         "Column should be NOT NULL after constraint"
@@ -376,9 +370,8 @@ fn test_composite_primary_key() {
     );
 
     // Both columns should be NOT NULL
-    let db = catalog.databases.get("constraint_test_db").unwrap();
-    let table = db.tables.get("enrollment").unwrap();
-    for col in &table.columns {
+    let meta = storage_manager::catalog::get_table_metadata(&mut catalog, &mut pm, &mut bm, "constraint_test_db", "enrollment").expect("should get metadata");
+    for col in &meta.columns {
         assert!(
             !col.is_nullable,
             "Column '{}' should be NOT NULL in composite PK",
@@ -399,11 +392,8 @@ fn test_validate_not_null_violation() {
 
     // Get the "name" column OID and add NOT NULL
     let name_col_oid = {
-        let db = catalog.databases.get("constraint_test_db").unwrap();
-        let table = db.tables.get("users").unwrap();
-        table
-            .columns
-            .iter()
+        let cols = storage_manager::catalog::get_columns(&pm, &mut bm, table_oid).expect("should get columns");
+        cols.iter()
             .find(|c| c.name == "name")
             .unwrap()
             .column_oid

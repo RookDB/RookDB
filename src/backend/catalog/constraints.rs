@@ -11,18 +11,33 @@ use crate::catalog::types::{
 use crate::catalog::indexes::{create_index, get_indexes_for_table};
 use crate::catalog::page_manager::{CatalogPageManager, CAT_COLUMN, CAT_CONSTRAINT};
 use crate::catalog::serialize::{
-    deserialize_column_tuple, deserialize_constraint_tuple, serialize_constraint_tuple,
+    deserialize_column_tuple, serialize_column_tuple, deserialize_constraint_tuple, serialize_constraint_tuple, deserialize_database_tuple, deserialize_table_tuple
 };
 
 // ─────────────────────────────────────────────────────────────
 // Helper: resolve db_name for a table OID
 // ─────────────────────────────────────────────────────────────
 
-fn db_name_for_table(catalog: &Catalog, table_oid: u32) -> Option<String> {
-    for db in catalog.databases.values() {
-        for t in db.tables.values() {
-            if t.table_oid == table_oid {
-                return Some(db.db_name.clone());
+fn db_name_for_table(pm: &CatalogPageManager, bm: &mut BufferManager, table_oid: u32) -> Option<String> {
+    if let Ok(tables) = pm.scan_catalog(bm, crate::catalog::page_manager::CAT_TABLE) {
+        let mut target_db_oid = None;
+        for t in &tables {
+            if let Ok((toid, _, db_oid, ..)) = deserialize_table_tuple(t) {
+                if toid == table_oid {
+                    target_db_oid = Some(db_oid);
+                    break;
+                }
+            }
+        }
+        if let Some(db_oid) = target_db_oid {
+            if let Ok(dbs) = pm.scan_catalog(bm, crate::catalog::page_manager::CAT_DATABASE) {
+                for d in &dbs {
+                    if let Ok((doid, name, ..)) = deserialize_database_tuple(d) {
+                        if doid == db_oid {
+                            return Some(name);
+                        }
+                    }
+                }
             }
         }
     }
@@ -123,6 +138,31 @@ fn check_referenced_columns_unique(
 // Public constraint-creation functions
 // ─────────────────────────────────────────────────────────────
 
+fn set_columns_not_null(
+    pm: &mut CatalogPageManager,
+    bm: &mut BufferManager,
+    column_oids: &[u32],
+) -> Result<(), CatalogError> {
+    for &coid in column_oids {
+        if let Some((page_num, slot_id, tuple_bytes)) = pm.find_catalog_tuple(bm, CAT_COLUMN, |bytes| {
+            if let Ok(deser) = deserialize_column_tuple(bytes) {
+                deser.0 == coid
+            } else {
+                false
+            }
+        })? {
+            let (c_oid, t_oid, name, pos, dt, tm, _, def_val, c_oids) =
+                deserialize_column_tuple(&tuple_bytes)
+                    .map_err(CatalogError::IoError)?;
+            let new_bytes = serialize_column_tuple(
+                c_oid, t_oid, &name, pos, &dt, tm.as_ref(), false, def_val.as_ref(), &c_oids,
+            );
+            pm.update_catalog_tuple(bm, CAT_COLUMN, page_num, slot_id, &new_bytes)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn add_primary_key_constraint(
     catalog: &mut Catalog,
     pm: &mut CatalogPageManager,
@@ -137,17 +177,7 @@ pub fn add_primary_key_constraint(
 
     let column_oids = resolve_column_oids(pm, bm, table_oid, &column_names)?;
 
-    for db in catalog.databases.values_mut() {
-        for table in db.tables.values_mut() {
-            if table.table_oid == table_oid {
-                for col in table.columns.iter_mut() {
-                    if column_oids.contains(&col.column_oid) {
-                        col.is_nullable = false;
-                    }
-                }
-            }
-        }
-    }
+
 
     let name = constraint_name.unwrap_or_else(|| format!("pk_table_{}", table_oid));
     let index_oid = create_index(
@@ -167,21 +197,15 @@ pub fn add_primary_key_constraint(
         constraint_name: name,
         constraint_type: ConstraintType::PrimaryKey,
         table_oid,
-        column_oids,
+        column_oids: column_oids.clone(),
         metadata: ConstraintMetadata::PrimaryKey { index_oid },
         is_deferrable: false,
     };
 
     persist_constraint(pm, bm, &constraint)?;
+    
+    set_columns_not_null(pm, bm, &column_oids)?;
 
-    for db in catalog.databases.values_mut() {
-        for table in db.tables.values_mut() {
-            if table.table_oid == table_oid {
-                table.constraints.push(constraint.clone());
-                break;
-            }
-        }
-    }
     catalog.cache.invalidate_constraints(table_oid);
 
     Ok(constraint_oid)
@@ -231,14 +255,7 @@ pub fn add_foreign_key_constraint(
 
     persist_constraint(pm, bm, &constraint)?;
 
-    for db in catalog.databases.values_mut() {
-        for table in db.tables.values_mut() {
-            if table.table_oid == table_oid {
-                table.constraints.push(constraint.clone());
-                break;
-            }
-        }
-    }
+
     catalog.cache.invalidate_constraints(table_oid);
 
     Ok(constraint_oid)
@@ -288,14 +305,7 @@ pub fn add_unique_constraint(
 
     persist_constraint(pm, bm, &constraint)?;
 
-    for db in catalog.databases.values_mut() {
-        for table in db.tables.values_mut() {
-            if table.table_oid == table_oid {
-                table.constraints.push(constraint.clone());
-                break;
-            }
-        }
-    }
+
     catalog.cache.invalidate_constraints(table_oid);
 
     Ok(constraint_oid)
@@ -308,23 +318,10 @@ pub fn add_not_null_constraint(
     table_oid: u32,
     column_oid: u32,
 ) -> Result<(), CatalogError> {
-    let mut found = false;
-    for db in catalog.databases.values_mut() {
-        for table in db.tables.values_mut() {
-            if table.table_oid == table_oid {
-                for col in table.columns.iter_mut() {
-                    if col.column_oid == column_oid {
-                        col.is_nullable = false;
-                        found = true;
-                    }
-                }
-            }
-        }
+    let cols = crate::catalog::catalog::get_columns(pm, bm, table_oid)?;
+    if !cols.iter().any(|c| c.column_oid == column_oid) {
+        return Err(CatalogError::ColumnNotFound(format!("column_oid: {}", column_oid)));
     }
-    if !found {
-        return Err(CatalogError::ColumnNotFound(column_oid.to_string()));
-    }
-
     let constraint_oid = catalog.alloc_oid();
     let name = format!("nn_col_{}", column_oid);
     let constraint = Constraint {
@@ -337,6 +334,7 @@ pub fn add_not_null_constraint(
         is_deferrable: false,
     };
     persist_constraint(pm, bm, &constraint)?;
+    set_columns_not_null(pm, bm, &[column_oid])?;
     catalog.cache.invalidate_constraints(table_oid);
     Ok(())
 }
@@ -368,7 +366,7 @@ pub fn validate_constraints(
                 }
             }
             ConstraintType::PrimaryKey | ConstraintType::Unique => {
-                let db_name = db_name_for_table(catalog, table_oid).unwrap_or_default();
+                let db_name = db_name_for_table(pm, bm, table_oid).unwrap_or_default();
                 let index_oid = match &constraint.metadata {
                     ConstraintMetadata::PrimaryKey { index_oid: id } => *id,
                     ConstraintMetadata::Unique { index_oid: id } => *id,
@@ -400,7 +398,7 @@ pub fn validate_constraints(
                 }
             }
             ConstraintType::ForeignKey => {
-                let db_name = db_name_for_table(catalog, table_oid).unwrap_or_default();
+                let db_name = db_name_for_table(pm, bm, table_oid).unwrap_or_default();
                 if let ConstraintMetadata::ForeignKey {
                     referenced_table_oid,
                     referenced_column_oids,

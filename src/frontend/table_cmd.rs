@@ -12,7 +12,7 @@ use storage_manager::statistics::print_table_page_count;
 
 /// Displays tables in the currently selected database
 pub fn show_tables_cmd(
-    catalog: &Catalog,
+    catalog: &mut Catalog,
     bm: &mut BufferManager,
     current_db: &Option<String>,
 ) -> io::Result<()> {

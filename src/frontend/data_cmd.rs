@@ -30,7 +30,7 @@ pub fn load_csv_cmd(
     io::stdin().read_line(&mut csv_path)?;
     let csv_path = csv_path.trim();
 
-    let catalog = load_catalog(buffer_manager);
+    let mut catalog = load_catalog(buffer_manager);
     let mut pm = init_catalog_page_storage()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
@@ -38,7 +38,7 @@ pub fn load_csv_cmd(
     let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
 
     load_csv(
-        &catalog,
+        &mut catalog,
         &mut pm,
         buffer_manager,
         &db,
@@ -73,8 +73,11 @@ pub fn show_tuples_cmd(
     let path = format!("database/base/{}/{}.dat", db, table);
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
 
-    let catalog = load_catalog(buffer_manager);
-    show_tuples(&catalog, &db, table, &mut file)?;
+    let mut catalog = load_catalog(buffer_manager);
+    let mut pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    
+    show_tuples(&mut catalog, &mut pm, buffer_manager, &db, table, &mut file)?;
 
     Ok(())
 }

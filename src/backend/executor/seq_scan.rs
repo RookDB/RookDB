@@ -9,24 +9,20 @@ use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
 
 pub fn show_tuples(
-    catalog: &Catalog,
+    catalog: &mut Catalog,
+    pm: &mut crate::catalog::page_manager::CatalogPageManager,
+    bm: &mut crate::buffer_manager::BufferManager,
     db_name: &str,
     table_name: &str,
     file: &mut File,
 ) -> io::Result<()> {
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
+    let table_meta = crate::catalog::catalog::get_table_metadata(catalog, pm, bm, db_name, table_name).map_err(|e| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
+            format!("Could not fetch metadata for '{}.{}': {}", db_name, table_name, e),
         )
     })?;
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
-    let columns = &table.columns;
+    let columns = table_meta.columns;
 
     let total_pages = page_count(file)?;
     println!(
@@ -52,7 +48,7 @@ pub fn show_tuples(
 
             print!("Tuple {}: ", i + 1);
             let mut cursor = 0usize;
-            for col in columns {
+            for col in &columns {
                 let type_name = col.data_type.type_name.to_uppercase();
                 match type_name.as_str() {
                     "INT" | "INTEGER" => {
@@ -108,7 +104,7 @@ pub fn show_tuples(
                         }
                     }
                     _ => {
-                        // Legacy TEXT: fixed 10-byte field
+                        // Default TEXT: fixed 10-byte field (backward compatible)
                         if cursor + 10 <= tuple.len() {
                             let text = String::from_utf8_lossy(&tuple[cursor..cursor + 10])
                                 .trim()

@@ -19,8 +19,9 @@ pub use types::{
 // ── Re-exports: catalog operations ───────────────────────────────────────────
 pub use catalog::{
     bootstrap_catalog, alter_table_add_column, create_database, create_table,
-    drop_database, drop_table, get_table_metadata, init_catalog, init_catalog_page_storage,
-    load_catalog, lookup_type_by_name, register_builtin_types, show_databases, show_tables,
+    drop_database, drop_table, get_columns, get_database, get_table, get_table_metadata,
+    init_catalog, init_catalog_page_storage, load_catalog, lookup_type_by_name,
+    register_builtin_types, show_databases, show_tables, update_table_statistics,
 };
 
 // ── Re-exports: constraint operations ────────────────────────────────────────

@@ -54,10 +54,10 @@ pub fn run() -> io::Result<()> {
 
         // Dispatch command based on user selection
         match choice {
-            "1" => database_cmd::show_databases_cmd(&catalog, &mut buffer_manager)?,
+            "1" => database_cmd::show_databases_cmd(&mut catalog, &mut buffer_manager)?,
             "2" => database_cmd::create_database_cmd(&mut catalog, &mut buffer_manager)?,
-            "3" => database_cmd::select_database_cmd(&catalog, &mut current_db)?,
-            "4" => table_cmd::show_tables_cmd(&catalog, &mut buffer_manager, &current_db)?,
+            "3" => database_cmd::select_database_cmd(&mut catalog, &mut buffer_manager, &mut current_db)?,
+            "4" => table_cmd::show_tables_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
             "5" => table_cmd::create_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
             "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
             "7" => data_cmd::show_tuples_cmd(&mut buffer_manager, &current_db)?,

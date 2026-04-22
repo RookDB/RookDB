@@ -7,9 +7,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::buffer_manager::BufferManager;
-use crate::catalog::page_manager::{CAT_CONSTRAINT, CAT_INDEX, CatalogPageManager};
+use crate::catalog::page_manager::{CAT_CONSTRAINT, CAT_INDEX, CAT_TABLE, CAT_DATABASE, CatalogPageManager};
 use crate::catalog::serialize::{
-    deserialize_constraint_tuple, deserialize_index_tuple, serialize_index_tuple,
+    deserialize_constraint_tuple, deserialize_index_tuple, serialize_index_tuple, deserialize_table_tuple, deserialize_database_tuple
 };
 use crate::catalog::types::{Catalog, CatalogError, Index, IndexType};
 use crate::layout::{INDEX_DIR_TEMPLATE, INDEX_FILE_TEMPLATE};
@@ -18,11 +18,26 @@ use crate::layout::{INDEX_DIR_TEMPLATE, INDEX_FILE_TEMPLATE};
 // Helper: resolve db_name for a table OID
 // ─────────────────────────────────────────────────────────────
 
-fn db_name_for_table(catalog: &Catalog, table_oid: u32) -> Option<String> {
-    for db in catalog.databases.values() {
-        for t in db.tables.values() {
-            if t.table_oid == table_oid {
-                return Some(db.db_name.clone());
+fn db_name_for_table(pm: &CatalogPageManager, bm: &mut BufferManager, table_oid: u32) -> Option<String> {
+    if let Ok(tables) = pm.scan_catalog(bm, CAT_TABLE) {
+        let mut target_db_oid = None;
+        for t in &tables {
+            if let Ok((toid, _, db_oid, ..)) = deserialize_table_tuple(t) {
+                if toid == table_oid {
+                    target_db_oid = Some(db_oid);
+                    break;
+                }
+            }
+        }
+        if let Some(db_oid) = target_db_oid {
+            if let Ok(dbs) = pm.scan_catalog(bm, CAT_DATABASE) {
+                for d in &dbs {
+                    if let Ok((doid, name, ..)) = deserialize_database_tuple(d) {
+                        if doid == db_oid {
+                            return Some(name);
+                        }
+                    }
+                }
             }
         }
     }
@@ -44,7 +59,7 @@ pub fn create_index(
     is_primary: bool,
     index_name: Option<String>,
 ) -> Result<u32, CatalogError> {
-    let db_name = db_name_for_table(catalog, table_oid)
+    let db_name = db_name_for_table(pm, bm, table_oid)
         .ok_or_else(|| CatalogError::TableNotFound(table_oid.to_string()))?;
 
     let name = index_name.unwrap_or_else(|| {
@@ -94,14 +109,7 @@ pub fn create_index(
     let bytes = serialize_index_tuple(&index);
     pm.insert_catalog_tuple(bm, CAT_INDEX, bytes)?;
 
-    for db in catalog.databases.values_mut() {
-        for table in db.tables.values_mut() {
-            if table.table_oid == table_oid {
-                table.indexes.push(index_oid);
-                break;
-            }
-        }
-    }
+
     catalog.cache.invalidate_indexes(table_oid);
 
     Ok(index_oid)
@@ -147,7 +155,7 @@ pub fn drop_index(
         }
     }
 
-    let db_name = db_name_for_table(catalog, index.table_oid).unwrap_or_default();
+    let db_name = db_name_for_table(pm, bm, index.table_oid).unwrap_or_default();
     let idx_file = INDEX_FILE_TEMPLATE
         .replace("{database}", &db_name)
         .replace("{index}", &index.index_name);
@@ -155,14 +163,7 @@ pub fn drop_index(
 
     pm.delete_catalog_tuple(bm, CAT_INDEX, pn, slot)?;
 
-    for db in catalog.databases.values_mut() {
-        for table in db.tables.values_mut() {
-            if table.table_oid == index.table_oid {
-                table.indexes.retain(|&oid| oid != index_oid);
-                break;
-            }
-        }
-    }
+
     catalog.cache.invalidate_indexes(index.table_oid);
 
     Ok(())

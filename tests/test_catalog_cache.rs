@@ -5,7 +5,7 @@
 //! - 7.5.2: Cache invalidation on DDL
 //! - 7.5.3: LRU eviction when max_cache_size is reached
 
-use std::collections::HashMap;
+
 use storage_manager::catalog::cache::CatalogCache;
 use storage_manager::catalog::types::*;
 
@@ -14,7 +14,6 @@ fn make_db(name: &str, oid: u32) -> Database {
     Database {
         db_oid: oid,
         db_name: name.to_string(),
-        tables: HashMap::new(),
         owner: "tester".to_string(),
         encoding: Encoding::UTF8,
         created_at: 0,
@@ -27,9 +26,6 @@ fn make_table(name: &str, oid: u32, db_oid: u32) -> Table {
         table_oid: oid,
         table_name: name.to_string(),
         db_oid,
-        columns: vec![],
-        constraints: vec![],
-        indexes: vec![],
         table_type: TableType::UserTable,
         statistics: TableStatistics::default(),
     }

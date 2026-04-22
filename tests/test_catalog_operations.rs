@@ -75,9 +75,8 @@ fn test_create_database_success() {
     let db_oid = result.unwrap();
     assert!(db_oid > 0);
 
-    // Verify in-memory
-    assert!(catalog.databases.contains_key("ops_test_db"));
-    let db = catalog.databases.get("ops_test_db").unwrap();
+    // Verify via page-based catalog
+    let db = get_database(&mut catalog, &mut pm, &mut bm, "ops_test_db").expect("db should exist");
     assert_eq!(db.db_oid, db_oid);
     assert_eq!(db.owner, "admin");
     assert!(matches!(db.encoding, Encoding::UTF8));
@@ -144,7 +143,7 @@ fn test_drop_database() {
     )
     .expect("create should succeed");
 
-    assert!(catalog.databases.contains_key("ops_test_db"));
+    assert!(get_database(&mut catalog, &mut pm, &mut bm, "ops_test_db").is_ok());
 
     let result = drop_database(&mut catalog, &mut pm, &mut bm, "ops_test_db");
     assert!(
@@ -153,7 +152,7 @@ fn test_drop_database() {
         result.err()
     );
 
-    assert!(!catalog.databases.contains_key("ops_test_db"));
+    assert!(get_database(&mut catalog, &mut pm, &mut bm, "ops_test_db").is_err());
     assert!(!Path::new("database/base/ops_test_db").exists());
 
     cleanup();
@@ -230,31 +229,29 @@ fn test_e2e_table_creation_with_pk_constraint() {
 
     let table_oid = result.unwrap();
 
-    // Verify table exists in catalog
-    let db = catalog.databases.get("ops_test_db").unwrap();
-    assert!(db.tables.contains_key("users"));
-    let table = db.tables.get("users").unwrap();
-    assert_eq!(table.table_oid, table_oid);
-    assert_eq!(table.columns.len(), 2);
+    // Verify table exists in catalog via page manager
+    let meta = get_table_metadata(&mut catalog, &mut pm, &mut bm, "ops_test_db", "users").expect("table should exist");
+    assert_eq!(meta.table_oid, table_oid);
+    assert_eq!(meta.columns.len(), 2);
 
     // Verify PK constraint was applied
     assert!(
-        !table.constraints.is_empty(),
+        !meta.constraints.is_empty(),
         "Table should have constraints"
     );
-    let pk = table
+    let pk = meta
         .constraints
         .iter()
         .find(|c| c.constraint_type == ConstraintType::PrimaryKey);
     assert!(pk.is_some(), "PK constraint should be present");
 
     // Verify id column is NOT NULL
-    let id_col = table.columns.iter().find(|c| c.name == "id").unwrap();
+    let id_col = meta.columns.iter().find(|c| c.name == "id").unwrap();
     assert!(!id_col.is_nullable, "PK column should be NOT NULL");
 
     // Verify backing index exists
     assert!(
-        !table.indexes.is_empty(),
+        !meta.indexes.is_empty(),
         "Table should have indexes from PK"
     );
 
@@ -314,9 +311,8 @@ fn test_e2e_table_creation_with_not_null() {
         result.err()
     );
 
-    let db = catalog.databases.get("ops_test_db").unwrap();
-    let table = db.tables.get("users").unwrap();
-    let name_col = table.columns.iter().find(|c| c.name == "name").unwrap();
+    let meta = get_table_metadata(&mut catalog, &mut pm, &mut bm, "ops_test_db", "users").expect("table should exist");
+    let name_col = meta.columns.iter().find(|c| c.name == "name").unwrap();
     assert!(!name_col.is_nullable, "name column should be NOT NULL");
 
     cleanup();
@@ -439,12 +435,8 @@ fn test_drop_table() {
     .expect("create table");
 
     assert!(
-        catalog
-            .databases
-            .get("ops_test_db")
-            .unwrap()
-            .tables
-            .contains_key("to_drop")
+        get_table_metadata(&mut catalog, &mut pm, &mut bm, "ops_test_db", "to_drop").is_ok(),
+        "Table should exist before drop"
     );
 
     let result = drop_table(&mut catalog, &mut pm, &mut bm, table_oid);
@@ -455,12 +447,8 @@ fn test_drop_table() {
     );
 
     assert!(
-        !catalog
-            .databases
-            .get("ops_test_db")
-            .unwrap()
-            .tables
-            .contains_key("to_drop")
+        get_table_metadata(&mut catalog, &mut pm, &mut bm, "ops_test_db", "to_drop").is_err(),
+        "Table should not exist after drop"
     );
 
     cleanup();
@@ -518,33 +506,28 @@ fn test_catalog_persistence_across_restart() {
 
     // "Restart" – create completely fresh buffer manager and load catalog
     let mut bm2 = BufferManager::new();
-    let catalog2 = load_catalog(&mut bm2);
+    let mut catalog2 = load_catalog(&mut bm2);
+    let mut pm2 = CatalogPageManager::new();
 
     // Verify the database survives
     assert!(
-        catalog2.databases.contains_key("persist_db"),
+        get_database(&mut catalog2, &mut pm2, &mut bm2, "persist_db").is_ok(),
         "Database 'persist_db' should survive restart"
     );
 
-    // Verify the table survives
-    let db = catalog2.databases.get("persist_db").unwrap();
-    assert!(
-        db.tables.contains_key("persistent_table"),
-        "Table 'persistent_table' should survive restart"
-    );
-
-    // Verify columns survive
-    let table = db.tables.get("persistent_table").unwrap();
+    // Verify the table and columns survive
+    let meta = get_table_metadata(&mut catalog2, &mut pm2, &mut bm2, "persist_db", "persistent_table")
+        .expect("Table 'persistent_table' should survive restart");
     assert_eq!(
-        table.columns.len(),
+        meta.columns.len(),
         2,
         "Table should have 2 columns after restart"
     );
 
-    let id_col = table.columns.iter().find(|c| c.name == "id");
+    let id_col = meta.columns.iter().find(|c| c.name == "id");
     assert!(id_col.is_some(), "Column 'id' should survive restart");
 
-    let name_col = table.columns.iter().find(|c| c.name == "name");
+    let name_col = meta.columns.iter().find(|c| c.name == "name");
     assert!(name_col.is_some(), "Column 'name' should survive restart");
 
     cleanup();
@@ -612,12 +595,11 @@ fn test_alter_table_add_column() {
         result.err()
     );
 
-    // Verify column was added
-    let db = catalog.databases.get("alter_db").unwrap();
-    let table = db.tables.get("users").unwrap();
-    assert_eq!(table.columns.len(), 3, "Table should have 3 columns");
+    // Verify column was added via page-based catalog
+    let meta = get_table_metadata(&mut catalog, &mut pm, &mut bm, "alter_db", "users").expect("table should exist");
+    assert_eq!(meta.columns.len(), 3, "Table should have 3 columns");
 
-    let age_col = table.columns.iter().find(|c| c.name == "age");
+    let age_col = meta.columns.iter().find(|c| c.name == "age");
     assert!(age_col.is_some(), "New column 'age' should exist");
     let age_col = age_col.unwrap();
     assert_eq!(age_col.column_position, 3);
@@ -922,7 +904,7 @@ fn test_get_table_metadata() {
     )
     .expect("create table");
 
-    let meta = get_table_metadata(&catalog, &pm, &mut bm, "ops_test_db", "meta_test");
+    let meta = get_table_metadata(&mut catalog, &mut pm, &mut bm, "ops_test_db", "meta_test");
     assert!(
         meta.is_ok(),
         "get_table_metadata should succeed: {:?}",
@@ -952,7 +934,7 @@ fn test_get_table_metadata_nonexistent() {
     )
     .expect("create db");
 
-    let result = get_table_metadata(&catalog, &pm, &mut bm, "ops_test_db", "nonexistent_table");
+    let result = get_table_metadata(&mut catalog, &mut pm, &mut bm, "ops_test_db", "nonexistent_table");
     assert!(result.is_err());
 
     cleanup();
@@ -965,7 +947,6 @@ fn test_get_table_metadata_nonexistent() {
 #[test]
 fn test_catalog_new() {
     let catalog = Catalog::new();
-    assert!(catalog.databases.is_empty());
     assert_eq!(catalog.oid_counter, 10_000);
     assert!(!catalog.bootstrap_mode);
     assert!(!catalog.page_backend_active);
