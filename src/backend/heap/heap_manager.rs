@@ -794,17 +794,12 @@ impl HeapManager {
     }
 
     /// Convert free bytes to free-space category (0-255).
-    /// For tuple sizing (min_category): use CEILING to ensure pages with at least that much free space
-    /// For page reporting (current free bytes): use FLOOR
-    /// If sizing_for_tuple is true, rounds UP so a 22-byte tuple doesn't match a page with 0 bytes free
+    /// For tuple sizing (min_category): use CEILING so 1 byte requires at least bucket 1
     fn bytes_to_category(required_bytes: u32) -> u8 {
         if required_bytes == 0 {
             return 0;
         }
-        if required_bytes >= PAGE_SIZE as u32 {
-            return 255;
-        }
-        ((required_bytes * 255 + PAGE_SIZE as u32 - 1) / PAGE_SIZE as u32) as u8
+        required_bytes.div_ceil(32).min(255) as u8
     }
 }
 

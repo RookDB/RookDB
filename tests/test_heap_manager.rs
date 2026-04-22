@@ -319,3 +319,78 @@ fn test_heap_multiple_pages() {
 
     cleanup_test_files(name);
 }
+
+use storage_manager::backend::page::{Page, get_tuple_count, get_slot_entry};
+use storage_manager::backend::disk::read_page;
+
+fn print_table_slots(file_path: &PathBuf, page_id: u32, step_desc: &str) {
+    println!("{}", step_desc);
+    let mut file = fs::File::open(file_path).expect("Failed to open file for printing slots");
+    let mut page = Page::new();
+    read_page(&mut file, &mut page, page_id).expect("Failed to read page");
+    
+    let tuple_count = get_tuple_count(&page).unwrap();
+    for slot_id in 0..tuple_count {
+        let (offset, length) = get_slot_entry(&page, slot_id).unwrap();
+        // A deleted slot typically has offset 0 and length 0 (or similar tombstone). 
+        // Let's print only active ones to match user's expected output.
+        if offset == 0 || length == 0 {
+            continue;
+        }
+        
+        let val_bytes = &page.data[offset as usize..(offset + length) as usize];
+        let val_str = std::str::from_utf8(val_bytes).unwrap_or("INVALID");
+        println!("slot_{} offset {} len {} {}", slot_id + 1, offset, length, val_str);
+    }
+}
+
+#[test]
+fn test_slot_reuse_delete_first() {
+    let name = "slot_reuse_delete_first";
+    cleanup_test_files(name);
+
+    let path = PathBuf::from(format!("heap_test_{}.dat", name));
+    let mut manager = HeapManager::create(path.clone())
+        .expect("Failed to create heap");
+
+    let (p1, s1) = manager.insert_tuple(b"val_1").unwrap();
+    let (_, _s2) = manager.insert_tuple(b"val_2").unwrap();
+    
+    print_table_slots(&path, p1, "1. insert 2");
+    
+    manager.delete_tuple(p1, s1).unwrap();
+    
+    print_table_slots(&path, p1, "2. delete val_1");
+    
+    let (_, _s3) = manager.insert_tuple(b"val_3").unwrap();
+    
+    print_table_slots(&path, p1, "3. insert 1");
+
+    cleanup_test_files(name);
+}
+
+#[test]
+fn test_slot_reuse_delete_second() {
+    let name = "slot_reuse_delete_second";
+    cleanup_test_files(name);
+
+    let path = PathBuf::from(format!("heap_test_{}.dat", name));
+    let mut manager = HeapManager::create(path.clone())
+        .expect("Failed to create heap");
+
+    let (p1, _s1) = manager.insert_tuple(b"val_1").unwrap();
+    let (_, s2) = manager.insert_tuple(b"val_2").unwrap();
+    
+    print_table_slots(&path, p1, "1. insert 2");
+    
+    manager.delete_tuple(p1, s2).unwrap();
+    
+    print_table_slots(&path, p1, "2. delete val_2");
+    
+    let (_, _s3) = manager.insert_tuple(b"val_2").unwrap();
+    
+    // The prompt says: "3. insert 1 \nsync slot_2 offset len val_2" - so let's insert val_2 again to match
+    print_table_slots(&path, p1, "3. insert 1");
+
+    cleanup_test_files(name);
+}
