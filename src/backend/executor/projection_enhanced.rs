@@ -147,6 +147,121 @@ impl ColumnReorderSpec {
     }
 }
 
+// ─── Column Elimination ─────────────────────────────────────────────────────
+
+/// Column elimination optimizer - only reads required columns
+#[derive(Debug, Clone)]
+pub struct ColumnPruner {
+    /// Set of column indices that are actually needed
+    pub required_columns: HashSet<usize>,
+    /// Original column count for validation
+    pub total_columns: usize,
+}
+
+impl ColumnPruner {
+    /// Create a new column pruner
+    pub fn new(total_columns: usize) -> Self {
+        Self {
+            required_columns: HashSet::new(),
+            total_columns,
+        }
+    }
+
+    /// Analyze projection items to determine required columns
+    pub fn analyze_projection(&mut self, items: &[ProjectionItem]) {
+        for item in items {
+            match item {
+                ProjectionItem::Star => {
+                    // SELECT * needs all columns
+                    for i in 0..self.total_columns {
+                        self.required_columns.insert(i);
+                    }
+                }
+                ProjectionItem::Expr(expr, _) => {
+                    self.analyze_expression(expr);
+                }
+            }
+        }
+    }
+
+    /// Analyze WHERE clause expression for required columns
+    pub fn analyze_filter(&mut self, expr: &Option<Expr>) {
+        if let Some(e) = expr {
+            self.analyze_expression(e);
+        }
+    }
+
+    /// Recursively analyze expression tree for column dependencies
+    pub fn analyze_expression(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Column(index) => {
+                if *index < self.total_columns {
+                    self.required_columns.insert(*index);
+                }
+            }
+            // Binary operations
+            Expr::Add(left, right) | Expr::Sub(left, right) | Expr::Mul(left, right) | Expr::Div(left, right) |
+            Expr::Eq(left, right) | Expr::Ne(left, right) | Expr::Lt(left, right) | Expr::Le(left, right) |
+            Expr::Gt(left, right) | Expr::Ge(left, right) | Expr::And(left, right) | Expr::Or(left, right) |
+            Expr::Like(left, right) | Expr::NotLike(left, right) | Expr::Concat(left, right) |
+            Expr::DateAdd(left, right) | Expr::DateDiff(left, right) => {
+                self.analyze_expression(left);
+                self.analyze_expression(right);
+            }
+            // Unary operations
+            Expr::Neg(operand) | Expr::Not(operand) | Expr::IsNull(operand) | Expr::IsNotNull(operand) |
+            Expr::Upper(operand) | Expr::Lower(operand) | Expr::Length(operand) | Expr::Trim(operand) => {
+                self.analyze_expression(operand);
+            }
+            // Ternary operations
+            Expr::Substring(expr, start, length) => {
+                self.analyze_expression(expr);
+                self.analyze_expression(start);
+                self.analyze_expression(length);
+            }
+            Expr::Between(expr, min, max) => {
+                self.analyze_expression(expr);
+                self.analyze_expression(min);
+                self.analyze_expression(max);
+            }
+            // Cast operation
+            Expr::Cast(expr, _) => {
+                self.analyze_expression(expr);
+            }
+            // In operations
+            Expr::In(expr, values) | Expr::NotIn(expr, values) => {
+                self.analyze_expression(expr);
+                for value in values {
+                    self.analyze_expression(value);
+                }
+            }
+            // Literals don't need columns
+            Expr::Const(_) => {}
+        }
+    }
+
+    /// Get the list of required column indices (sorted)
+    pub fn get_required_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self.required_columns.iter().cloned().collect();
+        indices.sort();
+        indices
+    }
+
+    /// Check if column elimination is beneficial
+    pub fn should_eliminate(&self) -> bool {
+        // Only eliminate if we can skip at least 2 columns
+        self.total_columns > self.required_columns.len() + 1
+    }
+
+    /// Get elimination statistics
+    pub fn elimination_stats(&self) -> (usize, usize, f64) {
+        let total = self.total_columns;
+        let required = self.required_columns.len();
+        let savings = if total > 0 { ((total - required) as f64 / total as f64) * 100.0 } else { 0.0 };
+        (total, required, savings)
+    }
+}
+
 // ─── Filter Information ──────────────────────────────────────────────────────
 
 /// Filter configuration with tracking
@@ -198,9 +313,31 @@ impl ProjectionEngine {
         )?;
         metrics.memory_bytes += schema.len() * std::mem::size_of::<Column>();
 
-        // Step 2: Load rows
+        // Step 2: Column Elimination Analysis
+        let mut pruner = ColumnPruner::new(schema.len());
+        pruner.analyze_projection(&input.items);
+        pruner.analyze_filter(&input.predicate);
+
+        let should_eliminate = pruner.should_eliminate();
+        let elimination_stats = pruner.elimination_stats();
+
+        if should_eliminate {
+            warnings.push(format!("Column elimination: {} of {} columns needed ({:.1}% savings)",
+                                elimination_stats.1, elimination_stats.0, elimination_stats.2));
+        }
+
+        // Step 3: Load rows (with column elimination if beneficial)
         let rows = if is_cte {
             input.cte_tables[input.table_name].rows.clone()
+        } else if should_eliminate {
+            // Load only required columns
+            load_rows_with_column_elimination(
+                input.catalog,
+                input.db_name,
+                input.table_name,
+                &pruner.get_required_indices(),
+                &mut metrics
+            )?
         } else {
             load_rows_with_metrics(input.catalog, input.db_name, input.table_name, &mut metrics)?
         };
@@ -355,6 +492,67 @@ fn load_rows_with_metrics(
             let row = decode_tuple(tuple_bytes, schema);
             metrics.memory_bytes += row.len() * std::mem::size_of::<Value>();
             rows.push(row);
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Load rows with column elimination - only reads required columns
+fn load_rows_with_column_elimination(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    required_indices: &[usize],
+    metrics: &mut ProjectionMetrics,
+) -> io::Result<Vec<Row>> {
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+    })?;
+    let schema = &table.columns;
+
+    let path = TABLE_FILE_TEMPLATE
+        .replace("{database}", db_name)
+        .replace("{table}", table_name);
+
+    let mut file = OpenOptions::new().read(true).open(&path).map_err(|e| {
+        io::Error::new(e.kind(), format!("Cannot open table file '{}': {}", path, e))
+    })?;
+
+    let total_pages = page_count(&mut file)?;
+    metrics.pages_read = total_pages as u64;
+
+    if total_pages <= 1 {
+        return Ok(vec![]);
+    }
+
+    let mut rows = Vec::new();
+    for page_num in 1..total_pages {
+        let mut page = Page::new();
+        read_page(&mut file, &mut page, page_num)?;
+
+        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+
+        for i in 0..num_items {
+            let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
+            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+            let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap()) as usize;
+            let tuple_bytes = &page.data[offset..offset + length];
+            let full_row = decode_tuple(tuple_bytes, schema);
+
+            // Only include required columns
+            let mut filtered_row = Vec::new();
+            for &idx in required_indices {
+                if idx < full_row.len() {
+                    filtered_row.push(full_row[idx].clone());
+                }
+            }
+            metrics.memory_bytes += filtered_row.len() * std::mem::size_of::<Value>();
+            rows.push(filtered_row);
         }
     }
 

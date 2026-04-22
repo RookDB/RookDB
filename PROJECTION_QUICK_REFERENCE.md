@@ -1,6 +1,6 @@
 # Projection Operator - Quick Reference Guide
 
-## 🎯 Quick Start Examples
+##  Quick Start Examples
 
 ### 1. Simple Column Selection
 ```rust
@@ -128,7 +128,7 @@ println!("Results exported to: {}", temp_path);
 
 ---
 
-## 📊 Benchmarking Examples
+##  Benchmarking Examples
 
 ### Basic Benchmark
 ```rust

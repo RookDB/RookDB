@@ -115,7 +115,7 @@ The projection operator handles all SELECT-level transformations in RookDB queri
 - Column selection (arbitrary subset of table columns)
 - Column reordering to match SELECT clause order
 - WHERE clause filtering with expression tree evaluation
-- DISTINCT deduplication using hash-based approach
+- DISTINCT deduplication using hash-based approach (O(n) space)
 - Variable-length string handling up to 65 KB
 - NULL value propagation and type casting
 - Complex expression evaluation (arithmetic, boolean, comparison)
@@ -413,16 +413,35 @@ let reorder = ColumnReorderSpec::by_indices_and_names(
 );
 ```
 
-#### WHERE Clause Filtering
+#### Complex Expression Evaluation
 
 ```rust
-// SQL: SELECT name FROM employees WHERE salary > 50000
-let where_pred = Expr::Gt(
-    Box::new(Expr::Column(2)),
-    Box::new(Expr::Const(Value::Int(50000)))
+// Arithmetic expressions
+let expr = Expr::Add(
+    Box::new(Expr::Mul(
+        Box::new(Expr::Column(0)),  // salary
+        Box::new(Expr::Const(Value::Float(1.1)))  // 10% bonus
+    )),
+    Box::new(Expr::Column(1))  // base_salary
 );
-let input = ProjectionInput { predicate: Some(where_pred), .. };
-let result = ProjectionEngine::execute_simple(input)?;
+
+// Boolean expressions with short-circuit evaluation
+let complex_pred = Expr::And(
+    Box::new(Expr::Gt(
+        Box::new(Expr::Column(2)),  // age
+        Box::new(Expr::Const(Value::Int(18)))
+    )),
+    Box::new(Expr::Or(
+        Box::new(Expr::Eq(
+            Box::new(Expr::Column(3)),  // department
+            Box::new(Expr::Const(Value::String("Engineering".to_string())))
+        )),
+        Box::new(Expr::Like(
+            Box::new(Expr::Column(4)),  // title
+            Box::new(Expr::Const(Value::String("%Manager%".to_string())))
+        ))
+    ))
+);
 ```
 
 #### DISTINCT Deduplication
@@ -438,14 +457,83 @@ let input = ProjectionInput {
 };
 ```
 
-#### Error Tracking
+#### Variable-Length String Handling
 
 ```rust
-let filter = FilterConfig::new(Some(predicate))
-    .with_error_tracking(100);   // stop after 100 errors
+// Strings up to 65 KB supported automatically
+// No configuration required — handles VARCHAR(MAX) equivalent
+let long_string = "A".repeat(65000);
+let result = ProjectionEngine::execute_simple(input_with_long_strings)?;
+```
 
+#### NULL Propagation & Type Casting
+
+```rust
+// NULL values propagate through expressions
+// Automatic type casting for compatible types
+let expr = Expr::Add(
+    Box::new(Expr::Column(0)),  // INT column
+    Box::new(Expr::Const(Value::Null))  // NULL
+);
+// Result: NULL (propagates through addition)
+
+let cast_expr = Expr::Cast(
+    Box::new(Expr::Column(0)),  // INT column
+    DataType::Float            // Cast to FLOAT
+);
+```
+
+#### Set Operations
+
+```rust
+// UNION ALL (preserves duplicates)
+let union_result = ProjectionEngine::union_all(&left_result, &right_result)?;
+
+// UNION (removes duplicates)
+let union_result = ProjectionEngine::union(&left_result, &right_result)?;
+
+// INTERSECT
+let intersect_result = ProjectionEngine::intersect(&left_result, &right_result)?;
+
+// EXCEPT (MINUS)
+let except_result = ProjectionEngine::except(&left_result, &right_result)?;
+```
+
+#### Common Table Expression (CTE) Integration
+
+```rust
+// WITH clause support for recursive queries
+let cte = CommonTableExpression {
+    name: "employee_hierarchy".to_string(),
+    columns: vec!["id".to_string(), "name".to_string(), "manager_id".to_string()],
+    query: recursive_query,
+};
+
+let input = ProjectionInput {
+    cte: Some(cte),
+    ..Default::default()
+};
+let result = ProjectionEngine::execute_with_cte(input)?;
+```
+
+#### Per-Row Error Diagnostics
+
+```rust
 let result = ProjectionEngine::execute(input, None, Some(filter))?;
-println!("Errors: {}", result.errors.len());
+
+// Access detailed error information per row
+for error in &result.errors {
+    println!("Row {}: {} - {}", error.row_index, error.error_type, error.message);
+    if let Some(context) = &error.context {
+        println!("  Context: {}", context);
+    }
+}
+
+// Errors include:
+// - Type conversion failures
+// - NULL constraint violations
+// - Expression evaluation errors
+// - Memory allocation issues
 ```
 
 #### Status Handling
