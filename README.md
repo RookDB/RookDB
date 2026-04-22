@@ -2,7 +2,7 @@
 title: Projection Operator (SELECT Attribute Processing)
 sidebar_position: 2
 ---
-# RookDB v3 — Projection Operator & Column Reordering
+# RookDB — Projection Operator & Column Reordering
 ## Complete Technical Report
 
 
