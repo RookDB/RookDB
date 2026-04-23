@@ -4,7 +4,7 @@ use std::io;
 
 use crate::catalog::types::Catalog;
 use crate::disk::read_page;
-use crate::index::{AnyIndex, IndexKey, index_file_path};
+use crate::index::{AnyIndex, IndexKey, index_file_path, secondary_index_file_path};
 use crate::layout::TABLE_FILE_TEMPLATE;
 use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE};
 
@@ -41,7 +41,11 @@ pub fn index_scan(
             )
         })?;
 
-    let index_path = index_file_path(db_name, table_name, index_name);
+    let index_path = if entry.is_secondary() {
+        secondary_index_file_path(db_name, table_name, index_name)
+    } else {
+        index_file_path(db_name, table_name, index_name)
+    };
     let mut record_ids = AnyIndex::search_on_disk(&index_path, &entry.algorithm, key)?;
 
     // Clustered indexes should be read in physical RID order for page locality.
@@ -103,7 +107,7 @@ pub fn index_scan_by_column(
     let entry = table
         .indexes
         .iter()
-        .filter(|idx| idx.column_name == column_name)
+        .filter(|idx| idx.column_name.len() == 1 && idx.column_name[0] == column_name)
         .max_by_key(|idx| idx.is_clustered)
         .ok_or_else(|| {
             io::Error::new(

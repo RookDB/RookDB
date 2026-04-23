@@ -1,3 +1,4 @@
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -66,12 +67,42 @@ impl IndexAlgorithm {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IndexEntry {
     pub index_name: String,
-    pub column_name: String,
+    #[serde(default, deserialize_with = "deserialize_index_columns")]
+    pub column_name: Vec<String>,
     pub algorithm: IndexAlgorithm,
     #[serde(default)]
     pub is_clustered: bool,
     #[serde(default)]
     pub include_columns: Vec<String>,
+}
+
+impl IndexEntry {
+    pub fn primary_column(&self) -> Option<&str> {
+        self.column_name.first().map(|s| s.as_str())
+    }
+
+    pub fn is_secondary(&self) -> bool {
+        !self.is_clustered
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IndexColumnsCompat {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+fn deserialize_index_columns<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<IndexColumnsCompat>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(IndexColumnsCompat::Single(col)) => vec![col],
+        Some(IndexColumnsCompat::Multiple(cols)) => cols,
+        None => Vec::new(),
+    })
 }
 
 #[derive(Serialize, Deserialize)]

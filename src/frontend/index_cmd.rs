@@ -6,16 +6,20 @@
 use std::fs;
 use std::io::{self, Write};
 
-use storage_manager::catalog::{create_index, drop_index, list_indexes, load_catalog};
+use storage_manager::catalog::{
+    create_index, create_secondary_index, drop_index, drop_secondary_index,
+    list_indexes, list_secondary_indices, load_catalog,
+};
 use storage_manager::catalog::types::{Column, IndexAlgorithm};
 use storage_manager::executor::index_scan;
 use storage_manager::index::{
-    AnyIndex, IndexKey, cluster_table_by_index, index_file_path, validate_index_consistency,
+    AnyIndex, cluster_table_by_index, index_file_path, index_key_from_values,
+    rebuild_secondary_index, secondary_index_file_path, validate_index_consistency,
 };
 
 // ─── Create index ─────────────────────────────────────────────────────────────
 
-/// Prompt the user for index details and build + register a new secondary index.
+/// Prompt the user for index details and build + register a new index.
 pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
     let db_name = match current_db {
         Some(db) => db.clone(),
@@ -31,11 +35,17 @@ pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
     io::stdin().read_line(&mut table_name)?;
     let table_name = table_name.trim().to_string();
 
-    print!("Column to index: ");
+    print!("Column(s) to index (comma-separated): ");
     io::stdout().flush()?;
-    let mut column_name = String::new();
-    io::stdin().read_line(&mut column_name)?;
-    let column_name = column_name.trim().to_string();
+    let mut column_names_str = String::new();
+    io::stdin().read_line(&mut column_names_str)?;
+    let column_names: Vec<String> = column_names_str
+        .trim()
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
 
     print!("Index name: ");
     io::stdout().flush()?;
@@ -87,7 +97,7 @@ pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
         &db_name,
         &table_name,
         &index_name,
-        &column_name,
+        &column_names,
         algorithm.clone(),
         is_clustered,
         include_columns,
@@ -97,10 +107,26 @@ pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
     }
 
     // Build the index from existing table data.
-    println!("Building index '{}' on {}.{}.{}...", index_name, db_name, table_name, column_name);
-    match AnyIndex::build_from_table(&catalog, &db_name, &table_name, &column_name, &algorithm) {
+    println!(
+        "Building index '{}' on {}.{}.({})...",
+        index_name,
+        db_name,
+        table_name,
+        column_names.join(",")
+    );
+    match AnyIndex::build_from_table_columns(
+        &catalog,
+        &db_name,
+        &table_name,
+        &column_names,
+        &algorithm,
+    ) {
         Ok(idx) => {
-            let path = index_file_path(&db_name, &table_name, &index_name);
+            let path = if is_clustered {
+                index_file_path(&db_name, &table_name, &index_name)
+            } else {
+                secondary_index_file_path(&db_name, &table_name, &index_name)
+            };
             idx.save(&path)?;
             println!(
                 "Index '{}' created ({} entries) saved to '{}'.",
@@ -121,6 +147,105 @@ pub fn create_index_cmd(current_db: &Option<String>) -> io::Result<()> {
             eprintln!("Failed to build index: {}", e);
             // Roll back the catalog registration.
             drop_index(&mut catalog, &db_name, &table_name, &index_name);
+        }
+    }
+
+    Ok(())
+}
+
+/// Prompt the user for details and create a non-clustered secondary index.
+pub fn create_secondary_index_cmd(current_db: &Option<String>) -> io::Result<()> {
+    let db_name = match current_db {
+        Some(db) => db.clone(),
+        None => {
+            println!("No database selected. Use 'Select Database' first.");
+            return Ok(());
+        }
+    };
+
+    print!("Table name: ");
+    io::stdout().flush()?;
+    let mut table_name = String::new();
+    io::stdin().read_line(&mut table_name)?;
+    let table_name = table_name.trim().to_string();
+
+    print!("Column(s) to index (comma-separated): ");
+    io::stdout().flush()?;
+    let mut column_names_str = String::new();
+    io::stdin().read_line(&mut column_names_str)?;
+    let column_names: Vec<String> = column_names_str
+        .trim()
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    print!("Index name: ");
+    io::stdout().flush()?;
+    let mut index_name = String::new();
+    io::stdin().read_line(&mut index_name)?;
+    let index_name = index_name.trim().to_string();
+
+    println!("Algorithm options:");
+    println!("  Hash-based : static_hash | chained_hash | extendible_hash | linear_hash");
+    println!("  Tree-based : btree | bplus_tree | radix_tree | skip_list | lsm_tree");
+    print!("Algorithm [bplus_tree]: ");
+    io::stdout().flush()?;
+    let mut algo_str = String::new();
+    io::stdin().read_line(&mut algo_str)?;
+    let algo_str = algo_str.trim();
+    let algo_str = if algo_str.is_empty() { "bplus_tree" } else { algo_str };
+
+    let algorithm = match IndexAlgorithm::from_str(algo_str) {
+        Some(a) => a,
+        None => {
+            println!("Unknown algorithm '{}'. Defaulting to bplus_tree.", algo_str);
+            IndexAlgorithm::BPlusTree
+        }
+    };
+
+    let mut catalog = load_catalog();
+    if let Err(e) = create_secondary_index(
+        &mut catalog,
+        &db_name,
+        &table_name,
+        &index_name,
+        &column_names,
+        algorithm.clone(),
+    ) {
+        println!("Failed to register secondary index: {}", e);
+        return Ok(());
+    }
+
+    println!(
+        "Building secondary index '{}' on {}.{}.({})...",
+        index_name,
+        db_name,
+        table_name,
+        column_names.join(",")
+    );
+
+    match AnyIndex::build_from_table_columns(
+        &catalog,
+        &db_name,
+        &table_name,
+        &column_names,
+        &algorithm,
+    ) {
+        Ok(idx) => {
+            let path = secondary_index_file_path(&db_name, &table_name, &index_name);
+            idx.save(&path)?;
+            println!(
+                "Secondary index '{}' created ({} entries) saved to '{}'.",
+                index_name,
+                idx.entry_count(),
+                path
+            );
+        }
+        Err(e) => {
+            eprintln!("Failed to build secondary index: {}", e);
+            let _ = drop_secondary_index(&mut catalog, &db_name, &table_name, &index_name);
         }
     }
 
@@ -155,13 +280,57 @@ pub fn drop_index_cmd(current_db: &Option<String>) -> io::Result<()> {
     if drop_index(&mut catalog, &db_name, &table_name, &index_name) {
         // Also remove the index file from disk.
         let path = index_file_path(&db_name, &table_name, &index_name);
+        let secondary_path = secondary_index_file_path(&db_name, &table_name, &index_name);
         if let Err(e) = fs::remove_file(&path) {
             // Not an error if the file never existed.
             eprintln!("Note: could not remove index file '{}': {}", path, e);
         }
+        if secondary_path != path {
+            let _ = fs::remove_file(&secondary_path);
+        }
         println!("Index '{}' dropped from table '{}'.", index_name, table_name);
     }
 
+    Ok(())
+}
+
+/// Prompt for table and index name, then drop only a secondary index.
+pub fn drop_secondary_index_cmd(current_db: &Option<String>) -> io::Result<()> {
+    let db_name = match current_db {
+        Some(db) => db.clone(),
+        None => {
+            println!("No database selected.");
+            return Ok(());
+        }
+    };
+
+    print!("Table name: ");
+    io::stdout().flush()?;
+    let mut table_name = String::new();
+    io::stdin().read_line(&mut table_name)?;
+    let table_name = table_name.trim().to_string();
+
+    print!("Secondary index name: ");
+    io::stdout().flush()?;
+    let mut index_name = String::new();
+    io::stdin().read_line(&mut index_name)?;
+    let index_name = index_name.trim().to_string();
+
+    let mut catalog = load_catalog();
+    if let Err(e) = drop_secondary_index(&mut catalog, &db_name, &table_name, &index_name) {
+        println!("Failed to drop secondary index: {}", e);
+        return Ok(());
+    }
+
+    let path = secondary_index_file_path(&db_name, &table_name, &index_name);
+    if let Err(e) = fs::remove_file(&path) {
+        eprintln!("Note: could not remove secondary index file '{}': {}", path, e);
+    }
+
+    println!(
+        "Secondary index '{}' dropped from table '{}'.",
+        index_name, table_name
+    );
     Ok(())
 }
 
@@ -189,14 +358,14 @@ pub fn list_indexes_cmd(current_db: &Option<String>) -> io::Result<()> {
             println!("\nIndexes on '{}.{}':", db_name, table_name);
             println!(
                 "{:<20} {:<20} {:<12} {:<10} {}",
-                "Index Name", "Column", "Algorithm", "Clustered", "Include"
+                "Index Name", "Columns", "Algorithm", "Clustered", "Include"
             );
             println!("{}", "-".repeat(90));
             for idx in indexes {
                 println!(
                     "{:<20} {:<20} {:<12} {:<10} {}",
                     idx.index_name,
-                    idx.column_name,
+                    idx.column_name.join(","),
                     idx.algorithm.display_name(),
                     if idx.is_clustered { "yes" } else { "no" },
                     if idx.include_columns.is_empty() {
@@ -213,6 +382,85 @@ pub fn list_indexes_cmd(current_db: &Option<String>) -> io::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Display all non-clustered indices for a table.
+pub fn list_secondary_indexes_cmd(current_db: &Option<String>) -> io::Result<()> {
+    let db_name = match current_db {
+        Some(db) => db.clone(),
+        None => {
+            println!("No database selected.");
+            return Ok(());
+        }
+    };
+
+    print!("Table name: ");
+    io::stdout().flush()?;
+    let mut table_name = String::new();
+    io::stdin().read_line(&mut table_name)?;
+    let table_name = table_name.trim().to_string();
+
+    let catalog = load_catalog();
+    let secondary = match list_secondary_indices(&catalog, &db_name, &table_name) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("Failed to list secondary indexes: {}", e);
+            return Ok(());
+        }
+    };
+
+    if secondary.is_empty() {
+        println!("No secondary indexes found on '{}.{}'.", db_name, table_name);
+        return Ok(());
+    }
+
+    println!("\nSecondary indexes on '{}.{}':", db_name, table_name);
+    println!("{:<20} {:<24} {:<14}", "Index Name", "Columns", "Algorithm");
+    println!("{}", "-".repeat(64));
+    for idx in secondary {
+        println!(
+            "{:<20} {:<24} {:<14}",
+            idx.index_name,
+            idx.column_name.join(","),
+            idx.algorithm.display_name(),
+        );
+    }
+    println!();
+
+    Ok(())
+}
+
+pub fn rebuild_secondary_index_cmd(current_db: &Option<String>) -> io::Result<()> {
+    let db_name = match current_db {
+        Some(db) => db.clone(),
+        None => {
+            println!("No database selected.");
+            return Ok(());
+        }
+    };
+
+    print!("Table name: ");
+    io::stdout().flush()?;
+    let mut table_name = String::new();
+    io::stdin().read_line(&mut table_name)?;
+    let table_name = table_name.trim().to_string();
+
+    print!("Secondary index name: ");
+    io::stdout().flush()?;
+    let mut index_name = String::new();
+    io::stdin().read_line(&mut index_name)?;
+    let index_name = index_name.trim().to_string();
+
+    let catalog = load_catalog();
+    if let Err(e) = rebuild_secondary_index(&catalog, &db_name, &table_name, &index_name) {
+        println!("Failed to rebuild secondary index: {}", e);
+        return Ok(());
+    }
+    println!(
+        "Secondary index '{}.{}.{}' rebuilt successfully.",
+        db_name, table_name, index_name
+    );
     Ok(())
 }
 
@@ -291,19 +539,23 @@ pub fn search_index_cmd(current_db: &Option<String>) -> io::Result<()> {
         }
     };
 
-    // Determine the column's data type.
     let db = catalog.databases.get(&db_name).unwrap();
     let table = db.tables.get(&table_name).unwrap();
-    let col_type = table
-        .columns
-        .iter()
-        .find(|c| c.name == entry.column_name)
-        .map(|c| c.data_type.as_str())
-        .unwrap_or("TEXT");
 
-    let search_key = parse_key(&value_str, col_type);
+    let values = parse_index_input_values(&value_str);
+    let search_key = match index_key_from_values(&table.columns, &entry.column_name, &values) {
+        Ok(k) => k,
+        Err(e) => {
+            println!("Invalid search key: {}", e);
+            return Ok(());
+        }
+    };
 
-    let path = index_file_path(&db_name, &table_name, &index_name);
+    let path = if entry.is_secondary() {
+        secondary_index_file_path(&db_name, &table_name, &index_name)
+    } else {
+        index_file_path(&db_name, &table_name, &index_name)
+    };
     let records = AnyIndex::search_on_disk(&path, &entry.algorithm, &search_key)?;
 
     if records.is_empty() {
@@ -381,17 +633,31 @@ pub fn range_scan_cmd(current_db: &Option<String>) -> io::Result<()> {
 
     let db = catalog.databases.get(&db_name).unwrap();
     let table = db.tables.get(&table_name).unwrap();
-    let col_type = table
-        .columns
-        .iter()
-        .find(|c| c.name == entry.column_name)
-        .map(|c| c.data_type.as_str())
-        .unwrap_or("TEXT");
 
-    let start_key = parse_key(&start_str, col_type);
-    let end_key = parse_key(&end_str, col_type);
+    let start_values = parse_index_input_values(&start_str);
+    let end_values = parse_index_input_values(&end_str);
 
-    let path = index_file_path(&db_name, &table_name, &index_name);
+    let start_key = match index_key_from_values(&table.columns, &entry.column_name, &start_values) {
+        Ok(k) => k,
+        Err(e) => {
+            println!("Invalid range start key: {}", e);
+            return Ok(());
+        }
+    };
+
+    let end_key = match index_key_from_values(&table.columns, &entry.column_name, &end_values) {
+        Ok(k) => k,
+        Err(e) => {
+            println!("Invalid range end key: {}", e);
+            return Ok(());
+        }
+    };
+
+    let path = if entry.is_secondary() {
+        secondary_index_file_path(&db_name, &table_name, &index_name)
+    } else {
+        index_file_path(&db_name, &table_name, &index_name)
+    };
     let index = AnyIndex::load(&path, &entry.algorithm)?;
     let records = index.range_scan(&start_key, &end_key)?;
 
@@ -455,14 +721,15 @@ pub fn index_scan_cmd(current_db: &Option<String>) -> io::Result<()> {
 
     let db = catalog.databases.get(&db_name).unwrap();
     let table = db.tables.get(&table_name).unwrap();
-    let col_type = table
-        .columns
-        .iter()
-        .find(|c| c.name == entry.column_name)
-        .map(|c| c.data_type.as_str())
-        .unwrap_or("TEXT");
 
-    let search_key = parse_key(&value_str, col_type);
+    let values = parse_index_input_values(&value_str);
+    let search_key = match index_key_from_values(&table.columns, &entry.column_name, &values) {
+        Ok(k) => k,
+        Err(e) => {
+            println!("Invalid search key: {}", e);
+            return Ok(());
+        }
+    };
     let tuples = index_scan(&catalog, &db_name, &table_name, &index_name, &search_key)?;
 
     if tuples.is_empty() {
@@ -481,12 +748,13 @@ pub fn index_scan_cmd(current_db: &Option<String>) -> io::Result<()> {
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
-/// Parse a user-supplied string into an `IndexKey` based on the column type.
-fn parse_key(s: &str, col_type: &str) -> IndexKey {
-    match col_type {
-        "INT" => IndexKey::Int(s.parse::<i64>().unwrap_or(0)),
-        _ => IndexKey::Text(s.to_string()),
-    }
+fn parse_index_input_values(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn format_tuple(tuple: &[u8], columns: &[Column]) -> String {

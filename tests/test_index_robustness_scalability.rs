@@ -242,7 +242,7 @@ fn test_dummy_db_scalability_and_consistency_all_algorithms() {
 
             table.indexes.push(IndexEntry {
                 index_name: index_name.clone(),
-                column_name: "id".to_string(),
+                column_name: vec!["id".to_string()],
                 algorithm: algo.clone(),
                 is_clustered: false,
                 include_columns: Vec::new(),

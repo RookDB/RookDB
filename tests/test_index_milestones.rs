@@ -125,7 +125,7 @@ fn milestone1_trait_hierarchy_and_secondary_representation() {
         ],
         indexes: vec![IndexEntry {
             index_name: "name_idx".to_string(),
-            column_name: "name".to_string(),
+            column_name: vec!["name".to_string()],
             algorithm: IndexAlgorithm::BPlusTree,
             is_clustered: false,
             include_columns: vec!["id".to_string()],
@@ -135,7 +135,7 @@ fn milestone1_trait_hierarchy_and_secondary_representation() {
     let encoded = serde_json::to_string(&table).expect("table serialization failed");
     let decoded: Table = serde_json::from_str(&encoded).expect("table deserialization failed");
     assert_eq!(decoded.indexes.len(), 1);
-    assert_eq!(decoded.indexes[0].column_name, "name");
+    assert_eq!(decoded.indexes[0].column_name, vec!["name".to_string()]);
     assert_eq!(decoded.indexes[0].include_columns, vec!["id".to_string()]);
     assert!(!decoded.indexes[0].is_clustered);
 }
@@ -286,7 +286,7 @@ fn milestone3_persistence_and_validation_with_content_checks() {
             }],
             indexes: vec![IndexEntry {
                 index_name: index_name.clone(),
-                column_name: "id".to_string(),
+                column_name: vec!["id".to_string()],
                 algorithm: algo.clone(),
                 is_clustered: false,
                 include_columns: Vec::new(),
@@ -390,14 +390,14 @@ fn milestone4_secondary_and_clustered_index_integration() {
         indexes: vec![
             IndexEntry {
                 index_name: primary_idx_name.clone(),
-                column_name: "id".to_string(),
+                column_name: vec!["id".to_string()],
                 algorithm: IndexAlgorithm::BPlusTree,
                 is_clustered: true,
                 include_columns: Vec::new(),
             },
             IndexEntry {
                 index_name: secondary_idx_name.clone(),
-                column_name: "name".to_string(),
+                column_name: vec!["name".to_string()],
                 algorithm: IndexAlgorithm::LsmTree,
                 is_clustered: false,
                 include_columns: vec!["id".to_string()],

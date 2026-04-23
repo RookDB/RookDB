@@ -39,7 +39,7 @@ fn test_index_update_on_insert_delete() {
         }],
         indexes: vec![IndexEntry {
             index_name: index_name.to_string(),
-            column_name: "id".to_string(),
+            column_name: vec!["id".to_string()],
             algorithm: IndexAlgorithm::BPlusTree,
             is_clustered: false,
             include_columns: Vec::new(),

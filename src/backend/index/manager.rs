@@ -23,11 +23,11 @@
 //! let records = idx.search(&IndexKey::Int(30))?;
 //! ```
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::collections::HashMap;
 
-use crate::catalog::types::{Catalog, Column, IndexAlgorithm};
+use crate::catalog::types::{Catalog, Column, IndexAlgorithm, IndexEntry};
 use crate::index::config::{DEFAULT_HASH_INDEX, DEFAULT_TREE_INDEX, HashIndexType, TreeIndexType};
 use crate::heap::{init_table, insert_tuple};
 use crate::index::hash::{ChainedHashIndex, ExtendibleHashIndex, LinearHashIndex, StaticHashIndex};
@@ -320,6 +320,31 @@ impl AnyIndex {
         column_name: &str,
         algorithm: &IndexAlgorithm,
     ) -> io::Result<Self> {
+        Self::build_from_table_columns(
+            catalog,
+            db_name,
+            table_name,
+            &[column_name.to_string()],
+            algorithm,
+        )
+    }
+
+    /// Scan all existing tuples and populate a fresh index for one or more
+    /// indexed columns (composite key support).
+    pub fn build_from_table_columns(
+        catalog: &Catalog,
+        db_name: &str,
+        table_name: &str,
+        column_names: &[String],
+        algorithm: &IndexAlgorithm,
+    ) -> io::Result<Self> {
+        if column_names.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "at least one indexed column is required",
+            ));
+        }
+
         let db = catalog.databases.get(db_name).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
         })?;
@@ -327,24 +352,7 @@ impl AnyIndex {
             io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
         })?;
 
-        // Compute the byte offset and type of the indexed column.
-        let (col_offset, col_type) = {
-            let mut offset = 0usize;
-            let mut found = None;
-            for col in &table.columns {
-                if col.name == column_name {
-                    found = Some((offset, col.data_type.clone()));
-                    break;
-                }
-                offset += column_byte_size(&col.data_type);
-            }
-            found.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Column '{}' not found in table '{}'", column_name, table_name),
-                )
-            })?
-        };
+        let projections = resolve_index_columns(&table.columns, column_names)?;
 
         let table_path = TABLE_FILE_TEMPLATE
             .replace("{database}", db_name)
@@ -383,7 +391,7 @@ impl AnyIndex {
 
                 let tuple = &page_bytes[tuple_offset..tuple_offset + tuple_len];
 
-                if let Some(key) = extract_key(tuple, col_offset, &col_type) {
+                if let Some(key) = extract_key_from_tuple(tuple, &projections) {
                     let rid = RecordId::new(page_num, item_id);
                     index.insert(key, rid)?;
                 }
@@ -392,9 +400,42 @@ impl AnyIndex {
 
         Ok(index)
     }
+
+    /// Build a non-clustered index from its catalog metadata entry.
+    pub fn build_secondary_index(
+        catalog: &Catalog,
+        db_name: &str,
+        table_name: &str,
+        index_entry: &IndexEntry,
+    ) -> io::Result<Self> {
+        if index_entry.is_clustered {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "index '{}' is clustered; use clustered build path",
+                    index_entry.index_name
+                ),
+            ));
+        }
+
+        Self::build_from_table_columns(
+            catalog,
+            db_name,
+            table_name,
+            &index_entry.column_name,
+            &index_entry.algorithm,
+        )
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+struct IndexedColumnProjection {
+    name: String,
+    offset: usize,
+    data_type: String,
+}
 
 /// Return the on-disk byte size of a column given its data type.
 fn column_byte_size(data_type: &str) -> usize {
@@ -406,9 +447,64 @@ fn column_byte_size(data_type: &str) -> usize {
     }
 }
 
+fn normalize_data_type(data_type: &str) -> &str {
+    match data_type {
+        "BOOLEAN" => "BOOL",
+        _ => data_type,
+    }
+}
+
+fn resolve_index_columns(
+    columns: &[Column],
+    column_names: &[String],
+) -> io::Result<Vec<IndexedColumnProjection>> {
+    if column_names.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "at least one indexed column is required",
+        ));
+    }
+
+    let mut available: HashMap<String, (usize, String)> = HashMap::new();
+    let mut running_offset = 0usize;
+
+    for col in columns {
+        let size = column_byte_size(&col.data_type);
+        if size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported column type '{}'", col.data_type),
+            ));
+        }
+
+        available.insert(col.name.clone(), (running_offset, col.data_type.clone()));
+        running_offset = running_offset.checked_add(size).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "tuple offset overflow")
+        })?;
+    }
+
+    let mut projections = Vec::with_capacity(column_names.len());
+    for col_name in column_names {
+        let (offset, data_type) = available.get(col_name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("column '{}' not found", col_name),
+            )
+        })?;
+
+        projections.push(IndexedColumnProjection {
+            name: col_name.clone(),
+            offset: *offset,
+            data_type: data_type.clone(),
+        });
+    }
+
+    Ok(projections)
+}
+
 /// Extract an `IndexKey` from raw tuple bytes at the given byte offset.
 fn extract_key(tuple: &[u8], offset: usize, data_type: &str) -> Option<IndexKey> {
-    match data_type {
+    match normalize_data_type(data_type) {
         "INT" => {
             if offset + 4 > tuple.len() {
                 return None;
@@ -425,8 +521,172 @@ fn extract_key(tuple: &[u8], offset: usize, data_type: &str) -> Option<IndexKey>
                 .to_string();
             Some(IndexKey::Text(text))
         }
+        "BOOL" => {
+            if offset + 1 > tuple.len() {
+                return None;
+            }
+            Some(IndexKey::Int(if tuple[offset] == 0 { 0 } else { 1 }))
+        }
         _ => None,
     }
+}
+
+fn extract_key_from_tuple(
+    tuple: &[u8],
+    projections: &[IndexedColumnProjection],
+) -> Option<IndexKey> {
+    if projections.len() == 1 {
+        let p = &projections[0];
+        return extract_key(tuple, p.offset, &p.data_type);
+    }
+
+    let mut encoded = Vec::new();
+    for p in projections {
+        let mut bytes = encode_component_bytes_from_tuple(tuple, p.offset, &p.data_type)?;
+        encoded.append(&mut bytes);
+    }
+
+    Some(IndexKey::Text(hex_encode(&encoded)))
+}
+
+fn encode_component_bytes_from_tuple(tuple: &[u8], offset: usize, data_type: &str) -> Option<Vec<u8>> {
+    match normalize_data_type(data_type) {
+        "INT" => {
+            if offset + 4 > tuple.len() {
+                return None;
+            }
+            let raw = i32::from_le_bytes(tuple[offset..offset + 4].try_into().unwrap());
+            let sortable = (raw as u32) ^ 0x8000_0000;
+            Some(sortable.to_be_bytes().to_vec())
+        }
+        "TEXT" => {
+            if offset + 10 > tuple.len() {
+                return None;
+            }
+            Some(tuple[offset..offset + 10].to_vec())
+        }
+        "BOOL" => {
+            if offset + 1 > tuple.len() {
+                return None;
+            }
+            Some(vec![if tuple[offset] == 0 { 0 } else { 1 }])
+        }
+        _ => None,
+    }
+}
+
+fn encode_component_bytes_from_value(value: &str, data_type: &str) -> io::Result<Vec<u8>> {
+    match normalize_data_type(data_type) {
+        "INT" => {
+            let parsed = value.trim().parse::<i32>().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid INT value '{}': {}", value, e),
+                )
+            })?;
+            let sortable = (parsed as u32) ^ 0x8000_0000;
+            Ok(sortable.to_be_bytes().to_vec())
+        }
+        "TEXT" => {
+            let mut out = value.as_bytes().to_vec();
+            if out.len() > 10 {
+                out.truncate(10);
+            } else if out.len() < 10 {
+                out.extend(vec![b' '; 10 - out.len()]);
+            }
+            Ok(out)
+        }
+        "BOOL" => {
+            let v = match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "t" | "yes" | "y" => 1u8,
+                "0" | "false" | "f" | "no" | "n" => 0u8,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid BOOL value '{}'", value),
+                    ));
+                }
+            };
+            Ok(vec![v])
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported column type '{}'", data_type),
+        )),
+    }
+}
+
+fn parse_single_column_key(value: &str, data_type: &str) -> io::Result<IndexKey> {
+    match normalize_data_type(data_type) {
+        "INT" => {
+            let parsed = value.trim().parse::<i64>().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid INT value '{}': {}", value, e),
+                )
+            })?;
+            Ok(IndexKey::Int(parsed))
+        }
+        "TEXT" => Ok(IndexKey::Text(value.trim().to_string())),
+        "BOOL" => {
+            let v = match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "t" | "yes" | "y" => 1,
+                "0" | "false" | "f" | "no" | "n" => 0,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid BOOL value '{}'", value),
+                    ));
+                }
+            };
+            Ok(IndexKey::Int(v))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported column type '{}'", data_type),
+        )),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+pub fn index_key_from_values(
+    columns: &[Column],
+    index_columns: &[String],
+    values: &[String],
+) -> io::Result<IndexKey> {
+    let projections = resolve_index_columns(columns, index_columns)?;
+    if projections.len() != values.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "expected {} value(s) for indexed columns {:?}, got {}",
+                projections.len(),
+                index_columns,
+                values.len()
+            ),
+        ));
+    }
+
+    if projections.len() == 1 {
+        return parse_single_column_key(&values[0], &projections[0].data_type);
+    }
+
+    let mut encoded = Vec::new();
+    for (p, value) in projections.iter().zip(values.iter()) {
+        let mut bytes = encode_component_bytes_from_value(value, &p.data_type)?;
+        encoded.append(&mut bytes);
+    }
+
+    Ok(IndexKey::Text(hex_encode(&encoded)))
 }
 
 /// Construct the canonical on-disk file path for an index.
@@ -439,36 +699,27 @@ pub fn index_file_path(db_name: &str, table_name: &str, index_name: &str) -> Str
     )
 }
 
-fn key_from_tuple(tuple: &[u8], columns: &[Column], column_name: &str) -> io::Result<IndexKey> {
-    let mut offset = 0usize;
-    for col in columns {
-        if col.name == column_name {
-            return extract_key(tuple, offset, &col.data_type).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "failed to extract key for column '{}' with type '{}'",
-                        column_name, col.data_type
-                    ),
-                )
-            });
-        }
-        let size = column_byte_size(&col.data_type);
-        if size == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unsupported column type '{}'", col.data_type),
-            ));
-        }
-        offset = offset.checked_add(size).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "tuple offset overflow")
-        })?;
-    }
+pub fn secondary_index_file_path(db_name: &str, table_name: &str, index_name: &str) -> String {
+    index_file_path(db_name, table_name, index_name)
+}
 
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("column '{}' not found", column_name),
-    ))
+fn key_from_tuple(
+    tuple: &[u8],
+    columns: &[Column],
+    column_names: &[String],
+) -> io::Result<IndexKey> {
+    let projections = resolve_index_columns(columns, column_names)?;
+    extract_key_from_tuple(tuple, &projections).ok_or_else(|| {
+        let cols = projections
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to extract key for indexed columns [{}]", cols),
+        )
+    })
 }
 
 pub fn rebuild_table_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> io::Result<usize> {
@@ -484,17 +735,75 @@ pub fn rebuild_table_indexes(catalog: &Catalog, db_name: &str, table_name: &str)
         })?;
 
     for idx in &table.indexes {
-        let rebuilt = AnyIndex::build_from_table(
-            catalog,
-            db_name,
-            table_name,
-            &idx.column_name,
-            &idx.algorithm,
-        )?;
-        rebuilt.save(&index_file_path(db_name, table_name, &idx.index_name))?;
+        let rebuilt = if idx.is_secondary() {
+            AnyIndex::build_secondary_index(catalog, db_name, table_name, idx)?
+        } else {
+            AnyIndex::build_from_table_columns(
+                catalog,
+                db_name,
+                table_name,
+                &idx.column_name,
+                &idx.algorithm,
+            )?
+        };
+
+        let path = if idx.is_secondary() {
+            secondary_index_file_path(db_name, table_name, &idx.index_name)
+        } else {
+            index_file_path(db_name, table_name, &idx.index_name)
+        };
+
+        rebuilt.save(&path)?;
     }
 
     Ok(table.indexes.len())
+}
+
+pub fn rebuild_secondary_index(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> io::Result<()> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    let index_entry = table
+        .indexes
+        .iter()
+        .find(|idx| idx.index_name == index_name)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("index '{}' not found", index_name),
+            )
+        })?;
+
+    if index_entry.is_clustered {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("index '{}' is clustered, not secondary", index_name),
+        ));
+    }
+
+    let path = secondary_index_file_path(db_name, table_name, index_name);
+    match fs::remove_file(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    let rebuilt = AnyIndex::build_secondary_index(catalog, db_name, table_name, index_entry)?;
+    rebuilt.save(&path)?;
+    Ok(())
 }
 
 pub fn maintain_clustered_index_layout(
@@ -563,7 +872,11 @@ pub fn add_tuple_to_all_indexes(
 
     for idx in &table.indexes {
         let key = key_from_tuple(tuple, &table.columns, &idx.column_name)?;
-        let path = index_file_path(db_name, table_name, &idx.index_name);
+        let path = if idx.is_secondary() {
+            secondary_index_file_path(db_name, table_name, &idx.index_name)
+        } else {
+            index_file_path(db_name, table_name, &idx.index_name)
+        };
         let mut index = AnyIndex::load(&path, &idx.algorithm)?;
         index.insert(key, record_id.clone())?;
         index.save(&path)?;
@@ -592,7 +905,11 @@ pub fn remove_tuple_from_all_indexes(
 
     for idx in &table.indexes {
         let key = key_from_tuple(tuple, &table.columns, &idx.column_name)?;
-        let path = index_file_path(db_name, table_name, &idx.index_name);
+        let path = if idx.is_secondary() {
+            secondary_index_file_path(db_name, table_name, &idx.index_name)
+        } else {
+            index_file_path(db_name, table_name, &idx.index_name)
+        };
         let mut index = AnyIndex::load(&path, &idx.algorithm)?;
         index.delete(&key, &record_id)?;
         index.save(&path)?;
@@ -685,7 +1002,11 @@ pub fn validate_index_consistency(
             )
         })?;
 
-    let index_path = index_file_path(db_name, table_name, index_name);
+    let index_path = if entry.is_secondary() {
+        secondary_index_file_path(db_name, table_name, index_name)
+    } else {
+        index_file_path(db_name, table_name, index_name)
+    };
     let index = AnyIndex::load(&index_path, &entry.algorithm)?;
 
     index.validate_structure()?;

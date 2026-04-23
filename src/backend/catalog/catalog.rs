@@ -251,7 +251,7 @@ pub fn create_index(
     db_name: &str,
     table_name: &str,
     index_name: &str,
-    column_name: &str,
+    column_names: &[String],
     algorithm: crate::catalog::types::IndexAlgorithm,
     is_clustered: bool,
     include_columns: Vec<String>,
@@ -272,9 +272,15 @@ pub fn create_index(
             return false;
         }
     };
-    if !table.columns.iter().any(|c| c.name == column_name) {
-        println!("Column '{}' not found in table '{}'.", column_name, table_name);
+    if column_names.is_empty() {
+        println!("At least one index column must be provided.");
         return false;
+    }
+    for column_name in column_names {
+        if !table.columns.iter().any(|c| c.name == *column_name) {
+            println!("Column '{}' not found in table '{}'.", column_name, table_name);
+            return false;
+        }
     }
     for include_col in &include_columns {
         if !table.columns.iter().any(|c| c.name == *include_col) {
@@ -298,13 +304,45 @@ pub fn create_index(
     }
     table.indexes.push(IndexEntry {
         index_name: index_name.to_string(),
-        column_name: column_name.to_string(),
+        column_name: column_names.to_vec(),
         algorithm,
         is_clustered,
         include_columns,
     });
     save_catalog(catalog);
     true
+}
+
+pub fn create_secondary_index(
+    catalog: &mut Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+    column_names: &[String],
+    algorithm: crate::catalog::types::IndexAlgorithm,
+) -> std::io::Result<()> {
+    let created = create_index(
+        catalog,
+        db_name,
+        table_name,
+        index_name,
+        column_names,
+        algorithm,
+        false,
+        Vec::new(),
+    );
+
+    if created {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "failed to create secondary index '{}.{}.{}'",
+                db_name, table_name, index_name
+            ),
+        ))
+    }
 }
 
 pub fn drop_index(
@@ -337,6 +375,60 @@ pub fn drop_index(
     true
 }
 
+pub fn drop_secondary_index(
+    catalog: &mut Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> std::io::Result<()> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    let entry = table
+        .indexes
+        .iter()
+        .find(|idx| idx.index_name == index_name)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "index '{}' not found on table '{}.{}'",
+                    index_name, db_name, table_name
+                ),
+            )
+        })?;
+
+    if entry.is_clustered {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "index '{}' is clustered and cannot be dropped via drop_secondary_index",
+                index_name
+            ),
+        ));
+    }
+
+    if drop_index(catalog, db_name, table_name, index_name) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "failed to drop secondary index '{}.{}.{}'",
+                db_name, table_name, index_name
+            ),
+        ))
+    }
+}
+
 pub fn list_indexes<'a>(
     catalog: &'a Catalog,
     db_name: &str,
@@ -347,6 +439,30 @@ pub fn list_indexes<'a>(
         .get(db_name)
         .and_then(|db| db.tables.get(table_name))
         .map(|t| &t.indexes)
+}
+
+pub fn list_secondary_indices(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> std::io::Result<Vec<crate::catalog::types::IndexEntry>> {
+    let table = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("table '{}.{}' not found", db_name, table_name),
+            )
+        })?;
+
+    Ok(table
+        .indexes
+        .iter()
+        .filter(|idx| idx.is_secondary())
+        .cloned()
+        .collect())
 }
 
 /// Lists all tables in the specified database.

@@ -41,7 +41,7 @@ fn test_index_validation_detects_stale_and_recovers_after_rebuild() {
         }],
         indexes: vec![IndexEntry {
             index_name: index_name.to_string(),
-            column_name: "id".to_string(),
+            column_name: vec!["id".to_string()],
             algorithm: IndexAlgorithm::BPlusTree,
             is_clustered: false,
             include_columns: Vec::new(),

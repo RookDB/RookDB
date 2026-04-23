@@ -30,13 +30,17 @@ pub fn run() -> io::Result<()> {
         println!("7. Show Tuples");
         println!("8. Show Table Statistics");
         println!("9. Create Index");
-        println!("10. Drop Index");
-        println!("11. List Indexes");
-        println!("12. Search by Index");
-        println!("13. Range Scan (tree indexes only)");
-        println!("14. Index Scan (fetch tuples)");
-        println!("15. Validate Index Consistency");
-        println!("16. Exit");
+        println!("10. Create Secondary Index");
+        println!("11. Drop Index");
+        println!("12. Drop Secondary Index");
+        println!("13. List Indexes");
+        println!("14. List Secondary Indexes");
+        println!("15. Rebuild Secondary Index");
+        println!("16. Search by Index");
+        println!("17. Range Scan (tree indexes only)");
+        println!("18. Index Scan (fetch tuples)");
+        println!("19. Validate Index Consistency");
+        println!("20. Exit");
         println!("=============================");
 
         print!("Enter your choice: ");
@@ -63,13 +67,17 @@ pub fn run() -> io::Result<()> {
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
             "9" => index_cmd::create_index_cmd(&current_db)?,
-            "10" => index_cmd::drop_index_cmd(&current_db)?,
-            "11" => index_cmd::list_indexes_cmd(&current_db)?,
-            "12" => index_cmd::search_index_cmd(&current_db)?,
-            "13" => index_cmd::range_scan_cmd(&current_db)?,
-            "14" => index_cmd::index_scan_cmd(&current_db)?,
-            "15" => index_cmd::validate_index_cmd(&current_db)?,
-            "16" => {
+            "10" => index_cmd::create_secondary_index_cmd(&current_db)?,
+            "11" => index_cmd::drop_index_cmd(&current_db)?,
+            "12" => index_cmd::drop_secondary_index_cmd(&current_db)?,
+            "13" => index_cmd::list_indexes_cmd(&current_db)?,
+            "14" => index_cmd::list_secondary_indexes_cmd(&current_db)?,
+            "15" => index_cmd::rebuild_secondary_index_cmd(&current_db)?,
+            "16" => index_cmd::search_index_cmd(&current_db)?,
+            "17" => index_cmd::range_scan_cmd(&current_db)?,
+            "18" => index_cmd::index_scan_cmd(&current_db)?,
+            "19" => index_cmd::validate_index_cmd(&current_db)?,
+            "20" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }
