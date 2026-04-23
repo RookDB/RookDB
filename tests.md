@@ -2,33 +2,34 @@
 
 ## Overview
 
-RookDB includes a comprehensive test suite with **50+ test cases** covering FSM (Free Space Manager), Heap File Manager, catalog management, and end-to-end integration scenarios. All tests pass with 100% success rate, validating the correctness of the database engine.
+RookDB includes a comprehensive test suite with targeted tests covering FSM (Free Space Manager), Heap File Manager, robust error handling, types validation, and end-to-end integration scenarios. All tests pass with 100% success rate, validating the correctness of the database engine storage and execution layers.
 
 ### Test Summary
 
-| Test File | Test Count | Category | Status |
-|-----------|-----------|----------|--------|
-| test_heap_manager.rs | 10 | Core Heap Operations | ✓ Pass |
-| test_fsm_heavy.rs | 6 | FSM Performance & Robustness | ✓ Pass |
-| test_hsm_integration.rs | 2 | Multi-Column & Isolation Testing | ✓ Pass |
-| test_init_catalog.rs | 1 | Catalog Initialization | ✓ Pass |
-| test_create_page.rs | 1 | Page Creation | ✓ Pass |
-| test_fsm_page_allocation.rs | 1 | FSM Page Distribution | ✓ Pass |
-| test_init_page.rs | 1 | Page Initialization | ✓ Pass |
-| test_init_table.rs | 1 | Table Initialization | ✓ Pass |
-| test_load_catalog.rs | 1 | Catalog Loading | ✓ Pass |
-| test_page_count.rs | 1 | Page Counting | ✓ Pass |
-| test_page_free_space.rs | 1 | Free Space Calculations | ✓ Pass |
-| test_read_page.rs | 1 | Page Reading | ✓ Pass |
-| test_save_catalog.rs | 1 | Catalog Persistence | ✓ Pass |
-| test_write_page.rs | 1 | Page Writing | ✓ Pass |
-| **TOTAL** | **50** | **All Systems** | **✓ 100% Pass** |
+| Test File / Module | Test Count | Category |
+|-----------|-----------|----------|
+| **Unit Tests (`src/lib.rs`)** | **24** | Internal Component Logic |
+| `test_heap_manager.rs` | 12 | Core Heap Operations |
+| `test_fsm_heavy.rs` | 6 | FSM Allocation & Boundary Robustness |
+| `test_hsm_integration.rs` | 2 | End-to-End Heap Storage Integration |
+| `test_init_catalog.rs` | 1 | Catalog Initialization |
+| `test_create_page.rs` | 1 | Page Creation |
+| `test_fsm_page_allocation.rs` | 1 | FSM Page Allocation Distribution |
+| `test_init_page.rs` | 1 | Page Header Initialization |
+| `test_init_table.rs` | 1 | Table and Metadata Init |
+| `test_load_catalog.rs` | 1 | Loading Catalog System |
+| `test_page_count.rs` | 1 | Page Count Validations |
+| `test_page_free_space.rs` | 1 | Free Space Boundary Math |
+| `test_read_page.rs` | 1 | I/O Reading |
+| `test_save_catalog.rs` | 1 | Catalog Serialization Persistence |
+| `test_write_page.rs` | 1 | I/O Writing |
+| **TOTAL** | **55** | **All Core Systems (100% Passing)** |
 
 ---
 
 ## Test Categories
 
-### 1. Core Heap Operations (10 tests in test_heap_manager.rs)
+### 1. Core Heap Operations (12 tests in test_heap_manager.rs)
 
 These tests verify the fundamental heap file manager operations in isolation.
 
@@ -92,12 +93,66 @@ assert_eq!(manager.header.total_tuples, 10, "Should have 10 tuples");
 
 **Implementation:**
 ```rust
-let (page_id, slot_id) = manager.insert_tuple(original_data).unwrap();
+let (page_id, slot_id) = manager.insert_tuple(&original_data).unwrap();
 let retrieved_data = manager.get_tuple(page_id, slot_id).unwrap();
 assert_eq!(retrieved_data, original_data.to_vec(), "Retrieved data should match");
 ```
 
 **Verifies:**
+- ✓ Tuple correctly addressed and retrieved via memory coordinates
+- ✓ Decoded tuple length and offset mapping is accurate
+
+#### 1.5 `test_heap_invalid_operations`
+**Purpose:** Ensure robust failure states handling logic.
+
+**Implementation:**
+```rust
+let invalid_get = manager.get_tuple(999, 999);
+assert!(invalid_get.is_err(), "Getting via invalid coordinates must throw error");
+```
+
+**Verifies:**
+- ✓ Bound checking prevents segment faults
+- ✓ Gracefully handles requested records that do not exist (deleted or out of bounds)
+
+#### 1.6 `test_slot_reuse_delete_first` / `delete_second`
+**Purpose:** Tests the slot reclamation and rollback optimizations on deleting tuples.
+
+**Implementation:**
+```rust
+let (page_id, slot_id1) = manager.insert_tuple(&tuple1).unwrap();
+// Slot directory exhaustion protection
+manager.delete_tuple(page_id, slot_id1).unwrap();
+let (page_id2, slot_id2) = manager.insert_tuple(&tuple2).unwrap();
+// Dead slot id gets remapped naturally
+assert_eq!(slot_id1, slot_id2, "Slot ID must be cleanly reused without growing upper pointers needlessly");
+```
+
+**Verifies:**
+- ✓ Exhaustion limits are circumvented successfully
+- ✓ `tail pointer rollback`/`slot exhaustion recovery` is functional
+
+---
+
+### 2. Space Management & FSM (6 tests in test_fsm_heavy.rs)
+
+The Free Space Manager guarantees sequential fills and boundary protection.
+
+#### 2.1 `test_allocation_accuracy`
+**Purpose:** Ensure quantization bytes map precisely to the 0-255 category space limitations.
+
+**Verifies:**
+- ✓ Quantization `(floor / 32)` rounds consistently 
+- ✓ Pages categorize properly
+
+#### 2.2 `test_fragmentation_management`
+**Purpose:** Tests internal holes tracking logic and ensures pages are recognized via tree max bounds.
+
+#### 2.3 `test_persistence_fsm_recovery`
+**Purpose:** Validates the FSM tree `build_from_heap()` functionality dynamically reconstructs the binary map if missing.
+
+#### 2.4 `test_boundary_violations` & `test_large_insertions`
+**Purpose:** Tests massive 8kb constraints to prevent memory overriding tuple fields.
 - ✓ Inserted tuples can be retrieved by coordinates
 - ✓ Retrieved data matches original exactly
 - ✓ No data corruption during storage/retrieval
@@ -218,6 +273,39 @@ assert_eq!(scanned_count, manager.header.total_tuples as usize);
 - ✓ Scan still retrieves tuples from all pages
 - ✓ No page fragmentation issues
 
+#### 1.11 `test_slot_reuse_delete_first`
+**Purpose:** Verify that when the first item is deleted, its slot is correctly reused by the next inserted item.
+
+**Implementation:**
+```rust
+let (p1, s1) = manager.insert_tuple(b"val_1").unwrap();
+let (_, _s2) = manager.insert_tuple(b"val_2").unwrap();
+manager.delete_tuple(p1, s1).unwrap();
+let (_, _s3) = manager.insert_tuple(b"val_3").unwrap();
+// Slot 0 (s1) was reused for val_3
+```
+
+**Verifies:**
+- ✓ Slot index is reused after a deletion
+- ✓ Reused slot correctly points to the new data offset
+- ✓ Data is appended after existing active space
+
+#### 1.12 `test_slot_reuse_delete_second`
+**Purpose:** Verify that when the second item is deleted, its slot is correctly reused by the next inserted item.
+
+**Implementation:**
+```rust
+let (p1, _s1) = manager.insert_tuple(b"val_1").unwrap();
+let (_, s2) = manager.insert_tuple(b"val_2").unwrap();
+manager.delete_tuple(p1, s2).unwrap();
+let (_, _s3) = manager.insert_tuple(b"val_2").unwrap();
+// Slot 1 (s2) was reused
+```
+
+**Verifies:**
+- ✓ The exact deleted slot index is reused
+- ✓ Table state correctly tracks the available slot
+
 ---
 
 ### 2. FSM Performance & Robustness (6 tests in test_fsm_heavy.rs)
@@ -245,24 +333,28 @@ let elapsed = start_time.elapsed();
 Inserted 50,000 tuples in 1.65 seconds (~30,300 inserts/sec)
 
 Operation Metrics (from CHECK_HEAP):
-┌─────────────────────────────────────┐
-│ FSM Operations:                     │
-│ • fsm_search_avail:    50,733       │
-│ • fsm_search_tree:    148,977       │
-│ • fsm_read_page:      350,856       │
-│ • fsm_write_page:     151,146       │
-│ • fsm_serialize_page: 151,154       │
-│ • fsm_deserialize:    350,850       │
-│ • fsm_set_avail:       50,382       │
-│                                     │
-│ Heap Operations:                    │
-│ • insert_tuple:        50,018       │
-│ • get_tuple:               0        │
-│ • allocate_page:         358        │
-│ • write_page:          50,017       │
-│ • read_page:           50,017       │
-│ • page_free_space:         0        │
-└─────────────────────────────────────┘
+
+╔══════════════════════════════════════════════════════════════╗
+║                    OPERATION METRICS                         ║
+╠══════════════════════════════════════════════════════════════╣
+║ FSM Operations:                                              ║
+║  - fsm_search_avail:         5026 calls                      ║
+║  - fsm_search_tree:          5026 calls                      ║
+║  - fsm_read_page:            5052 calls                      ║
+║  - fsm_write_page:           3450 calls                      ║
+║  - fsm_serialize_page:       3450 calls                      ║
+║  - fsm_deserialize_page:     5052 calls                      ║
+║  - fsm_set_avail:            5013 calls                      ║
+║  - fsm_vacuum_update:           0 calls                      ║
+╠══════════════════════════════════════════════════════════════╣
+║ Heap Operations:                                             ║
+║  - insert_tuple:             5000 calls                      ║
+║  - get_tuple:                   0 calls                      ║
+║  - allocate_page:              13 calls                      ║
+║  - write_page:               5000 calls                      ║
+║  - read_page:                5000 calls                      ║
+║  - page_free_space:             0 calls                      ║
+╚══════════════════════════════════════════════════════════════╝
 ```
 
 **Verifies:**
@@ -338,7 +430,7 @@ hm.delete_tuple(page_id, slot_id_1)  // DELETE on Heap
 ```
 
 #### 2.3 `test_allocation_accuracy`
-**Purpose:** Verify FSM never allocates overlapping pages to different tuples.
+**Purpose:** Verify FSM never allocates overlapping pages to very large sized tuples.
 
 **Implementation:**
 ```rust
@@ -847,43 +939,13 @@ cargo test --release
 
 ```
 FSM Tests:        6 tests ✓ (500% coverage)
-Heap Tests:      10 tests ✓ (360% coverage)
+Heap Tests:      12 tests ✓ (360% coverage)
 Integration:      2 tests ✓ (200% coverage)
 Catalog:          6 tests ✓ (150% coverage)
 Page-Level:       8 tests ✓ (180% coverage)
 ───────────────────────────
 Total:           50 tests ✓ (100% Pass)
 ```
-
-### Integration Proof
-
-**FSM & Heap Coupling Verified:**
-```
-test_update_delete_fsm_deallocation ... ok
-├─ Heap: delete_tuple(page_id, slot_id)
-├─ Automatic: fsm_set_avail(page_id, reclaimed_bytes)
-├─ FSM Tree: Updates all 3 levels
-└─ Next Insert: Reuses freed space ✓
-```
-
-**Isolation Proof:**
-```
-test_multiple_tables_isolation ... ok
-├─ Table 1: 2 tuples (isolated)
-├─ Table 2: 2 tuples (isolated)
-├─ Interleaved insertions (4 total)
-└─ No cross-table corruption ✓
-```
-
-**Multi-Column Proof:**
-```
-test_multiple_columns_insertion ... ok
-├─ Schema: 5 columns (INT, INT, TEXT, INT, TEXT)
-├─ Tuple 1: (1, 10, "Alice", 123456789, "Pizza")
-├─ Tuple 2: (2, 20, "Bob", 987654321, "Burger")
-└─ Both retrieved correctly ✓
-```
-
 ---
 
 ## Test Execution Examples
@@ -944,76 +1006,35 @@ Inserted 50000 tuples in 1.652962318s
 ║  - page_free_space:             0 calls                      ║
 ╚══════════════════════════════════════════════════════════════╝
 
+
+reduced this to 
+Starting 1. Large Insertions Test (50000 records)...
+Inserted 50000 tuples in 757.581488ms
+
+╔══════════════════════════════════════════════════════════════╗
+║                    OPERATION METRICS                         ║
+╠══════════════════════════════════════════════════════════════╣
+║ FSM Operations:                                              ║
+║  - fsm_search_avail:        50708 calls                      ║
+║  - fsm_search_tree:         50708 calls                      ║
+║  - fsm_read_page:           51417 calls                      ║
+║  - fsm_write_page:          50355 calls                      ║
+║  - fsm_serialize_page:      50355 calls                      ║
+║  - fsm_deserialize_page:    51416 calls                      ║
+║  - fsm_set_avail:           50355 calls                      ║
+║  - fsm_vacuum_update:           0 calls                      ║
+╠══════════════════════════════════════════════════════════════╣
+║ Heap Operations:                                             ║
+║  - insert_tuple:            50000 calls                      ║
+║  - get_tuple:                   0 calls                      ║
+║  - allocate_page:             354 calls                      ║
+║  - write_page:              50000 calls                      ║
+║  - read_page:               50000 calls                      ║
+║  - page_free_space:             0 calls                      ║
+╚══════════════════════════════════════════════════════════════╝
+
 ✓ Large insertion test passed. Time mapped.
 test test_large_insertions ... ok
-```
-
-### Example 3: Running All Tests with Summary
-
-```bash
-$ cargo test 2>&1 | tail -20
-```
-
-**Output:**
-```
-running 1 test
-test test_write_page ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-   Doc-tests storage_manager
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-========== Test Summary ==========
-Total:  50 tests
-Passed: 50 ✓
-Failed: 0
-Time:   1.68s
-Success Rate: 100%
-```
-
----
-
-## Troubleshooting Tests
-
-### Issue: "TEST_MUTEX lock contention" / Test hangs
-
-**Cause:** Two tests trying to access catalog.json simultaneously.
-
-**Solution:**
-```bash
-# Run tests sequentially (no parallel)
-cargo test -- --test-threads=1
-```
-
-### Issue: "Failed to open file: Permission denied"
-
-**Cause:** Leftover test files from previous run.
-
-**Solution:**
-```bash
-# Clean up database directory
-rm -rf database/base/test_*
-rm -f database/global/catalog.json
-
-# Re-run tests
-cargo test
-```
-
-### Issue: "Assertion failed: page_count should be > 1"
-
-**Cause:** FSM not allocating multiple pages correctly.
-
-**Solution:**
-```bash
-# Check FSM logs
-RUST_LOG=storage_manager::backend::fsm=debug cargo test test_large_insertions -- --nocapture
-
-# Verify page allocation in output
-# Should see: "Allocating page 2", "Allocating page 3", etc.
 ```
 
 ---
@@ -1033,13 +1054,19 @@ RUST_LOG=storage_manager::backend::fsm=debug cargo test test_large_insertions --
 
 RookDB's comprehensive test suite validates:
 
-✓ **FSM Correctness** - 3-level tree structure, O(log N) search, proper page allocation
-✓ **Heap Integrity** - Slotted page layout, tuple storage, multi-page support
-✓ **Integration** - FSM/Heap coupling, delete_tuple → FSM updates automatic
-✓ **Isolation** - Multi-table independence, no cross-table corruption
-✓ **Performance** - 50K insertions in 1.65s, 30.3K ops/sec
-✓ **Durability** - Catalog persistence, FSM recovery from heap
-✓ **Safety** - Boundary violation handling, error recovery
+**FSM Correctness** - 3-level tree structure, O(log N) search, proper page allocation
+
+**Heap Integrity** - Slotted page layout, tuple storage, multi-page support
+
+**Integration** - FSM/Heap coupling, delete_tuple → FSM updates automatic
+
+**Isolation** - Multi-table independence, no cross-table corruption
+
+**Performance** - 50K insertions in 1.65s, 30.3K ops/sec
+
+**Durability** - Catalog persistence, FSM recovery from heap
+
+**Safety** - Boundary violation handling, error recovery
 
 **Result: 53/53 tests passing (100% success rate), comprehensive coverage of all systems.**
 
@@ -1085,9 +1112,3 @@ Unit tests live directly alongside the database source code and test specific, i
    - **Checks**: If disk corruption makes a memory pointer point to a negative number or a location outside the page, the code aggressively throws a safe Error rather than causing a fatal system crash or "kernel panic".
 2. **Preventing Array Out-of-Bounds (`test_get_slot_entry_detects_out_of_bounds_tuple`)**
    - **Checks**: If the user asks for "Row 99" but only 10 rows exist, the system safely rejects the request instead of reading random garbage memory.
-
-### B. Data Type Validation (`src/backend/types_validator.rs`)
-1. **Case-Insensitive Types**
-   - **Checks**: Ensures `INT`, `int`, and `InT` are all recognized correctly as the integer data type by the database parser.
-2. **Unsupported Types**
-   - **Checks**: Ensures types the database doesn't support yet (like `FLOAT` or `VARCHAR`) are caught early and gracefully rejected with a helpful message to the user.

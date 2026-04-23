@@ -2,7 +2,7 @@
 
 **Project:** 6. Free Space Manager and Heap File Manager
 
-**Date:** 19th April, 2026
+**Date:** 23rd April, 2026
 
 ---
 
@@ -27,7 +27,7 @@ The FSM (Free Space Manager) sidecar file is a dedicated companion file to the h
 **Why It Exists:**
 
 1. **No Heap Page Intrusion:** Adding metadata to heap pages would consume precious tuple storage space. The sidecar keeps heap pages pristine.
-2. **Efficient Searches:** The binary max-tree enables O(\log N) for internal and O(N) for leaves page searches by free-space category, replacing a naive O(N) linear scan of all pages.
+2. **Efficient Searches:** The binary max-tree enables O(\log N) searches by free-space category, replacing a naive O(N) linear scan of all pages.
 3. **Rebuild on Crash:** The FSM file is treated as a hint-like structure. If corrupted or deleted, it can be rebuilt from the heap file without data loss or WAL complexity.
 4. **Scalability:** A single byte per heap page (free-space category 0–255) means 1 MB of FSM overhead covers an 8 GB table.
 
@@ -123,44 +123,7 @@ FindPage(min_category):
     5. If no candidate found: extend relation, call fsm_set_avail for new page, return it.
 ```
 
-**Example (single-level tree with 4 leaf slots):**
 
-```
-    4             ← root (max of all children)
-  4     2
- 3 4   0 2       ← leaf nodes (one per heap page)
-```
-
-- Need: category ≥ 2
-- Root = 4 ≥ 2 → traverse sequentially
-- Descend right → pick leaf with value 2
-- **Result:** heap page mapped to that leaf slot is returned
-
-**Why Appropriate:**
-
-- **Scalability:** O(\log N) for internal and O(N) for leaves search; O(1) rejection via root when table is full
-
-- **Memory efficiency:** 1 byte/page overhead (e.g., 1 MB FSM covers an 8 GB table)
-- **Self-correcting:** corrupted parent nodes are rebuilt in-place during traversal; no WAL logging required
-
-#### FSM Fork File
-
-**Mechanism:** A dedicated sidecar file `<table>.fsm` holds all FSM pages as a flat sequence. The 3-level tree maps logical `(level, page_no, slot)` addresses to physical block numbers:
-
-```
-Physical block = page_no + (page_no / F) + (page_no / F²) + 1
-  where F = FSM_SLOTS_PER_PAGE
-
-Layout (simplified with F=4):
-  Block 0:   Level-2 root FSM page
-  Block 1:   Level-1 FSM page 0     (covers heap pages 0-15)
-    Block 2:   Level-0 FSM page 0   (covers heap pages 0-3)
-    Block 3:   Level-0 FSM page 1   (covers heap pages 4-7)
-    Block 4:   Level-0 FSM page 2   (covers heap pages 8-11)
-    Block 5:   Level-0 FSM page 3   (covers heap pages 12-15)
-  Block 6:   Level-1 FSM page 1     (covers heap pages 16-31)
-    ...
-```
 
 **FSM page constants (8 KB page):**
 
@@ -172,7 +135,6 @@ Layout (simplified with F=4):
 
 - No intrusive overhead written to heap pages
 - Treated as a hint: can be rebuilt from the heap after a crash without WAL
-- Constant-height 3-level tree covers up to 4000² ≈ 4 M heap pages (~500 TB at 8 KB/page)
 
 #### Slotted Page Layout (Heap Pages 1+)
 
@@ -180,29 +142,6 @@ Layout (simplified with F=4):
 
 The fundamental tuple organization remains unchanged from the base system. Each heap page (except Page 0) follows the slotted page format:
 
-```
-Page Layout (8 KB page):
-
-┌─────────────────────────┐
-│ Header (8 bytes)        │  Offset 0-7
-│  - lower (u32): points  │  Next free slot in directory
-│  - upper (u32): points  │  Start of tuple data region
-├─────────────────────────┤
-│                         │
-│ Slot Directory          │  Growing downward from offset 8
-│ (4 bytes per slot)      │  Each slot: (offset, length)
-│                         │
-├────────────────────────ー┤
-│                         │
-│ Free Space              │  Contiguous gap between
-│ (fragmented or not)     │  directory and tuple data
-│                         │
-├─────────────────────────┤
-│ Tuple Data              │  Growing upward from PAGE_SIZE
-│ (variable-length)       │
-│                         │
-└─────────────────────────┘
-```
 
 **Key Points:**
 
@@ -223,7 +162,7 @@ Page Layout (8 KB page):
 - **Result:** If FSM routes an insert to a fragmented page, insertion fails and FSM updates the page's true contiguous space
 - **Tradeoff:** Wasted space from fragmentation until compaction, but fast inserts with guaranteed success
 
-**Future Phase (Project 10 - Total Space with On-Fly Compaction):**
+**Future Phase (Total Space with On-Fly Compaction):**
 - **What FSM Will Track:** Total free space (contiguous + fragmented holes)
 - **Why:** Heap Manager can quickly compact pages during INSERT (Postgres-style)
 - **Result:** If insert lands on fragmented page, heap manager shifts memory to merge holes, then inserts
@@ -235,15 +174,6 @@ The slotted page format is already tuple-efficient. The FSM layer operates *abov
 
 ---
 
-#### Integration
-
-**Buffer/Disk Manager:** Use existing `read_page`/`write_page`, add `update_header_page` helper for header persistence
-
-**Page Structure:** No changes; use existing `page_free_space()` calculation and slotted page layout
-
-**Catalog:** No changes for MVP (Project 6 scope)
-
----
 
 ## 1.3 Complexity Analysis: FSM Tree Operations 
 
@@ -1383,5 +1313,3 @@ This design implements RookDB's Free Space Manager and Heap File Manager (Projec
 4. **Persistence**: FSM fork treated as a hint - rebuilt from heap on crash without WAL; header survives crashes
 5. **Testing**: 24 comprehensive tests covering tree invariants, search, insertion and persistence
 
-### Future Work: fp_next_slot
-A per-page search hint (`fp_next_slot`) could be added to the FSM in the future to spread concurrent inserting backends across different available heap pages, reducing page-level lock contention.
