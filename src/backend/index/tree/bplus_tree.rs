@@ -397,7 +397,7 @@ impl BPlusTree {
     fn parse_node_page(page: &[u8]) -> io::Result<DiskBPlusNode> {
         if page.len() != PAGE_SIZE {
             return Err(Self::io_invalid_data("invalid B+Tree node page length"));
-        }
+        }   
 
         let is_leaf = page[0] != 0;
         let dead = page[1] != 0;

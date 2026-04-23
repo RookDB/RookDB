@@ -1,0 +1,46 @@
+{
+  "input_csv": "/home/sujayb/Desktop/Sem 6/Data_Systems/Project/RookDB/Benchmarking/data/synthetic_orders.csv",
+  "total_rows": 50000,
+  "primary_key_unique_count": 50000,
+  "algorithms": [
+    {
+      "algorithm": "B-Tree",
+      "insert_latency": {
+        "min_us": 0.04,
+        "max_us": 49.46,
+        "avg_us": 0.18770181999998714,
+        "p50_us": 0.07,
+        "p95_us": 0.12,
+        "p99_us": 6.42
+      },
+      "search_latency": {
+        "min_us": 0.049999999999999996,
+        "max_us": 18.930999999999997,
+        "avg_us": 0.0940740199999839,
+        "p50_us": 0.071,
+        "p95_us": 0.16,
+        "p99_us": 0.48100000000000004
+      },
+      "index_file": {
+        "path": "/home/sujayb/Desktop/Sem 6/Data_Systems/Project/RookDB/Benchmarking/results/index_files/btree_tuning/btree_d128_p4096.idx",
+        "page_size_bytes": 4096,
+        "page_count": 394,
+        "file_size_bytes": 1613824
+      },
+      "total_keys": 50000,
+      "missing_keys": 0,
+      "duplicate_hits": 0,
+      "wrong_record_ids": 0,
+      "unexpected_keys": 0,
+      "all_entries_mismatches": 0,
+      "range_scan_mismatches": 0,
+      "miss_checks_total": 1000,
+      "miss_checks_failed": 0,
+      "structure_valid": true,
+      "all_entries_ok": true,
+      "range_scan_ok": true,
+      "miss_checks_ok": true,
+      "correctness_ok": true
+    }
+  ]
+}

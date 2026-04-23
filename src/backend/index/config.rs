@@ -20,4 +20,4 @@ pub const STATIC_HASH_NUM_BUCKETS: usize = 64;
 pub const EXTENDIBLE_HASH_BUCKET_CAPACITY: usize = 4;
 pub const LINEAR_HASH_INITIAL_BUCKETS: usize = 4;
 pub const LINEAR_HASH_LOAD_FACTOR_THRESHOLD: f64 = 0.75;
-pub const BTREE_MIN_DEGREE: usize = 4;
+pub const BTREE_MIN_DEGREE: usize = 256;

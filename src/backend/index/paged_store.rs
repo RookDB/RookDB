@@ -4,18 +4,19 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use crate::index::index_trait::{IndexKey, RecordId};
 use crate::page::PAGE_SIZE;
 
+const DEFAULT_INDEX_PAGE_SIZE: usize = PAGE_SIZE;
 const INDEX_MAGIC: [u8; 8] = *b"RDBIDXV1";
 const INDEX_FORMAT_VERSION_V1: u16 = 1;
 const INDEX_FORMAT_VERSION_V2: u16 = 2;
 const INDEX_HEADER_SIZE: usize = 64;
 
 const DATA_PAGE_HEADER_SIZE: usize = 4;
-const DATA_PAGE_PAYLOAD_CAPACITY: usize = PAGE_SIZE - DATA_PAGE_HEADER_SIZE;
+const DATA_PAGE_PAYLOAD_CAPACITY: usize = DEFAULT_INDEX_PAGE_SIZE - DATA_PAGE_HEADER_SIZE;
 
 const PARTITION_COUNT: usize = 256;
 const DIRECTORY_ENTRY_SIZE: usize = 16;
 const DIRECTORY_PAGE_HEADER_SIZE: usize = 4;
-const DIRECTORY_PAGE_PAYLOAD_CAPACITY: usize = PAGE_SIZE - DIRECTORY_PAGE_HEADER_SIZE;
+const DIRECTORY_PAGE_PAYLOAD_CAPACITY: usize = DEFAULT_INDEX_PAGE_SIZE - DIRECTORY_PAGE_HEADER_SIZE;
 
 /// Keep index files bounded to avoid accidental unbounded disk growth.
 ///
@@ -25,6 +26,51 @@ pub const MAX_INDEX_FILE_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 
 fn io_invalid_data(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+fn validate_index_page_size(page_size: usize) -> io::Result<()> {
+    if page_size < INDEX_HEADER_SIZE {
+        return Err(io_invalid_data(format!(
+            "index page size {} is smaller than header size {}",
+            page_size, INDEX_HEADER_SIZE
+        )));
+    }
+
+    if page_size <= DATA_PAGE_HEADER_SIZE {
+        return Err(io_invalid_data(format!(
+            "index page size {} must be larger than data page header size {}",
+            page_size, DATA_PAGE_HEADER_SIZE
+        )));
+    }
+
+    if page_size <= DIRECTORY_PAGE_HEADER_SIZE {
+        return Err(io_invalid_data(format!(
+            "index page size {} must be larger than directory page header size {}",
+            page_size, DIRECTORY_PAGE_HEADER_SIZE
+        )));
+    }
+
+    let directory_payload = page_size - DIRECTORY_PAGE_HEADER_SIZE;
+    if directory_payload < DIRECTORY_ENTRY_SIZE {
+        return Err(io_invalid_data(format!(
+            "index page size {} is too small to fit a directory entry",
+            page_size
+        )));
+    }
+
+    Ok(())
+}
+
+fn data_page_payload_capacity(page_size: usize) -> io::Result<usize> {
+    page_size
+        .checked_sub(DATA_PAGE_HEADER_SIZE)
+        .ok_or_else(|| io_invalid_data("index page size is too small for data page header"))
+}
+
+fn directory_page_payload_capacity(page_size: usize) -> io::Result<usize> {
+    page_size.checked_sub(DIRECTORY_PAGE_HEADER_SIZE).ok_or_else(|| {
+        io_invalid_data("index page size is too small for directory page header")
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -43,12 +89,18 @@ struct V2Header {
     data_pages: u64,
 }
 
-fn directory_pages_for_partitions(partitions: usize) -> io::Result<usize> {
+fn directory_pages_for_partitions(partitions: usize, page_size: usize) -> io::Result<usize> {
     if partitions == 0 {
         return Err(io_invalid_data("partition count must be > 0"));
     }
 
-    let pages = partitions.div_ceil(DIRECTORY_PAGE_PAYLOAD_CAPACITY / DIRECTORY_ENTRY_SIZE);
+    let payload_capacity = directory_page_payload_capacity(page_size)?;
+    let entries_per_page = payload_capacity / DIRECTORY_ENTRY_SIZE;
+    if entries_per_page == 0 {
+        return Err(io_invalid_data("directory page cannot fit any partition entries"));
+    }
+
+    let pages = partitions.div_ceil(entries_per_page);
     if pages == 0 {
         return Err(io_invalid_data("computed directory page count is zero"));
     }
@@ -350,15 +402,18 @@ fn write_directory_pages(
     file: &mut File,
     metas: &[PartitionMeta],
     directory_pages: usize,
+    page_size: usize,
 ) -> io::Result<()> {
-    file.seek(SeekFrom::Start(PAGE_SIZE as u64))?;
+    let payload_capacity = directory_page_payload_capacity(page_size)?;
+
+    file.seek(SeekFrom::Start(page_size as u64))?;
 
     let mut idx = 0usize;
     for _ in 0..directory_pages {
-        let mut page = vec![0u8; PAGE_SIZE];
+        let mut page = vec![0u8; page_size];
         let mut payload_cursor = 0usize;
 
-        while idx < metas.len() && payload_cursor + DIRECTORY_ENTRY_SIZE <= DIRECTORY_PAGE_PAYLOAD_CAPACITY {
+        while idx < metas.len() && payload_cursor + DIRECTORY_ENTRY_SIZE <= payload_capacity {
             let m = metas[idx];
             let base = DIRECTORY_PAGE_HEADER_SIZE + payload_cursor;
             page[base..base + 4].copy_from_slice(&m.start_page.to_le_bytes());
@@ -386,17 +441,22 @@ fn write_directory_pages(
 struct DataPageAppender {
     file: File,
     page: Vec<u8>,
+    page_size: usize,
+    data_page_payload_capacity: usize,
     page_used: usize,
     next_page_no: u32,
     data_pages_written: u64,
 }
 
 impl DataPageAppender {
-    fn new(mut file: File, start_page_no: u32) -> io::Result<Self> {
-        file.seek(SeekFrom::Start(start_page_no as u64 * PAGE_SIZE as u64))?;
+    fn new(mut file: File, start_page_no: u32, page_size: usize) -> io::Result<Self> {
+        let payload_capacity = data_page_payload_capacity(page_size)?;
+        file.seek(SeekFrom::Start(start_page_no as u64 * page_size as u64))?;
         Ok(Self {
             file,
-            page: vec![0u8; PAGE_SIZE],
+            page: vec![0u8; page_size],
+            page_size,
+            data_page_payload_capacity: payload_capacity,
             page_used: 0,
             next_page_no: start_page_no,
             data_pages_written: 0,
@@ -408,7 +468,7 @@ impl DataPageAppender {
             return Ok(());
         }
 
-        let size_after_write = (self.next_page_no as u64 + 1) * PAGE_SIZE as u64;
+        let size_after_write = (self.next_page_no as u64 + 1) * self.page_size as u64;
         if size_after_write > MAX_INDEX_FILE_SIZE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
@@ -441,18 +501,17 @@ impl DataPageAppender {
         let payload_len = payload.len();
         let encoded_len = 4 + payload_len;
 
-        if encoded_len > DATA_PAGE_PAYLOAD_CAPACITY {
+        if encoded_len > self.data_page_payload_capacity {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "single index entry too large ({} bytes), max per-entry is {} bytes",
-                    encoded_len,
-                    DATA_PAGE_PAYLOAD_CAPACITY
+                    encoded_len, self.data_page_payload_capacity
                 ),
             ));
         }
 
-        if self.page_used + encoded_len > DATA_PAGE_PAYLOAD_CAPACITY {
+        if self.page_used + encoded_len > self.data_page_payload_capacity {
             self.flush_page_if_non_empty()?;
         }
 
@@ -660,16 +719,20 @@ fn search_key_v2(file: &mut File, header: &V2Header, key: &IndexKey) -> io::Resu
     Ok(out)
 }
 
-pub fn save_entries<I>(path: &str, entries: I) -> io::Result<()>
+fn save_entries_internal<I>(path: &str, entries: I, page_size: usize) -> io::Result<()>
 where
     I: IntoIterator<Item = (IndexKey, RecordId)>,
 {
-    let directory_pages = directory_pages_for_partitions(PARTITION_COUNT)?;
+    validate_index_page_size(page_size)?;
+
+    let directory_pages = directory_pages_for_partitions(PARTITION_COUNT, page_size)?;
     let reserved_pages = 1usize
         .checked_add(directory_pages)
         .ok_or_else(|| io_invalid_data("reserved page count overflow"))?;
 
-    let reserved_size = reserved_pages as u64 * PAGE_SIZE as u64;
+    let reserved_size = (reserved_pages as u64)
+        .checked_mul(page_size as u64)
+        .ok_or_else(|| io_invalid_data("reserved index size overflow"))?;
     if reserved_size > MAX_INDEX_FILE_SIZE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::OutOfMemory,
@@ -699,14 +762,14 @@ where
         .truncate(true)
         .open(path)?;
 
-    let zero_page = vec![0u8; PAGE_SIZE];
+    let zero_page = vec![0u8; page_size];
     for _ in 0..reserved_pages {
         file.write_all(&zero_page)?;
     }
 
     let data_start_page = u32::try_from(reserved_pages)
         .map_err(|_| io_invalid_data("data_start_page conversion overflow"))?;
-    let mut appender = DataPageAppender::new(file, data_start_page)?;
+    let mut appender = DataPageAppender::new(file, data_start_page, page_size)?;
 
     let mut metas = Vec::with_capacity(PARTITION_COUNT);
     for part_entries in &partitioned {
@@ -716,13 +779,17 @@ where
     let data_pages = appender.data_pages_written();
     let mut file = appender.into_file();
 
-    write_directory_pages(&mut file, &metas, directory_pages)?;
+    write_directory_pages(&mut file, &metas, directory_pages, page_size)?;
 
-    let mut header = vec![0u8; PAGE_SIZE];
+    let mut header = vec![0u8; page_size];
     header[0..8].copy_from_slice(&INDEX_MAGIC);
     header[8..10].copy_from_slice(&INDEX_FORMAT_VERSION_V2.to_le_bytes());
     header[10..12].copy_from_slice(&(INDEX_HEADER_SIZE as u16).to_le_bytes());
-    header[12..16].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
+    header[12..16].copy_from_slice(
+        &u32::try_from(page_size)
+            .map_err(|_| io_invalid_data("index page size conversion overflow"))?
+            .to_le_bytes(),
+    );
     header[16..24].copy_from_slice(&entry_count.to_le_bytes());
     header[24..28].copy_from_slice(
         &u32::try_from(PARTITION_COUNT)
@@ -743,6 +810,24 @@ where
     file.flush()?;
 
     Ok(())
+}
+
+pub fn save_entries<I>(path: &str, entries: I) -> io::Result<()>
+where
+    I: IntoIterator<Item = (IndexKey, RecordId)>,
+{
+    save_entries_internal(path, entries, DEFAULT_INDEX_PAGE_SIZE)
+}
+
+/// Persist entries using a caller-specified page size.
+///
+/// This is intended for offline benchmarking and tuning. Runtime index loading
+/// currently expects the default page size used by `save_entries`.
+pub fn save_entries_with_page_size<I>(path: &str, entries: I, page_size: usize) -> io::Result<()>
+where
+    I: IntoIterator<Item = (IndexKey, RecordId)>,
+{
+    save_entries_internal(path, entries, page_size)
 }
 
 pub fn load_entries_stream<F>(path: &str, mut on_entry: F) -> io::Result<u64>

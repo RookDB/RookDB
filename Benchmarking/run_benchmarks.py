@@ -88,6 +88,36 @@ def parse_args() -> argparse.Namespace:
         default="Benchmarking/results/charts",
         help="directory for matplotlib chart outputs",
     )
+    parser.add_argument(
+        "--btree-page-sizes",
+        default="4096,8192,16384",
+        help="comma-separated index page sizes (bytes) for B-tree tuning sweep",
+    )
+    parser.add_argument(
+        "--btree-degrees",
+        default="64,128,256,512",
+        help="comma-separated B-tree minimum degree values for tuning sweep",
+    )
+    parser.add_argument(
+        "--btree-tuning-csv",
+        default="Benchmarking/results/btree_hyperparameter_tuning.csv",
+        help="B-tree hyperparameter tuning CSV output path",
+    )
+    parser.add_argument(
+        "--btree-tuning-json",
+        default="Benchmarking/results/btree_hyperparameter_tuning.json",
+        help="B-tree hyperparameter tuning JSON output path",
+    )
+    parser.add_argument(
+        "--btree-tuning-index-dir",
+        default="Benchmarking/results/index_files/btree_tuning",
+        help="directory for persisted B-tree index files generated during tuning",
+    )
+    parser.add_argument(
+        "--btree-tuning-runs-dir",
+        default="Benchmarking/results/btree_tuning_runs",
+        help="directory for per-combination RookDB JSON outputs during tuning",
+    )
     return parser.parse_args()
 
 
@@ -304,7 +334,7 @@ def duckdb_baseline(csv_path: Path, db_path: Path) -> Dict:
         "miss_checks_ok": miss_ok,
     }
 
-def run_rookdb_benchmark(csv_path: Path, output_json: Path) -> Dict:
+def run_rookdb_benchmark(csv_path: Path, output_json: Path, extra_args: List[str] | None = None) -> Dict:
     cmd = [
         "cargo",
         "run",
@@ -317,6 +347,8 @@ def run_rookdb_benchmark(csv_path: Path, output_json: Path) -> Dict:
         "--output",
         str(output_json),
     ]
+    if extra_args:
+        cmd.extend(extra_args)
     subprocess.run(cmd, check=True)
     return json.loads(output_json.read_text(encoding="utf-8"))
 
@@ -366,6 +398,21 @@ def parse_scales(scales_raw: str) -> List[int]:
         out.append(int(tok))
     if not out:
         raise ValueError("no valid scales provided")
+    return sorted(set(out))
+
+
+def parse_positive_int_list(raw: str, label: str) -> List[int]:
+    out: List[int] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        value = int(tok)
+        if value <= 0:
+            raise ValueError(f"{label} must contain positive integers; got {value}")
+        out.append(value)
+    if not out:
+        raise ValueError(f"no valid values provided for {label}")
     return sorted(set(out))
 
 
@@ -562,6 +609,134 @@ def write_scalability_csv(path: Path, scale_rows: List[List[str]]) -> None:
             writer.writerow(r)
 
 
+def run_btree_hyperparameter_tuning(
+    csv_path: Path,
+    runs_dir: Path,
+    index_dir: Path,
+    page_sizes: List[int],
+    degrees: List[int],
+) -> List[Dict]:
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    index_dir.mkdir(parents=True, exist_ok=True)
+
+    rows: List[Dict] = []
+    for page_size in page_sizes:
+        for degree in degrees:
+            out_json = runs_dir / f"btree_degree_{degree}_page_{page_size}.json"
+            rookdb_info = run_rookdb_benchmark(
+                csv_path,
+                out_json,
+                extra_args=[
+                    "--algorithms",
+                    "btree",
+                    "--btree-min-degree",
+                    str(degree),
+                    "--index-page-size",
+                    str(page_size),
+                    "--persist-index-dir",
+                    str(index_dir),
+                ],
+            )
+
+            btree_algo = next(
+                (a for a in rookdb_info.get("algorithms", []) if a.get("algorithm") == "B-Tree"),
+                None,
+            )
+            if btree_algo is None:
+                raise RuntimeError(
+                    f"B-tree tuning run did not return B-Tree metrics for degree={degree}, page_size={page_size}"
+                )
+
+            index_file = btree_algo.get("index_file") or {}
+            rows.append(
+                {
+                    "btree_min_degree": degree,
+                    "index_page_size_bytes": page_size,
+                    "index_file_pages": int(index_file.get("page_count", 0)),
+                    "index_file_size_bytes": int(index_file.get("file_size_bytes", 0)),
+                    "search_p95_us": float(btree_algo["search_latency"]["p95_us"]),
+                    "search_avg_us": float(btree_algo["search_latency"]["avg_us"]),
+                    "insert_p95_us": float(btree_algo["insert_latency"]["p95_us"]),
+                    "insert_avg_us": float(btree_algo["insert_latency"]["avg_us"]),
+                    "correctness_ok": bool(btree_algo.get("correctness_ok")),
+                    "benchmark_json": str(out_json),
+                    "index_file_path": str(index_file.get("path", "")),
+                }
+            )
+
+    return rows
+
+
+def write_btree_tuning_csv(path: Path, rows: List[Dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "btree_min_degree",
+                "index_page_size_bytes",
+                "index_file_pages",
+                "index_file_size_bytes",
+                "search_p95_us",
+                "search_avg_us",
+                "insert_p95_us",
+                "insert_avg_us",
+                "correctness_ok",
+                "benchmark_json",
+                "index_file_path",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    str(row["btree_min_degree"]),
+                    str(row["index_page_size_bytes"]),
+                    str(row["index_file_pages"]),
+                    str(row["index_file_size_bytes"]),
+                    f"{float(row['search_p95_us']):.6f}",
+                    f"{float(row['search_avg_us']):.6f}",
+                    f"{float(row['insert_p95_us']):.6f}",
+                    f"{float(row['insert_avg_us']):.6f}",
+                    str(bool(row["correctness_ok"])).lower(),
+                    row["benchmark_json"],
+                    row["index_file_path"],
+                ]
+            )
+
+
+def write_btree_tuning_json(path: Path, rows: List[Dict]) -> Dict:
+    valid_rows = [r for r in rows if bool(r.get("correctness_ok"))]
+    candidates = valid_rows if valid_rows else rows
+
+    summary: Dict = {
+        "total_combinations": len(rows),
+        "valid_combinations": len(valid_rows),
+        "rows": rows,
+    }
+
+    if candidates:
+        summary["best_by_page_count"] = min(
+            candidates,
+            key=lambda r: (
+                int(r["index_file_pages"]),
+                int(r["index_file_size_bytes"]),
+                float(r["search_p95_us"]),
+            ),
+        )
+        summary["best_by_file_size"] = min(
+            candidates,
+            key=lambda r: (
+                int(r["index_file_size_bytes"]),
+                int(r["index_file_pages"]),
+                float(r["search_p95_us"]),
+            ),
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
 def write_report(
     path: Path,
     rows: int,
@@ -570,6 +745,9 @@ def write_report(
     duckdb_info: Dict,
     dict_info: Dict,
     verification: Dict,
+    btree_tuning_summary: Dict | None = None,
+    btree_tuning_csv: str | None = None,
+    btree_tuning_json: str | None = None,
 ) -> None:
     lines = [
         "# RookDB Primary-Key Benchmark (SQLite, DuckDB & Dict Baselines)",
@@ -609,6 +787,35 @@ def write_report(
         f"- Dict miss checks: {'PASS' if verification['dict_miss_checks_ok'] else 'FAIL'}",
         "- RookDB algorithms tested on primary key: 9",
         "",
+    ]
+
+    if btree_tuning_summary is not None:
+        best_pages = btree_tuning_summary.get("best_by_page_count")
+        best_size = btree_tuning_summary.get("best_by_file_size")
+        lines.extend(
+            [
+                "## B-Tree Hyperparameter Tuning (Degree x Page Size)",
+                f"- Total combinations evaluated: {btree_tuning_summary.get('total_combinations', 0)}",
+                f"- Correctness-valid combinations: {btree_tuning_summary.get('valid_combinations', 0)}",
+            ]
+        )
+        if best_pages:
+            lines.extend(
+                [
+                    "- Best by index page count:",
+                    f"  degree={best_pages['btree_min_degree']}, page_size={best_pages['index_page_size_bytes']} bytes, pages={best_pages['index_file_pages']}, size={best_pages['index_file_size_bytes']} bytes",
+                ]
+            )
+        if best_size:
+            lines.extend(
+                [
+                    "- Best by index file size:",
+                    f"  degree={best_size['btree_min_degree']}, page_size={best_size['index_page_size_bytes']} bytes, pages={best_size['index_file_pages']}, size={best_size['index_file_size_bytes']} bytes",
+                ]
+            )
+        lines.append("")
+
+    lines.extend([
         "## Artifacts",
         "- Benchmarking/results/rookdb_primary_key_metrics.json",
         "- Benchmarking/results/latency_comparison.csv",
@@ -621,7 +828,13 @@ def write_report(
         "## Reference Metrics Context",
         "- Latency percentiles (p50/p95/p99) and throughput are standard service-benchmark metrics.",
         "- Reference: Cooper et al., 2010, YCSB (SoCC).",
-    ]
+    ])
+
+    if btree_tuning_csv:
+        lines.insert(lines.index("## Reference Metrics Context"), f"- {btree_tuning_csv}")
+    if btree_tuning_json:
+        lines.insert(lines.index("## Reference Metrics Context"), f"- {btree_tuning_json}")
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -639,8 +852,14 @@ def main() -> int:
     report_md = root / args.report_md
     scalability_csv = root / args.scalability_csv
     charts_dir = root / args.charts_dir
+    btree_tuning_csv = root / args.btree_tuning_csv
+    btree_tuning_json = root / args.btree_tuning_json
+    btree_tuning_index_dir = root / args.btree_tuning_index_dir
+    btree_tuning_runs_dir = root / args.btree_tuning_runs_dir
 
     scales = parse_scales(args.scales)
+    btree_page_sizes = parse_positive_int_list(args.btree_page_sizes, "--btree-page-sizes")
+    btree_degrees = parse_positive_int_list(args.btree_degrees, "--btree-degrees")
 
     generate_synthetic_orders(csv_path, args.rows, args.seed)
     
@@ -734,11 +953,33 @@ def main() -> int:
 
     write_scalability_csv(scalability_csv, scale_rows)
 
+    # B-tree hyperparameter sweep (minimum degree x index page size).
+    tuning_rows = run_btree_hyperparameter_tuning(
+        csv_path=csv_path,
+        runs_dir=btree_tuning_runs_dir,
+        index_dir=btree_tuning_index_dir,
+        page_sizes=btree_page_sizes,
+        degrees=btree_degrees,
+    )
+    write_btree_tuning_csv(btree_tuning_csv, tuning_rows)
+    tuning_summary = write_btree_tuning_json(btree_tuning_json, tuning_rows)
+
     # Charts.
     plot_search_latency_bar(comparison_csv, charts_dir / "search_p95_comparison.png")
     plot_insert_latency_rookdb(comparison_csv, charts_dir / "rookdb_insert_p95.png")
     plot_scalability(scalability_csv, charts_dir / "scalability_search_p95.png")
-    write_report(report_md, args.rows, args.seed, sqlite_info, duckdb_info, dict_info, verification)
+    write_report(
+        report_md,
+        args.rows,
+        args.seed,
+        sqlite_info,
+        duckdb_info,
+        dict_info,
+        verification,
+        btree_tuning_summary=tuning_summary,
+        btree_tuning_csv=args.btree_tuning_csv,
+        btree_tuning_json=args.btree_tuning_json,
+    )
     
     print("Benchmark completed. Report generated at", report_md)
     return 0

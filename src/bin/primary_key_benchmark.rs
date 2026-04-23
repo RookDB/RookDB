@@ -3,10 +3,30 @@ use std::fs;
 use std::io;
 use std::time::Instant;
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Serialize;
 use storage_manager::catalog::types::IndexAlgorithm;
+use storage_manager::index::paged_store;
+use storage_manager::index::tree::BTree;
 use storage_manager::index::{AnyIndex, IndexKey, RecordId};
+use storage_manager::page::PAGE_SIZE;
+
+#[derive(Debug, Clone)]
+struct BenchmarkArgs {
+    input: String,
+    output: String,
+    algorithms: Vec<IndexAlgorithm>,
+    btree_min_degree: Option<usize>,
+    index_page_size: Option<usize>,
+    persist_index_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RunOptions {
+    btree_min_degree: Option<usize>,
+    index_page_size: Option<usize>,
+}
 
 #[derive(Serialize)]
 struct LatencyStats {
@@ -19,10 +39,20 @@ struct LatencyStats {
 }
 
 #[derive(Serialize)]
+struct IndexFileMetrics {
+    path: String,
+    page_size_bytes: u64,
+    page_count: u64,
+    file_size_bytes: u64,
+}
+
+#[derive(Serialize)]
 struct AlgoMetrics {
     algorithm: String,
     insert_latency: LatencyStats,
     search_latency: LatencyStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_file: Option<IndexFileMetrics>,
     total_keys: usize,
     missing_keys: usize,
     duplicate_hits: usize,
@@ -107,8 +137,8 @@ fn read_primary_keys(csv_path: &str) -> io::Result<Vec<i64>> {
     Ok(keys)
 }
 
-fn algorithms() -> [IndexAlgorithm; 9] {
-    [
+fn default_algorithms() -> Vec<IndexAlgorithm> {
+    vec![
         IndexAlgorithm::StaticHash,
         IndexAlgorithm::ChainedHash,
         IndexAlgorithm::ExtendibleHash,
@@ -121,9 +151,48 @@ fn algorithms() -> [IndexAlgorithm; 9] {
     ]
 }
 
-fn parse_args() -> (String, String) {
+fn parse_algorithms(raw: &str) -> io::Result<Vec<IndexAlgorithm>> {
+    let mut out = Vec::new();
+    for token in raw.split(',') {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let algo = IndexAlgorithm::from_str(trimmed).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown algorithm '{}' in --algorithms", trimmed),
+            )
+        })?;
+        out.push(algo);
+    }
+
+    if out.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--algorithms must contain at least one valid algorithm",
+        ));
+    }
+
+    Ok(out)
+}
+
+fn parse_usize_arg(value: &str, flag: &str) -> io::Result<usize> {
+    value.parse::<usize>().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid value for {}: {}", flag, e),
+        )
+    })
+}
+
+fn parse_args() -> io::Result<BenchmarkArgs> {
     let mut input = "Benchmarking/data/synthetic_orders.csv".to_string();
     let mut output = "Benchmarking/results/rookdb_primary_key_metrics.json".to_string();
+    let mut algorithms = default_algorithms();
+    let mut btree_min_degree = None;
+    let mut index_page_size = None;
+    let mut persist_index_dir = None;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -131,22 +200,148 @@ fn parse_args() -> (String, String) {
             "--input" => {
                 if let Some(v) = args.next() {
                     input = v;
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing value for --input",
+                    ));
                 }
             }
             "--output" => {
                 if let Some(v) = args.next() {
                     output = v;
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing value for --output",
+                    ));
+                }
+            }
+            "--algorithms" => {
+                if let Some(v) = args.next() {
+                    algorithms = parse_algorithms(&v)?;
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing value for --algorithms",
+                    ));
+                }
+            }
+            "--btree-min-degree" => {
+                if let Some(v) = args.next() {
+                    let parsed = parse_usize_arg(&v, "--btree-min-degree")?;
+                    if parsed < 2 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--btree-min-degree must be >= 2",
+                        ));
+                    }
+                    btree_min_degree = Some(parsed);
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing value for --btree-min-degree",
+                    ));
+                }
+            }
+            "--index-page-size" => {
+                if let Some(v) = args.next() {
+                    let parsed = parse_usize_arg(&v, "--index-page-size")?;
+                    index_page_size = Some(parsed);
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing value for --index-page-size",
+                    ));
+                }
+            }
+            "--persist-index-dir" => {
+                if let Some(v) = args.next() {
+                    persist_index_dir = Some(v);
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing value for --persist-index-dir",
+                    ));
                 }
             }
             _ => {}
         }
     }
 
-    (input, output)
+    Ok(BenchmarkArgs {
+        input,
+        output,
+        algorithms,
+        btree_min_degree,
+        index_page_size,
+        persist_index_dir,
+    })
 }
 
-fn run_for_algorithm(algo: &IndexAlgorithm, keys: &[i64]) -> io::Result<AlgoMetrics> {
-    let mut idx = AnyIndex::new_empty(algo);
+fn algorithm_slug(algo: &IndexAlgorithm) -> &'static str {
+    match algo {
+        IndexAlgorithm::StaticHash => "static_hash",
+        IndexAlgorithm::ChainedHash => "chained_hash",
+        IndexAlgorithm::ExtendibleHash => "extendible_hash",
+        IndexAlgorithm::LinearHash => "linear_hash",
+        IndexAlgorithm::BTree => "btree",
+        IndexAlgorithm::BPlusTree => "bplus_tree",
+        IndexAlgorithm::RadixTree => "radix_tree",
+        IndexAlgorithm::SkipList => "skip_list",
+        IndexAlgorithm::LsmTree => "lsm_tree",
+    }
+}
+
+fn persist_index_file(
+    idx: &AnyIndex,
+    path: &Path,
+    page_size_override: Option<usize>,
+) -> io::Result<IndexFileMetrics> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let path_str = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "index output path contains non-UTF8 characters",
+        )
+    })?;
+
+    if let Some(page_size) = page_size_override {
+        let entries = idx.all_entries()?;
+        paged_store::save_entries_with_page_size(path_str, entries.into_iter(), page_size)?;
+    } else {
+        idx.save(path_str)?;
+    }
+
+    let file_size_bytes = fs::metadata(path)?.len();
+    let page_size_bytes = page_size_override.unwrap_or(PAGE_SIZE) as u64;
+    let page_count = if page_size_bytes == 0 {
+        0
+    } else {
+        (file_size_bytes + page_size_bytes - 1) / page_size_bytes
+    };
+
+    Ok(IndexFileMetrics {
+        path: path.to_string_lossy().to_string(),
+        page_size_bytes,
+        page_count,
+        file_size_bytes,
+    })
+}
+
+fn run_for_algorithm(
+    algo: &IndexAlgorithm,
+    keys: &[i64],
+    opts: RunOptions,
+    persist_index_path: Option<&Path>,
+) -> io::Result<AlgoMetrics> {
+    let mut idx = match (algo, opts.btree_min_degree) {
+        (IndexAlgorithm::BTree, Some(t)) => AnyIndex::BTree(BTree::new(t)),
+        _ => AnyIndex::new_empty(algo),
+    };
     let mut expected: HashMap<i64, RecordId> = HashMap::with_capacity(keys.len());
 
     let mut insert_lat = Vec::with_capacity(keys.len());
@@ -272,10 +467,17 @@ fn run_for_algorithm(algo: &IndexAlgorithm, keys: &[i64]) -> io::Result<AlgoMetr
         && all_entries_ok
         && range_scan_ok;
 
+    let index_file = if let Some(path) = persist_index_path {
+        Some(persist_index_file(&idx, path, opts.index_page_size)?)
+    } else {
+        None
+    };
+
     Ok(AlgoMetrics {
         algorithm: algo.display_name().to_string(),
         insert_latency: to_stats(&mut insert_lat),
         search_latency: to_stats(&mut search_lat),
+        index_file,
         total_keys: keys.len(),
         missing_keys: missing,
         duplicate_hits,
@@ -294,9 +496,9 @@ fn run_for_algorithm(algo: &IndexAlgorithm, keys: &[i64]) -> io::Result<AlgoMetr
 }
 
 fn main() -> io::Result<()> {
-    let (input, output) = parse_args();
+    let args = parse_args()?;
 
-    let keys = read_primary_keys(&input)?;
+    let keys = read_primary_keys(&args.input)?;
     let unique_count = {
         let mut dedup = keys.clone();
         dedup.sort_unstable();
@@ -305,12 +507,30 @@ fn main() -> io::Result<()> {
     };
 
     let mut rows = Vec::new();
-    for algo in algorithms() {
-        rows.push(run_for_algorithm(&algo, &keys)?);
+    let run_options = RunOptions {
+        btree_min_degree: args.btree_min_degree,
+        index_page_size: args.index_page_size,
+    };
+
+    for algo in &args.algorithms {
+        let persist_path = args.persist_index_dir.as_ref().map(|dir| {
+            Path::new(dir).join(format!(
+                "{}_d{}_p{}.idx",
+                algorithm_slug(algo),
+                run_options.btree_min_degree.unwrap_or(0),
+                run_options.index_page_size.unwrap_or(PAGE_SIZE),
+            ))
+        });
+        rows.push(run_for_algorithm(
+            algo,
+            &keys,
+            run_options,
+            persist_path.as_deref(),
+        )?);
     }
 
     let payload = BenchmarkOutput {
-        input_csv: input,
+        input_csv: args.input,
         total_rows: keys.len(),
         primary_key_unique_count: unique_count,
         algorithms: rows,
@@ -319,11 +539,11 @@ fn main() -> io::Result<()> {
     let out_text = serde_json::to_string_pretty(&payload)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("serialize failed: {e}")))?;
 
-    if let Some(parent) = std::path::Path::new(&output).parent() {
+    if let Some(parent) = std::path::Path::new(&args.output).parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&output, out_text)?;
+    fs::write(&args.output, out_text)?;
 
-    println!("Wrote RookDB primary-key benchmark report to {}", output);
+    println!("Wrote RookDB primary-key benchmark report to {}", args.output);
     Ok(())
 }
