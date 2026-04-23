@@ -56,9 +56,9 @@ pub fn run() -> io::Result<()> {
         match choice {
             "1" => database_cmd::show_databases_cmd(&catalog),
             "2" => database_cmd::create_database_cmd(&mut catalog)?,
-            "3" => database_cmd::select_database_cmd(&catalog, &mut current_db)?,
+            // "3" => database_cmd::select_database_cmd(&catalog, &mut current_db)?,
             "4" => table_cmd::show_tables_cmd(&catalog, &current_db),
-            "5" => table_cmd::create_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
+            // "5" => table_cmd::create_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
             "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,

@@ -21,7 +21,7 @@ pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
 
 pub fn create_table_cmd(
     catalog: &mut Catalog,
-    buffer_manager: &mut BufferManager,
+    // buffer_manager: &mut BufferManager,
     current_db: &Option<String>,
 ) -> io::Result<()> {
     let db = match current_db {
@@ -65,7 +65,7 @@ pub fn create_table_cmd(
     }
 
     create_table(catalog, &db, &table_name, columns);
-    buffer_manager.load_table_from_disk(&db, &table_name)?;
+    // buffer_manager.load_table_from_disk(&db, &table_name)?;
 
     Ok(())
 }

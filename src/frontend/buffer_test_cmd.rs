@@ -49,12 +49,12 @@ pub fn new_page_cmd(
 ) {
     match buffer_pool.new_page(table_name) {
         Ok((page_id, _)) => {
-            println!(
-                "✅ New page created -> {}:{}",
-                page_id.table_name, page_id.page_number
-            );
+            // println!(
+            //     "✅ New page created -> {}:{}",
+            //     page_id.table_name, page_id.page_number
+            // );
         }
-        Err(e) => println!("❌ Error creating page: {}", e),
+        Err(e) => println!("❌ Error fetching new page: {}", e),
     }
 }
 
@@ -106,15 +106,15 @@ pub fn flush_all_pages_cmd(
 // -----------------------------
 // DELETE PAGE
 // -----------------------------
-pub fn delete_page_cmd(
-    buffer_pool: &mut BufferPool,
-    page_id: PageId,
-) {
-    match buffer_pool.delete_page(&page_id) {
-        Ok(_) => println!("✅ Page deleted from buffer."),
-        Err(e) => println!("❌ Error: {}", e),
-    }
-}
+// pub fn delete_page_cmd(
+//     buffer_pool: &mut BufferPool,
+//     page_id: PageId,
+// ) {
+//     match buffer_pool.delete_page(&page_id) {
+//         Ok(_) => println!("✅ Page deleted from buffer."),
+//         Err(e) => println!("❌ Error: {}", e),
+//     }
+// }
 
 // -----------------------------
 // SHOW BUFFER STATS

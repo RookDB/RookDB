@@ -3,6 +3,7 @@
 
 use std::io::{self, Write};
 use storage_manager::catalog::{Catalog, create_database, show_databases};
+use storage_manager::buffer_manager::BufferPool;
 
 /// Displays all available databases
 pub fn show_databases_cmd(catalog: &Catalog) {
@@ -31,7 +32,7 @@ pub fn create_database_cmd(catalog: &mut Catalog) -> io::Result<()> {
 }
 
 /// Selects an existing database and updates the current context
-pub fn select_database_cmd(catalog: &Catalog, current_db: &mut Option<String>) -> io::Result<()> {
+pub fn select_database_cmd(buffer_pool: &mut BufferPool,catalog: &Catalog, current_db: &mut Option<String>) -> io::Result<()> {
     // Check if any databases exist
     if catalog.databases.is_empty() {
         println!("No databases found.");
@@ -54,6 +55,7 @@ pub fn select_database_cmd(catalog: &Catalog, current_db: &mut Option<String>) -
     // Update selected database
     if catalog.databases.contains_key(&db_name) {
         *current_db = Some(db_name.clone());
+        buffer_pool.preload_database(&db_name)?; 
         println!("Database '{}' selected.", db_name);
     } else {
         println!("Database '{}' does not exist.", db_name);

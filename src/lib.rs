@@ -15,4 +15,5 @@ pub use backend::buffer_manager::{
     ReplacementPolicy,
     LRUPolicy,
     ClockPolicy,
+    LRUKPolicy,
 };
