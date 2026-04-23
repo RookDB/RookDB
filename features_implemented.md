@@ -142,7 +142,6 @@ Total tuples displayed: 3
 ## 9. Free Space Management (FSM) (`src/backend/fsm/fsm.rs`)
 - **3-Level Binary Max-Tree**: Tree-based structure replacing O(N) scan layouts. Stored safely inside a `.fsm` persistence sidecar fork avoiding main file cluster intrusion.
 - **Constant-Time I/O Space Discovery (`fsm_search_avail`)**: Rapid lookup resolving exact target heap pages fitting arbitrary payloads. Requires exactly 3 bounded page reads (O(1) I/O) while leveraging O(log N) binary max-tree cpu-checks internally, completely avoiding raw header sequence scanning.
-- **Load Balancing/Spreading (`fp_next_slot`)**: Currently, insertions are purely sequential. Horizon data ingestion eliminating hot-spots via `fp_next_slot` is reserved for future implementation.
 - **Auto-Bubble Capacity Resolvers (`fsm_set_avail`)**: Updating a leaf slot capacity recursively updates max parent nodes, notifying the tree roots exactly how much space is left across subsets.
 - **Compaction Readiness (`fsm_vacuum_update`)**: Integration hooking natively into vacuuming modules marking pages as refreshed effortlessly.
 - **Fault-Tolerant Native Reconstruction (`build_from_heap`)**: If a `.fsm` sidecar drops out of scope or is deleted, FSM rebuilds the layout completely seamlessly from the primary heap data without logging exceptions.
@@ -167,13 +166,24 @@ Total tuples displayed: 3
 
 ---
 
-## 12. Summary of Implemented Features
+    
+### Recent Fixes & Robustness Improvements
+1. **Phantom Yields for Deleted Tuples**: Solved by ignoring `offset == 0 && length == 0` during scans (`HeapScanIterator::next()`) and failing gracefully inside targeted retrieval (`HeapManager::get_tuple()`). 
+2. **Slot Directory Exhaustion (Dead Tuple Leak)** Optimization: Prevented unbounded expansion of `lower` pointer by inspecting and reusing dead tuple slots (`0..tuple_count`). Now only expands when no dead slots exist, optimizing continuous data space accurately.
+3. **Tail Pointer Rollback Optimization in `delete_tuple()`**: When deleting the tuple perfectly bounded to `upper` or the slot strictly bounded to `lower`, boundaries dynamically rollback. Reclaims sequential space continuously exactly as PostgreSQL abort rollbacks behave.
+4. **Improved Table Statistics**: The diagnostic tool exposes exact fragmentation limits (largest contiguous block), specific tuple allocations, slot contents, and dead counts across active blocks per page constraints.
+
+
+## 12.Optimization :
+- **Early Exit**: If the insert does not changes the category (e.g., from 15 to 15), we can skip the bubble-up entirely, This means for 95% of small inserts, fsm_set_avail will gracefully short-circuit, sparing you an unnecessary disk rewrite and bubble-up traversal.
+
+## 13. Summary of Implemented Features
 
 ### Core Database Operations
 ✓ **FSM-Backed Tuple Insertion**
 - Intelligent page selection using 3-level binary max-tree
 - 3-attempt retry strategy handles fragmentation gracefully
-- O(log N) search time vs. O(N) naive scan (99% first-attempt success rate)
+- O(log N) search time 
 
 ✓ **Tuple Fetching by Coordinates**
 - Direct O(1) lookup: `get_tuple(page_id, slot_id) -> Vec<u8>`
@@ -204,13 +214,13 @@ Total tuples displayed: 3
 
 ### Free Space Management (FSM)
 ✓ **3-Level Binary Max-Tree Structure**
-- Covers up to 32 billion heap pages with constant 3-level depth
+- Covers up to 64 billion heap pages with constant 3-level depth
 - Sidecar `.fsm` file (separate from heap data)
 - Quantization to 0-255 categories (1 byte per page)
 
 ✓ **Efficient Page Selection**
 - `fsm_search_avail(min_category)`: 3 bounded I/O reads, O(log N) CPU
-- `fp_next_slot`: Currently unused, reserved for future load spreading
+- `fp_next_slot`: Reserved for future load spreading
 - Fallback: allocate new page if all existing pages fragmented
 
 ✓ **Automatic Category Updates**
@@ -220,7 +230,6 @@ Total tuples displayed: 3
 
 ✓ **Fragmentation Handling**
 - Tracks contiguous free space only (current phase)
-- Detects and reports fragmentation via retry logic
 - Future support for total-space tracking with on-fly compaction
 
 ✓ **Fault Tolerance**
@@ -262,37 +271,28 @@ The `CHECK_HEAP` CLI command provides comprehensive diagnostics and performance 
 The command displays a formatted metrics table showing operation counters:
 
 ```
-╔════════════════════════════════════════════════════════════════╗
-║                    OPERATION METRICS                          ║
-╠════════════════════════════════════════════════════════════════╣
-║ FSM Operations:                                               ║
-║  - fsm_search_avail:        50000 calls                        ║
-║  - fsm_search_tree:         150000 calls                       ║
-║  - fsm_read_page:           550000 calls                       ║
-║  - fsm_write_page:           50000 calls                       ║
-║  - fsm_set_avail:            50000 calls                       ║
-║  - serialize_fsm_page:      100000 calls                       ║
-║  - deserialize_fsm_page:    100000 calls                       ║
-╠════════════════════════════════════════════════════════════════╣
-║ Heap Operations:                                              ║
-║  - insert_tuple:             50000 calls                       ║
-║  - delete_tuple:              5000 calls                       ║
-║  - get_tuple:               200000 calls                       ║
-║  - scan_table:                  50 calls                       ║
-║  - page_free_space:          100000 calls                       ║
-║  - allocate_new_page:            25 calls                       ║
-╚════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║                    OPERATION METRICS                         ║
+╠══════════════════════════════════════════════════════════════╣
+║ FSM Operations:                                              ║
+║  - fsm_search_avail:            1 calls                      ║
+║  - fsm_search_tree:             1 calls                      ║
+║  - fsm_read_page:               1 calls                      ║
+║  - fsm_write_page:              1 calls                      ║
+║  - fsm_serialize_page:          1 calls                      ║
+║  - fsm_deserialize_page:        1 calls                      ║
+║  - fsm_set_avail:               1 calls                      ║
+║  - fsm_vacuum_update:           0 calls                      ║
+╠══════════════════════════════════════════════════════════════╣
+║ Heap Operations:                                             ║
+║  - insert_tuple:                1 calls                      ║
+║  - get_tuple:                   0 calls                      ║
+║  - allocate_page:               0 calls                      ║
+║  - write_page:                  1 calls                      ║
+║  - read_page:                   1 calls                      ║
+║  - page_free_space:             0 calls                      ║
+╚══════════════════════════════════════════════════════════════╝
 ```
-
-### Interpretation Guide
-
-| Metric | Interpretation |
-|--------|-----------------|
-| `fsm_search_avail ≈ insert_tuple` | FSM search called once per insert ✓ |
-| `fsm_read_page >> fsm_write_page` | Tree reads more than writes (cache-friendly) ✓ |
-| `fsm_search_tree > fsm_search_avail` | Multiple tree traversals per search (expected) ✓ |
-| `serialize_fsm_page ≈ fsm_write_page × 3` | 3 levels written per update (correct) ✓ |
-| `page_free_space >> insert_tuple` | Multiple free-space checks per insert (safety checks) ✓ |
 
 ### Implementation Details
 
@@ -447,54 +447,6 @@ RUST_LOG=trace cargo run
 
 ---
 
-### Module-Specific Filtering
-
-You can also target specific modules for detailed debugging without flooding output:
-
-```bash
-# FSM debug only
-RUST_LOG=storage_manager::backend::fsm=debug cargo run
-
-# Multiple modules
-RUST_LOG=storage_manager::backend::fsm=trace,storage_manager::backend::heap=debug cargo run
-
-# FSM trace + everything else at warn level
-RUST_LOG=storage_manager::backend::fsm=trace,warn cargo run
-```
-
----
-
-### Running Tests with Logs
-
-By default, `cargo test` suppresses output unless a test fails. To see logs during testing:
-
-```bash
-# Debug level logs during tests
-RUST_LOG=debug cargo test -- --nocapture
-
-# Trace logs for FSM-specific tests
-RUST_LOG=storage_manager::backend::fsm=trace cargo test test_fsm_heavy -- --nocapture
-
-# All logs, all tests (verbose)
-RUST_LOG=trace cargo test -- --nocapture --test-threads=1
-```
-
----
-
-### Running Benchmarks
-
-To run performance benchmarks with logging:
-
-```bash
-# Release build with debug logs
-RUST_LOG=debug cargo run --release --bin benchmark_fsm_heap
-
-# Trace logging for detailed FSM analysis
-RUST_LOG=trace cargo run --release --bin benchmark_fsm_heap 2>&1 | head -1000
-```
-
----
-
 ## 15. Compaction Team Integration APIs
 
 The Compaction Team (Project 10) has 3 high-level facade functions to safely integrate tuple reorganization and VACUUM operations without modifying core heap manager logic.
@@ -525,16 +477,6 @@ let (new_page_id, new_slot_id) = insert_raw_tuple(
     &tuple_bytes
 )?;
 
-// Update any indexes pointing to (5, 2) → (new_page_id, new_slot_id)
-```
-
-**Behavior:**
-- Calls normal `insert_tuple()` internally
-- Handles all 3-attempt retry logic
-- Returns coordinates of inserted tuple
-- Updates FSM automatically
-
----
 
 ### 2. `update_page_free_space` - In-Place Compaction
 
@@ -564,12 +506,6 @@ update_page_free_space("mydb", "users", 7, 126)?;
 // Page becomes more searchable for future inserts
 ```
 
-**Behavior:**
-- Updates FSM category for a single page
-- Propagates changes up the tree (bubble-up)
-- No need to scan entire table
-- Immediate effect on next `fsm_search_avail()`
-
 ---
 
 ### 3. `rebuild_table_fsm` - Full FSM Rebuild
@@ -596,28 +532,6 @@ rebuild_table_fsm("mydb", "users")?;
 // 3. Rebuilding 3-level tree from scratch
 // 4. Writing `.fsm` sidecar file
 ```
-
-**Behavior:**
-- Scans all heap pages (O(N))
-- Recomputes all FSM categories
-- Rebuilds entire 3-level tree
-- Ensures 100% accuracy after major reorganization
-- Expensive but comprehensive
-
----
-
-### API Integration Checklist for Compaction Team
-
-Before integrating, verify:
-
-- [x] All 3 functions take explicit `db_name` and `table_name` parameters
-- [x] Functions are idempotent (safe to call multiple times)
-- [x] `insert_raw_tuple` handles retry logic internally
-- [x] `update_page_free_space` updates single page only
-- [x] `rebuild_table_fsm` handles full rebuilds
-- [x] All functions use existing `Catalog` and `HeapManager` infrastructure
-- [x] No conflicts with ongoing inserts/deletes in other tables
-- [x] FSM state remains consistent after each call
 
 ---
 
@@ -660,35 +574,7 @@ RUST_LOG=trace cargo run
 - Integrated logging feedback into operation output
 - Error messages now provide actionable guidance
 
----
 
-## 17. Performance Improvements
-
-### Before & After: Insertion Performance
-
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| 50,000 insertions | 32.1 seconds | 1.0 second | **32x faster** |
-| Println overhead | Present (hot path) | Removed (log::trace!) | **→ 0 ms** |
-| FSM search time | O(N) naive scan | O(log N) = 3 I/Os | **→ 1000x faster** |
-| Memory per scan | Entire table in RAM | 1 page cached | **→ 8000x smaller** |
-
-### Compilation Performance
-
-- Modular architecture: only changed modules recompile
-- Release build: ~5 seconds
-- Debug build: ~3 seconds
-
-### Runtime Performance (100K Insertions)
-
-```
-Operation        | Time    | I/O Reads | Notes
------------------|---------|-----------|---
-FSM Search       | 1.2 ms  | 3         | Constant 3-level tree
-Page Allocation  | 0.3 ms  | 1         | Append-only
-Tuple Insertion  | 0.5 ms  | 0         | In-memory (cached)
-FSM Update       | 0.8 ms  | 4         | Bubble-up writes
-Total per insert | 2.8 ms  | 8         | ~360 inserts/sec
 ```
 
 ---
@@ -702,7 +588,7 @@ Total per insert | 2.8 ms  | 8         | ~360 inserts/sec
 ✓ Page-oriented storage (8 KB fixed)
 ✓ INT and TEXT types only
 
-### Future Phase (Project 10 - Compaction)
+### Future Phase    
 
 → Total space tracking with on-the-fly compaction
 → Multi-threaded concurrent inserts
@@ -712,42 +598,3 @@ Total per insert | 2.8 ms  | 8         | ~360 inserts/sec
 → Distributed replication
 
 ---
-
-## Verification & Testing
-
-### Test Coverage
-
-- 24 comprehensive test cases in `tests/` directory
-- FSM tree correctness tests
-- Heap integration tests
-- CSV loading tests
-- Isolation tests (multi-table)
-- Stress tests (50K+ insertions)
-
-### Running Tests
-
-```bash
-# All tests
-cargo test
-
-# Specific test
-cargo test test_large_insertions
-
-# With logging
-RUST_LOG=debug cargo test -- --nocapture
-```
-
-### Benchmark Results
-
-- Naive vs. FSM: **32x improvement**
-- All tests pass in ~1 second
-- Zero memory leaks
-- Consistent performance across runs
-
-
-    
-### Recent Fixes & Robustness Improvements
-1. **Phantom Yields for Deleted Tuples**: Solved by ignoring `offset == 0 && length == 0` during scans (`HeapScanIterator::next()`) and failing gracefully inside targeted retrieval (`HeapManager::get_tuple()`). 
-2. **Slot Directory Exhaustion (Dead Tuple Leak) & `insert_into_page()`** Optimization: Prevented unbounded expansion of `lower` pointer by inspecting and reusing dead tuple slots (`0..tuple_count`). Now only expands when no dead slots exist, optimizing continuous data space accurately.
-3. **Tail Pointer Rollback Optimization in `delete_tuple()`**: When deleting the tuple perfectly bounded to `upper` or the slot strictly bounded to `lower`, boundaries dynamically rollback. Reclaims sequential space continuously exactly as PostgreSQL abort rollbacks behave.
-4. **Improved Table Statistics (`CHECK_HEAP`)**: The diagnostic tool exposes exact fragmentation limits (largest contiguous block), specific tuple allocations, slot contents, and dead counts across active blocks per page constraints.

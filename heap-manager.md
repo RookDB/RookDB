@@ -13,22 +13,6 @@ The Heap Manager is responsible for managing data storage at the page level. It 
 
 ---
 
-## Table of Contents
-
-1. [Slotted Page Layout](#1-slotted-page-layout)
-2. [Page Pointers: `lower` and `upper`](#2-page-pointers-lower-and-upper)
-3. [Contiguous vs. Total Free Space](#3-contiguous-vs-total-free-space)
-4. [Sequential Insertion Within Pages](#4-sequential-insertion-within-pages)
-5. [The 3-Attempt Insertion Algorithm](#5-the-3-attempt-insertion-algorithm)
-6. [Fragmentation & Dead Space](#6-fragmentation--dead-space)
-7. [Backend Functions & API](#7-backend-functions--api)
-8. [Data Structures](#8-data-structures)
-9. [Deletion & FSM Updates](#9-deletion--fsm-updates)
-10. [Performance Characteristics](#10-performance-characteristics)
-11. [Future Work: On-The-Fly Compaction](#11-future-work-on-the-fly-compaction)
-12. [Integration with FSM](#12-integration-with-fsm)
-
----
 
 ## 1. Slotted Page Layout
 
@@ -38,40 +22,40 @@ Every heap page (except Page 0, which is metadata) follows the **slotted page fo
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Page 0: Metadata                         │
-│              (20-byte HeaderMetadata)                        │
-│  - page_count (u32): Total heap pages                        │
-│  - fsm_page_count (u32): Total FSM pages                     │
-│  - total_tuples (u64): 64-bit tuple count                    │
-│  - last_vacuum (u32): Reserved for future VACUUM tracking    │
+│                     Page 0: Metadata                        │
+│              (20-byte HeaderMetadata)                       │
+│  - page_count (u32): Total heap pages                       │
+│  - fsm_page_count (u32): Total FSM pages                    │
+│  - total_tuples (u64): 64-bit tuple count                   │
+│  - last_vacuum (u32): Reserved for future VACUUM tracking   │
 └─────────────────────────────────────────────────────────────┘
 
 Pages 1+: Slotted Pages (8192 bytes each)
 
 ┌──────────────────────────────────────────────────────────────┐
-│ Header (8 bytes)                                              │
+│ Header (8 bytes)                                             │
 │  - lower (u32): Offset of next free slot in directory        │
 │  - upper (u32): Start of free space for tuple data           │
 ├──────────────────────────────────────────────────────────────┤
-│                                                               │
+│                                                              │
 │ Slot Directory (growing downward from offset 8)              │
-│ - Each slot: 8 bytes = (offset: u32, length: u32)          │
-│ - Slot 0 at offset 8, Slot 1 at offset 16, etc.            │
-│                                                               │
+│ - Each slot: 8 bytes = (offset: u32, length: u32)            │
+│ - Slot 0 at offset 8, Slot 1 at offset 16, etc.              │
+│                                                              │
 ├──────────────────────────────────────────────────────────────┤
-│                                                               │
+│                                                              │
 │ Contiguous Free Space                                        │
 │ (gap between directory and tuple data)                       │
 │ Size = upper - lower                                         │
-│                                                               │
+│                                                              │
 ├──────────────────────────────────────────────────────────────┤
-│                                                               │
+│                                                              │
 │ Tuple Data Region (growing upward from PAGE_SIZE)            │
 │ - Tuples stored sequentially from end of page                │
-│ - T1: bytes [upper, upper+len1)                             │
-│ - T2: bytes [upper+len1, upper+len1+len2)                   │
-│ - Etc...                                                      │
-│                                                               │
+│ - T1: bytes [upper, upper+len1)                              │
+│ - T2: bytes [upper+len1, upper+len1+len2)                    │
+│ - Etc...                                                     │
+│                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -80,101 +64,10 @@ Pages 1+: Slotted Pages (8192 bytes each)
 1. **Flexibility:** Supports variable-length tuples efficiently
 2. **Directness:** Slot directory provides O(1) access to any tuple by slot ID
 3. **Space Efficiency:** Only stores one length entry per tuple in the directory
-4. **Compaction-Ready:** Logical slot IDs remain valid even if physical tuple data is rearranged (important for Project 10)
-
+4. **Compaction-Ready:** Logical slot IDs remain valid even if physical tuple data is rearranged 
 ---
 
-## 2. Page Pointers: `lower` and `upper`
-
-### Understanding `lower` and `upper`
-
-The two fundamental pointers that define free space in a slotted page:
-
-#### `lower` - Slot Directory Pointer (Growing Downward)
-
-```rust
-pub struct Page {
-    pub header: PageHeader,  // Contains lower and upper
-    pub data: [u8; PAGE_SIZE - 8],
-}
-
-pub struct PageHeader {
-    pub lower: u32,  // Points to the next available slot offset
-    pub upper: u32,  // Points to the start of tuple data
-}
-```
-
-**Initial State (empty page):**
-```
-lower = 8 (first slot starts after the 8-byte header)
-upper = 8192 (PAGE_SIZE, entire data region free)
-free_bytes = upper - lower = 8192 - 8 = 8184 bytes
-```
-
-**After inserting 1 tuple (100 bytes):**
-```
-Step 1: Create slot at offset lower (8)
-        Slot entry: (offset=8192-100=8092, length=100)
-        Slot occupies bytes 8-15 (8 bytes for offset and length)
-
-Step 2: Write tuple data at upper-100 = 8092
-        Tuple data: bytes [8092, 8192)
-
-Step 3: Advance lower
-        lower = 8 + 8 = 16
-
-Result:
-lower = 16 (next slot will be at offset 16-23)
-upper = 8092 (new tuple data starts here)
-free_bytes = 8092 - 16 = 8076 bytes
-```
-
-**After inserting 2nd tuple (150 bytes):**
-```
-Step 1: Create slot at offset lower (16)
-        Slot entry: (offset=8092-150=7942, length=150)
-
-Step 2: Write tuple data at upper-150 = 7942
-        Tuple data: bytes [7942, 8092)
-
-Step 3: Advance lower
-        lower = 16 + 8 = 24
-
-Result:
-lower = 24
-upper = 7942
-free_bytes = 7942 - 24 = 7918 bytes
-
-Memory Layout:
-┌─ Header ─┐ Slot 0 │ Slot 1 │ ... free space ... │ T2  │ T1  │
-8         16       24       7942              8092 8192
-                            ↑                       ↑
-                          upper                   PAGE_SIZE
-```
-
-### The Bidirectional Gap
-
-This architecture creates a **bidirectional gap** between `lower` and `upper`:
-
-```
-┌──────────────────────────────────────────────────────────┐
-│ offset 0: lower pointer starts  (grows down →)           │
-│  ╔═ Header (8 bytes) ═╗                                  │
-│  ║ Slot 0 │ Slot 1 │ ... (each 8 bytes)   ← lower moves │
-│  ↓                                                        │
-│  gap = free space = upper - lower                        │
-│  ↑                                                        │
-│              ← upper moves ... │ T2  │ T1 ║               │
-│                               ║ Tuple Data ║              │
-│                               PAGE_SIZE ↑ │              │
-└──────────────────────────────────────────────────────────┘
-```
-
-**Key Property:** The gap between `lower` and `upper` is the **only free space** that RookDB can use for new insertions (in the current phase).
-
----
-
-## 3. Contiguous vs. Total Free Space
+## 2. Contiguous vs. Total Free Space
 
 ### Current Phase: Contiguous Free Space Only
 
@@ -209,7 +102,7 @@ Dead space exists but is NOT tracked:
 
 #### Why Not Track Total Free Space?
 
-**Reason 1: Insertion Complexity**
+**Reason : Insertion Complexity**
 - If FSM advertised "126 bytes total," an insert requiring 100 bytes would land on this page
 - But only 76 contiguous bytes are available for insertion
 - The system would need to:
@@ -218,49 +111,9 @@ Dead space exists but is NOT tracked:
   3. Update all slot offsets
 - This is **too expensive** to do during every insertion
 
-**Reason 2: Single-Threading Guarantee**
-- RookDB (Phase 6) is single-threaded
-- No concurrent reads/writes during tuple relocation
-- But compacting during INSERT still wastes CPU and I/O
-
-**Reason 3: Phase-Based Architecture**
-- Phase 6 (Current): Fast insertions, acceptable wasted space
-- Phase 10 (Future): VACUUM/Compaction handles holes explicitly
-
----
-
-### What Happens When FSM Is Wrong?
-
-Since FSM advertises only contiguous space, sometimes the advertised space is still insufficient:
-
-#### Scenario: FSM Quantization Error
-
-```
-FSM reports: Page 5 has Category 3 (~96 bytes free estimate)
-Actual state: 94 bytes contiguous (due to quantization or fragmentation)
-Insert request: 95 bytes needed
-
-Attempt 1:
-  ├─ FSM suggests Page 5 (Category 3 ≥ 2)
-  ├─ Try insert_into_page(page_5, 95_bytes)
-  ├─ Check: upper - lower = 94 < 95
-  └─ FAIL! (quantization error)
-
-Update FSM:
-  ├─ FSM::fsm_set_avail(page_5, 94)
-  └─ Category drops to 2 (more accurate)
-
-Attempt 2:
-  ├─ FSM suggests Page 12 (different page)
-  ├─ Try insert_into_page(page_12, 95_bytes)
-  └─ SUCCESS! (Page 12 actually has enough space)
-```
-
 ---
 
 ### Future Phase: Total Free Space with On-The-Fly Compaction
-
-**Project 10 Vision:**
 
 ```
 When a tuple is deleted:
@@ -287,62 +140,11 @@ When an insert requires 100 bytes:
 
 ---
 
-## 4. Sequential Insertion Within Pages
-
-### Page Filling Pattern
-
-RookDB pages fill **strictly sequentially** from top to bottom (as `lower` and `upper` pointers converge):
-
-```
-Page 1 Filling Sequence:
-
-Insert T1 (58 bytes):
-  lower=8, upper=8192
-  → Slot 0 @ offset 8, Tuple @ offset 8134
-  → lower=16, upper=8134, free=8118
-
-Insert T2 (58 bytes):
-  lower=16, upper=8134
-  → Slot 1 @ offset 16, Tuple @ offset 8076
-  → lower=24, upper=8076, free=8052
-
-Insert T3 (58 bytes):
-  lower=24, upper=8076
-  → Slot 2 @ offset 24, Tuple @ offset 8018
-  → lower=32, upper=8018, free=7986
-
-... (continues sequentially)
-
-After 140 sequential inserts (58 bytes each ≈ 8120 bytes):
-  lower=1128 (140 slots × 8 bytes)
-  upper≈72 (remaining)
-  free ≈ 0
-  → Page 1 is FULL
-
-Next Insert:
-  ├─ FSM search for category ≥ 2
-  ├─ Page 1 now has Category 0 (full)
-  ├─ FSM returns Page 2
-  └─ Insert T141 → (Page 2, Slot 0)
-```
-
-### Why Sequential, Not Scattered?
-
-1. **Cache Locality:** Sequential layout improves disk I/O performance
-2. **FSM Simplicity:** No need to search for holes; just check contiguous space
-3. **Predictability:** Table growth is linear and predictable
-4. **Minimal Seeking:** Disk reads/writes are contiguous
-
----
-
-## 5. The 3-Attempt Insertion Algorithm
+## 3. The 3-Attempt Insertion Algorithm
 
 ### Overview
 
-`HeapManager::insert_tuple()` implements a **robust 3-attempt retry strategy** to handle:
-- FSM quantization errors
-- Fragmentation from previous deletions
-- Edge cases in space estimation
+`HeapManager::insert_tuple()` implements a **robust 3-attempt retry strategy**.
 
 ### Algorithm Flowchart
 
@@ -403,212 +205,10 @@ insert_tuple(tuple_data):
   └─ Error handling: If all attempts fail, propagate error
 ```
 
-### Detailed Steps Explanation
-
-#### Attempt 1: FSM Suggestion
-
-**Why Attempt 1?**
-- FSM maintains up-to-date information from previous inserts/deletes
-- 99% of inserts succeed on the first suggestion
-- Minimizes unnecessary tree traversals
-
-**What Can Go Wrong?**
-```
-Scenario: Quantization Error
-  FSM Category: 3 (≥96 bytes estimated)
-  Actual free: 92 bytes (quantization lost 4 bytes)
-  Required: 95 bytes
-  Result: Insert fails despite FSM suggestion
-```
-
-#### Attempt 2: Corrected FSM Search
-
-**Why Attempt 2?**
-- After Attempt 1 fails, `fsm_set_avail()` updates the FSM
-- The failed page now has a more accurate category
-- FSM search can now find a truly suitable page
-
-**What Happens?**
-```
-Attempt 2 calls fsm_search_avail(min_category) again:
-  ├─ FSM now marks the failed page (e.g., Page 5) as Category 2
-  ├─ Traversal avoids or deprioritizes Page 5
-  ├─ Returns a different page (e.g., Page 12)
-  └─ Insert succeeds because Page 12 has true availability
-```
-
-#### Attempt 3: Guaranteed New Page
-
-**Why Attempt 3?**
-- If entire FSM tree is fragmented (all pages partially full)
-- Only solution: allocate a fresh, completely empty page
-- Guaranteed to succeed because page is brand new
-
-**What Happens?**
-```
-Attempt 3:
-  ├─ allocate_new_page()
-  │   ├─ new_page_id = header.page_count (e.g., 1000)
-  │   ├─ Append empty 8 KB page to file
-  │   ├─ header.page_count = 1001
-  │   └─ Register with FSM: fsm_set_avail(1000, 8184)
-  │
-  ├─ insert_into_page(1000, tuple_data)
-  │   (8192 - 8 = 8184 bytes available, tuple is small)
-  │
-  └─ Insertion succeeds 100% of the time
-```
-
-### Real-World Example
-
-```rust
-// Inserting a 50-byte tuple into a database with 100 pages
-let tuple_data = vec![/* 50 bytes */];
-
-// --- ATTEMPT 1 ---
-let min_category = (50 * 255) / 8192 = 1;  // ceil(1.57) = 2
-
-fsm_search_avail(2)?  // Returns Some(47)
-insert_into_page(47, tuple_data)?  // SUCCESS!
-// → Return (47, 3)
-
-// Most common case: Done in one attempt ✓
-```
-
-```rust
-// Attempting to insert 100-byte tuple on a fragmented page
-let tuple_data = vec![/* 100 bytes */];
-
-// --- ATTEMPT 1 ---
-let min_category = (100 * 255) / 8192 = 3;  // ceil(3.1)
-
-fsm_search_avail(3)?  // Returns Some(12)
-insert_into_page(12, tuple_data)?  // FAIL! (Page 12 has 94 contiguous, only 92 actual)
-
-// Update FSM to reflect truth
-fsm_set_avail(12, 92)?
-
-// --- ATTEMPT 2 ---
-fsm_search_avail(3)?  // Returns Some(45)
-insert_into_page(45, tuple_data)?  // SUCCESS!
-// → Return (45, 2)
-```
-
-```rust
-// Extreme case: All pages fragmented
-let tuple_data = vec![/* 100 bytes */];
-
-// --- ATTEMPT 1 ---
-fsm_search_avail(3)?  // Returns Some(7)
-insert_into_page(7, tuple_data)?  // FAIL!
-
-// --- ATTEMPT 2 ---
-fsm_search_avail(3)?  // Returns Some(23)
-insert_into_page(23, tuple_data)?  // FAIL!
-
-// --- ATTEMPT 3 ---
-allocate_new_page()?  // new_page_id = 1050
-insert_into_page(1050, tuple_data)?  // SUCCESS! (page is brand new)
-// → Return (1050, 0)
-```
 
 ---
 
-## 6. Fragmentation & Dead Space
-
-### What Is Fragmentation?
-
-When a tuple is deleted, its slot entry is marked as invalid, but the **tuple data remains** in the `upper` region, creating "dead space":
-
-```
-Before Delete:
-┌─ Header ─┐ Slot A, B, C │ ... gap ... │ T3 │ T2 │ T1 │
-           lower=24             upper=100
-
-After Delete T2:
-┌─ Header ─┐ Slot A, _, C │ ... gap ... │ T3 │ XX │ T1 │
-           lower=24             upper=100
-           
-Dead space: 50 bytes (where T2 was)
-Slot B now has length=0, offset=0 (marked invalid)
-Contiguous free (upper - lower): still 76 bytes (unchanged)
-Total free: 76 + 50 = 126 bytes (not tracked)
-```
-
-### Why RookDB Doesn't Reuse Holes (Now)
-
-```rust
-// In insert_into_page():
-let contiguous_free = page.upper - page.lower;
-
-if contiguous_free >= tuple_size {
-    // Insert at upper
-    page.upper -= tuple_size;
-    // ... create slot ...
-} else {
-    return Err("Not enough contiguous space");  // Don't search for holes!
-}
-```
-
-**Design Decision:**
-- Searching for and reusing holes would require:
-  1. Scanning all deleted slots
-  2. Finding a hole large enough
-  3. Updating slot metadata
-  4. Copying tuple into the hole
-- This is **too expensive** for every INSERT
-
-**Space-Time Tradeoff:**
-- Space: Some wasted space from fragmentation
-- Time: Fast inserts without hole-hunting
-
----
-
-### Impact on FSM
-
-```
-Fragmentation Example (50-byte tuples):
-
-Initial: Page 5 has 140 tuples (140 × 50 = 7000 bytes)
-         lower=1128, upper=1192
-         contiguous_free = 64 bytes
-         FSM Category = floor(64 × 255 / 8192) = 2
-
-Delete 100 tuples:
-         Slot entries marked invalid, data stays at upper region
-         lower=1128, upper=1192 (unchanged!)
-         contiguous_free = 64 bytes (unchanged)
-         Dead space: 100 × 50 = 5000 bytes
-         FSM Category = 2 (unchanged)
-
-Result: 5000 bytes of wasted space that FSM doesn't advertise
-```
-
----
-
-### Recovery: Future VACUUM/Compaction
-
-**Project 10 will implement page compaction:**
-
-```
-HeapManager::compact_page(page_id):
-  ├─ Read all live tuples from slots
-  ├─ Rewrite tuples sequentially (no gaps)
-  ├─ Recalculate slot offsets
-  ├─ Reset upper to end of last tuple
-  ├─ Call fsm_set_avail(page_id, new_free_bytes)
-  └─ Free space re-advertised to FSM
-
-Example:
-  Before: 140 live tuples + 100 dead slots = 7000 + 5000 = 12000 bytes used
-  After:  140 live tuples only = 7000 bytes used
-  Recovered: 5000 bytes
-  New contiguous free: 1192 bytes (64 + 5000/2 approximation)
-```
-
----
-
-## 7. Backend Functions & API
+## 4. Backend Functions & API
 
 ### High-Level Functions (Public API)
 
@@ -706,9 +306,6 @@ pub fn scan(&mut self) -> HeapScanIterator
 3. Skip invalid slots (length=0)
 4. Stop at last page (from header.page_count)
 
-**Memory Efficiency:**
-- Only 1 page cached at a time
-- For 1 GB table: 8 KB in memory vs. 1 GB on disk
 
 ---
 
@@ -862,37 +459,6 @@ rebuild_table_fsm("mydb", "users")?;
 ---
 
 ## 8. Data Structures
-
-### `Page` Structure
-
-```rust
-pub struct Page {
-    pub header: PageHeader,
-    pub data: [u8; PAGE_SIZE - 8],
-}
-
-pub struct PageHeader {
-    pub lower: u32,  // Next free slot offset
-    pub upper: u32,  // Start of tuple data
-}
-
-impl Page {
-    pub fn new() -> Self {
-        Page {
-            header: PageHeader {
-                lower: 8,                  // After 8-byte header
-                upper: PAGE_SIZE as u32,   // End of page
-            },
-            data: [0; PAGE_SIZE - 8],
-        }
-    }
-    
-    pub fn get_free_space(&self) -> u32 {
-        self.header.upper - self.header.lower
-    }
-}
-```
-
 ---
 
 ### `HeaderMetadata` Structure
@@ -1023,7 +589,7 @@ Page 47 freed 100 bytes:
 
 | Operation | Complexity | Notes |
 |-----------|-----------|-------|
-| `insert_tuple()` | O(1) avg, O(log N) worst | 3 attempts, each O(log N) for FSM search |
+| `insert_tuple()` | O(log N) avg | 3 attempts, each O(log N) for FSM search |
 | `get_tuple()` | O(1) | Direct page read + slot lookup |
 | `delete_tuple()` | O(log N) | FSM bubble-up propagation |
 | `allocate_new_page()` | O(1) | Append-only, O(log N) for FSM registration |
@@ -1040,62 +606,6 @@ Page 47 freed 100 bytes:
 
 ---
 
-### Space Complexity
-
-| Component | Overhead |
-|-----------|----------|
-| `HeapManager` in-memory | ~1 KB (file handles, state) |
-| Cached page | 8 KB max |
-| FSM fork file | ~32 MB per 32 GB heap |
-| Dead space (fragmentation) | Varies, recoverable via VACUUM |
-
----
-
-## 11. Future Work: On-The-Fly Compaction
-
-### Vision for Phase 10
-
-```rust
-pub fn insert_tuple_with_compaction(&mut self, tuple_data: &[u8]) -> io::Result<(u32, u32)> {
-    // Attempt 1: Normal FSM search
-    if let Some(page_id) = fsm.fsm_search_avail(min_category) {
-        if insert_into_page(page_id, tuple_data).is_ok() {
-            return Ok((page_id, slot_id));
-        }
-    }
-    
-    // Attempt 2: Search again with corrected FSM
-    if let Some(page_id) = fsm.fsm_search_avail(min_category) {
-        if insert_into_page(page_id, tuple_data).is_ok() {
-            return Ok((page_id, slot_id));
-        }
-    }
-    
-    // Attempt 3 (NEW): Compact a fragmented page before allocating new
-    if let Some(fragmented_page) = find_most_fragmented_page() {
-        compact_page_in_place(fragmented_page)?;  // NEW in Phase 10
-        if insert_into_page(fragmented_page, tuple_data).is_ok() {
-            return Ok((fragmented_page, slot_id));
-        }
-    }
-    
-    // Attempt 4: Allocate new page
-    let new_page_id = allocate_new_page()?;
-    let (_, slot_id) = insert_into_page(new_page_id, tuple_data)?;
-    Ok((new_page_id, slot_id))
-}
-```
-
-**Benefits:**
-- Eliminates 95% of wasted space
-- Fewer page allocations (table grows slower)
-- Simpler insertion logic (fewer retries)
-
-**Tradeoff:**
-- Slower average insert (occasional compaction work)
-- More CPU usage
-
----
 
 ## 12. Integration with FSM
 
@@ -1107,9 +617,7 @@ User calls: hm.insert_tuple(50_bytes)
   ├─ Calculate min_category = ceil(50 × 255 / 8192) = 2
   │
   ├─ FSM::fsm_search_avail(2)
-  │   ├─ Read FSM Level-2 root
-  │   ├─ Traverse Level 2 → Level 1 → Level 0
-  │   ├─ fp_next_slot is reserved for future load-spreading
+  │   ├─ Read FSM Level-0 root
   │   ├─ Compute heap_page_id from level-0 slot
   │   └─ Return Some(page_id=47)
   │

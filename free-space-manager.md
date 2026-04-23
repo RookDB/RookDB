@@ -672,7 +672,9 @@ RookDB tracks how many times each FSM function is called to verify correctness:
 - `read_fsm_page`: How many FSM pages read from disk?
 - `write_fsm_page`: How many FSM pages written to disk?
 - `serialize_fsm_page`: How many times did we encode an FSM page?
+  What it does: It takes the higher-level representation of the free space nodes and packs them into the physical layout of a standard page that can be flushed to disk.
 - `deserialize_fsm_page`: How many times did we decode an FSM page?
+  It reads the raw bytes from a physical page from disk into memory and initializes the internal data structures that the FSM code uses to navigate the tree.
 - `fsm_set_avail`: How many times did we update free-space categories?
 
 ### 10.2 Viewing Instrumentation Data
