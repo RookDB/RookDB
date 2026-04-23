@@ -426,6 +426,75 @@ Source: `benchmark_runs/benchmark_history.csv`
 
 The latest run remains correctness-clean (`scan_matches_insert_count = true`) while maintaining strong insert throughput and very low FSM rebuild time.
 
+### Benchmark Analysis and Interpretation
+
+This subsection explains what the benchmark numbers mean for system behavior.
+
+1. Insert path is stable and high-throughput.
+	- Small insert throughput increased from `18852.96` to `21291.09` TPS between run `1776596962` and `1776859982` (about 12.9% gain).
+	- Large insert throughput increased from `13036.05` to `16930.30` TPS over the same window (about 29.9% gain).
+	- Practical implication: FSM-guided allocation plus page-local slot reuse is handling mixed tuple sizes without regressions.
+
+2. Recovery path is consistently low-latency.
+	- FSM rebuild time dropped from `0.009143s` to `0.005375s` across the recent run window.
+	- Practical implication: missing/corrupted `.fsm` sidecars are recoverable quickly from heap state.
+
+3. Read-heavy metrics are very strong, but should be interpreted with cache context.
+	- Point lookup and sequential scan figures are significantly higher in the latest run than earlier baseline runs.
+	- Because this benchmark is single-process and can be affected by OS page cache warmth, these values should be treated as best-case in-memory/path-cache behavior unless validated with repeated cold/warm split runs.
+
+4. Correctness signals stayed green while throughput improved.
+	- `inserted_total == scanned_total` remains true.
+	- Oversized tuple rejection remains true.
+	- FSM rebuild search correctness remains true.
+	- Practical implication: performance gains did not trade off correctness in the current test matrix.
+
+5. Cross-engine data is currently comparison-oriented, not workload-equivalent.
+	- SQLite/MySQL/PostgreSQL scripts report operation seconds and post-delete state, while RookDB reports storage-manager-specific TPS/OPS and rebuild timings.
+	- Practical implication: use the table as an engineering dashboard, not as a strict apples-to-apples transactional benchmark until workload harmonization is added.
+
+### Benchmark Method Caveats
+
+- Single-process benchmark mode (no concurrent clients for RookDB path).
+- Results can vary with page cache, background load, and thermal state.
+- Time values for external engines are second-granularity in shell scripts.
+- Recommended reporting practice: run multiple repetitions and publish median with min/max (or p95 where applicable).
+
+## Submission Checklist Coverage
+
+This section maps the required submission checklist to concrete sections in this document.
+
+1. Details of newly introduced database files, structure, contents, and intermediate generation.
+	- Covered in `High-Level Layout` and `Header Metadata`.
+	- Includes `.dat`, `.dat.fsm`, catalog file, and benchmark artifact files in `benchmark_runs/`.
+
+2. Modifications made to the database structure.
+	- Covered in `What This Project Does`, `High-Level Layout`, and `Heap Manager Behavior`.
+
+3. Changes to page layout or file structure, including tuple layout updates.
+	- Covered in `Heap Page Format`, `Header Metadata`, and `Slot Reuse`/`Deletion` behavior.
+
+4. Algorithms used.
+	- Covered in `Insertion Flow`, `FSM Behavior` (`Search`, `Updates`, `Rebuild`), and benchmark interpretation.
+
+5. Newly created data structures and their purpose.
+	- Covered in `Header Metadata`, `Core Modules and Responsibilities`, and `FSM Behavior` (`FSMPage`, constants, iterator models).
+
+6. Backend functions created and their purpose.
+	- Covered in `Core Modules and Responsibilities` with function-level tables for heap, FSM, disk, and executor modules.
+
+7. Frontend/CLI changes.
+	- Covered in `CLI Workflow`, `Menu Options`, and command-level descriptions (`Load CSV`, `Insert Single Tuple`, `Show Tuples`, `Check Heap Health`).
+
+8. BenchMark (if available) results.
+	- Covered in `Benchmark Results (Available)`, `Benchmark Analysis and Interpretation`, and the auto-updated benchmark log block.
+
+9. Potential future work.
+	- Covered in `Current Limitations and Future Work` and `Benchmark Method Caveats` recommendations.
+
+10. No PDF uploads.
+	- This documentation is maintained as Markdown (`.md`) only.
+
 ## Current Limitations and Future Work
 
 - Free-space management is page-granular, not tuple-granular.

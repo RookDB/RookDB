@@ -1,54 +1,312 @@
-# RookDB: FSM & Heap Manager Benchmark Analysis
+# RookDB Benchmark Report
 
+This report documents the benchmark scripts, how to run them, the outputs they generate, and what the latest results mean for the FSM/heap manager implementation.
 
-## 1. Storage Utilization & Fragmentation
+## Scope
 
-**Metrics:**
-*   Total Heap Pages: 269
-*   Total FSM Pages: 3
-*   Pages actively holding tuples: 268
-*   Average Tuples per Page: ~78.3
-*   **Average Free Bytes per Page: 94.4 bytes**
+The benchmark set measures four things:
 
-*Analysis:*
-The FSM is operating with **extreme space efficiency**. With page bounds likely sitting at 8192 bytes, leaving an average of only 94.4 unallocated bytes per page translates to a **space utilization rate of ~98.8%**. This densely packed structural layout confirms that the `fsm_search_avail` and allocation algorithms are successfully filling pages to their maximum capacity before forcing the creation of new extensions.
+1. RookDB's own FSM-backed heap manager performance.
+2. A SQLite comparison workload.
+3. A MySQL comparison workload.
+4. PostgreSQL comparison workloads using `pgbench` and `pg_freespacemap`.
 
-Additionally, managing 269 heap pages requires only **3 FSM pages**. This empirically validates the architectural claim of **constant-time $O(1)$ I/O overhead**. The spatial representation correctly encapsulates the entire heap structure within exactly three memory checks (Root -> Level 1 -> Leaf).
+The benchmark outputs are stored in the repository-root `benchmark_runs/` directory. Intermediate scratch files are not meant to be committed.
 
-## 2. Insertion Throughput
+## How To Run The Benchmarks
 
-**Metrics:**
-*   Small Insertions (50 bytes): ~498 tuples / sec
-*   Large Insertions (1000 bytes): ~246 tuples / sec
+### Full Suite
 
-*Analysis:*
-While the space utilization is exceptionally high, the raw insertion speed indicates heavy per-transaction I/O constraints or aggressive `fsync` barriers explicitly writing through into `.dat` boundaries safely. The 50-byte inserts run at virtually double the throughput of large 1000-byte inserts, matching standard physical buffer flushing scaling algorithms linearly. 
+Run every benchmark and refresh the comparison CSV:
 
-If this performance is tested synchronously (awaiting disk flushes upon every single allocation), this serves as a sturdy crash-safe baseline. Future optimizations such as batch-writing (WAL) or relaxed durability flushes could greatly multiply throughput overhead natively if I/O bottlenecks are fully targeted.
+```bash
+./benchmarks/generate_comparison_csv.sh
+```
 
-## 3. Read Operations (Lookups & Scans)
+This will, by default, run the full suite first and then generate `benchmark_runs/benchmark_comparison.csv`.
 
-**Metrics:**
-*   Point Lookups (Coordinate based): ~4,957 ops / sec
-*   Sequential Scanning: ~6,134 tuples / sec
+### Run Everything Without Rebuilding the CSV
 
-*Analysis:*
-Read operations heavily outperform write injections (by nearly a 10x to 12x factor). Targeted O(1) point lookups successfully retrieve exact Row IDs rapidly. The sequential linear scanner pulls 6.1k tuples per second without indexed caching, demonstrating the efficiency of the `HeapScanIterator` linearly hopping page boundaries seamlessly without fragmenting memory headers.
+```bash
+./benchmarks/run_all_benchmarks.sh
+```
 
-## 4. System Resiliency & Crash Recovery
+### Aggregate Existing Outputs Only
 
-**Metrics:**
-*   **FSM Rebuild Time: 42.5 milliseconds** (0.042s)
-*   Oversized Tuple Rejections: Successfully caught out-of-bounds pointer mappings natively.
+```bash
+RUN_BENCHMARKS=0 ./benchmarks/generate_comparison_csv.sh
+```
 
-*Analysis:*
-The system dynamically wiped and re-analyzed 269 heap pages directly from the raw `.dat` file, re-translating and reconstructing the entire 3-Level Binary Max-Tree structural side-car within just **42.5 milliseconds**. 
-This establishes incredible baseline capabilities for Database Crash Recovery boundaries: reconstructing even tens of thousands of mapping pages theoretically takes under a few seconds locally. 
+### Individual Scripts
 
-## 5. Conclusion
+```bash
+./benchmarks/run_sqlite_bench.sh
+./benchmarks/run_mysql_bench.sh
+./benchmarks/run_pgbench.sh
+./benchmarks/run_postgres_fsm_compare.sh
+```
 
-The benchmark unequivocally validates RookDB's primary architectural designs:
-1. **The FSM mapping eliminates disk bloat.** Maintaining 98.8% packed page densities protects system memory bounds strictly.
-2. **Crash recovery is lightning-fast.** Real-time FSM tree reconstructions scale beautifully via binary max-tree rebuild methodologies locally.
-3. **O(1) I/O FSM validation holds strictly true.** Zero linear sequence scanning happens; allocating targets only required tapping 3 literal side-car pages. 
+### RookDB Native Benchmark Only
+
+```bash
+cargo run --bin benchmark_fsm_heap
+```
+
+You can also direct the JSON output explicitly:
+
+```bash
+cargo run --bin benchmark_fsm_heap -- --output benchmark_runs/latest_fsm_heap_benchmark.json
+```
+
+## Script Summary
+
+| Script | Purpose | Main Output |
+| --- | --- | --- |
+| `benchmarks/run_all_benchmarks.sh` | Runs the full benchmark suite | Multiple files in `benchmark_runs/` |
+| `benchmarks/generate_comparison_csv.sh` | Aggregates all result files into one comparison table | `benchmark_runs/benchmark_comparison.csv` |
+| `benchmarks/run_sqlite_bench.sh` | Creates, updates, deletes, and reports SQLite metrics | `benchmark_runs/sqlite_benchmark.txt` |
+| `benchmarks/run_mysql_bench.sh` | Creates, updates, deletes, and reports MySQL metrics | `benchmark_runs/mysql_benchmark.txt` |
+| `benchmarks/run_pgbench.sh` | Runs `pgbench` against PostgreSQL | `benchmark_runs/pgbench_results.txt` |
+| `benchmarks/run_postgres_fsm_compare.sh` | Measures PostgreSQL free-space behavior | `benchmark_runs/postgres_fsm_metrics.csv`, `benchmark_runs/postgres_fsm_summary.txt` |
+| `cargo run --bin benchmark_fsm_heap` | Benchmarks the RookDB FSM/heap stack | `benchmark_runs/latest_fsm_heap_benchmark.json` |
+
+## Required Environment
+
+### Shared
+
+- Rust toolchain and Cargo
+- Repository root as the working directory when invoking the scripts
+- A writable `benchmark_runs/` directory
+
+### SQLite
+
+- `sqlite3` available on `PATH`
+
+### MySQL
+
+- `mysql` client available on `PATH`
+- A reachable MySQL server
+- Optional environment variables:
+	- `MYSQL_HOST`
+	- `MYSQL_PORT`
+	- `MYSQL_USER`
+	- `MYSQL_PASSWORD`
+	- `MYSQL_DATABASE`
+
+### PostgreSQL / pgbench
+
+- `psql` and `pgbench` available on `PATH`
+- A reachable PostgreSQL server
+- Optional environment variables:
+	- `PGHOST`
+	- `PGPORT`
+	- `PGUSER`
+	- `PGPASSWORD`
+	- `PGDATABASE`
+	- `PGBENCH_SCALE`
+	- `PGBENCH_CLIENTS`
+	- `PGBENCH_JOBS`
+	- `PGBENCH_TIME`
+
+## Output Files
+
+The canonical benchmark output set is:
+
+- `benchmark_runs/latest_fsm_heap_benchmark.json`
+- `benchmark_runs/benchmark_history.csv`
+- `benchmark_runs/benchmark_history.jsonl`
+- `benchmark_runs/benchmark_comparison.csv`
+- `benchmark_runs/sqlite_benchmark.txt`
+- `benchmark_runs/mysql_benchmark.txt`
+- `benchmark_runs/pgbench_results.txt`
+- `benchmark_runs/postgres_fsm_metrics.csv`
+- `benchmark_runs/postgres_fsm_summary.txt`
+- `benchmark_runs/initial_phase_results.json`
+
+Temporary SQLite files such as `sqlite_bench.db`, `sqlite_bench.db-wal`, and `sqlite_bench.db-shm` are intermediate artifacts and are intentionally not part of the final benchmark deliverables.
+
+## Latest RookDB Benchmark Results
+
+Source: `benchmark_runs/latest_fsm_heap_benchmark.json`
+
+| Metric | Value |
+| --- | ---: |
+| Run ID | 1776859982 |
+| Small inserts | 20000 |
+| Large inserts | 1000 |
+| Lookup samples | 1000 |
+| Inserted total | 21000 |
+| Scanned total | 21000 |
+| Small insert TPS | 21291.0861 |
+| Large insert TPS | 16930.2971 |
+| Point lookup OPS | 515331.1002 |
+| Sequential scan TPS | 2167611.4872 |
+| FSM rebuild seconds | 0.005375 |
+| Heap pages | 269 |
+| FSM pages | 3 |
+| Pages used with tuples | 268 |
+| Avg tuples per used page | 78.36 |
+| Avg free bytes on used pages | 94.45 |
+| Oversized tuple rejected | true |
+| FSM rebuild search found page | true |
+
+## Cross-Database Comparison
+
+Source: `benchmark_runs/benchmark_comparison.csv`
+
+| Engine | Rows Configured | Insert sec | Update sec | Delete sec | Rows After Delete | Avg Payload Len | Small TPS | Large TPS | Lookup OPS | Scan TPS | FSM Rebuild sec | Avg FSM Free Bytes | pgbench TPS | pgbench Latency ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| rookdb_fsm_heap | 21000 | NA | NA | NA | NA | NA | 21291.09 | 16930.30 | 515331.10 | 2167611.49 | 0.005375 | NA | NA | NA |
+| sqlite | 100000 | 0 | 1 | 0 | 90000 | 55.56 | NA | NA | NA | NA | NA | NA | NA | NA |
+| mysql | 100000 | 1 | 0 | 0 | 90000 | 55.56 | NA | NA | NA | NA | NA | NA | NA | NA |
+| postgres_fsm | 1000 | 0 | 0 | 0 | 900 | 55.56 | NA | NA | NA | NA | NA | 2269.71 | NA | NA |
+| pgbench | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | 3867.890925 | 2.068 |
+
+## Analysis
+
+### Storage Utilization
+
+The latest RookDB run reports `269` heap pages and only `3` FSM pages. Of those heap pages, `268` hold tuples. The average free space on used pages is `94.45` bytes, which means the heap is packed extremely tightly. On an 8192-byte page, that leaves roughly `1.15%` free space and implies about `98.85%` average utilization on active pages.
+
+This is the expected effect of page-level free-space selection: the FSM keeps inserts routed to pages that still have room, and the heap manager reuses available slot space before extending the table.
+
+### Insert Performance
+
+The latest RookDB run shows:
+
+- Small insert throughput: `21291.09` TPS
+- Large insert throughput: `16930.30` TPS
+
+Compared with the earlier history point at run `1776596962`, small inserts improved from `18852.96` TPS to `21291.09` TPS, and large inserts improved from `13036.05` TPS to `16930.30` TPS. That is a meaningful gain for both tuple sizes, especially for larger payloads.
+
+Interpretation:
+
+- The FSM search path is finding viable pages efficiently.
+- Slot reuse and header/page update logic are not introducing a visible bottleneck.
+- Large tuple handling is scaling better than earlier runs, which suggests the current page reuse and allocation path is stable.
+
+### Read Performance
+
+The latest run reports:
+
+- Point lookup throughput: `515331.10` OPS
+- Sequential scan throughput: `2167611.49` TPS
+
+These are very strong numbers, but they should be read carefully. This benchmark is single-process and can be sensitive to page cache warmth, so lookup and scan values should be treated as best-case operational performance unless you run repeated cold/warm trials.
+
+Still, the trend is positive: point lookups and scans remain correct and fast while the storage layer is under sustained insert pressure.
+
+### Recovery and Robustness
+
+The FSM rebuild time in the latest run is `0.005375` seconds. That is fast enough to support rebuild-on-open behavior without turning recovery into a user-visible penalty.
+
+The benchmark also confirms that:
+
+- oversized tuples are rejected correctly
+- `scanned_total == inserted_total`
+- rebuilding the FSM still finds a valid page
+
+This means the storage layer remains correct while the benchmarked performance improves.
+
+### Cross-Engine Context
+
+The comparison CSV is useful as an engineering snapshot, not a perfectly identical workload comparison.
+
+- RookDB reports storage-engine metrics like TPS, OPS, and FSM rebuild time.
+- SQLite and MySQL report operation durations and post-delete state.
+- PostgreSQL FSM metrics report average free bytes.
+- `pgbench` reports throughput and latency for a synthetic transactional workload.
+
+Because the workloads are not identical, the table should be read as a qualitative comparison set rather than a strict apples-to-apples TPC-style benchmark.
+
+## Trend Analysis
+
+Recent RookDB runs in `benchmark_history.csv` show a clear progression:
+
+| Run ID | Small TPS | Large TPS | Lookup OPS | Scan TPS | Rebuild sec |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1776596962 | 18852.9578 | 13036.0534 | 43332.4078 | 47035.3673 | 0.009143 |
+| 1776620140 | 21265.6556 | 16456.1535 | 77746.6411 | 2166632.8431 | 0.006503 |
+| 1776859982 | 21291.0861 | 16930.2971 | 515331.1002 | 2167611.4872 | 0.005375 |
+
+Read this as:
+
+- insert throughput improved and then stabilized at a stronger level
+- rebuild time kept decreasing
+- read metrics remained correct and became much faster in the latest runs
+
+## Benchmark Method Notes
+
+- The benchmark suite is single-process for the RookDB path.
+- Results can vary with OS cache state and background system load.
+- External engine scripts are shell-based and use elapsed second timing.
+- For submission-quality reporting, repeated runs and median values are preferable.
+
+## Script Inputs And Outputs
+
+### RookDB Native Benchmark
+
+Command:
+
+```bash
+cargo run --bin benchmark_fsm_heap
+```
+
+Main outputs:
+
+- `benchmark_runs/latest_fsm_heap_benchmark.json`
+- `benchmark_runs/benchmark_history.csv`
+- `benchmark_runs/benchmark_history.jsonl`
+
+### Comparison Aggregation
+
+Command:
+
+```bash
+./benchmarks/generate_comparison_csv.sh
+```
+
+Main output:
+
+- `benchmark_runs/benchmark_comparison.csv`
+
+### SQLite, MySQL, pgbench, PostgreSQL FSM
+
+Commands:
+
+```bash
+./benchmarks/run_sqlite_bench.sh
+./benchmarks/run_mysql_bench.sh
+./benchmarks/run_pgbench.sh
+./benchmarks/run_postgres_fsm_compare.sh
+```
+
+Main outputs:
+
+- `benchmark_runs/sqlite_benchmark.txt`
+- `benchmark_runs/mysql_benchmark.txt`
+- `benchmark_runs/pgbench_results.txt`
+- `benchmark_runs/postgres_fsm_metrics.csv`
+- `benchmark_runs/postgres_fsm_summary.txt`
+
+## Cleanup Policy
+
+Intermediate files are removed after the benchmark summary is produced. Examples include:
+
+- transient SQLite database files and WAL/SHM sidecars
+- temporary `fsm_heap_bench_*.dat.fsm` files used during benchmark runs
+
+Final result files remain in `benchmark_runs/` so the documentation and comparison CSV can refer to them directly.
+
+## Conclusion
+
+The benchmark set shows that RookDB's FSM-backed heap manager is behaving as intended:
+
+- heap pages are densely utilized
+- insert throughput is strong for both small and large tuples
+- point lookups and scans are fast
+- FSM rebuild is cheap enough to support recovery
+- correctness checks stay green throughout the run
+
+This makes the current documentation package complete for the benchmark portion of the submission requirements.
 
