@@ -21,6 +21,20 @@ const sidebars: SidebarsConfig = {
         'projects/catalog-manager',
         'projects/sorted-ordered-file-manager',
         'projects/fsm-heap-manager',
+        {
+          type: 'category',
+          label: 'FSM Heap Manager Docs',
+          collapsed: true,
+          items: [
+            'projects/fsm-heap-manager/submission-requirements',
+            'projects/fsm-heap-manager/design-doc',
+            'projects/fsm-heap-manager/heap-manager',
+            'projects/fsm-heap-manager/free-space-manager',
+            'projects/fsm-heap-manager/features-implemented',
+            'projects/fsm-heap-manager/benchmark-report',
+            'projects/fsm-heap-manager/test',
+          ],
+        },
         
         // First subsection: Fixed Length Data Types
         {
