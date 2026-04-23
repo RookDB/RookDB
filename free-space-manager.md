@@ -198,28 +198,7 @@ This formula dynamically packs the file tightly, completely eliminating huge pad
 **No Physical Pointers:** Pages don't store file offsets or addresses. Instead, the address is computed deterministically from the page number and overall heap size.
 
 ---
-
-## 4. Future Work: The `fp_next_slot` Variable for Sequential Slot Tracking
-
-### 4.1 What `fp_next_slot` Will Do 
-
-**Clarification:** `fp_next_slot` will be used to **avoid rescanning from slot 0 every time** when searching for available pages. It provides a **sequential tracking hint**, NOT load balancing. 
-
-Currently, our max-tree correctly directs us to the available space without rescanning, starting its search from the root node. However, keeping track of the last successfully filled spot (`fp_next_slot`) can further optimize search speed when sequentially filling many tuples into a single newly allocated page. 
-
-**Future Data Structure Adjustment:**
-```rust
-pub struct FSMPage {
-    tree: [u8; FSM_NODES_PER_PAGE],  // 4,080 bytes: binary max-tree
-    // fp_next_slot: u16,            // track index for faster intra-page sequential inserts
-}
-```
-
-### 4.2 Handling Intra-Page Searches
-
-**For the future:** We could attempt finding space beginning at `fp_next_slot` via a localized sub-tree traversal or scan, reducing array index navigation steps on hot inserts.
-
----
+ 
 
 ## 5. Sequential Insertion Logic: Greedy Max Binary Tree Routing
 
@@ -289,30 +268,17 @@ insert_tuple(tuple_data):
   └─ Write page back to disk, update FSM
 ```
 
-### 5.3 Why Sequential, Not Scattered?
-
-**Sequential fills pages until full:**
-```
-Page 1:  [Header] [Slot Dir] .......... [Tuple 1][Tuple 2]
-                    ↑                         ↑
-                  lower                    upper
-                  
-Page 1 After 100 inserts:
-[Header] [Slot Dir (100 entries)] [Tuple 1-100 packed at end]
-         ↑                              ↑
-        lower=808                    upper=300 (nearly full!)
-        
-Once lower ≈ upper, page is FULL → FSM marks category = 0
-
-Next insert searches FSM → finds Page 2 (category > 0)
-[Header] [Slot Dir] .......... [Tuple 101][Tuple 102]
-```
-
-**Guarantee:** The FSM ensures **sequential fill with minimal wasted seeks**.
 
 ### 5.4 The 3-Attempt Insertion Algorithm
 
-Due to fragmentation, insertions use a **3-attempt retry strategy**:
+**Currently, why does Attempt 1 ever fail in our system?**
+In a perfectly synchronous, single-threaded system that updates the FSM immediately on every single `INSERT`, Attempt 1 **should theoretically never fail** because we only track contiguous free space, and we don't update on deletions (meaning the FSM only shrinks and never becomes falsely optimistic). 
+
+**However, the 3-attempt strategy is required for three fundamental architectural reasons:**
+1. **Concurrency (Race Conditions):** By the time you lock a data page provided by the FSM, another background thread might have already inserted a tuple into it, reducing its actual space.
+2. **Future FSM Laziness:** Once we optimize the engine so the FSM is *not* updated aggressively on every single insert (to save disk writes) and begins to rely on periodic Vacuum passes, the FSM *will* become intentionally stale (falsely optimistic).
+
+Due to these factors, insertions use a **3-attempt retry strategy**:
 
 **Attempt 1: Trust FSM's suggestion**
 ```rust
@@ -320,8 +286,9 @@ if let Some(page_id) = fsm_search_avail(min_category) {
     if insert_into_page(page_id, tuple_data).is_ok() {
         return Ok((page_id, slot_id));  // Success!
     }
-    // Insertion failed: page has internal fragmentation
-    // Update FSM with true contiguous free space
+    // Insertion failed: FSM data was stale or lost a race condition!
+    // The page actually has less space than the FSM claimed.
+    // Fix the tree on the fly: update FSM with true contiguous free space.
     fsm_set_avail(page_id, actual_free_bytes);
 }
 ```
@@ -344,9 +311,9 @@ Ok((new_page_id, slot_id))
 ```
 
 **Why 3 attempts?**
-1. Handles 99% of inserts in one disk read (Attempt 1 succeeds)
-2. Fallback for fragmentized pages (Attempt 2)
-3. Emergency allocation if all tracked pages are fragmented (Attempt 3)
+1. **Attempt 1:** Handles 99% of inserts in one fast disk read when FSM is accurate.
+2. **Attempt 2:** Seamless on-the-fly self-healing. If Attempt 1 hits a stale node, it explicitly fixes the FSM tree (`fsm_set_avail`) and tries again. This decouples the FSM from catastrophic crashes or lazy updates.
+3. **Attempt 3:** Emergency allocation if the FSM is completely filled and Attempt 2 fails. Guarantees progress.
 
 ---
 
@@ -501,7 +468,7 @@ pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, 
    ├─ If root_value < min_category: return None.
 
 3. Traverse active FSM pages:
-   ├─ Sequentially scan children preferring the left branch (greedy tree).
+   ├─ Traverses a binary max-tree down the nodes (binary search logic), greedily preferring the left branch for density packing.
    ├─ Drill down Level_N → Level_N-1.
 
 4. Reach Level-0 leaf page:
@@ -513,11 +480,11 @@ pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, 
 
 **Guarantees:**
 - Returns a page whose category >= `min_category`.
-- Does NOT guarantee the page will have enough contiguous space (due to internal page fragmentation in the database).
-  - → Insertion may still fail (handled by 3-attempt retry).
+- Does NOT guarantee the page will have enough contiguous space (due to internal page fragmentation or lazy FSM updates in the database).
+  - → Insertion may still fail (handled by 3-attempt retry self-healing).
 
 **I/O Cost:**
-- **Best case:** 1-3 disk reads (depending on tree depth and cache).
+- **Best/Typical case:** 1-3 disk reads maximum (exactly the height of the tree, usually 1 if internal nodes are cached).
 
 ### 8.3 `FSM::fsm_set_avail(heap_page_id, new_free_bytes, cached_page)`
 
@@ -745,6 +712,17 @@ Total Tuples:      1
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
+**How to Verify Correctness (Detailed Breakdown of the 1 Insert):**
+
+* **`Total Heap Pages (2)` & `FSM Fork Pages (1)`:** Exactly one header page (Page 0) and one data page (Page 1) are active for the heap. Thus, the FSM only needs exactly 1 Level-0 page to track the data map.
+* **`insert_tuple` (1):** A single row was requested.
+* **`allocate_page` (0):** The tuple fit comfortably inside the pre-existing Page 1 (allocated at initialization/creation), meaning ZERO new heap expansions were forced dynamically.
+* **`fsm_search_avail` (1) & `fsm_search_tree` (1):** Attempt 1 of the 3-attempt algorithm fired, traversed the FSM tree perfectly to the root, located the empty Page 1, and successfully returned. No retry loop (`fsm_search_avail` was not called sequentially) because the FSM accurately knew Page 1 had space!
+* **`fsm_read_page` & `fsm_deserialize_page` (1):** Exact matching cost of reading and parsing the FSM Level-0 page from disk during the `fsm_search_tree` scan.
+* **`fsm_set_avail` (1):** Once the tuple was inserted into the heap page, the new contiguous free space was computed and the `fsm_set_avail` was triggered exactly 1 time to broadcast this shrinkage down to the FSM.
+* **`fsm_write_page` & `fsm_serialize_page` (1):** Because it was the very first inserted tuple, the category of "Page 1" dropped immediately, naturally bypassing the `Early Exit` logic and therefore persisting the changes directly to the Level-0 disk page exactly 1 time.
+* **`read_page` & `write_page` (1):** The actual heap data page (Page 1) was physically read from the drive exactly 1 time, modified in RAM, and securely flushed directly back to the disk exactly 1 time (due to the lack of an intermediate Buffer Pool caching dirty pages).
+
 **Example Output for 5000 insert tuple:**
 ```
 Total Heap Pages:  15
@@ -774,8 +752,29 @@ Total Tuples:      5000
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
+**How to Verify Correctness (Detailed Breakdown of the 5000 Inserts):**
 
-**How to Verify Correctness:**
+* **`insert_tuple` (5000 calls)**
+  * Exactly corresponds to 5000 requested tuple rows.
+* **`read_page` (5000) & `write_page` (5000)**
+  * **The "Screaming OS" Reality:** For every single insertion, the engine currently reads a data page directly from disk, modifies it, and immediately writes it back—there is **no Buffer Pool Manager** built yet! Over 5000 tuples across 15 pages means reading/writing the exact same 8KB physical disk file ~333 times. Once a Buffer Pool exists, I/O will drop dramatically to loading each page once (`15 reads`) and flushing it when evicted or synced (`15+ writes`).
+* **`allocate_page` (13 calls)**
+  * Over the course of 5000 inserts, 13 brand-new pages had to be dynamically provisioned to hold expanding table data.
+* **`fsm_search_avail` (5026 calls) & `fsm_search_tree` (5026 calls)**
+  * Every insert attempts an `fsm_search_avail` (5000 starts).
+  * Why the extra 26 calls? **The 3-Attempt Algorithm & Lazy Propagation:**
+  * 13 times, the FSM tree routed an insert to a page whose FSM byte was falsely optimistic (stale category data).
+  * Attempt 1 **fails**. The FSM corrects its own staleness: `fsm_set_avail` modifies the tree.
+  * Attempt 2 triggers another *second search* (so 13 extra `fsm_search_avail`).
+  * If those 13 Attempt 2's also failed (because the table is completely out of space), Attempt 3 fires and dynamically hits `allocate_page`. Thus, exactly 5000 base searches + 13 retry searches + 13 empty edge-case checks = 5026.
+* **`fsm_set_avail` (5013 calls)**
+  * 5000 successful tuple insertions each update the FSM space dynamically upon success.
+  * 13 failed Attempt-1 inserts *healed* the stale FSM branches on the fly. Total `5000 + 13 = 5013`.
+* **`fsm_serialize_page` (3450) & `fsm_write_page` (3450)**
+  * Why only 3450 writes if `fsm_set_avail` was called 5013 times?
+  * **Quantization Optimization Magic** (`Early Exit`): When `min_category` stays the exact same (e.g. integer category 15 stays 15 despite losing 16 bytes of free space), the Bubble-Up logic short-circuits. Roughly 1563 insertions did not change a category block's classification, totally bypassing unnecessary disk writes!
+* **`fsm_read_page` (5052 calls) & `fsm_deserialize_page` (5052 calls)**
+  * Exactly matches 5026 search loads (`fsm_search_avail`) + 26 page loads associated with the FSM bubbling up during `fsm_set_avail` tree-corrections.
 
 
 ---
@@ -798,8 +797,8 @@ pub struct FSMPage {
 ```
 Index 0:           Root node (max of entire subtree)
 Index 1-3:         Level 1 of tree (parents of leaves)
-Index 4-2039:      Leaves (direct free-space categories for heap pages)
-Index 4000+:       Unused (padding to fill 8 KB page)
+Index 4-3998:      Internal nodes (intermediate values)
+Index 3999+:       Leaves (direct free-space categories for heap pages)
 ```
 
 ### 11.2 How `tree[]` is Indexed
@@ -811,7 +810,8 @@ tree[0]            = root
 tree[1], tree[2]   = children of root
 tree[3]..tree[6]   = children of tree[1] and tree[2]
 ...
-tree[1020]..tree[2039] = leaves (free-space categories)
+tree[1020]..tree[3998] = internal nodes (max values for subtrees)
+tree[3999]..tree[7998] = leaves (categories for heap pages 0..3999)
 ```
 
 **Parent-Child Relationship:**
@@ -829,16 +829,27 @@ heap_page_0 has 500 free bytes → category = 15
 heap_page_1 has 8000 free bytes → category = 250
 heap_page_2 has 1000 free bytes → category = 31
 heap_page_3 has 2000 free bytes → category = 62
+.
+.
+.
+heap_page_3999 has 0 free bytes → category = 0
 
-tree[1020] = 15   (heap page 0)
-tree[1021] = 250  (heap page 1)
-tree[1022] = 31   (heap page 2)
-tree[1023] = 62   (heap page 3)
+tree[3999] = 15   (heap page 0)
+tree[4000] = 250  (heap page 1)
+tree[4001] = 31   (heap page 2)
+tree[4002] = 62   (heap page 3)
+.
+.
+.
+tree[7998] = 0    (heap page 3999)
 
-tree[510] = max(tree[1020], tree[1021]) = max(15, 250) = 250   (parent)
-tree[511] = max(tree[1022], tree[1023]) = max(31, 62) = 62    (parent)
+tree[1999] = max(tree[3999], tree[4000]) = max(15, 250) = 250   (parent)
+tree[2000] = max(tree[4001], tree[4002]) = max(31, 62) = 62    (parent)
+..
+tree[3998] = max(tree[7997], tree[7998]) = max(?, 0)              (parent)
+..
+tree[0] = max(tree[1], tree[2]) = max(250, 62) = 250   (root) 
 
-tree[255] = max(tree[510], tree[511]) = max(250, 62) = 250    (root)
 ```
 
 When someone searches for a page with category >= 200:
@@ -847,21 +858,6 @@ Check tree[0] (root) = 250 >= 200 ✓
 → Traverse tree; find tree[1021] = 250 >= 200
 → Return heap_page_1
 ```
-
----
-
-## 12. Summary: FSM Guarantees
-
-| Property | Guarantee | Why |
-|----------|-----------|-----|
-| **Page Find Time** | O(log N) = O(\log N) | 3-level tree, constant height |
-| **Page Found Correctness** | category >= requested | Binary max-tree bubble-up |
-| **Contiguous Free Tracking** | Accurate within category resolution | Updated after every insert/delete |
-| **Sequential Fills** | Pages fill in order, then wrap | Sequential traversal |
-| **No Implicit Scanning** | FSM never scans all pages | O(log N) traversal only |
-| **Crash Recovery** | FSM can be rebuilt from heap | Treated as hint, not durability critical |
-| **Multi-Page Scalability** | Scales to 4M+ pages | Tree height stays constant |
-
 ---
 
 ## 13. Compaction Team Integration Checklist
@@ -874,20 +870,22 @@ Check tree[0] (root) = 250 >= 200 ✓
 
 ---
 
-### Future Work: Concurrent Access (fp_next_slot)
-
-To optimize concurrent insertions and reduce contention on FSM pages, an `fp_next_slot` pointer could be introduced in the `FSMPage` struct as future work.
-
-Currently, the FSM uses a purely greedy search to traverse the binary max-heap. All concurrent backends looking for free space traverse from the root downwards in exactly the same way, always finding the first block (leftmost branch usually) with enough space. This causes heavy contention, as multiple transactions might attempt to lock and insert tuples into the same heap page.
-
-By adding `fp_next_slot`, we could keep track of where the last successful search ended or round-robin requests. 
-For instance, a backend could start searching the tree from `fp_next_slot` instead of the root, effectively spreading out insertions across different heap pages, minimizing lock waits and maximizing write throughput. This would be implemented efficiently by caching the `fp_next_slot` hint, falling back to a full tree search only when no sufficient space is found from the hint onwards.
-
 ### Optimization :
 - **Early Exit**: If the insert does not changes the category (e.g., from 15 to 15), we can skip the bubble-up entirely, This means for 95% of small inserts, fsm_set_avail will gracefully short-circuit, sparing you an unnecessary disk rewrite and bubble-up traversal.
+- **Initial FSM Construction Optimization**: During the initial FSM build, we need only 1 level 0 page for the first 4000 heap pages. We can skip building level 1 and level 2 until we exceed those thresholds, saving time and disk space for small tables.
 
-### Future Work: Delayed Updates and Pinning
 
-1. **Delayed Updates**: PostgreSQL typically doesn't update the FSM immediately after every single small insert. The FSM is mostly updated during VACUUM. We could implement similar delayed updates to reduce FSM write contention during burst inserts.
-2. **Pinning and State Retention**: Instead of releasing the page after `fsm_search_tree`, the page should be kept "pinned" in memory if we know we are about to call `fsm_set_avail`. By holding the reference, we avoid needing to re-read or re-deserialize it to update the value, reducing the deserializations from 6 to 3.
+### Future Work
 
+1. **Delayed Updates (Laziness) for Inserts:** PostgreSQL typically doesn't update the FSM immediately after every single small insert. The FSM is mostly updated during VACUUM. We could implement similar delayed updates to reduce FSM write contention during burst inserts.
+2. **Buffer Pool Manager (BPM) Integration:** Currently, the Heap Manager is heavily bottle-necked (`read_page` hitting disk 5,000 times for 15 pages). Implementing a BPM will slash logical reads against physical block reads dramatically.
+3. **Pinning and State Retention:** Instead of releasing the page after `fsm_search_tree`, the page should be kept "pinned" in memory if we know we are about to call `fsm_set_avail`. By holding the reference, we avoid needing to re-read or re-deserialize it to update the value, reducing the deserializations from 6 to 3.
+4. **The `fp_next_slot` Variable for Sequential Slot Tracking:** What `fp_next_slot` Will Do 
+
+**Clarification:** `fp_next_slot` will be used to **avoid rescanning from slot 0 every time** when searching for available pages. It provides a **sequential tracking hint**, and load balancing. 
+
+Currently, our max-tree correctly directs us to the available space without rescanning, starting its search from the root node. However, keeping track of the last successfully filled spot (`fp_next_slot`) can further optimize search speed when sequentially filling many tuples into a single newly allocated page. 
+
+**For the future:** We could attempt finding space beginning at `fp_next_slot` via a localized sub-tree traversal or scan, reducing array index navigation steps on hot inserts.
+
+---
