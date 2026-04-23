@@ -272,3 +272,57 @@ fn test_secondary_composite_rebuild_removes_stale_entries() {
     let _ = fs::remove_file(table_path);
     let _ = fs::remove_dir_all(table_dir);
 }
+
+#[test]
+fn test_secondary_composite_bplus_large_save_does_not_overflow_page() {
+    let db_name = "test_db_secondary_composite_large";
+    let table_name = "events";
+    let index_name = "id_customer_idx";
+
+    let index_entry = IndexEntry {
+        index_name: index_name.to_string(),
+        column_name: vec!["id".to_string(), "customer_id".to_string()],
+        algorithm: IndexAlgorithm::BPlusTree,
+        is_clustered: false,
+        include_columns: Vec::new(),
+    };
+
+    let (catalog, mut file, table_path, table_dir) = setup_table(
+        db_name,
+        table_name,
+        vec![
+            Column {
+                name: "id".to_string(),
+                data_type: "INT".to_string(),
+            },
+            Column {
+                name: "customer_id".to_string(),
+                data_type: "INT".to_string(),
+            },
+        ],
+        vec![index_entry.clone()],
+    );
+
+    for i in 0..3000i32 {
+        let mut tuple = Vec::with_capacity(8);
+        tuple.extend_from_slice(&i.to_le_bytes());
+        tuple.extend_from_slice(&((i * 17) % 997).to_le_bytes());
+        insert_tuple_with_rid(&mut file, &tuple).expect("failed to insert tuple");
+    }
+
+    let built = AnyIndex::build_secondary_index(&catalog, db_name, table_name, &index_entry)
+        .expect("build_secondary_index failed");
+
+    let path = secondary_index_file_path(db_name, table_name, index_name);
+    let _ = fs::remove_file(&path);
+    built
+        .save(&path)
+        .expect("B+Tree save should not overflow a node page for this workload");
+
+    let loaded = AnyIndex::load(&path, &IndexAlgorithm::BPlusTree).expect("load failed");
+    assert!(loaded.entry_count() >= 3000, "expected all entries to persist");
+
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(table_path);
+    let _ = fs::remove_dir_all(table_dir);
+}

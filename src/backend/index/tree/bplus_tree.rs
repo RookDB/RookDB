@@ -554,6 +554,8 @@ impl BPlusTree {
     }
 
     fn save_node_format(&self, path: &str) -> io::Result<()> {
+        self.validate_node_payload_sizes()?;
+
         if let Some(parent) = std::path::Path::new(path).parent() {
             fs::create_dir_all(parent)?;
         }
@@ -707,6 +709,70 @@ impl BPlusTree {
         }
 
         out
+    }
+
+    fn is_node_payload_overflow_error(err: &io::Error) -> bool {
+        err.kind() == io::ErrorKind::InvalidData
+            && err
+                .to_string()
+                .contains("payload is too large for a single page")
+    }
+
+    fn validate_node_payload_sizes(&self) -> io::Result<()> {
+        for node_idx in 0..self.nodes.len() {
+            let _ = self.serialize_node_page(node_idx)?;
+        }
+        Ok(())
+    }
+
+    fn build_from_entries_with_degree(
+        entries: &[(IndexKey, RecordId)],
+        t: usize,
+    ) -> io::Result<Self> {
+        let mut rebuilt = Self::new(t);
+        for (key, rid) in entries {
+            rebuilt.insert(key.clone(), rid.clone())?;
+        }
+        Ok(rebuilt)
+    }
+
+    fn save_with_adaptive_degree(&self, path: &str) -> io::Result<()> {
+        let entries = self.collect_entries();
+        if entries.is_empty() {
+            return self.save_node_format(path);
+        }
+
+        let mut lo = 2usize;
+        let mut hi = self.t.max(2);
+        let mut best_t: Option<usize> = None;
+
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let candidate = Self::build_from_entries_with_degree(&entries, mid)?;
+
+            match candidate.validate_node_payload_sizes() {
+                Ok(()) => {
+                    best_t = Some(mid);
+                    lo = mid.saturating_add(1);
+                }
+                Err(err) if Self::is_node_payload_overflow_error(&err) => {
+                    if mid == 2 {
+                        break;
+                    }
+                    hi = mid - 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        let chosen_t = best_t.ok_or_else(|| {
+            Self::io_invalid_data(
+                "B+Tree node payload cannot fit in one page even with minimum degree 2",
+            )
+        })?;
+
+        let adapted = Self::build_from_entries_with_degree(&entries, chosen_t)?;
+        adapted.save_node_format(path)
     }
 
     fn validate_subtree(&self, node_idx: usize, seen: &mut [bool]) -> io::Result<()> {
@@ -1172,7 +1238,13 @@ impl IndexTrait for BPlusTree {
     }
 
     fn save(&self, path: &str) -> io::Result<()> {
-        self.save_node_format(path)
+        match self.save_node_format(path) {
+            Ok(()) => Ok(()),
+            Err(err) if Self::is_node_payload_overflow_error(&err) => {
+                self.save_with_adaptive_degree(path)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn entry_count(&self) -> usize {
