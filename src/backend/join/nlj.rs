@@ -1,14 +1,20 @@
+//! Nested Loop Join executor (Simple and Block modes).
+
+use std::collections::HashSet;
 use std::io;
 
 use crate::catalog::types::Catalog;
 
-use super::{JoinType, NLJMode};
-use super::condition::{JoinCondition, evaluate_conditions};
-use super::scanner::TupleScanner;
+use super::condition::evaluate_conditions;
 use super::result::JoinResult;
+use super::scanner::TupleScanner;
 use super::tuple::Tuple;
+use super::{JoinCondition, JoinType, NLJMode};
 
 /// Nested Loop Join executor.
+///
+/// - **Simple mode**: one inner-table scan per outer row.
+/// - **Block mode** : loads a chunk of outer rows, then scans inner once per chunk.
 pub struct NLJExecutor {
     pub outer_table: String,
     pub inner_table: String,
@@ -19,35 +25,40 @@ pub struct NLJExecutor {
 }
 
 impl NLJExecutor {
+    /// Dispatch to the appropriate execution strategy.
     pub fn execute(&self, db: &str, catalog: &Catalog) -> io::Result<JoinResult> {
         match self.mode {
-            NLJMode::Simple => self.execute_simple(db, catalog),
-            NLJMode::Block => self.execute_block(db, catalog),
+            NLJMode::Simple  => self.execute_simple(db, catalog),
+            NLJMode::Block   => self.execute_block(db, catalog),
+            NLJMode::Indexed => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Indexed NLJ mode not yet implemented",
+            )),
         }
     }
 
+    // ── Simple NLJ ───────────────────────────────────────────────────
+
     fn execute_simple(&self, db: &str, catalog: &Catalog) -> io::Result<JoinResult> {
-        let mut outer_scanner = TupleScanner::new(db, &self.outer_table, catalog)?;
-        let mut inner_scanner = TupleScanner::new(db, &self.inner_table, catalog)?;
-
-        let left_schema = outer_scanner.schema.clone();
-        let right_schema = inner_scanner.schema.clone();
-
+        let mut outer = TupleScanner::new(db, &self.outer_table, catalog)?;
+        let mut inner = TupleScanner::new(db, &self.inner_table, catalog)?;
+        let left_schema  = outer.schema.clone();
+        let right_schema = inner.schema.clone();
         let mut result = JoinResult::new(&left_schema, &right_schema, &self.outer_table, &self.inner_table);
 
         match self.join_type {
             JoinType::Cross => {
-                while let Some(o) = outer_scanner.next_tuple() {
-                    inner_scanner.reset();
-                    while let Some(i) = inner_scanner.next_tuple() {
+                while let Some(o) = outer.next_tuple() {
+                    inner.reset();
+                    while let Some(i) = inner.next_tuple() {
                         result.add(Tuple::merge(&o, &i));
                     }
                 }
             }
             JoinType::Inner => {
-                while let Some(o) = outer_scanner.next_tuple() {
-                    inner_scanner.reset();
-                    while let Some(i) = inner_scanner.next_tuple() {
+                while let Some(o) = outer.next_tuple() {
+                    inner.reset();
+                    while let Some(i) = inner.next_tuple() {
                         if evaluate_conditions(&self.conditions, &o, &i) {
                             result.add(Tuple::merge(&o, &i));
                         }
@@ -55,45 +66,42 @@ impl NLJExecutor {
                 }
             }
             JoinType::LeftOuter => {
-                while let Some(o) = outer_scanner.next_tuple() {
-                    inner_scanner.reset();
+                while let Some(o) = outer.next_tuple() {
+                    inner.reset();
                     let mut matched = false;
-                    while let Some(i) = inner_scanner.next_tuple() {
+                    while let Some(i) = inner.next_tuple() {
                         if evaluate_conditions(&self.conditions, &o, &i) {
                             result.add(Tuple::merge(&o, &i));
                             matched = true;
                         }
                     }
                     if !matched {
-                        let null_right = Tuple::null_tuple(&right_schema);
-                        result.add(Tuple::merge(&o, &null_right));
+                        result.add(Tuple::merge(&o, &Tuple::null_tuple(&right_schema)));
                     }
                 }
             }
             JoinType::RightOuter => {
-                while let Some(i) = inner_scanner.next_tuple() {
-                    outer_scanner.reset();
+                while let Some(i) = inner.next_tuple() {
+                    outer.reset();
                     let mut matched = false;
-                    while let Some(o) = outer_scanner.next_tuple() {
+                    while let Some(o) = outer.next_tuple() {
                         if evaluate_conditions(&self.conditions, &o, &i) {
                             result.add(Tuple::merge(&o, &i));
                             matched = true;
                         }
                     }
                     if !matched {
-                        let null_left = Tuple::null_tuple(&left_schema);
-                        result.add(Tuple::merge(&null_left, &i));
+                        result.add(Tuple::merge(&Tuple::null_tuple(&left_schema), &i));
                     }
                 }
             }
             JoinType::FullOuter => {
-                let mut right_matched = std::collections::HashSet::new();
-
-                while let Some(o) = outer_scanner.next_tuple() {
-                    inner_scanner.reset();
+                let mut right_matched: HashSet<usize> = HashSet::new();
+                while let Some(o) = outer.next_tuple() {
+                    inner.reset();
                     let mut left_matched = false;
                     let mut j = 0;
-                    while let Some(i) = inner_scanner.next_tuple() {
+                    while let Some(i) = inner.next_tuple() {
                         if evaluate_conditions(&self.conditions, &o, &i) {
                             result.add(Tuple::merge(&o, &i));
                             left_matched = true;
@@ -102,65 +110,66 @@ impl NLJExecutor {
                         j += 1;
                     }
                     if !left_matched {
-                        let null_right = Tuple::null_tuple(&right_schema);
-                        result.add(Tuple::merge(&o, &null_right));
+                        result.add(Tuple::merge(&o, &Tuple::null_tuple(&right_schema)));
                     }
                 }
-                
-                inner_scanner.reset();
+                inner.reset();
                 let mut j = 0;
-                while let Some(i) = inner_scanner.next_tuple() {
+                while let Some(i) = inner.next_tuple() {
                     if !right_matched.contains(&j) {
-                        let null_left = Tuple::null_tuple(&left_schema);
-                        result.add(Tuple::merge(&null_left, &i));
+                        result.add(Tuple::merge(&Tuple::null_tuple(&left_schema), &i));
                     }
                     j += 1;
                 }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("{} not implemented in NLJ", self.join_type),
+                ));
             }
         }
 
         Ok(result)
     }
 
+    // ── Block NLJ ────────────────────────────────────────────────────
+
     fn execute_block(&self, db: &str, catalog: &Catalog) -> io::Result<JoinResult> {
-        let mut outer_scanner = TupleScanner::new(db, &self.outer_table, catalog)?;
-        let mut inner_scanner = TupleScanner::new(db, &self.inner_table, catalog)?;
-
-        let left_schema = outer_scanner.schema.clone();
-        let right_schema = inner_scanner.schema.clone();
-
+        let mut outer = TupleScanner::new(db, &self.outer_table, catalog)?;
+        let mut inner = TupleScanner::new(db, &self.inner_table, catalog)?;
+        let left_schema  = outer.schema.clone();
+        let right_schema = inner.schema.clone();
         let mut result = JoinResult::new(&left_schema, &right_schema, &self.outer_table, &self.inner_table);
 
-        let block_size_tuples = self.block_size * 100; // approximate tuples per block
+        let chunk_capacity = self.block_size * 100;
 
-        // We handle Inner, Cross, and LeftOuter fully. RightOuter/FullOuter will use inner buffering.
         match self.join_type {
-            JoinType::Inner | JoinType::Cross | JoinType::LeftOuter | JoinType::RightOuter | JoinType::FullOuter => {
-                let mut right_matched = std::collections::HashSet::new();
+            JoinType::Inner | JoinType::Cross
+            | JoinType::LeftOuter | JoinType::RightOuter | JoinType::FullOuter => {
+                let mut right_matched: HashSet<usize> = HashSet::new();
 
                 loop {
-                    let mut chunk = Vec::new();
-                    for _ in 0..block_size_tuples {
-                        if let Some(t) = outer_scanner.next_tuple() {
-                            chunk.push(t);
-                        } else {
-                            break;
+                    // Load one chunk of outer tuples.
+                    let mut chunk = Vec::with_capacity(chunk_capacity);
+                    for _ in 0..chunk_capacity {
+                        match outer.next_tuple() {
+                            Some(t) => chunk.push(t),
+                            None    => break,
                         }
                     }
                     if chunk.is_empty() {
                         break;
                     }
 
-                    inner_scanner.reset();
+                    inner.reset();
                     let mut outer_matched = vec![false; chunk.len()];
-                    let mut inner_idx = 0;
+                    let mut inner_idx = 0usize;
 
-                    while let Some(i) = inner_scanner.next_tuple() {
+                    while let Some(i) = inner.next_tuple() {
                         for (idx, o) in chunk.iter().enumerate() {
                             if self.join_type == JoinType::Cross {
                                 result.add(Tuple::merge(o, &i));
-                                outer_matched[idx] = true;
-                                right_matched.insert(inner_idx);
                             } else if evaluate_conditions(&self.conditions, o, &i) {
                                 result.add(Tuple::merge(o, &i));
                                 outer_matched[idx] = true;
@@ -170,27 +179,33 @@ impl NLJExecutor {
                         inner_idx += 1;
                     }
 
+                    // Emit unmatched outer rows for LEFT / FULL.
                     if self.join_type == JoinType::LeftOuter || self.join_type == JoinType::FullOuter {
                         for (idx, o) in chunk.iter().enumerate() {
                             if !outer_matched[idx] {
-                                let null_right = Tuple::null_tuple(&right_schema);
-                                result.add(Tuple::merge(o, &null_right));
+                                result.add(Tuple::merge(o, &Tuple::null_tuple(&right_schema)));
                             }
                         }
                     }
                 }
 
+                // Emit unmatched inner rows for RIGHT / FULL.
                 if self.join_type == JoinType::RightOuter || self.join_type == JoinType::FullOuter {
-                    inner_scanner.reset();
-                    let mut inner_idx = 0;
-                    while let Some(i) = inner_scanner.next_tuple() {
+                    inner.reset();
+                    let mut inner_idx = 0usize;
+                    while let Some(i) = inner.next_tuple() {
                         if !right_matched.contains(&inner_idx) {
-                            let null_left = Tuple::null_tuple(&left_schema);
-                            result.add(Tuple::merge(&null_left, &i));
+                            result.add(Tuple::merge(&Tuple::null_tuple(&left_schema), &i));
                         }
                         inner_idx += 1;
                     }
                 }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("{} not implemented in Block NLJ", self.join_type),
+                ));
             }
         }
 

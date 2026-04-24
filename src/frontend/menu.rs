@@ -45,8 +45,7 @@ pub fn run() -> io::Result<()> {
         println!("7. Show Tuples");
         println!("8. Show Table Statistics");
         println!("9. Join Tables");
-        println!("10. Benchmark Join");
-        println!("11. Exit");
+        println!("10. Exit");
         println!("=============================");
 
         // Read user input
@@ -68,8 +67,7 @@ pub fn run() -> io::Result<()> {
             "7" => data_cmd::show_tuples_cmd(&current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
             "9" => join_cmd::run_join_cmd(&catalog, &current_db)?,
-            "10" => join_cmd::run_benchmark_cmd(&catalog, &current_db)?,
-            "11" => {
+            "10" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }

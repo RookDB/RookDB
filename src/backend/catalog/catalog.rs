@@ -17,10 +17,10 @@ pub fn init_catalog() {
     let catalog_path = Path::new(CATALOG_FILE);
 
     // Create directory if not exist
-    if let Some(parent) = catalog_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).expect("Failed to create catalog directory");
-        }
+    if let Some(parent) = catalog_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).expect("Failed to create catalog directory");
     }
 
     // Ensure base database directory exists
@@ -193,7 +193,12 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     }
 
     // Insert table metadata into catalog
-    let new_table = Table { columns };
+    let new_table = Table {
+        columns,
+        row_count: 0,      // Will be updated when table is populated
+        page_count: 0,     // Initial table has no data pages (only header)
+        avg_row_size: 0,   // Will be estimated from actual data
+    };
     database.tables.insert(table_name.to_string(), new_table);
 
     // Persist catalog changes

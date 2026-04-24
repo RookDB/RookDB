@@ -1,7 +1,8 @@
 //! Tuple representation and deserialization for join operations.
+
 use crate::catalog::types::Column;
 
-/// Represents a typed column value.
+/// A typed column value (INT, TEXT, or NULL).
 #[derive(Debug, Clone)]
 pub enum ColumnValue {
     Int(i32),
@@ -10,19 +11,19 @@ pub enum ColumnValue {
 }
 
 impl ColumnValue {
-    /// Compare two ColumnValues for ordering. Returns None if types mismatch or Null.
+    /// Compare two values for ordering. Returns `None` on type mismatch or NULL.
     pub fn partial_cmp_values(&self, other: &ColumnValue) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (ColumnValue::Int(a), ColumnValue::Int(b)) => Some(a.cmp(b)),
+            (ColumnValue::Int(a), ColumnValue::Int(b))   => Some(a.cmp(b)),
             (ColumnValue::Text(a), ColumnValue::Text(b)) => Some(a.cmp(b)),
             _ => None,
         }
     }
 
-    /// Check equality between two ColumnValues.
+    /// Check equality. Returns `false` on type mismatch or NULL.
     pub fn eq_value(&self, other: &ColumnValue) -> bool {
         match (self, other) {
-            (ColumnValue::Int(a), ColumnValue::Int(b)) => a == b,
+            (ColumnValue::Int(a), ColumnValue::Int(b))   => a == b,
             (ColumnValue::Text(a), ColumnValue::Text(b)) => a == b,
             _ => false,
         }
@@ -32,14 +33,14 @@ impl ColumnValue {
 impl std::fmt::Display for ColumnValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ColumnValue::Int(v) => write!(f, "{}", v),
+            ColumnValue::Int(v)  => write!(f, "{}", v),
             ColumnValue::Text(v) => write!(f, "{}", v.trim()),
-            ColumnValue::Null => write!(f, "NULL"),
+            ColumnValue::Null    => write!(f, "NULL"),
         }
     }
 }
 
-/// A fully deserialized row from a table.
+/// A fully deserialized row with its schema.
 #[derive(Debug, Clone)]
 pub struct Tuple {
     pub values: Vec<ColumnValue>,
@@ -47,28 +48,24 @@ pub struct Tuple {
 }
 
 impl Tuple {
-    /// Get a field value by column name.
+    /// Look up a field value by column name.
     pub fn get_field(&self, col_name: &str) -> Option<&ColumnValue> {
-        for (i, col) in self.schema.iter().enumerate() {
-            if col.name == col_name {
-                return self.values.get(i);
-            }
-        }
-        None
+        self.schema
+            .iter()
+            .position(|c| c.name == col_name)
+            .and_then(|i| self.values.get(i))
     }
 
-    /// Merge two tuples into one (concatenate fields and schemas).
+    /// Concatenate two tuples (fields and schemas).
     pub fn merge(left: &Tuple, right: &Tuple) -> Tuple {
         let mut values = left.values.clone();
         values.extend(right.values.clone());
-
         let mut schema = left.schema.clone();
         schema.extend(right.schema.clone());
-
         Tuple { values, schema }
     }
 
-    /// Create a tuple with NULLs for all columns of the given schema.
+    /// Create a tuple with NULL in every column of the given schema.
     pub fn null_tuple(schema: &[Column]) -> Tuple {
         Tuple {
             values: schema.iter().map(|_| ColumnValue::Null).collect(),
@@ -77,8 +74,9 @@ impl Tuple {
     }
 }
 
-/// Deserialize raw bytes from a page into a Tuple using the table schema.
-/// INT = 4 bytes (i32 LE), TEXT = 10 bytes (fixed-width, space-padded).
+/// Deserialize raw page bytes into a [`Tuple`] using the table schema.
+///
+/// Fixed-width encoding: INT = 4 bytes (i32 LE), TEXT = 10 bytes (space-padded).
 pub fn deserialize_tuple(bytes: &[u8], schema: &[Column]) -> Tuple {
     let mut values = Vec::new();
     let mut cursor = 0usize;
@@ -98,8 +96,7 @@ pub fn deserialize_tuple(bytes: &[u8], schema: &[Column]) -> Tuple {
             }
             "TEXT" => {
                 if cursor + 10 <= bytes.len() {
-                    let text = String::from_utf8_lossy(&bytes[cursor..cursor + 10])
-                        .to_string();
+                    let text = String::from_utf8_lossy(&bytes[cursor..cursor + 10]).to_string();
                     values.push(ColumnValue::Text(text));
                     cursor += 10;
                 } else {

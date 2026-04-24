@@ -42,6 +42,9 @@ fn test_save_catalog() {
                 data_type: "TEXT".to_string(),
             },
         ],
+        row_count: 0,
+        page_count: 0,
+        avg_row_size: 0,
     };
 
     let db = catalog.databases.get_mut(db_name).unwrap();
