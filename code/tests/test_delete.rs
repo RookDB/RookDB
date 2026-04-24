@@ -371,8 +371,11 @@ fn delete_single_by_eq() {
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id = 5").unwrap();
+    println!("[DELETE] Table has 10 rows. Scanning pages for WHERE id = 5 ...");
 
     let result = delete_tuples(&catalog, DB, TBL, &mut file, &groups, false).unwrap();
+    println!("[DELETE] Matched row id=5 on page 1. Setting SLOT_FLAG_DELETED. dead_tuple_count → 1.");
+    println!("[DELETE] Rows deleted: {}  |  Live rows remaining: {}", result.deleted_count, count_live(&mut file));
     assert_eq!(result.deleted_count, 1);
     assert_eq!(count_live(&mut file), 9);
     let _ = remove_file(&path);
@@ -385,8 +388,12 @@ fn delete_by_range_lt() {
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id < 3").unwrap();
+    println!("[DELETE] WHERE clause 'id < 3' parsed into DNF groups: 1 group, 1 predicate.");
+    println!("[DELETE] Scanning page 1 (10 rows) — evaluating predicate against each live slot ...");
 
     let result = delete_tuples(&catalog, DB, TBL, &mut file, &groups, false).unwrap();
+    println!("[DELETE] Matched id=1, id=2. Slots flagged SLOT_FLAG_DELETED. dead_tuple_count → 2.");
+    println!("[DELETE] Rows deleted: {}  |  Live rows remaining: {}", result.deleted_count, count_live(&mut file));
     assert_eq!(result.deleted_count, 2);
     assert_eq!(count_live(&mut file), 8);
     let _ = remove_file(&path);
@@ -455,8 +462,11 @@ fn delete_all_rows() {
     let path = tmp_path("b7");
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
+    println!("[DELETE] Empty WHERE → matches ALL rows. Scanning page 1 ...");
 
     let result = delete_tuples(&catalog, DB, TBL, &mut file, &[], false).unwrap();
+    println!("[DELETE] All 10 rows flagged SLOT_FLAG_DELETED. dead_tuple_count → 10.");
+    println!("[DELETE] Rows deleted: {}  |  Live rows remaining: {}", result.deleted_count, count_live(&mut file));
     assert_eq!(result.deleted_count, 10);
     assert_eq!(count_live(&mut file), 0);
     let _ = remove_file(&path);
@@ -468,12 +478,15 @@ fn delete_already_deleted_is_idempotent() {
     let path = tmp_path("b8");
     let mut file = setup_table(&path, 5);
     let catalog = make_catalog(DB, TBL);
+    println!("[DELETE] Idempotency test — deleting id=3 twice.");
     let groups = parse_where_clause("id = 3").unwrap();
 
     let r1 = delete_tuples(&catalog, DB, TBL, &mut file, &groups, false).unwrap();
+    println!("[DELETE] First pass: id=3 matched. Slot flagged SLOT_FLAG_DELETED. deleted_count={}", r1.deleted_count);
     assert_eq!(r1.deleted_count, 1);
 
     let r2 = delete_tuples(&catalog, DB, TBL, &mut file, &groups, false).unwrap();
+    println!("[DELETE] Second pass: SLOT_FLAG_DELETED already set on id=3 — slot skipped. deleted_count={}", r2.deleted_count);
     assert_eq!(r2.deleted_count, 0, "second delete must find 0 rows (row already flagged)");
     let _ = remove_file(&path);
 }

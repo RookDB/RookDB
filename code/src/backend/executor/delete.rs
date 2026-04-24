@@ -19,11 +19,12 @@ use std::io;
 use crate::backend::heap::autovacuum::notify_table_write;
 use crate::catalog::types::{Catalog, Column};
 use crate::disk::{read_page, write_page};
-use crate::fsm_manager::fsm_set_avail;
+use crate::backend::executor::api::rebuild_table_fsm;
 use crate::backend::log::operation_log::{current_timestamp_iso, log_compaction, log_delete};
-use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, PAGE_SIZE, SLOT_FLAG_DELETED, page_free_space};
+use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, PAGE_SIZE, SLOT_FLAG_DELETED};
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::table::{page_count, increment_dead_tuple_count, write_dead_tuple_count};
+use crate::backend::visibility_map::{vm_clear_page, vm_is_visible, vm_set_page};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -84,7 +85,7 @@ fn decode_tuple(
     let mut cursor = 0usize;
 
     for col in columns {
-        match col.data_type.as_str() {
+        match col.data_type.to_uppercase().as_str() {
             "INT" => {
                 if cursor + 4 <= tuple_data.len() {
                     let val =
@@ -445,6 +446,8 @@ pub fn delete_tuples(
                     page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
                 }
                 write_page(file, &mut page, page_num)?;
+                // A write touched this page → mark it dirty in the Visibility Map.
+                let _ = vm_clear_page(db_name, table_name, page_num);
             }
             // Lock is automatically released here when _page_lock is dropped
         }
@@ -510,6 +513,15 @@ pub fn compaction_table(
         let mut pages_compacted = 0usize;
 
         for page_num in 1..total_pages {
+            // ── Visibility-map shortcut ───────────────────────────────────────
+            // vm_clear_page is called by DELETE/UPDATE before modifying any
+            // slot on this page, so a set VM bit means zero dead tuples →
+            // nothing to compact here.  This is the whole point of tracking
+            // the VM: we skip reading, locking, and scanning clean pages.
+            if vm_is_visible(db_name, table_name, page_num) {
+                continue;
+            }
+
             // Acquire exclusive write lock on this page before reading and potentially compacting
             let _page_lock = PageWriteLock::acquire(file_identity, page_num);
 
@@ -532,12 +544,18 @@ pub fn compaction_table(
                 pages_compacted += 1;
             }
 
-            let free = page_free_space(&page)?;
-            fsm_set_avail(file_identity, page_num, free);
+            // Page is now clean (either had no dead tuples, or just compacted).
+            // Mark all-visible so the next compaction can skip it entirely.
+            let _ = vm_set_page(db_name, table_name, page_num);
             // Lock is automatically released here when _page_lock is dropped
         }
 
+        // Rebuild the FSM and reset dead-tuple counter after a successful compaction.
+        // rebuild_table_fsm scans actual on-disk free space and writes a fresh .fsm fork,
+        // which is more accurate than per-page fsm_set_avail calls and removes the need
+        // for a global fsm_manager singleton.
         if pages_compacted > 0 {
+            rebuild_table_fsm(db_name, table_name)?;
             write_dead_tuple_count(&mut file, 0)?;
         }
 
@@ -610,7 +628,7 @@ enum BoolExpr {
 /// (e.g. in unit tests that don't supply a schema).
 fn resolve_value(col_name: &str, raw: &str, columns: &[Column]) -> ColumnValue {
     if let Some(col) = columns.iter().find(|c| c.name.eq_ignore_ascii_case(col_name)) {
-        return match col.data_type.as_str() {
+        return match col.data_type.to_uppercase().as_str() {
             "INT" => raw.parse::<i32>()
                 .map(ColumnValue::Int)
                 .unwrap_or_else(|_| ColumnValue::Text(raw.to_string())),

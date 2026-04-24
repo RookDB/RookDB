@@ -63,7 +63,7 @@ pub fn show_tuples(
             // 5. Decode each column
             let mut cursor = 0usize;
             for col in columns {
-                match col.data_type.as_str() {
+                match col.data_type.to_uppercase().as_str() {
                     "INT" => {
                         if cursor + 4 <= tuple_data.len() {
                             let val = i32::from_le_bytes(tuple_data[cursor..cursor + 4].try_into().unwrap());

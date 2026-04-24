@@ -117,9 +117,12 @@ fn soft_delete_sets_flag_no_layout_change() {
     let cat = make_catalog(db, tbl);
 
     let (lower_before, upper_before) = page1_bounds(&mut file);
+    println!("[COMPACTION] Before soft-delete: page1 lower={} upper={}", lower_before, upper_before);
     let groups = parse_where_clause("id = 3").unwrap();
     delete_tuples(&cat, db, tbl, &mut file, &groups, false).unwrap();
     let (lower_after, upper_after) = page1_bounds(&mut file);
+    println!("[COMPACTION] After soft-delete:  page1 lower={} upper={}", lower_after, upper_after);
+    println!("[COMPACTION] Page layout unchanged — soft-delete only sets flags, no physical movement.");
 
     // layout must not have changed
     assert_eq!(lower_before, lower_after, "lower changed after soft-delete");
@@ -127,6 +130,7 @@ fn soft_delete_sets_flag_no_layout_change() {
 
     // flag must be set
     let (live, dead) = slot_counts(&mut file);
+    println!("[COMPACTION] Slot counts: live={} dead={} — row id=3 is logically invisible.", live, dead);
     assert_eq!(dead, 1);
     assert_eq!(live, 4);
     cleanup_db(db);
@@ -175,16 +179,20 @@ fn compaction_decreases_lower() {
     let cat = make_catalog(db, tbl);
 
     let (lower_before, _) = page1_bounds(&mut file);
+    println!("[COMPACTION] Before delete: lower={} (3 slots will be removed)", lower_before);
 
     let groups = parse_where_clause("id IN (1, 2, 3)").unwrap();
     delete_tuples(&cat, db, tbl, &mut file, &groups, false).unwrap();
     drop(file);
 
+    println!("[COMPACTION] Running compaction_table — rebuilding page with only live rows ...");
     compaction_table(db, tbl).unwrap();
 
     let mut file2 = OpenOptions::new().read(true).write(true)
         .open(format!("database/base/{}/{}.dat", db, tbl)).unwrap();
     let (lower_after, _) = page1_bounds(&mut file2);
+    println!("[COMPACTION] After compaction: lower={} (decreased by {} bytes = 3 slots x 8B)",
+        lower_after, lower_before - lower_after);
 
     // 3 slots removed → lower should decrease by 3 × ITEM_ID_SIZE (8)
     assert!(
@@ -232,11 +240,13 @@ fn compaction_preserves_live_rows() {
     delete_tuples(&cat, db, tbl, &mut file, &groups, false).unwrap();
     drop(file);
 
+    println!("[COMPACTION] Deleted id=2,4,6 (3 dead slots). Running compaction ...");
     compaction_table(db, tbl).unwrap();
 
     let mut file2 = OpenOptions::new().read(true).write(true)
         .open(format!("database/base/{}/{}.dat", db, tbl)).unwrap();
     let (live, dead) = slot_counts(&mut file2);
+    println!("[COMPACTION] After compaction: live={} dead={} — physical page now clean.", live, dead);
     assert_eq!(live, 5, "5 live rows should remain");
     assert_eq!(dead, 0, "no dead rows after compaction");
     cleanup_db(db);
@@ -254,7 +264,9 @@ fn compaction_is_idempotent() {
     drop(file);
 
     let first  = compaction_table(db, tbl).unwrap();
+    println!("[COMPACTION] First compaction:  pages_rewritten={}", first);
     let second = compaction_table(db, tbl).unwrap();
+    println!("[COMPACTION] Second compaction: pages_rewritten={} (idempotent — nothing to do)", second);
     assert_eq!(first,  1, "first compaction should rewrite 1 page");
     assert_eq!(second, 0, "second compaction should rewrite 0 pages (nothing to do)");
     cleanup_db(db);
@@ -291,9 +303,11 @@ fn compaction_interleaved_cycle() {
     let g1 = parse_where_clause("id IN (1, 2)").unwrap();
     delete_tuples(&cat, db, tbl, &mut file, &g1, false).unwrap();
     drop(file);
+    println!("[COMPACTION] Cycle step 1: deleted id=1,2.");
 
     // Step 2: compact
     let p1 = compaction_table(db, tbl).unwrap();
+    println!("[COMPACTION] Cycle step 2: compaction_table() → {} page(s) rewritten. FSM updated.", p1);
     assert_eq!(p1, 1);
 
     // Step 3: delete rows 3, 4 (which are now at the front)
@@ -302,15 +316,18 @@ fn compaction_interleaved_cycle() {
     let g2 = parse_where_clause("id IN (3, 4)").unwrap();
     delete_tuples(&cat, db, tbl, &mut file2, &g2, false).unwrap();
     drop(file2);
+    println!("[COMPACTION] Cycle step 3: deleted id=3,4 (new dead slots inserted after first compaction).");
 
     // Step 4: compact again
     let p2 = compaction_table(db, tbl).unwrap();
+    println!("[COMPACTION] Cycle step 4: compaction_table() → {} page(s) rewritten.", p2);
     assert_eq!(p2, 1);
 
     // Verify only 5, 6 remain
     let mut file3 = OpenOptions::new().read(true).write(true)
         .open(format!("database/base/{}/{}.dat", db, tbl)).unwrap();
     let (live, dead) = slot_counts(&mut file3);
+    println!("[COMPACTION] Final state: live={} dead={} (only rows 5 and 6 remain).", live, dead);
     assert_eq!(live, 2);
     assert_eq!(dead, 0);
     cleanup_db(db);

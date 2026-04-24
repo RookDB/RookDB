@@ -37,15 +37,16 @@
 //!      B16. update already-deleted rows → 0 (skipped)
 
 use std::collections::HashMap;
-use std::fs::{remove_file, OpenOptions};
+use std::fs::{remove_file, remove_dir_all, create_dir_all, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
 
 use storage_manager::catalog::types::{Catalog, Column, Database, Table};
 use storage_manager::executor::{
     delete_tuples, update_tuples, parse_where_clause, parse_set_clause,
     SetExpr, ArithOp, ColumnValue,
 };
-use storage_manager::heap::{init_table, insert_tuple};
+use storage_manager::heap::{HeapManager, insert_tuple};
 use storage_manager::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, SLOT_FLAG_DELETED};
 use storage_manager::disk::read_page;
 use storage_manager::table::page_count;
@@ -80,17 +81,19 @@ fn make_catalog(db: &str, table: &str) -> Catalog {
     Catalog { databases }
 }
 
-fn setup_table(path: &str, n: u32) -> std::fs::File {
-    let _ = remove_file(path);
-    let mut file = OpenOptions::new()
-        .read(true).write(true).create(true).truncate(true)
-        .open(path)
-        .expect("setup_table: open failed");
-    init_table(&mut file).expect("setup_table: init_table failed");
+fn setup_table(db: &str, n: u32) -> std::fs::File {
+    let dir  = format!("database/base/{}", db);
+    let path = format!("{}/{}.dat", dir, TBL);
+    let _ = remove_dir_all(&dir);
+    create_dir_all(&dir).expect("setup_table: create_dir_all");
+    // HeapManager::create registers page 1 in the FSM so insert_raw_tuple
+    // (called by update_tuples) opens the same file and finds free space there.
+    HeapManager::create(PathBuf::from(&path)).expect("setup_table: HeapManager::create");
+    let mut file = OpenOptions::new().read(true).write(true)
+        .open(&path).expect("setup_table: open");
     for i in 1..=n {
         let name = format!("row_{:02}", i);
-        insert_tuple(&mut file, &make_row(i as i32, &name))
-            .expect("setup_table: insert failed");
+        insert_tuple(&mut file, &make_row(i as i32, &name)).expect("setup_table: insert");
     }
     file
 }
@@ -116,10 +119,11 @@ fn live_ids(file: &mut std::fs::File) -> Vec<i32> {
     ids
 }
 
-const DB: &str = "_testdb_update";
 const TBL: &str = "_tbl_update";
 
-fn tmp(suffix: &str) -> String { format!("test_update_{}.bin", suffix) }
+/// Return a unique database name for this test, using the suffix to avoid
+/// cross-test conflicts when tests run in parallel.
+fn tmp(suffix: &str) -> String { format!("_testdb_update_{}", suffix) }
 
 // ===========================================================================
 // A. parse_set_clause — parser tests
@@ -264,79 +268,86 @@ fn set_parse_extra_spaces() {
 // B1 – literal int update, single row by id
 #[test]
 fn update_literal_int_single() {
-    let path = tmp("b1");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b1");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = 99").unwrap();
     let groups = parse_where_clause("id = 3").unwrap();
+    println!("[UPDATE] Phase 1: scanning page 1 for WHERE id=3. No locks held.");
+    println!("[UPDATE] Phase 2: acquiring PageWriteLock on page 1, marking old row id=3 as SLOT_FLAG_DELETED.");
+    println!("[UPDATE] Phase 3: inserting new row id=99 via HeapManager (FSM finds free space).");
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, false).unwrap();
+    println!("[UPDATE] Phase 4 complete: updated_count={}.  Live ids: {:?}", result.updated_count, live_ids(&mut file));
     assert_eq!(result.updated_count, 1);
 
     let ids = live_ids(&mut file);
     assert!(ids.contains(&99), "id should have been updated to 99");
     assert!(!ids.contains(&3), "original id=3 should be gone");
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B2 – literal text update
 #[test]
 fn update_literal_text_single() {
-    let path = tmp("b2");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b2");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("name = Updated").unwrap();
     let groups = parse_where_clause("id = 2").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, true).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, true).unwrap();
     assert_eq!(result.updated_count, 1);
     // RETURNING row should contain name = "Updated"
     let updated_name = result.returning_rows[0].iter()
         .find(|(k, _)| k == "name").map(|(_, v)| v.as_str()).unwrap_or("");
     assert!(updated_name.trim() == "Updated", "name mismatch: '{}'", updated_name);
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B3 – no matching rows → 0 updates
 #[test]
 fn update_no_match_is_zero() {
-    let path = tmp("b3");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b3");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = 99").unwrap();
     let groups = parse_where_clause("id = 99").unwrap(); // doesn't exist
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, false).unwrap();
     assert_eq!(result.updated_count, 0);
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B4 – update ALL rows (empty condition groups)
 #[test]
 fn update_all_rows() {
-    let path = tmp("b4");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b4");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = 0").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &[], false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &[], false).unwrap();
     assert_eq!(result.updated_count, 5);
 
     let ids = live_ids(&mut file);
     assert!(ids.iter().all(|&id| id == 0), "all ids should be 0 now");
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B5 – arithmetic add  id = id + 100
 #[test]
 fn update_arith_add() {
-    let path = tmp("b5");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b5");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = id + 100").unwrap();
     let groups = parse_where_clause("id < 4").unwrap(); // rows 1, 2, 3
+    println!("[UPDATE] Arithmetic SET: id = id + 100 WHERE id < 4 (rows 1, 2, 3 matched).");
+    println!("[UPDATE] Phase 2: old rows (id=1,2,3) flagged as deleted. Phase 3: reinserted as id=101,102,103.");
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, false).unwrap();
+    println!("[UPDATE] updated_count={}. Live ids after update: {:?}", result.updated_count, live_ids(&mut file));
     assert_eq!(result.updated_count, 3);
 
     let ids = live_ids(&mut file);
@@ -347,18 +358,18 @@ fn update_arith_add() {
     // rows 4, 5 unchanged
     assert!(ids.contains(&4));
     assert!(ids.contains(&5));
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B6 – arithmetic subtract id = id - 1
 #[test]
 fn update_arith_sub() {
-    let path = tmp("b6");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b6");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = id - 1").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &[], false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &[], false).unwrap();
     assert_eq!(result.updated_count, 5);
 
     let ids = live_ids(&mut file);
@@ -366,18 +377,18 @@ fn update_arith_sub() {
     assert!(ids.contains(&0));
     assert!(ids.contains(&4));
     assert!(!ids.contains(&5));
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B7 – arithmetic multiply  id = id * 2
 #[test]
 fn update_arith_mul() {
-    let path = tmp("b7");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b7");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = id * 2").unwrap();
 
-    update_tuples(&catalog, DB, TBL, &mut file, &assignments, &[], false).unwrap();
+    update_tuples(&catalog, &db, TBL, &mut file, &assignments, &[], false).unwrap();
 
     let ids = live_ids(&mut file);
     // 1→2, 2→4, 3→6, 4→8, 5→10
@@ -385,36 +396,36 @@ fn update_arith_mul() {
     assert!(ids.contains(&4));
     assert!(ids.contains(&10));
     assert!(!ids.contains(&1));
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B8 – arithmetic divide  id = id / 2  (integer division)
 #[test]
 fn update_arith_div() {
-    let path = tmp("b8");
-    let mut file = setup_table(&path, 6);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b8");
+    let mut file = setup_table(&db, 6);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = id / 2").unwrap();
 
-    update_tuples(&catalog, DB, TBL, &mut file, &assignments, &[], false).unwrap();
+    update_tuples(&catalog, &db, TBL, &mut file, &assignments, &[], false).unwrap();
 
     let ids = live_ids(&mut file);
     // 2→1, 4→2, 6→3
     assert!(ids.contains(&1));
     assert!(ids.contains(&3));
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B9 – update two columns at once
 #[test]
 fn update_multi_column() {
-    let path = tmp("b9");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b9");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = 50, name = 'MultiUp'").unwrap();
     let groups = parse_where_clause("id = 3").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, true).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, true).unwrap();
     assert_eq!(result.updated_count, 1);
 
     let row = &result.returning_rows[0];
@@ -422,19 +433,19 @@ fn update_multi_column() {
     let name_val = row.iter().find(|(k,_)| k=="name").map(|(_,v)| v.as_str()).unwrap_or("");
     assert_eq!(id_val, "50");
     assert!(name_val.trim() == "MultiUp", "name was '{}'", name_val);
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B10 – update with WHERE AND range
 #[test]
 fn update_where_and_range() {
-    let path = tmp("b10");
-    let mut file = setup_table(&path, 10);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b10");
+    let mut file = setup_table(&db, 10);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = id + 1000").unwrap();
     let groups = parse_where_clause("id >= 4 AND id <= 6").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, false).unwrap();
     assert_eq!(result.updated_count, 3);
 
     let ids = live_ids(&mut file);
@@ -442,112 +453,112 @@ fn update_where_and_range() {
     assert!(ids.contains(&1005));
     assert!(ids.contains(&1006));
     assert!(!ids.contains(&4));
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B11 – update with WHERE IN
 #[test]
 fn update_where_in() {
-    let path = tmp("b11");
-    let mut file = setup_table(&path, 10);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b11");
+    let mut file = setup_table(&db, 10);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = 0").unwrap();
     let groups = parse_where_clause("id IN (2, 4, 6)").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, false).unwrap();
     assert_eq!(result.updated_count, 3);
 
     let ids = live_ids(&mut file);
     let zero_count = ids.iter().filter(|&&id| id == 0).count();
     assert_eq!(zero_count, 3);
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B12 – update with WHERE BETWEEN
 #[test]
 fn update_where_between() {
-    let path = tmp("b12");
-    let mut file = setup_table(&path, 10);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b12");
+    let mut file = setup_table(&db, 10);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = id * 10").unwrap();
     let groups = parse_where_clause("id BETWEEN 3 AND 5").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, false).unwrap();
     assert_eq!(result.updated_count, 3);
 
     let ids = live_ids(&mut file);
     assert!(ids.contains(&30));
     assert!(ids.contains(&40));
     assert!(ids.contains(&50));
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B13 – update with WHERE LIKE
 #[test]
 fn update_where_like() {
-    let path = tmp("b13");
-    let mut file = setup_table(&path, 10);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b13");
+    let mut file = setup_table(&db, 10);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("name = Matched").unwrap();
     // rows 1-9 → name like row_0X
     let groups = parse_where_clause("name LIKE %row_0%").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, false).unwrap();
     assert_eq!(result.updated_count, 9);
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B14 – update with WHERE OR
 #[test]
 fn update_where_or() {
-    let path = tmp("b14");
-    let mut file = setup_table(&path, 10);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b14");
+    let mut file = setup_table(&db, 10);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = id + 500").unwrap();
     let groups = parse_where_clause("id = 1 OR id = 10").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, false).unwrap();
     assert_eq!(result.updated_count, 2);
 
     let ids = live_ids(&mut file);
     assert!(ids.contains(&501));
     assert!(ids.contains(&510));
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B15 – RETURNING * shows after-update values
 #[test]
 fn update_returning_star() {
-    let path = tmp("b15");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b15");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
     let assignments = parse_set_clause("id = 77").unwrap();
     let groups = parse_where_clause("id = 2").unwrap();
 
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &groups, true).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &groups, true).unwrap();
     assert_eq!(result.returning_rows.len(), 1);
     let id_after = result.returning_rows[0].iter()
         .find(|(k,_)| k == "id").map(|(_, v)| v.as_str()).unwrap_or("0");
     assert_eq!(id_after, "77");
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }
 
 // B16 – update skips soft-deleted rows
 #[test]
 fn update_skips_deleted_rows() {
-    let path = tmp("b16");
-    let mut file = setup_table(&path, 5);
-    let catalog = make_catalog(DB, TBL);
+    let db = tmp("b16");
+    let mut file = setup_table(&db, 5);
+    let catalog = make_catalog(&db, TBL);
 
     // First soft-delete id=3
     let del_groups = parse_where_clause("id = 3").unwrap();
-    delete_tuples(&catalog, DB, TBL, &mut file, &del_groups, false).unwrap();
+    delete_tuples(&catalog, &db, TBL, &mut file, &del_groups, false).unwrap();
 
     // Now try to update all rows with id <= 5 (should skip the deleted one)
     let assignments = parse_set_clause("id = id + 100").unwrap();
     let upd_groups  = parse_where_clause("id <= 5").unwrap();
-    let result = update_tuples(&catalog, DB, TBL, &mut file, &assignments, &upd_groups, false).unwrap();
+    let result = update_tuples(&catalog, &db, TBL, &mut file, &assignments, &upd_groups, false).unwrap();
 
     assert_eq!(result.updated_count, 4, "deleted row should not be updated");
-    let _ = remove_file(&path);
+    let _ = remove_dir_all(format!("database/base/{}", db));
 }

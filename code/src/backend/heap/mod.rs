@@ -1,76 +1,74 @@
-pub mod heap_manager;
-pub mod types;
-pub mod autovacuum;
-
-pub use heap_manager::{HeapManager, HeapScanIterator};
-
 use std::fs::File;
-use std::io::{self, SeekFrom, Seek, Write};
+use std::io::{self, Seek, SeekFrom, Write};
+pub mod autovacuum;
+use crate::disk::{read_page, write_page};
+use crate::page::{ITEM_ID_SIZE, Page};
+use crate::table::{TABLE_HEADER_SIZE, page_count};
 
-use crate::fsm_manager::{fsm_search_avail, fsm_set_avail};
-use crate::page::{Page, page_free_space, ITEM_ID_SIZE, PAGE_HEADER_SIZE, SLOT_FLAG_DELETED};
-use crate::disk::{create_page, read_page, write_page};
-use crate::backend::page::page_lock::PageWriteLock;
-use crate::table::{page_count, TABLE_HEADER_SIZE};
-use crate::table::file_identity_from_file;
+pub mod types;
+pub mod heap_manager;
 
-#[derive(Debug, Clone, Copy)]
-pub struct TuplePointer {
-    pub page_id: u32,
-    pub slot_index: u16,
-}
+pub use heap_manager::HeapManager;
 
-/// Initialize a new table file
+/// Initialize a new table file with HeaderMetadata.
+///
+/// Creates a new table file with:
+/// - Page 0: HeaderMetadata (20 bytes) + padding (remaining 8192 - 20 bytes)
+/// - Page 1: First data page (empty slotted page)
+///
+/// This new version uses the improved header format that tracks FSM pages
+/// and maintains a tuple counter.
+#[deprecated(
+    note = "Use HeapManager::create or open with existing file instead"
+)]
 pub fn init_table(file: &mut File) -> io::Result<()> {
-    // Move cursor to the beginning of the file
+    use crate::backend::heap::types::HeaderMetadata;
+
     file.seek(SeekFrom::Start(0))?;
 
-    // Allocate 8192 bytes
-    let mut zero_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
+    // Initialize header metadata correctly for memory bounds
+    let mut header = HeaderMetadata::new();
+    header.page_count = 2; // 1 header page + 1 empty slotted page
+    let header_bytes = header.serialize()?;
 
-    //  Write "1" into the first 4 bytes (little-endian u32)
-    // This can represent the total number of pages, e.g. 1
-    zero_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+    // Create header page with metadata
+    let mut header_page_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
+    header_page_buf[0..20].copy_from_slice(&header_bytes);
 
-    // Write the full buffer (header) to the file
-    file.write_all(&zero_buf)?;
+    file.write_all(&header_page_buf)?;
+    file.flush()?;
+
+    // Create first data page dynamically instead of using legacy create_page
+    let mut page = Page::new();
+    crate::page::init_page(&mut page);
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(&page.data)?;
+
     file.flush()?;
     file.sync_all()?;
 
-    create_page(file)?;
+    log::info!("[init_table] New table initialized with HeaderMetadata and data page");
 
     Ok(())
 }
 
-
-fn find_page_with_space(file: &mut File, required: u32, file_identity: u64) -> io::Result<Option<u32>> {
-    if let Some(page_id) = fsm_search_avail(file_identity, required) {
-        let total_pages = page_count(file)?;
-        if page_id > 0 && page_id < total_pages {
-            return Ok(Some(page_id));
-        }
-    }
-
-    let total_pages = page_count(file)?;
-    for page_id in 1..total_pages {
-        let mut page = Page::new();
-        read_page(file, &mut page, page_id)?;
-        let free = page_free_space(&page)?;
-        fsm_set_avail(file_identity, page_id, free);
-        if free >= required {
-            return Ok(Some(page_id));
-        }
-    }
-
-    Ok(None)
-}
-
 pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
+
     let mut total_pages = page_count(file)?;
     // If table is empty (only header), create first data page
     if total_pages == 1 {
-        create_page(file)?;
+        let mut new_page = Page::new();
+        crate::page::init_page(&mut new_page);
+
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(&new_page.data)?;
+
+        // Update header block
         total_pages = 2;
+        if let Ok(mut latest_header) = crate::disk::read_header_page(file) {
+            latest_header.page_count = 2;
+            crate::disk::update_header_page(file, &latest_header)?;
+        }
     }
 
     let mut last_page_num = total_pages - 1;
@@ -86,16 +84,22 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
     let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
     let free_space = upper.saturating_sub(lower);
-    
 
     if required > free_space {
-        create_page(file)?;
         total_pages += 1;
         last_page_num = total_pages - 1;
 
-        // Initialize new page
+        // Initialize new page instead of legacy create_page
         page = Page::new();
         crate::page::init_page(&mut page);
+
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(&page.data)?;
+
+        if let Ok(mut latest_header) = crate::disk::read_header_page(file) {
+            latest_header.page_count = total_pages;
+            crate::disk::update_header_page(file, &latest_header)?;
+        }
     }
 
     // Re-read lower/upper because we might have a new page
@@ -131,30 +135,4 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     }
 
     Ok(())
-}
-
-pub fn soft_delete_tuple_at(file: &mut File, pointer: TuplePointer) -> io::Result<()> {
-    // NOTE: Caller must ensure the page is locked (e.g. via PageWriteLock)
-    // We don't acquire lock here to avoid deadlock if called from update_tuples which already holds the lock
-
-    let mut page = Page::new();
-    read_page(file, &mut page, pointer.page_id)?;
-
-    let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-    let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
-    if pointer.slot_index as usize >= num_items {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "slot index {} out of bounds for page {}",
-                pointer.slot_index, pointer.page_id
-            ),
-        ));
-    }
-
-    let base = PAGE_HEADER_SIZE as usize + pointer.slot_index as usize * ITEM_ID_SIZE as usize;
-    let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-    let new_flags = flags | SLOT_FLAG_DELETED;
-    page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
-    write_page(file, &mut page, pointer.page_id)
 }

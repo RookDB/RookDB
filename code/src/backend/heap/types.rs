@@ -1,5 +1,5 @@
 /// HeaderMetadata: Serializable metadata stored on Page 0 of a heap file.
-/// 
+///
 /// This struct represents the heap file's metadata, occupying exactly 20 bytes:
 /// - Offset 0-4: page_count (u32) - Total heap pages in file
 /// - Offset 4-8: fsm_page_count (u32) - Total pages in FSM fork file
@@ -21,7 +21,7 @@ pub struct HeaderMetadata {
 impl HeaderMetadata {
     /// Create a new header with initial state (1 page = Page 0 + Page 1 for data).
     pub fn new() -> Self {
-        println!("[HeaderMetadata::new] Creating initial header metadata");
+        log::trace!("[HeaderMetadata::new] Creating initial header metadata");
         Self {
             page_count: 1,           // Page 0 only initially
             fsm_page_count: 0,       // Will be set by FSM::build_from_heap
@@ -31,27 +31,27 @@ impl HeaderMetadata {
     }
 
     /// Serialize header to 20 bytes (little-endian).
-    /// 
+    ///
     /// # Errors
     /// Returns io::Error if write fails.
     pub fn serialize(&self) -> io::Result<Vec<u8>> {
         let mut buf = Vec::with_capacity(20);
-        
+
         buf.write_all(&self.page_count.to_le_bytes())?;
         buf.write_all(&self.fsm_page_count.to_le_bytes())?;
         buf.write_all(&self.total_tuples.to_le_bytes())?;
         buf.write_all(&self.last_vacuum.to_le_bytes())?;
-        
-        println!(
+
+        log::trace!(
             "[HeaderMetadata::serialize] Serialized: page_count={}, fsm_page_count={}, total_tuples={}, last_vacuum={}",
             self.page_count, self.fsm_page_count, self.total_tuples, self.last_vacuum
         );
-        
+
         Ok(buf)
     }
 
     /// Deserialize header from bytes (little-endian).
-    /// 
+    ///
     /// # Errors
     /// Returns io::Error if buffer is too small or read fails.
     pub fn deserialize(bytes: &[u8]) -> io::Result<Self> {
@@ -82,7 +82,7 @@ impl HeaderMetadata {
         cursor.read_exact(&mut buf)?;
         let last_vacuum = u32::from_le_bytes(buf);
 
-        println!(
+        log::trace!(
             "[HeaderMetadata::deserialize] Deserialized: page_count={}, fsm_page_count={}, total_tuples={}, last_vacuum={}",
             page_count, fsm_page_count, total_tuples, last_vacuum
         );

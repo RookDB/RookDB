@@ -14,17 +14,25 @@ use std::io;
 
 use crate::backend::heap::autovacuum::notify_table_write;
 use crate::catalog::types::Catalog;
-use crate::disk::read_page;
-use crate::heap::{insert_tuple, soft_delete_tuple_at, TuplePointer};
+use crate::disk::{read_page, write_page};
+use crate::backend::executor::api as heap_api;
 use crate::backend::log::operation_log::log_update;
 use crate::backend::log::operation_log::current_timestamp_iso;
 use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, SLOT_FLAG_DELETED};
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::table::page_count;
 use crate::table::increment_dead_tuple_count;
+use crate::backend::visibility_map::vm_clear_page;
 use serde_json::{Value, json};
 
 use super::delete::{Condition, ColumnValue, condition_to_json, matches_condition_groups_pub};
+
+/// (page_num, slot_index) pair that uniquely identifies a stored tuple.
+#[derive(Debug, Clone, Copy)]
+struct TuplePointer {
+    page_id:    u32,
+    slot_index: u16,
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -89,7 +97,7 @@ fn decode_tuple(
     let mut result = Vec::new();
     let mut cursor = 0usize;
     for col in columns {
-        match col.data_type.as_str() {
+        match col.data_type.to_uppercase().as_str() {
             "INT" => {
                 if cursor + 4 <= data.len() {
                     let v = i32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap());
@@ -127,7 +135,7 @@ fn encode_tuple(
             .find(|(name, _)| name == &col.name)
             .map(|(_, v)| v);
 
-        match col.data_type.as_str() {
+        match col.data_type.to_uppercase().as_str() {
             "INT" => {
                 let n = match val {
                     Some(ColumnValue::Int(n))   => *n,
@@ -306,14 +314,26 @@ pub fn update_tuples(
     if !pending_updates.is_empty() {
         for update in &pending_updates {
             let _page_lock = PageWriteLock::acquire(file_identity, update.pointer.page_id);
-            soft_delete_tuple_at(file, update.pointer)?;
+            // Soft-delete: set SLOT_FLAG_DELETED on the original slot.
+            let mut page = Page::new();
+            read_page(file, &mut page, update.pointer.page_id)?;
+            let base = (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
+            let mut flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+            flags |= SLOT_FLAG_DELETED;
+            page.data[base + 6..base + 8].copy_from_slice(&flags.to_le_bytes());
+            write_page(file, &mut page, update.pointer.page_id)?;
+            // Mark the page dirty in the Visibility Map: it now has dead tuples.
+            let _ = vm_clear_page(db_name, table_name, update.pointer.page_id);
         }
         increment_dead_tuple_count(file, pending_updates.len() as u32)?;
     }
 
     if !pending_updates.is_empty() {
         for update in pending_updates {
-            insert_tuple(file, &update.new_bytes)?;
+            // Insert the updated tuple via the heap API.
+            // insert_raw_tuple routes through HeapManager so it uses the FSM
+            // to find freed pages before falling back to tail-append.
+            heap_api::insert_raw_tuple(db_name, table_name, &update.new_bytes)?;
 
             if returning {
                 let row: Vec<(String, String)> = update

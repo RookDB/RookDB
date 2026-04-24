@@ -38,7 +38,11 @@ struct TimingSummary {
 struct EngineReport {
     update: TimingSummary,
     delete: TimingSummary,
+    /// Standard VACUUM / RookDB compaction_table (in-place, non-blocking).
     compaction: TimingSummary,
+    /// PostgreSQL VACUUM FULL (exclusive rewrite lock). Only populated for
+    /// the PostgreSQL engine; always `None` for RookDB.
+    compaction_vacuum_full: Option<TimingSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,10 +73,19 @@ struct ReportConfig {
 struct RatioReport {
     update_avg_rook_over_postgres: f64,
     delete_avg_rook_over_postgres: f64,
+    /// RookDB compaction vs PostgreSQL standard VACUUM.
     compaction_avg_rook_over_postgres: f64,
+    /// RookDB compaction vs PostgreSQL VACUUM FULL.
+    compaction_avg_rook_over_postgres_vacuum_full: f64,
 }
 
 fn main() -> io::Result<()> {
+    // Default to "error" so trace/debug/info don't flood stdout.
+    // Users can override with RUST_LOG=debug to see verbose output.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("error")
+    ).init();
+
     let cfg = parse_args();
     println!("Running benchmark with rows={} iterations={}...", cfg.rows, cfg.iterations);
 
@@ -122,6 +135,7 @@ fn main() -> io::Result<()> {
         update: summarize(rook_update),
         delete: summarize(rook_delete),
         compaction: summarize(rook_compaction),
+        compaction_vacuum_full: None, // not applicable to RookDB
     };
 
     if cfg.rook_only {
@@ -154,12 +168,17 @@ fn main() -> io::Result<()> {
 
     let postgres_update = bench_postgres_update(&cfg)?;
     let postgres_delete = bench_postgres_delete(&cfg)?;
-    let postgres_compaction = bench_postgres_vacuum_full(&cfg)?;
+    let postgres_vacuum        = bench_postgres_vacuum(&cfg)?;
+    let postgres_vacuum_full   = bench_postgres_vacuum_full(&cfg)?;
+
+    let pg_vacuum_summary      = summarize(postgres_vacuum);
+    let pg_vacuum_full_summary = summarize(postgres_vacuum_full);
 
     let postgres_report = EngineReport {
         update: summarize(postgres_update),
         delete: summarize(postgres_delete),
-        compaction: summarize(postgres_compaction),
+        compaction: pg_vacuum_summary.clone(),
+        compaction_vacuum_full: Some(pg_vacuum_full_summary.clone()),
     };
 
     let report = ComparisonReport {
@@ -182,7 +201,11 @@ fn main() -> io::Result<()> {
             ),
             compaction_avg_rook_over_postgres: ratio(
                 rook_report.compaction.average_ms,
-                postgres_report.compaction.average_ms,
+                pg_vacuum_summary.average_ms,
+            ),
+            compaction_avg_rook_over_postgres_vacuum_full: ratio(
+                rook_report.compaction.average_ms,
+                pg_vacuum_full_summary.average_ms,
             ),
         },
         rookdb: rook_report,
@@ -318,14 +341,18 @@ fn print_report(report: &ComparisonReport) {
         report.config.table_name,
         report.config.pg_schema,
     );
-    print_summary_row("UPDATE", &report.rookdb.update, &report.postgres.update);
-    print_summary_row("DELETE", &report.rookdb.delete, &report.postgres.delete);
-    print_summary_row("COMPACTION", &report.rookdb.compaction, &report.postgres.compaction);
+    print_summary_row("UPDATE",     &report.rookdb.update,      &report.postgres.update);
+    print_summary_row("DELETE",     &report.rookdb.delete,      &report.postgres.delete);
+    print_summary_row("COMPACT(std VACUUM)",  &report.rookdb.compaction,  &report.postgres.compaction);
+    if let Some(ref vf) = report.postgres.compaction_vacuum_full {
+        print_summary_row("COMPACT(VACUUM FULL)", &report.rookdb.compaction, vf);
+    }
     println!(
-        "\nAvg ratio (Rook/PostgreSQL): update={:.3}x delete={:.3}x compaction={:.3}x",
+        "\nAvg ratio (Rook/PostgreSQL): update={:.3}x delete={:.3}x compaction_vs_vacuum={:.3}x compaction_vs_vacuum_full={:.3}x",
         report.ratios.update_avg_rook_over_postgres,
         report.ratios.delete_avg_rook_over_postgres,
-        report.ratios.compaction_avg_rook_over_postgres
+        report.ratios.compaction_avg_rook_over_postgres,
+        report.ratios.compaction_avg_rook_over_postgres_vacuum_full,
     );
 }
 
@@ -508,6 +535,10 @@ fn bench_rook_update(
     let mut samples = Vec::with_capacity(cfg.iterations);
     for _ in 0..cfg.iterations {
         fs::copy(seed_path, active_path)?;
+        let fsm_path = format!("{}.fsm", active_path);
+        if std::path::Path::new(&fsm_path).exists() {
+            fs::remove_file(&fsm_path)?;
+        }
         let mut file = OpenOptions::new().read(true).write(true).open(active_path)?;
 
         let start = Instant::now();
@@ -535,6 +566,10 @@ fn bench_rook_delete(
     let mut samples = Vec::with_capacity(cfg.iterations);
     for _ in 0..cfg.iterations {
         fs::copy(seed_path, active_path)?;
+        let fsm_path = format!("{}.fsm", active_path);
+        if std::path::Path::new(&fsm_path).exists() {
+            fs::remove_file(&fsm_path)?;
+        }
         let mut file = OpenOptions::new().read(true).write(true).open(active_path)?;
 
         let start = Instant::now();
@@ -561,6 +596,10 @@ fn bench_rook_compaction(
     let mut samples = Vec::with_capacity(cfg.iterations);
     for _ in 0..cfg.iterations {
         fs::copy(seed_path, active_path)?;
+        let fsm_path = format!("{}.fsm", active_path);
+        if std::path::Path::new(&fsm_path).exists() {
+            fs::remove_file(&fsm_path)?;
+        }
 
         let mut file = OpenOptions::new().read(true).write(true).open(active_path)?;
         let _ = delete_tuples(
@@ -612,7 +651,10 @@ fn bench_postgres_delete(cfg: &BenchmarkConfig) -> io::Result<Vec<f64>> {
     Ok(samples)
 }
 
-fn bench_postgres_vacuum_full(cfg: &BenchmarkConfig) -> io::Result<Vec<f64>> {
+/// Benchmark PostgreSQL standard VACUUM (non-blocking, in-place dead-tuple
+/// reclaim). This is the closest equivalent to RookDB's `compaction_table`:
+/// both reclaim space page-by-page without an exclusive table-level lock.
+fn bench_postgres_vacuum(cfg: &BenchmarkConfig) -> io::Result<Vec<f64>> {
     let mut client = pg_connect(cfg)?;
     let active = pg_qualified_table(&cfg.pg_schema, &pg_active_table_name(cfg));
     let mut samples = Vec::with_capacity(cfg.iterations);
@@ -623,6 +665,30 @@ fn bench_postgres_vacuum_full(cfg: &BenchmarkConfig) -> io::Result<Vec<f64>> {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("PostgreSQL pre-vacuum DELETE error: {}", e)))?;
 
         let start = Instant::now();
+        // Standard VACUUM – no FULL keyword, no exclusive rewrite lock.
+        client
+            .batch_execute(&format!("VACUUM {active};"))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("PostgreSQL VACUUM error: {}", e)))?;
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(samples)
+}
+
+/// Benchmark PostgreSQL VACUUM FULL (exclusive lock, full table rewrite).
+/// This is included for comparison only — it is a heavier operation than
+/// RookDB `compaction_table` and standard VACUUM.
+fn bench_postgres_vacuum_full(cfg: &BenchmarkConfig) -> io::Result<Vec<f64>> {
+    let mut client = pg_connect(cfg)?;
+    let active = pg_qualified_table(&cfg.pg_schema, &pg_active_table_name(cfg));
+    let mut samples = Vec::with_capacity(cfg.iterations);
+    for _ in 0..cfg.iterations {
+        reset_postgres_active_table(&mut client, cfg)?;
+        client
+            .execute(&format!("DELETE FROM {active} WHERE id <= 20000"), &[])
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("PostgreSQL pre-vacuum-full DELETE error: {}", e)))?;
+
+        let start = Instant::now();
+        // VACUUM FULL – acquires an exclusive lock and rewrites the entire table.
         client
             .batch_execute(&format!("VACUUM FULL {active};"))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("PostgreSQL VACUUM FULL error: {}", e)))?;

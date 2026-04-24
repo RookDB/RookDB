@@ -1,3 +1,4 @@
+pub mod api;
 pub mod load_csv;
 pub mod seq_scan;
 pub mod delete;

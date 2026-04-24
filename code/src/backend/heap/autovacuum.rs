@@ -8,6 +8,7 @@
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BinaryHeap, HashMap};
+use std::fs::OpenOptions;
 use std::sync::{
     Arc,
     Condvar,
@@ -19,7 +20,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::executor::compaction_table;
-use crate::table::Table;
+use crate::table::{Table, read_dead_tuple_count};
 
 pub const AUTOVACUUM_WORKERS: usize = 3;
 pub const AUTOVACUUM_BASE_THRESHOLD: usize = 50;
@@ -89,6 +90,13 @@ fn compute_threshold(table_size: usize) -> usize {
     AUTOVACUUM_BASE_THRESHOLD + (AUTOVACUUM_SCALE_FACTOR * table_size as f64) as usize
 }
 
+fn read_persisted_dead_tuple_count(db_name: &str, table_name: &str) -> Option<usize> {
+    let path = format!("database/base/{}/{}.dat", db_name, table_name);
+    let mut file = OpenOptions::new().read(true).open(path).ok()?;
+    let count = read_dead_tuple_count(&mut file).ok()?;
+    Some(count as usize)
+}
+
 pub fn notify_table_write(db_name: &str, table_name: &str, delta: usize, table_size: usize) {
     if delta == 0 {
         return;
@@ -111,7 +119,8 @@ pub fn notify_table_write(db_name: &str, table_name: &str, delta: usize, table_s
     {
         let mut table = table_arc.lock().unwrap();
         table.threshold = compute_threshold(table_size);
-        table.dead_tuple_count = table.dead_tuple_count.saturating_add(delta);
+        table.dead_tuple_count = read_persisted_dead_tuple_count(db_name, table_name)
+            .unwrap_or_else(|| table.dead_tuple_count.saturating_add(delta));
 
         if table.dead_tuple_count > table.threshold && !table.in_heap {
             table.in_heap = true;
@@ -209,11 +218,14 @@ fn worker_loop(
         }
 
         if table_busy {
-            {
-                let mut guard = heap.lock().unwrap();
-                guard.push(entry);
-            }
-            condvar.notify_one();
+            // The active worker already owns this compaction and will re-insert
+            // the entry itself if the table is still above the threshold once it
+            // finishes.  Dropping the entry here does NOT lose work.
+            //
+            // Skip this entry and immediately try the next highest-priority
+            // entry in the heap.  If the heap is empty we fall through to the
+            // condvar wait at the top of the loop, which is the correct place
+            // to sleep.
             continue;
         }
 
@@ -237,7 +249,12 @@ fn worker_loop(
             let mut table = table_arc.lock().unwrap();
 
             if compacted {
-                table.dead_tuple_count = 0;
+                if let Some((db_name, table_name)) = split_table_key(&entry.key) {
+                    table.dead_tuple_count = read_persisted_dead_tuple_count(db_name, table_name)
+                        .unwrap_or(0);
+                } else {
+                    table.dead_tuple_count = 0;
+                }
             }
 
             table.in_use = false;

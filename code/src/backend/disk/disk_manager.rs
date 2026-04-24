@@ -1,9 +1,11 @@
 use std::fs::File;
-use std::io::{self, Seek, SeekFrom, Read, ErrorKind, Error, Write};
+use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 
-use crate::page::{Page, PAGE_SIZE, init_page};
+use crate::page::{PAGE_SIZE, Page, init_page};
+use crate::table::page_count;
 use crate::heap::types::HeaderMetadata;
-use crate::table::{page_count};
+use crate::backend::instrumentation::HEAP_METRICS;
+use std::sync::atomic::Ordering;
 
 // Create a new page on disk and return its page number
 pub fn create_page(file: &mut File) -> io::Result<u32> {
@@ -32,11 +34,8 @@ pub fn create_page(file: &mut File) -> io::Result<u32> {
 }
 
 // Read a page from disk into the provided page buffer
-pub fn read_page(
-    file: &mut File,
-    page: &mut Page,
-    page_num: u32,
-) -> io::Result<()> {
+pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {
+    HEAP_METRICS.read_page_calls.fetch_add(1, Ordering::Relaxed);
     // Calculate byte offset for the page
     let offset = page_num * PAGE_SIZE as u32;
 
@@ -61,11 +60,8 @@ pub fn read_page(
 }
 
 // Write a page buffer to disk at the given page number
-pub fn write_page(
-    file: &mut File,
-    page: &mut Page,
-    page_num: u32,
-) -> io::Result<()> {
+pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {
+    HEAP_METRICS.write_page_calls.fetch_add(1, Ordering::Relaxed);
     // Calculate byte offset for the page
     let offset = page_num as u64 * PAGE_SIZE as u64;
 
@@ -89,9 +85,27 @@ pub fn write_page(
     Ok(())
 }
 
+/// Update the header page (Page 0) with HeaderMetadata.
+pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> io::Result<()> {
+    log::trace!("[disk::update_header_page] Writing header metadata to page 0");
+
+    // Serialize the header
+    let header_bytes = header.serialize()?;
+
+    // Seek to page 0, offset 0
+    file.seek(SeekFrom::Start(0))?;
+
+    // Write the 20-byte header
+    file.write_all(&header_bytes)?;
+
+    log::trace!("[disk::update_header_page] Header successfully written");
+
+    Ok(())
+}
+
 /// Read and deserialize the header page (Page 0) into HeaderMetadata.
 pub fn read_header_page(file: &mut File) -> io::Result<HeaderMetadata> {
-    println!("[disk::read_header_page] Reading header metadata from page 0");
+    log::trace!("[disk::read_header_page] Reading header metadata from page 0");
 
     // Seek to page 0, offset 0
     file.seek(SeekFrom::Start(0))?;
@@ -104,20 +118,28 @@ pub fn read_header_page(file: &mut File) -> io::Result<HeaderMetadata> {
     HeaderMetadata::deserialize(&buf)
 }
 
-/// Update the header page (Page 0) with HeaderMetadata.
-pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> io::Result<()> {
-    println!("[disk::update_header_page] Writing header metadata to page 0");
+/// Read all pages (header + data) from the file into memory.
+pub fn read_all_pages(file: &mut File) -> io::Result<Vec<Page>> {
+    let metadata = file.metadata()?;
+    let file_size = metadata.len();
 
-    // Serialize the header
-    let header_bytes = header.serialize()?;
+    if file_size == 0 {
+        return Ok(Vec::new());
+    }
 
-    // Seek to page 0, offset 0
+    let total_pages = (file_size / PAGE_SIZE as u64) as usize;
+    let mut pages = Vec::with_capacity(total_pages);
+
     file.seek(SeekFrom::Start(0))?;
 
-    // Write the 20-byte header
-    file.write_all(&header_bytes)?;
+    for _ in 0..total_pages {
+        let mut page = Page::new();
+        match file.read_exact(&mut page.data) {
+            Ok(_) => pages.push(page),
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        }
+    }
 
-    println!("[disk::update_header_page] Header successfully written");
-
-    Ok(())
+    Ok(pages)
 }
