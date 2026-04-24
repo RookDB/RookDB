@@ -260,9 +260,9 @@ fn test_aggregation_overflow_handling() {
     ];
     let child_node = Box::new(MockScanner { tuples: dummy_data.into_iter() });
     
-    // Checking SUM which invokes `checked_add` internally to safely return Null
+    // Checking SUM which invokes `checked_add` internally to safely return Overflow
     let reqs = vec![AggReq { agg_type: AggFunc::Sum, col_index: Some(0) }];
-    let result = execute_aggregation(child_node, reqs, vec![], None).unwrap();
+    let result = execute_aggregation(child_node, reqs, vec![], None);
     
-    assert_eq!(result[0].values[0], Value::Null); // SUM overflows, returns Null as safely handled in backend
+    assert!(matches!(result, Err(ExecutorError::Overflow))); // SUM overflows, returns Err(ExecutorError::Overflow)
 }

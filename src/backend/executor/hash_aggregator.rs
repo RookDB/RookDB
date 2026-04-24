@@ -150,10 +150,7 @@ impl AggregationState{
                                         (Value::Int(c), Value::Int(t)) => {
                                             match c.checked_add(*t) {
                                                 Some(sum) => *curr = Value::Int(sum),
-                                                None => {
-                                                    // ON OVERFLOW: Push a Null to signify the error in results 
-                                                    *current_val = Some(Value::Null); 
-                                                }
+                                                None => return Err(ExecutorError::Overflow),
                                             }
                                         },
                                         (Value::Null, _) => {}, // Keep poisoned
@@ -179,9 +176,7 @@ impl AggregationState{
                                         (Value::Int(c), Value::Int(t))=>{
                                             match c.checked_add(*t){
                                                 Some(sum)=>*curr=Value::Int(sum),
-                                                None=>{
-                                                    *sum=Some(Value::Null);
-                                                }
+                                                None=> return Err(ExecutorError::Overflow),
                                             }
                                         },
                                         (Value::Null, _) => {}, // Keep poisoned
@@ -405,22 +400,21 @@ impl Executor for HashAggregator {
                             final_values.push(Value::Int(set.len() as i32));
                         }
                         AggValueState::SumDistinct(set)=>{
-                            let mut sum_val = Some(0_i32);
+                            let mut sum_val = 0_i32;
                             for val in set {
-                                if let Some(current_sum) = sum_val {
-                                    match val {
-                                        Value::Int(v) => sum_val = current_sum.checked_add(v),
-                                        Value::Null => {},
-                                        _ => return Err(ExecutorError::TypeMismatch(format!("Cannot compute SumDistinct on non-integer type: {:?}", val))),
-                                    }
+                                match val {
+                                    Value::Int(v) => {
+                                        match sum_val.checked_add(v) {
+                                            Some(s) => sum_val = s,
+                                            None => return Err(ExecutorError::Overflow),
+                                        }
+                                    },
+                                    Value::Null => {},
+                                    _ => return Err(ExecutorError::TypeMismatch(format!("Cannot compute SumDistinct on non-integer type: {:?}", val))),
                                 }
                             }
                             
-                            if let Some(final_sum) = sum_val {
-                                final_values.push(Value::Int(final_sum));
-                            } else {
-                                final_values.push(Value::Null); // Overflow case
-                            }
+                            final_values.push(Value::Int(sum_val));
                         }
                         AggValueState::Variance{count,mean: _,m2}=>{
                             if count<2 {
