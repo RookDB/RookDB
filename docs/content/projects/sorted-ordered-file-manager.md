@@ -426,6 +426,47 @@ Output: all tuples displayed in the specified sort order.
 
 ## Testing
 
+### Benchmarking (Manual)
+
+Benchmark coverage is implemented in `tests/bench_insert_paths.rs` as ignored tests, so normal CI/unit test runs stay fast.
+
+Run benchmark suite:
+
+```bash
+cargo test --test bench_insert_paths -- --ignored --nocapture
+```
+
+Useful environment variables:
+
+- `ROOKDB_BENCH_ROWS`: row count for most benchmark paths (default `5000`)
+- `ROOKDB_BENCH_EXTERNAL_ROWS`: row count for external-sort microbench only (default `ROOKDB_BENCH_ROWS * 4`)
+- `ROOKDB_BENCH_EXTERNAL_POOL`: external sort buffer pool size in pages (default `4`)
+- `ROOKDB_BENCH_PATTERN`: one of `ascending`, `descending`, `random`, `duplicates`, `random_duplicates`
+- `ROOKDB_BENCH_SWEEP_ROWS`: row count for pattern sweep benchmark (default `4000`)
+- `ROOKDB_BENCH_TRACK_SPLITS`: set `1`/`true` to track ordered-insert split growth by header page-count deltas (default `false`)
+
+Example:
+
+```bash
+ROOKDB_BENCH_ROWS=10000 \
+ROOKDB_BENCH_EXTERNAL_ROWS=40000 \
+ROOKDB_BENCH_EXTERNAL_POOL=4 \
+ROOKDB_BENCH_PATTERN=random \
+ROOKDB_BENCH_TRACK_SPLITS=1 \
+cargo test --test bench_insert_paths -- --ignored --nocapture
+```
+
+Output is split into two sections:
+
+- **Microbenchmarks (component timings)**: isolated operation costs (insert path, delta append/merge, sort-only)
+- **End-to-end strategy benchmarks**: full load + maintenance/sort costs using aligned row counts for direct comparison
+
+Interpretation notes:
+
+- Use end-to-end table to compare strategies (`heap+sort` vs `delta+merge`)
+- Use microbench table to locate bottlenecks (`sorted_insert`, `delta_merge`, sort-only)
+- `measured_splits_by_header_growth` reflects file page-count growth events during insertion; it is a practical split-growth signal, not a full internal split profiler
+
 ### Test Summary
 
 | Test File | Tests | Covers |

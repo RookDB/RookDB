@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -99,6 +99,17 @@ fn env_usize(key: &str, default: usize) -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(default)
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(v) => match v.to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
 }
 
 fn env_pattern(key: &str, default: DataPattern) -> DataPattern {
@@ -257,6 +268,13 @@ fn ordered_page_count_from_header(file_path: &str) -> u32 {
     u32::from_le_bytes(buf)
 }
 
+fn ordered_page_count_in_file(file: &mut std::fs::File) -> u32 {
+    let mut buf = [0u8; 4];
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.read_exact(&mut buf).unwrap();
+    u32::from_le_bytes(buf)
+}
+
 fn read_all_tuples(file_path: &str) -> Vec<Vec<u8>> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -345,7 +363,11 @@ fn bench_heap_insert(ids: &[i32], pattern: DataPattern) -> BenchResult {
     )
 }
 
-fn bench_ordered_sorted_insert(ids: &[i32], pattern: DataPattern) -> BenchResult {
+fn bench_ordered_sorted_insert(
+    ids: &[i32],
+    pattern: DataPattern,
+    track_splits: bool,
+) -> BenchResult {
     let db = unique_db("bench_sorted_insert");
     let table = "t";
     let mut catalog = setup_catalog(&db);
@@ -367,10 +389,24 @@ fn bench_ordered_sorted_insert(ids: &[i32], pattern: DataPattern) -> BenchResult
         .open(&path)
         .unwrap();
 
+    let mut measured_splits = 0u32;
     let duration = measure(|| {
+        let mut previous_pages = if track_splits {
+            ordered_page_count_in_file(&mut file)
+        } else {
+            0
+        };
+
         for id in ids {
             let tuple = make_tuple(*id);
             sorted_insert(&mut file, &tuple, &comparator).unwrap();
+            if track_splits {
+                let current_pages = ordered_page_count_in_file(&mut file);
+                if current_pages > previous_pages {
+                    measured_splits += current_pages - previous_pages;
+                }
+                previous_pages = current_pages;
+            }
         }
     });
 
@@ -380,7 +416,11 @@ fn bench_ordered_sorted_insert(ids: &[i32], pattern: DataPattern) -> BenchResult
         assert!(extract_int(&w[0]) <= extract_int(&w[1]));
     }
     let total_pages = ordered_page_count_from_header(&path);
-    let split_estimate = total_pages.saturating_sub(2);
+    let split_note = if track_splits {
+        format!("measured_splits_by_header_growth={}", measured_splits)
+    } else {
+        "measured_splits_by_header_growth=disabled".to_string()
+    };
 
     cleanup_db(&db);
     build_result(
@@ -389,8 +429,8 @@ fn bench_ordered_sorted_insert(ids: &[i32], pattern: DataPattern) -> BenchResult
         ids.len(),
         duration,
         format!(
-            "direct ordered insertion, est_splits={}, data_pages={}",
-            split_estimate,
+            "direct ordered insertion, {}, data_pages={}",
+            split_note,
             total_pages.saturating_sub(1)
         ),
     )
@@ -435,6 +475,7 @@ fn bench_ordered_delta_append_and_merge(ids: &[i32], pattern: DataPattern) -> [B
             append_delta_tuple(&db, table, &tuple).unwrap();
         }
     });
+    let delta_pages_before_merge = delta_total_pages(&db, table);
 
     {
         let tbl = catalog
@@ -477,7 +518,11 @@ fn bench_ordered_delta_append_and_merge(ids: &[i32], pattern: DataPattern) -> [B
             pattern,
             ids.len(),
             append_duration,
-            format!("sidecar append before merge, delta_rows={}", ids.len()),
+            format!(
+                "sidecar append before merge, delta_rows={}, delta_pages_before_merge={}",
+                ids.len(),
+                delta_pages_before_merge
+            ),
         ),
         build_result(
             "ordered_delta_merge",
@@ -485,8 +530,8 @@ fn bench_ordered_delta_append_and_merge(ids: &[i32], pattern: DataPattern) -> [B
             ids.len(),
             merge_duration,
             format!(
-                "base + delta merge, merges=1, delta_pages_after={}, base_pages={}",
-                delta_pages_after, base_pages
+                "base + delta merge, merges=1, delta_pages_before_merge={}, delta_pages_after_merge={}, base_pages={}",
+                delta_pages_before_merge, delta_pages_after, base_pages
             ),
         ),
     ]
@@ -690,11 +735,13 @@ fn bench_ordered_delta_end_to_end(ids: &[i32], pattern: DataPattern) -> BenchRes
     let mut catalog = setup_catalog(&db);
     create_table(&mut catalog, &db, table, schema(), Some(sort_keys_id_asc()));
 
+    let mut delta_pages_before_merge = 0u32;
     let duration = measure(|| {
         for id in ids {
             let tuple = make_tuple(*id);
             append_delta_tuple(&db, table, &tuple).unwrap();
         }
+        delta_pages_before_merge = delta_total_pages(&db, table);
 
         {
             let tbl = catalog
@@ -736,8 +783,8 @@ fn bench_ordered_delta_end_to_end(ids: &[i32], pattern: DataPattern) -> BenchRes
         ids.len(),
         duration,
         format!(
-            "append + merge total, merges=1, delta_pages_after={}, base_pages={}",
-            delta_pages_after, base_pages
+            "append + merge total, merges=1, delta_pages_before_merge={}, delta_pages_after_merge={}, base_pages={}",
+            delta_pages_before_merge, delta_pages_after, base_pages
         ),
     )
 }
@@ -771,6 +818,7 @@ fn bench_insertion_and_sort_paths() {
     let external_rows = env_usize("ROOKDB_BENCH_EXTERNAL_ROWS", rows * 4);
     let pool_size = env_usize("ROOKDB_BENCH_EXTERNAL_POOL", 4);
     let pattern = env_pattern("ROOKDB_BENCH_PATTERN", DataPattern::Random);
+    let track_splits = env_bool("ROOKDB_BENCH_TRACK_SPLITS", false);
 
     println!(
         "Running benchmark with rows={}, external_rows={}, pattern={}, external_pool={}...",
@@ -785,7 +833,7 @@ fn bench_insertion_and_sort_paths() {
 
     let mut micro_results = vec![
         bench_heap_insert(&ids, pattern),
-        bench_ordered_sorted_insert(&ids, pattern),
+        bench_ordered_sorted_insert(&ids, pattern, track_splits),
         bench_ordered_delta_append_only(&ids, pattern),
     ];
     micro_results.extend(bench_ordered_delta_append_and_merge(&ids, pattern));
@@ -795,10 +843,14 @@ fn bench_insertion_and_sort_paths() {
     let end_to_end_results = vec![
         bench_heap_load_plus_in_memory_sort(&ids, pattern),
         bench_ordered_delta_end_to_end(&ids, pattern),
-        bench_heap_load_plus_external_sort(&external_ids, pattern, pool_size),
+        bench_heap_load_plus_external_sort(&ids, pattern, pool_size),
     ];
 
     println!("\nNOTE: microbench results are component-level timings; end-to-end includes full load + maintenance costs.");
+    println!(
+        "NOTE: all end-to-end rows are aligned at {} for direct strategy comparison.",
+        rows
+    );
     print_results("RookDB Microbenchmarks (Component Timings)", &micro_results);
     print_results("RookDB End-to-End Strategy Benchmarks", &end_to_end_results);
 }
@@ -810,6 +862,7 @@ fn bench_sorted_insert_pattern_sweep() {
     let _catalog_backup = CatalogBackup::capture();
 
     let rows = env_usize("ROOKDB_BENCH_SWEEP_ROWS", 4000);
+    let track_splits = env_bool("ROOKDB_BENCH_TRACK_SPLITS", false);
     let patterns = [
         DataPattern::Ascending,
         DataPattern::Descending,
@@ -823,7 +876,7 @@ fn bench_sorted_insert_pattern_sweep() {
     let mut results = Vec::new();
     for pattern in patterns {
         let ids = generate_ids(rows, pattern);
-        results.push(bench_ordered_sorted_insert(&ids, pattern));
+        results.push(bench_ordered_sorted_insert(&ids, pattern, track_splits));
         results.push(bench_ordered_delta_append_only(&ids, pattern));
     }
 
