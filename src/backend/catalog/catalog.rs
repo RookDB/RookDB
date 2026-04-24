@@ -57,10 +57,24 @@ pub fn init_catalog(bm: &mut BufferManager) {
         fs::create_dir_all(base).expect("Failed to create base dir");
     }
 
-    if Path::new(CATALOG_PAGES_DIR).exists() {
-        println!("Page-based catalog backend detected.");
+    let needs_bootstrap = if Path::new(CATALOG_PAGES_DIR).exists() {
+        // Directory exists but may have been left empty by tests or a crashed run.
+        // Verify by checking whether pg_type has any records.
+        let pm = CatalogPageManager::new();
+        let types = pm.scan_catalog(bm, CAT_TYPE).unwrap_or_default();
+        if types.is_empty() {
+            println!("Catalog directory found but empty – bootstrapping ...");
+            true
+        } else {
+            println!("Page-based catalog backend detected.");
+            false
+        }
     } else {
         println!("No catalog found – bootstrapping ...");
+        true
+    };
+
+    if needs_bootstrap {
         if let Err(e) = bootstrap_catalog(bm) {
             eprintln!("Bootstrap failed: {}", e);
         }
@@ -99,6 +113,9 @@ pub fn bootstrap_catalog(bm: &mut BufferManager) -> Result<(), CatalogError> {
         Encoding::UTF8.to_u8(),
     );
     pm.insert_catalog_tuple(bm, CAT_DATABASE, sys_bytes)?;
+
+    // Flush immediately so bootstrap data survives even if process exits unexpectedly.
+    bm.flush_pages().map_err(CatalogError::IoError)?;
 
     println!("Bootstrap complete – page-based catalog initialized.");
     Ok(())

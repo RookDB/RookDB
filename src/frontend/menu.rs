@@ -63,6 +63,9 @@ pub fn run() -> io::Result<()> {
             "7" => data_cmd::show_tuples_cmd(&mut buffer_manager, &current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
             "9" => {
+                if let Err(e) = buffer_manager.flush_pages() {
+                    println!("Warning: failed to flush pages to disk: {}", e);
+                }
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }
