@@ -5,6 +5,8 @@ use crate::catalog::types::Catalog;
 use crate::disk::read_page;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
+use crate::types::{deserialize_nullable_row};
+use crate::types::datatype::DataType;
 
 pub fn show_tuples(
     catalog: &Catalog,
@@ -35,18 +37,20 @@ pub fn show_tuples(
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);
 
-    // 3. Loop through each page
+    // Print column header
+    let header: Vec<String> = columns
+        .iter()
+        .map(|c| format!("{} ({:?})", c.name, c.data_type))
+        .collect();
+    println!("{}", header.join(" | "));
+
+    // 3. Loop through each data page (skip page 0 = table header)
     for page_num in 1..total_pages {
         let mut page = Page::new();
         read_page(file, &mut page, page_num)?;
-        println!("\n-- Page {} --", page_num);
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-        println!("Lower: {}, Upper: {}", lower, upper);
         let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
-
-        println!("Lower: {}, Upper: {}, Tuples: {}", lower, upper, num_items);
 
         // 4. For each tuple
         for i in 0..num_items {
@@ -57,32 +61,21 @@ pub fn show_tuples(
 
             print!("Tuple {}: ", i + 1);
 
-            // 5. Decode each column
-            let mut cursor = 0usize;
-            for col in columns {
-                match col.data_type.as_str() {
-                    "INT" => {
-                        if cursor + 4 <= tuple_data.len() {
-                            let val = i32::from_le_bytes(
-                                tuple_data[cursor..cursor + 4].try_into().unwrap(),
-                            );
-                            print!("{}={} ", col.name, val);
-                            cursor += 4;
+            // 5. Decode each column using its DataType
+            let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
+            let exec_types: Vec<DataType> = schema_types.iter().map(|t| t.into()).collect();
+            match deserialize_nullable_row(&exec_types, tuple_data) {
+                Ok(values) => {
+                    for (col, val_opt) in columns.iter().zip(values.iter()) {
+                        match val_opt {
+                            Some(val) => print!("{}={} ", col.name, val),
+                            None => print!("{}=NULL ", col.name),
                         }
-                    }
-                    "TEXT" => {
-                        if cursor + 10 <= tuple_data.len() {
-                            let text_bytes = &tuple_data[cursor..cursor + 10];
-                            let text = String::from_utf8_lossy(text_bytes).trim().to_string();
-                            print!("{}='{}' ", col.name, text);
-                            cursor += 10;
-                        }
-                    }
-                    _ => {
-                        print!("{}=<unsupported> ", col.name);
                     }
                 }
+                Err(e) => print!("<decode-error: {}> ", e),
             }
+
             println!();
         }
     }

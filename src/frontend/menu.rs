@@ -1,31 +1,96 @@
-//! Handles the interactive command-line menu and routes user input
-//! to the appropriate operations.
+//! menu_test_buffer.rs
+//! Interactive CLI to test BufferPool with LRU / Clock policies
 
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 
-// Core storage manager components
-use storage_manager::buffer_manager::BufferManager;
+// Catalog
 use storage_manager::catalog::{init_catalog, load_catalog};
 
 // Frontend command handlers
 use crate::frontend::{data_cmd, database_cmd, join_cmd, table_cmd};
 
-/// Runs the main interactive menu loop
+use storage_manager::{BufferPool, PageId, ReplacementPolicy, LRUPolicy, ClockPolicy};
+// Command implementations
+use crate::frontend::buffer_test_cmd;
+use crate::frontend::database_cmd;
+
+/// Runs the buffer pool test menu
 pub fn run() -> io::Result<()> {
     println!("--------------------------------------");
-    println!("Welcome to RookDB");
+    println!("RookDB Buffer Pool Testing Interface");
     println!("--------------------------------------\n");
 
-    // Ensure catalog file exists
-    println!("Initializing Catalog File...\n");
+     // -----------------------------
+    // INIT CATALOG
+    // -----------------------------
+    println!("Initializing Catalog...\n");
     init_catalog();
 
-    // Load catalog metadata into memory
     println!("Loading Catalog...\n");
     let mut catalog = load_catalog();
 
-    // Initialize buffer manager
-    let mut buffer_manager = BufferManager::new();
+
+    let mut input = String::new();
+
+    // -----------------------------
+    // BUFFER SIZE INPUT
+    // -----------------------------
+    print!("Enter buffer pool size: ");
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut input)?;
+    let pool_size: usize = input.trim().parse().unwrap_or(3);
+    input.clear();
+
+    // -----------------------------
+    // FILE PATH INPUT
+    // -----------------------------
+    print!("Enter table file path (e.g., database/base/db1/table.dat): ");
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut input)?;
+    let file_path = input.trim().to_string();
+    input.clear();
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(file_path)?;
+
+    // -----------------------------
+    // POLICY SELECTION
+    // -----------------------------
+    println!("\nChoose Replacement Policy:");
+    println!("1. LRU");
+    println!("2. Clock");
+
+    print!("Enter choice: ");
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut input)?;
+    let policy_choice = input.trim().to_string();
+input.clear();
+
+    let policy: Box<dyn ReplacementPolicy> = match policy_choice.as_str() {
+        "2" => {
+            println!("Using Clock Replacement Policy");
+            Box::new(ClockPolicy::new())
+        }
+        _ => {
+            println!("Using LRU Replacement Policy");
+            Box::new(LRUPolicy::new())
+        }
+    };
+
+    // -----------------------------
+    // INIT BUFFER POOL
+    // -----------------------------
+    let mut buffer_manager =    BufferPool::new(policy);
+     println!("Initializing Catalog File...\n");
+    init_catalog(&mut buffer_manager);
+
+    // Load catalog metadata into memory
+    println!("Loading Catalog...\n");
+    let mut catalog = load_catalog(&mut buffer_manager);
 
     // Tracks the currently selected database
     let mut current_db: Option<String> = None;
@@ -33,6 +98,15 @@ pub fn run() -> io::Result<()> {
     // Ensure tmp directory exists for joins
     let _ = std::fs::create_dir_all("database/tmp");
 
+    // Load 6 catalog pages into the buffer manager
+    buffer_manager.preload_catalog_pages()
+
+    
+
+    println!("\n Buffer Pool initialized successfully!");
+    // -----------------------------
+    // COMMAND LOOP
+    // -----------------------------
     loop {
         println!("\n=============================");
         println!("Choose an option:");
@@ -42,7 +116,7 @@ pub fn run() -> io::Result<()> {
         println!("4. Show Tables");
         println!("5. Create Table");
         println!("6. Load CSV");
-        println!("7. Show Tuples");
+        println!("7. Select tuples");
         println!("8. Show Table Statistics");
         println!("9. Join Tables");
         println!("10. Exit");
@@ -58,13 +132,13 @@ pub fn run() -> io::Result<()> {
 
         // Dispatch command based on user selection
         match choice {
-            "1" => database_cmd::show_databases_cmd(&catalog),
-            "2" => database_cmd::create_database_cmd(&mut catalog)?,
+            "1" => database_cmd::show_databases_cmd(&catalog, &mut buffer_manager)?,
+            "2" => database_cmd::create_database_cmd(&mut catalog, &mut buffer_manager)?,
             "3" => database_cmd::select_database_cmd(&catalog, &mut current_db)?,
-            "4" => table_cmd::show_tables_cmd(&catalog, &current_db),
+            "4" => table_cmd::show_tables_cmd(&catalog, &mut buffer_manager, &current_db)?,
             "5" => table_cmd::create_table_cmd(&mut catalog, &mut buffer_manager, &current_db)?,
             "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
-            "7" => data_cmd::show_tuples_cmd(&current_db)?,
+            "7" => data_cmd::show_tuples_cmd(&mut buffer_manager, &current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
             "9" => join_cmd::run_join_cmd(&catalog, &current_db)?,
             "10" => {
@@ -74,6 +148,7 @@ pub fn run() -> io::Result<()> {
             _ => println!("Invalid option."),
         }
     }
+
 
     Ok(())
 }

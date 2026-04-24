@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
+use storage_manager::types::DataType;
 
 use storage_manager::layout::CATALOG_FILE;
 
@@ -29,18 +30,9 @@ fn test_save_catalog() {
     // Step 4: Add a new test table entry inside the test database
     let test_table = Table {
         columns: vec![
-            Column {
-                name: "id".to_string(),
-                data_type: "INT".to_string(),
-            },
-            Column {
-                name: "name".to_string(),
-                data_type: "TEXT".to_string(),
-            },
-            Column {
-                name: "email".to_string(),
-                data_type: "TEXT".to_string(),
-            },
+            Column::new("id".to_string(), DataType::Int),
+            Column::new("name".to_string(), DataType::Varchar(10)),
+            Column::new("email".to_string(), DataType::Varchar(10)),
         ],
         row_count: 0,
         page_count: 0,
@@ -75,6 +67,14 @@ fn test_save_catalog() {
         users_table.columns.len(),
         3,
         "Expected 3 columns in 'users' table"
+    );
+
+    assert!(users_table.columns.iter().all(|c| c.nullable));
+    assert!(
+        users_table
+            .columns
+            .iter()
+            .all(|c| !c.constraints.not_null && !c.constraints.unique && c.constraints.default.is_none())
     );
 
     // Step 7: Clean up (optional)
