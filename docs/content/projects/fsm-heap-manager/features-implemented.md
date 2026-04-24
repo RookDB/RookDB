@@ -485,7 +485,7 @@ pub fn update_page_free_space(
     db_name: &str,
     table_name: &str,
     page_id: u32,
-    reclaimed_bytes: u32
+    absolute_free_bytes: u32
 ) -> io::Result<()>
 ```
 

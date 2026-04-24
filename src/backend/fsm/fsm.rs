@@ -806,15 +806,15 @@ impl FSM {
 
     /// Update free space after a tuple is deleted or page is vacuumed.
     /// Wrapper around fsm_set_avail for Project 10 integration.
-    pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, reclaimed_bytes: u32) -> io::Result<()> {
+    pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, absolute_free_bytes: u32) -> io::Result<()> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS.fsm_vacuum_update_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         log::trace!(
             "[FSM::fsm_vacuum_update] Recording vacuumed bytes: page_id={}, bytes={}",
-            heap_page_id, reclaimed_bytes
+            heap_page_id, absolute_free_bytes
         );
         // Delegate to fsm_set_avail
-        self.fsm_set_avail(heap_page_id, reclaimed_bytes, None)?;
+        self.fsm_set_avail(heap_page_id, absolute_free_bytes, None)?;
         Ok(())
     }
 

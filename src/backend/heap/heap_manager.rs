@@ -164,8 +164,8 @@ pub struct HeapManager {
 
 impl HeapManager {
     /// Vacuum update to expose vacuuming logic internally
-    pub fn vacuum_page(&mut self, page_id: u32, reclaimed_bytes: u32) -> io::Result<()> {
-        self.fsm.fsm_vacuum_update(page_id, reclaimed_bytes)
+    pub fn vacuum_page(&mut self, page_id: u32, absolute_free_bytes: u32) -> io::Result<()> {
+        self.fsm.fsm_vacuum_update(page_id, absolute_free_bytes)
     }
 
     /// Create a new heap file and initialize with empty pages.

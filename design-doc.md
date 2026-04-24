@@ -470,7 +470,7 @@ A critical flaw of RookDB's architecture is **catalog persistence**. If the cata
 
 The Compaction Team (Project 10) will handle fragmentation elimination via:
 
-1. **`update_page_free_space(page_id, reclaimed_bytes)`**
+1. **`update_page_free_space(page_id, absolute_free_bytes)`**
    - After in-place compaction, notify FSM of consolidated free space
    - FSM updates category; page becomes available again
 
@@ -500,7 +500,7 @@ let (page_id, slot_id) = insert_raw_tuple("mydb", "users", tuple_bytes)?;
 // Internally searches FSM for available page and inserts
 ```
 
-### 6.2 `update_page_free_space(db_name, table_name, page_id, reclaimed_bytes) -> ()`
+### 6.2 `update_page_free_space(db_name, table_name, page_id, absolute_free_bytes) -> ()`
 
 **Purpose:** Notify FSM that a page's contiguous free space has changed
 
@@ -593,14 +593,14 @@ pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32) -> io::R
 #### `FSM::fsm_vacuum_update`
 
 ```rust
-pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, reclaimed_bytes: u32) -> io::Result<()>
+pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, absolute_free_bytes: u32) -> io::Result<()>
 ```
 
-**Description:** Called by Project 10 (VACUUM / compaction) when a heap page gains free space. Converts the reclaimed bytes to a category and calls `fsm_set_avail` so the page becomes searchable again.  
-**Inputs:** `heap_page_id`, `reclaimed_bytes` (may be the full page free space if the page became empty)  
+**Description:** Called by Project 10 (VACUUM / compaction) when a heap page gains free space. Converts the absolute free bytes to a category and calls `fsm_set_avail` so the page becomes searchable again.  
+**Inputs:** `heap_page_id`, `absolute_free_bytes` (may be the full page free space if the page became empty)  
 **Steps:**
 
-1. Delegate to `self.fsm_set_avail(heap_page_id, reclaimed_bytes)`
+1. Delegate to `self.fsm_set_avail(heap_page_id, absolute_free_bytes)`
 2. If the Level-0 root value increased, propagate up (handled inside `fsm_set_avail`).
 
 #### `HeapManager::open`

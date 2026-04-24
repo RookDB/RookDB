@@ -355,8 +355,8 @@ Project 10 Compaction:
   ├─ Consolidate slots: rebuild slot directory
   ├─ Result: one large contiguous free space
   │
-  └─ Call update_page_free_space(page_id, reclaimed_bytes)
-      ├─ Update FSM: fsm_set_avail(page_id, reclaimed_bytes)
+  └─ Call update_page_free_space(page_id, absolute_free_bytes)
+      ├─ Update FSM: fsm_set_avail(page_id, absolute_free_bytes)
       ├─ Bubble up changes through all ancestor nodes
       └─ Next insert sees this page as available again!
 ```
@@ -549,21 +549,21 @@ pub fn fsm_set_avail(&mut self, heap_page_id: u32, new_free_bytes: u32, cached_p
 - **Typical:** 1–3 disk writes (Level 0, Level 1, Level 2 pages) depending on whether the highest local roots changed.
 - **Why:** Bubble-up only modifies ancestors whose values actually change. Short-circuiting keeps edits localized.
 
-### 8.4 `FSM::fsm_vacuum_update(heap_page_id, reclaimed_bytes)`
+### 8.4 `FSM::fsm_vacuum_update(heap_page_id, absolute_free_bytes)`
 
 **Purpose:** Wrapper called by Project 10 (Compaction) to update FSM after reclaiming space
 
 **Signature:**
 ```rust
-pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, reclaimed_bytes: u32) -> io::Result<()>
+pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, absolute_free_bytes: u32) -> io::Result<()>
 ```
 
 **Inputs:**
 - `heap_page_id`: Page that was just compacted
-- `reclaimed_bytes`: Newly available contiguous space
+- `absolute_free_bytes`: Newly available contiguous space
 
 **Behavior:**
-- Delegates to `fsm_set_avail(heap_page_id, reclaimed_bytes, None)`
+- Delegates to `fsm_set_avail(heap_page_id, absolute_free_bytes, None)`
 - Triggers bubble-up as normal
 - **No special handling:** Treated as a regular free-space update
 
@@ -607,7 +607,7 @@ Compaction workflow:
 **Signature:**
 ```rust
 pub fn update_page_free_space(db_name: &str, table_name: &str, page_id: u32, 
-    reclaimed_bytes: u32) -> io::Result<()>
+    absolute_free_bytes: u32) -> io::Result<()>
 ```
 
 **Use Case:**

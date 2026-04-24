@@ -409,14 +409,14 @@ let (new_page, new_slot) = insert_raw_tuple("mydb", "users", &tuple_data)?;
 
 ---
 
-#### 2. `update_page_free_space(db, table, page_id, reclaimed_bytes) -> ()`
+#### 2. `update_page_free_space(db, table, page_id, absolute_free_bytes) -> ()`
 
 ```rust
 pub fn update_page_free_space(
     db_name: &str,
     table_name: &str,
     page_id: u32,
-    reclaimed_bytes: u32
+    absolute_free_bytes: u32
 ) -> io::Result<()>
 ```
 

@@ -199,3 +199,164 @@ fn test_boundary_violations() {
     println!("✓ Boundary violations passed: Manager rejects oversized buffers.");
 }
 
+
+/// 1. Reallocation after vacuum (Replaces upd_del_fsm logic effectively showing FSM reuse)
+#[test]
+fn test_fsm_reallocation_after_vacuum() {
+    let (db_path, _guard) = setup_db_dir("fsm_reallocation");
+    let table_name = "fsm_reallocation";
+    let file_path = get_test_path(&db_path, table_name);
+
+    let mut hm = HeapManager::create(file_path.clone()).expect("Failed to create HM");
+    
+    // Fill up a few pages
+    // Each insert is 8000 bytes, so each goes to a new page.
+    let tuple_data = vec![0xAA; 8000];
+    
+    let (p1, s1) = hm.insert_tuple(&tuple_data).unwrap();
+    let (p2, _s2) = hm.insert_tuple(&tuple_data).unwrap();
+    let (p3, _s3) = hm.insert_tuple(&tuple_data).unwrap();
+    
+    assert_ne!(p1, p2);
+    assert_ne!(p2, p3);
+    
+    // Check Table statistics logic (printing tuple counts and allocations internally)
+    println!("Pages allocated: P1: {}, P2: {}, P3: {}", p1, p2, p3);
+
+    // Delete from page 1
+    let freed_bytes = hm.delete_tuple(p1, s1).unwrap();
+    
+    // Apply Vacuum to update the FSM
+    hm.vacuum_page(p1, freed_bytes).expect("Failed to vacuum page");
+    
+    // Now insert a new tuple that can fit in the freed space
+    let tuple_small = vec![0xBB; 4000];
+    let (p_new, _s_new) = hm.insert_tuple(&tuple_small).unwrap();
+    
+    // If FSM working correctly, it should reuse page 1!
+    assert_eq!(p_new, p1, "FSM failed to route new insert to the freed space on page 1");
+    println!("✓ Reallocation after vacuum test passed.");
+}
+
+/// 2. The "Masking" Bubble-Up Test
+#[test]
+fn test_fsm_bubble_up_recalculation() {
+    let (db_path, _guard) = setup_db_dir("bubble_up");
+    let table_name = "bubble_up";
+    let file_path = get_test_path(&db_path, table_name);
+
+    // Provide large enough count so FSM has 1 page
+    let mut fsm = FSM::open(file_path.with_extension("dat.fsm"), 10).unwrap();
+    // Simulate setting initial size
+    fsm.set_heap_page_count(10);
+    
+    // Fill pages 0 and 1 partially
+    fsm.fsm_set_avail(0, 500, None).unwrap(); // Page 0
+    fsm.fsm_set_avail(1, 1000, None).unwrap(); // Page 1
+    
+    let cat_1000 = (1000 / 32).max(0).min(255) as u8;
+    let root_val_1 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
+    assert_eq!(root_val_1, cat_1000, "Root should reflect the highest free space");
+
+    // Reduce Page 1's space below Page 0's space
+    fsm.fsm_set_avail(1, 200, None).unwrap();
+    
+    let cat_500 = (500 / 32).max(0).min(255) as u8;
+    let root_val_2 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
+    
+    assert_eq!(
+        root_val_2, cat_500, 
+        "FSM failed to correctly recalculate using the sibling node during bubble-up"
+    );
+    println!("✓ Bubble-up recalculation passed.");
+}
+
+/// 3. The Initial Unused Space Test
+#[test]
+fn test_fsm_initial_state_routing() {
+    let (db_path, _guard) = setup_db_dir("fsm_initial_state");
+    let table_name = "fsm_initial_state";
+    let file_path = get_test_path(&db_path, table_name);
+
+    let mut fsm = FSM::open(file_path.with_extension("dat.fsm"), 4).unwrap();
+    fsm.set_heap_page_count(4);
+    
+    // Assume new pages 1, 2, 3 have full size
+    for p in 1..4 {
+        fsm.fsm_set_avail(p, 8000, None).unwrap();
+    }
+    
+    let cat_3000 = (3000 / 32).max(0).min(255) as u8;
+    let target_page = fsm.fsm_search_avail(cat_3000).unwrap().map(|(id, _)| id);
+    
+    assert_eq!(
+        target_page, Some(1), // Page 1 is first data page
+        "A completely empty FSM should route requests to the first data page"
+    );
+    println!("✓ Initial unused space routing passed.");
+}
+
+/// 4. The "Needle in the Haystack" Test (Deep Search)
+#[test]
+fn test_fsm_needle_in_haystack() {
+    let (db_path, _guard) = setup_db_dir("needle_haystack");
+    let table_name = "needle_haystack";
+    let file_path = get_test_path(&db_path, table_name);
+
+    let mut fsm = FSM::open(file_path.with_extension("dat.fsm"), 4001).unwrap();
+    fsm.set_heap_page_count(4001);
+    
+    // Simulate completely full database
+    for i in 1..=4000 {
+        fsm.fsm_set_avail(i, 0, None).unwrap(); // 0 bytes free
+    }
+    
+    let root_val_1 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
+    assert_eq!(root_val_1, 0, "Root should report 0 space when all pages are full in level 0");
+    // At 4000 it is exactly 1 leaf page, so level 0 root is the max space.
+
+    // Free up space on one specific, deep page
+    let target_page_id = 3142;
+    fsm.fsm_set_avail(target_page_id, 4000, None).unwrap(); 
+
+    let cat_4000 = (4000 / 32).max(0).min(255) as u8;
+    let root_val_2 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
+    
+    // The root should instantly know 4000 bytes opened up
+    assert_eq!(root_val_2, cat_4000, "Root did not bubble up the newly freed space");
+
+    // Search for space
+    let cat_3500 = (3500 / 32).max(0).min(255) as u8;
+    let found_page = fsm.fsm_search_avail(cat_3500).unwrap().map(|(id, _)| id);
+    
+    assert_eq!(
+        found_page, Some(target_page_id), 
+        "FSM search failed to navigate the branches to find the only page with space"
+    );
+    println!("✓ Needle in haystack (Deep Search) passed.");
+}
+
+/// 5. The Exact Fit / Left-Bias Test
+#[test]
+fn test_fsm_exact_fit_left_bias() {
+    let (db_path, _guard) = setup_db_dir("left_bias");
+    let table_name = "left_bias";
+    let file_path = get_test_path(&db_path, table_name);
+
+    let mut fsm = FSM::open(file_path.with_extension("dat.fsm"), 5).unwrap();
+    fsm.set_heap_page_count(5);
+    
+    fsm.fsm_set_avail(1, 0, None).unwrap();
+    fsm.fsm_set_avail(2, 2000, None).unwrap();
+    fsm.fsm_set_avail(3, 2000, None).unwrap();
+    
+    let cat_1500 = (1500 / 32).max(0).min(255) as u8;
+    let found_page = fsm.fsm_search_avail(cat_1500).unwrap().map(|(id, _)| id);
+    
+    assert_eq!(
+        found_page, Some(2), 
+        "FSM failed exact fit / left-bias test (should prioritize the leftmost available space)"
+    );
+    println!("✓ Exact fit / left-bias passed.");
+}
+
