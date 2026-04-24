@@ -24,7 +24,46 @@ use crate::layout::{
     CATALOG_PAGES_DIR, PG_COLUMN_FILE, PG_CONSTRAINT_FILE, PG_DATABASE_FILE, PG_INDEX_FILE,
     PG_TABLE_FILE, PG_TYPE_FILE,
 };
-use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, page_free_space};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, page_free_space};
+
+// ─────────────────────────────────────────────────────────────
+// Page compaction helper
+// ─────────────────────────────────────────────────────────────
+
+/// Compact the tuple data area of a slotted page after a deletion.
+///
+/// All live slots (length > 0) have their tuple data repacked tightly at the
+/// top of the data area.  Slot entries are updated with the new offsets and
+/// the upper pointer is moved accordingly.  Deleted slots (length == 0) remain
+/// as tombstones in the slot array; the lower pointer is unchanged.
+fn compact_page_data(page: &mut Page) {
+    let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap()) as usize;
+    let num_slots = (lower - PAGE_HEADER_SIZE as usize) / ITEM_ID_SIZE as usize;
+    let page_size = page.data.len();
+
+    // Collect live tuples: (slot_index, owned_copy_of_data)
+    let mut live: Vec<(usize, Vec<u8>)> = Vec::new();
+    for slot in 0..num_slots {
+        let base = PAGE_HEADER_SIZE as usize + slot * ITEM_ID_SIZE as usize;
+        let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+        let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap()) as usize;
+        if length > 0 && offset + length <= page_size {
+            live.push((slot, page.data[offset..offset + length].to_vec()));
+        }
+    }
+
+    // Re-pack tuple data from page end downward (slot 0 lands nearest page end)
+    let mut new_upper = page_size;
+    for (slot, data) in live.iter() {
+        new_upper -= data.len();
+        page.data[new_upper..new_upper + data.len()].copy_from_slice(data);
+        let base = PAGE_HEADER_SIZE as usize + slot * ITEM_ID_SIZE as usize;
+        page.data[base..base + 4].copy_from_slice(&(new_upper as u32).to_le_bytes());
+    }
+
+    // Update upper pointer
+    page.data[4..8].copy_from_slice(&(new_upper as u32).to_le_bytes());
+}
 
 // ─────────────────────────────────────────────────────────────
 // Catalog name constants
@@ -165,10 +204,10 @@ impl CatalogPageManager {
         page.data[lower as usize + 4..lower as usize + 8]
             .copy_from_slice(&(data.len() as u32).to_le_bytes());
 
+        let slot_id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
         lower += ITEM_ID_SIZE;
         page.data[0..4].copy_from_slice(&lower.to_le_bytes());
 
-        let slot_id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE - 1;
         bm.unpin_page(&PageId::new(&path, last_page_num), true)
             .map_err(CatalogError::IoError)?;
 
@@ -272,9 +311,12 @@ impl CatalogPageManager {
         let fi = bm
             .pin_page(PageId::new(&path, page_num))
             .map_err(CatalogError::IoError)?;
-        let page = &mut bm.frames[fi];
-        let base = (PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE) as usize;
-        page.data[base + 4..base + 8].copy_from_slice(&0u32.to_le_bytes());
+        {
+            let page = &mut bm.frames[fi];
+            let base = (PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE) as usize;
+            page.data[base + 4..base + 8].copy_from_slice(&0u32.to_le_bytes());
+            compact_page_data(page);
+        }
         bm.unpin_page(&PageId::new(&path, page_num), true)
             .map_err(CatalogError::IoError)?;
         Ok(())

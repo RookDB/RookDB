@@ -474,20 +474,11 @@ pub fn insert_index_entry(
                 bm.frames[fi].data[7..11].copy_from_slice(&new_page_num.to_le_bytes());
             }
 
-            if insert_key >= promoted_key && (!is_leaf && insert_key >= promoted_key) {
-                if insert_key >= promoted_key {
-                    insert_into_page(&mut new_page, &insert_key, &insert_suffix, is_leaf).unwrap();
-                } else {
-                    insert_into_page(&mut bm.frames[fi], &insert_key, &insert_suffix, is_leaf)
-                        .unwrap();
-                }
+            if insert_key >= promoted_key {
+                insert_into_page(&mut new_page, &insert_key, &insert_suffix, is_leaf).unwrap();
             } else {
-                if insert_key >= promoted_key {
-                    insert_into_page(&mut new_page, &insert_key, &insert_suffix, is_leaf).unwrap();
-                } else {
-                    insert_into_page(&mut bm.frames[fi], &insert_key, &insert_suffix, is_leaf)
-                        .unwrap();
-                }
+                insert_into_page(&mut bm.frames[fi], &insert_key, &insert_suffix, is_leaf)
+                    .unwrap();
             }
 
             let nfi = bm

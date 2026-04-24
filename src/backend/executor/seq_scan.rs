@@ -90,6 +90,19 @@ pub fn show_tuples(
                             cursor += 1;
                         }
                     }
+                    "TEXT" | "STRING" => {
+                        if cursor + 2 <= tuple.len() {
+                            let len =
+                                u16::from_le_bytes(tuple[cursor..cursor + 2].try_into().unwrap())
+                                    as usize;
+                            cursor += 2;
+                            if cursor + len <= tuple.len() {
+                                let text = String::from_utf8_lossy(&tuple[cursor..cursor + len]);
+                                print!("{}='{}' ", col.name, text);
+                                cursor += len;
+                            }
+                        }
+                    }
                     t if t.starts_with("VARCHAR") => {
                         if cursor + 2 <= tuple.len() {
                             let len =
@@ -104,16 +117,7 @@ pub fn show_tuples(
                         }
                     }
                     _ => {
-                        // Default TEXT: fixed 10-byte field (backward compatible)
-                        if cursor + 10 <= tuple.len() {
-                            let text = String::from_utf8_lossy(&tuple[cursor..cursor + 10])
-                                .trim()
-                                .to_string();
-                            print!("{}='{}' ", col.name, text);
-                            cursor += 10;
-                        } else {
-                            print!("{}=<unsupported> ", col.name);
-                        }
+                        print!("{}=<unsupported> ", col.name);
                     }
                 }
             }

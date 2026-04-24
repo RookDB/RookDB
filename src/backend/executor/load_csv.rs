@@ -100,6 +100,11 @@ pub fn load_csv(
                     };
                     field_bytes.push(b);
                 }
+                "TEXT" | "STRING" => {
+                    let bytes = val.as_bytes().to_vec();
+                    field_bytes.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+                    field_bytes.extend_from_slice(&bytes);
+                }
                 t if t.starts_with("VARCHAR") => {
                     let max_len: usize = t
                         .strip_prefix("VARCHAR(")
@@ -112,15 +117,7 @@ pub fn load_csv(
                     field_bytes.extend_from_slice(&bytes);
                 }
                 _ => {
-                    // Default TEXT: fixed 10-byte field (for backward compatibility with existing data)
-                    // If you need variable-length TEXT, use VARCHAR instead
-                    let mut text_bytes = val.as_bytes().to_vec();
-                    if text_bytes.len() > 10 {
-                        text_bytes.truncate(10);
-                    } else if text_bytes.len() < 10 {
-                        text_bytes.extend(vec![b' '; 10 - text_bytes.len()]);
-                    }
-                    field_bytes.extend_from_slice(&text_bytes);
+                    field_bytes.extend_from_slice(&(0u16).to_le_bytes());
                 }
             }
             tuple_map.insert(col.column_oid, Some(field_bytes.clone()));

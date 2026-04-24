@@ -76,21 +76,6 @@ impl OidCounter {
         Ok(())
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Allocation
-    // ──────────────────────────────────────────────────────────────
-
-    /// Atomically allocate the next OID and persist the counter to disk.
-    pub fn allocate_oid(&mut self) -> Result<u32, CatalogError> {
-        let oid = self.next_oid;
-        if oid == u32::MAX {
-            return Err(CatalogError::InvalidOperation("OID space exhausted".into()));
-        }
-        self.next_oid += 1;
-        self.persist()?;
-        Ok(oid)
-    }
-
     /// Ensure the counter file and its parent directory exist.
     /// Called during bootstrap.
     pub fn initialize() -> Result<(), io::Error> {

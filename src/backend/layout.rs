@@ -67,5 +67,6 @@ pub const OID_TYPE_DATE: u32 = 8;
 pub const OID_TYPE_TIMESTAMP: u32 = 9;
 pub const OID_TYPE_BYTES: u32 = 10;
 
-/// OID of the built-in "system" database
-pub const SYSTEM_DB_OID: u32 = 1;
+/// OID of the built-in "system" database.
+/// Starts at 11 so it does not alias any built-in type OID (1–10).
+pub const SYSTEM_DB_OID: u32 = 11;

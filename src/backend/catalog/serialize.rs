@@ -190,6 +190,7 @@ pub fn serialize_column_tuple(
     write_u8(&mut buf, dt.type_align);
     write_u8(&mut buf, type_category_to_u8(&dt.type_category));
     write_str(&mut buf, &dt.type_name);
+    write_u8(&mut buf, dt.is_builtin as u8);
     // TypeModifier (flag byte + optional payload)
     match type_modifier {
         None => write_u8(&mut buf, 0),
@@ -240,13 +241,14 @@ pub fn deserialize_column_tuple(
     let type_align = read_u8(&mut c)?;
     let type_category = type_category_from_u8(read_u8(&mut c)?);
     let type_name = read_str(&mut c)?;
+    let is_builtin = read_u8(&mut c)? != 0;
     let dt = DataType {
         type_oid,
         type_name,
         type_category,
         type_length,
         type_align,
-        is_builtin: true,
+        is_builtin,
     };
     // TypeModifier
     let tm_flag = read_u8(&mut c)?;
