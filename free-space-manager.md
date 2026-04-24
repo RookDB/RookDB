@@ -39,6 +39,9 @@ RookDB uses a **PostgreSQL-style binary max-tree** to efficiently track free spa
 **FSM Insertion:**
 ![FSM Insertion](./FSM_Insertion.png)
 
+**FSM 2-Level Example:**
+![FSM 2-Level Example](./FSM_2level_Structure.png)
+
 **Key Points:**
 - Each node in a Level-1 or Level-0 page is 1 byte (8-bit unsigned integer 0–255)
 - The root (`tree[0]`) of any page = max of all descendants
@@ -668,14 +671,20 @@ RookDB tracks how many times each FSM function is called to verify correctness:
 
 **Tracked Functions:**
 - `fsm_search_avail`: How many times did we search for available pages?
+  fsm_search_avail internally uses search_tree_for_available_page to find a page with enough free space for the new tuple.
 - `fsm_search_tree`: How many tree traversals occurred?
 - `read_fsm_page`: How many FSM pages read from disk?
+  read_fsm_page internally uses deserialize_page function .
 - `write_fsm_page`: How many FSM pages written to disk?
+  write_fsm_page internally uses serialize_page function.
 - `serialize_fsm_page`: How many times did we encode an FSM page?
   What it does: It takes the higher-level representation of the free space nodes and packs them into the physical layout of a standard page that can be flushed to disk.
 - `deserialize_fsm_page`: How many times did we decode an FSM page?
   It reads the raw bytes from a physical page from disk into memory and initializes the internal data structures that the FSM code uses to navigate the tree.
 - `fsm_set_avail`: How many times did we update free-space categories?
+  fsm_set_avail used for updating the free space of a page in the FSM and does the bubble up the changes to the parent nodes in the FSM tree.
+- `fsm_vacuum_update`: How many times did we update free space after compaction?
+  fsm_vacuum_update internally uses fsm_set_avail to update the FSM after a vacuum operation.
 
 ### 10.2 Viewing Instrumentation Data
 

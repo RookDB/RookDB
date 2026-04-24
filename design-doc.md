@@ -8,9 +8,9 @@
 
 ## PROJECT SCOPE
 
-Project 6 and Project 10 have clearly separated responsibilities based on operational granularity. Project 6 handles page-level operations: tuple insertion (using the FSM binary max-tree search algorithm), tuple retrieval by coordinates (page_id, slot_id), and sequential scans across all pages. The Free Space Map tracks available space at page granularity using a PostgreSQL-style 3-level tree of FSM pages stored in a separate fork file.
+Project 6 and Project 10 have clearly separated responsibilities based on operational granularity. Project 6 handles page-level operations: tuple insertion (using the FSM binary max-tree search algorithm), tuple retrieval by coordinates (page_id, slot_id). The Free Space Map tracks available space at page granularity using a PostgreSQL-style 3-level tree of FSM pages stored in a separate fork file.
 
-Project 10 will handle tuple-level operations including deletion, updates, in-page compaction, slot reorganization, and tuple relocation. These are explicitly out of scope for our implementation, which operates exclusively at the page level tracking which pages have space, not managing individual tuple lifecycles within pages.
+Project 10 will handle tuple-level operations including deletion, updates, in-page compaction, slot reorganization, and tuple relocation. These are explicitly out of scope for our implementation, which operates exclusively at the page level tracking which pages have space, not managing individual tuple life cycles within pages.
 
 ---
 
@@ -29,7 +29,6 @@ The FSM (Free Space Manager) sidecar file is a dedicated companion file to the h
 1. **No Heap Page Intrusion:** Adding metadata to heap pages would consume precious tuple storage space. The sidecar keeps heap pages pristine.
 2. **Efficient Searches:** The binary max-tree enables O(\log N) searches by free-space category, replacing a naive O(N) linear scan of all pages.
 3. **Rebuild on Crash:** The FSM file is treated as a hint-like structure. If corrupted or deleted, it can be rebuilt from the heap file without data loss or WAL complexity.
-4. **Scalability:** A single byte per heap page (free-space category 0–255) means 1 MB of FSM overhead covers an 8 GB table.
 
 **File Structure:**
 
@@ -90,7 +89,7 @@ The `fsm_page_count` field similarly allows the FSM fork to grow dynamically. Wh
 
 **Justification for Each Field:**
 
-- **Page Count (4 bytes):** Tracks heap boundaries without scanning; supports tables up to 2^32 pages (~32 TB at 8 KB/page)
+- **Page Count (4 bytes):** Tracks heap boundaries without scanning.
 - **FSM Page Count (4 bytes):** Sizes the FSM fork; the fork can grow on demand as the heap grows
 - **Total Tuples (8 bytes):** Enables O(1) COUNT(\*) queries without scanning; supports up to 2^64 tuples
 - **Last Vacuum (4 bytes):** Reserved for future integration with Project 10 (compaction/vacuum tracking)
@@ -105,7 +104,7 @@ The `fsm_page_count` field similarly allows the FSM fork to grow dynamically. Wh
 Exact byte counts are not stored. Each heap page maps to one `u8` category:
 
 ```
-category = floor(free_bytes × 255 / PAGE_SIZE)   // 0 = full, 255 = completely empty
+category = floor(free_bytes / 32)   // 0 = full, 255 = completely empty
 ```
 
 For an 8 KB page this gives ~32 bytes of resolution per category step.
@@ -147,7 +146,8 @@ The fundamental tuple organization remains unchanged from the base system. Each 
 
 - **Lower Pointer (`lower`):** Points to the next available slot in the directory (grows downward)
 - **Upper Pointer (`upper`):** Points to the start of free space for new tuple data (grows downward from end of page)
-- **Slot Entry Format:** 8 bytes per slot = (offset: u32, length: u32) → tuple is located at `page.data[offset..offset+length]`
+- **Slot Entry Format:** 8 bytes per slot = (offset: u32, length: u32) → tuple is located at `page.data[offset..offset+length]`. Note: A deleted slot has an `offset == 0` and `length == 0`.
+- **Slot Reclaiming / Rollback:** During deletion, if a tuple is functionally flush against the upper bounds, the `upper` boundary explicitly rolls backwards. The tuple arrays can uniquely track and reclaim empty structures sequentially to drastically diminish dead vacuum spaces within blocks.
 - **Contiguous Free Space Only:** `free_bytes = upper - lower` (the contiguous gap between directory and data)
   - RookDB **only inserts into this last contiguous space**, never reusing fragmented holes from deletions
   - **Why:** Compacting a page during INSERT is too expensive; FSM must only advertise space that's 100% ready to use
@@ -174,46 +174,53 @@ The slotted page format is already tuple-efficient. The FSM layer operates *abov
 
 ---
 
-
 ## 1.3 Complexity Analysis: FSM Tree Operations 
 
-### Time Complexity
+### Time Complexity (CPU Execution)
 
-**FSM Tree Search (`fsm_search_avail`): O(\log N) for internal and O(N) for leaves**
+**1. Insertion Search (`fsm_search_avail`)**
+* **Complexity: $O(1)$** relative to the total number of heap pages ($N$).
+* **Reasoning:** The FSM does not perform linear $O(N)$ scans. It performs a greedy $O(\log S)$ binary search down a fixed-size array, where $S$ is the number of slots per page (4000). 
+* **Execution:** Searching a single FSM page takes exactly ~12 array index lookups (`(2 * i) + 1`). Even for a 64-billion-page database requiring all 3 tree levels, the search guarantees a maximum of ~36 array lookups. In Rust, this resolves in nanoseconds.
 
-- **Tree Traversal:** The 3-level tree (Level 2 root → Level 1 → Level 0 leaves) requires 3 disk reads in the worst case, regardless of the number of heap pages.
-- **Per Page Count:** If the heap has N pages:
-  - Leaves required: ≈ N / FSM_SLOTS_PER_PAGE ≈ N / 4000
-  - Level-1 pages: ≈ (N / 4000) / 4000 ≈ N / 16,000,000
-  - Level-2 pages: 1 (root)
-  - Depth: ≈ log₂₀₄₀(N) ≈ 3 for N up to ~64 billion pages
-- **Result:** O(\log N) for internal and O(N) for leaves = O(1) for practical table sizes (even a 32 TB table only needs 3 I/Os)
+**2. Update Free Space (`fsm_set_avail`)**
+* **Complexity: $O(1)$** relative to total heap pages. 
+* **Reasoning:** Updating the FSM requires calculating the new space category and iteratively "bubbling up" the maximum value from the leaf to the root of the page's array. 
+* **Execution:** This is strictly bound to the height of a single page's internal tree (~12 iterative loops). It does not scale with the size of the database.
 
-### I/O Complexity
+---
 
-**FSM Tree Search: O(\log N) for internal and O(N) for leaves disk reads**
+### I/O Complexity (Disk Access)
 
-- **Read 1:** Root FSM page (Level 2)
-- **Read 2:** One Level-1 FSM page (selected via tree navigation)
-- **Read 3:** One Level-0 FSM page (leaf)
-- **Read 4:** Actual heap page (to insert tuple)
-- **Write 1:** Updated heap page
-- **Write 2-4:** Updated FSM pages (levels 0, 1, 2) if categories changed
-- **Total:** ~3 reads + ~4 writes per insert
+FSM employs **Lossy Compression** (`floor(free_bytes / 32)`), which safely aborts disk writes if the space category does not change.
 
+**Current Implementation (Direct Disk / No Buffer Manager)**
+* **Read I/O:** * 1 to 3 Reads for the FSM path (Level-2 down to Level-0).
+  * 1 Read to fetch the target Heap Data Page.
+  * *Total: 2 to 4 Disk Reads per insert.*
+* **Write I/O:**
+  * 1 Write for the updated Heap Data Page.
+  * 0 Writes for the FSM if the category is unchanged (Optimization triggers ~31% of the time).
+  * 1 to 3 Writes for the FSM if the category boundary is crossed and must propagate up the tree.
+  * *Total: 1 to 4 Disk Writes per insert.*
 
-### Space Complexity
+**Target Architecture (With Buffer Pool Manager)**
+Once the BPM is integrated, the I/O cost per transaction drops to effectively zero synchronous operations:
+* **Read I/O:** The Level-2 root and Level-1 FSM pages are accessed so frequently they will remain permanently "pinned" in RAM. Level-0 and Heap pages will likely require 1 initial disk read, but subsequent inserts to the same page will hit the cache.
+* **Write I/O:** All FSM and Heap page mutations will occur entirely in memory. The BPM will flush dirty pages to disk asynchronously in the background. *Transaction Write I/O becomes 0.*
 
-**FSM Tree: O(N / 4000) pages, 1 byte per heap page**
+---
 
-- **FSM Fork Size:** For N heap pages, approximately N / 4000 FSM pages required
-  - Example: 1M heap pages → ~500 FSM pages → 4 MB FSM fork
-  - 1B heap pages (8 TB table) → ~500K FSM pages → 4 GB FSM fork
-- **In-Memory Overhead:** Minimal. Only the current heap page and up to 3 FSM pages are cached (per-insertion). No full-tree materialization in memory.
-- **Header Overhead:** 20 bytes on Page 0
-- **Total:** < 0.05% of heap size
+### Space Complexity (Disk & Memory Footprint)
 
+**FSM Tree: $O(N / 4000)$ pages**
 
+* **Storage Density:** A single 8KB FSM leaf page tracks exactly 4,000 heap pages. The 3-level hierarchical tree scales to track up to 64 billion heap pages using a single entry point.
+* **FSM Fork Size vs Heap Size (Base-10 Math):** * 4,000 Heap pages (32 MB table) $\rightarrow$ 1 FSM page (8 KB).
+  * 16,000,000 Heap pages (131 GB table) $\rightarrow$ 4,001 FSM pages (~32 MB).
+  * 64,000,000,000 Heap pages (524 TB table) $\rightarrow$ 16,004,001 FSM pages (~131 GB).
+* **Total Overhead:** The entire FSM file represents strictly **~0.025%** of the total database heap file size, regardless of scale.
+* **In-Memory Overhead:** The FSM uses lazy dynamic allocation, starting with only 1 Level-0 page for the first 4,000 heap pages, and growing levels only when capacity overflows. It does not materialize the entire tree in memory; only the active 8KB `FSMPage` struct currently being searched or updated is loaded into RAM.
 ---
 
 ## 2. Backend Data Structures
@@ -301,112 +308,9 @@ impl Iterator for HeapScanIterator {
 **Purpose:** Memory-efficient sequential scan
 **Justification:** Rust iterator trait; pages lazy-loaded (8KB vs 100GB table)
 
-### 2.2 Component Redundancy: `create_page` vs. `allocate_new_page`
-
-**The Distinction:**
-
-These two functions operate at different levels of abstraction and serve different purposes:
-
-#### `create_page` (Low-Level I/O)
-
-**Location:** `src/backend/disk/disk_manager.rs`
-
-**Purpose:** Raw disk I/O operation
-
-**Signature:**
-```rust
-pub fn create_page(file: &File, page_id: u32) -> io::Result<Page>
-```
-
-**Behavior:**
-- Takes an open file and a page ID
-- Seeks to the correct file offset: `offset = page_id * PAGE_SIZE`
-- Reads (or initializes) 8 KB of data from disk
-- Returns a `Page` struct
-- **No state tracking** – purely mechanical I/O
-- **No side effects** – doesn't update file size, headers, or any metadata
-
-**Use Case:** Direct page reads for specific pages when you already know the page_id
-
 ---
 
-#### `allocate_new_page` (Stateful Heap Manager)
-
-**Location:** `src/backend/heap/heap_manager.rs`
-
-**Purpose:** High-level heap state management
-
-**Signature:**
-```rust
-fn allocate_new_page(&mut self) -> io::Result<u32>
-```
-
-**Behavior:**
-- Computes `new_page_id = header.page_count` (must be mutable to track state)
-- Creates an empty slotted page structure (lower=8, upper=PAGE_SIZE)
-- **Appends** to the heap file (extending file size)
-- **Updates** `header.page_count` in memory
-- **Extends** FSM fork if necessary (`header.fsm_page_count` may grow)
-- **Registers** the new page with FSM: calls `fsm.fsm_set_avail(new_page_id, PAGE_SIZE - 8)` with category 255 (fully empty)
-- **Mutates state:** The `HeapManager` must track the growing heap
-- **Returns:** The new page_id
-
-**Use Case:** When the FSM has no pages with sufficient free space, grow the heap and immediately register the new page for reuse
-
----
-
-**Why Both Exist (Not Redundant):**
-
-| Aspect               | `create_page`          | `allocate_new_page`      |
-|----------------------|------------------------|---------------------------|
-| **Abstraction**      | Low-level I/O          | High-level state mgmt    |
-| **Mutability**       | Immutable (reads page) | Mutable (modifies header) |
-| **Side effects**     | None                   | Updates header, FSM       |
-| **File growth**      | No                     | Yes (appends to file)    |
-| **Usage**            | Read existing pages    | Allocate new pages       |
-| **Called by**        | `fsm_search_avail`     | `insert_tuple` fallback  |
-
-**Example Workflow:**
-
-```
-insert_tuple(50 bytes):
-  │
-  ├─ min_category = ceil(58 * 255 / 8192) = 2
-  │
-  ├─ fsm_search_avail(2)  ← may internally call create_page to read FSM pages
-  │   └─ Returns Some(47)
-  │
-  ├─ Read heap page 47 (uses create_page internally)
-  │
-  ├─ Actual free_space = 1200 bytes ✓ sufficient
-  │
-  ├─ Insert tuple into page 47
-  │
-  ├─ fsm_set_avail(47, 1150)  ← update FSM
-  │
-  └─ Return (47, 3)  ← (page_id, slot_id)
-
-BUT if fsm_search_avail returned None:
-  │
-  ├─ allocate_new_page()  ← HIGH-level, mutable
-  │   │
-  │   ├─ Compute new_page_id = 10240 (assuming header.page_count was 10240)
-  │   ├─ Create empty slotted page
-  │   ├─ Append to heap file  ← FILE GROWTH
-  │   ├─ header.page_count = 10241  ← STATE UPDATE
-  │   ├─ Extend FSM fork if needed  ← FSM GROWTH
-  │   ├─ fsm_set_avail(10240, 8184)  ← REGISTER with FSM
-  │   │
-  │   └─ Return 10240
-  │
-  ├─ Insert tuple into page 10240
-  │
-  └─ Return (10240, 0)  ← brand new page
-```
-
----
-
-### 2.3 Data Structures to be Modified
+### 2.2 Data Structures to be Modified
 
 #### `Page` - Add Helper Functions
 
@@ -435,7 +339,7 @@ pub fn update_header_page(file: &File, header: &HeaderMetadata) -> io::Result<()
 
 ---
 
-## 8. Execution, Testing, and Instrumentation
+## 3. Execution, Testing, and Instrumentation
 
 ### Running the Application
 
@@ -493,46 +397,6 @@ In Rust's `log` ecosystem, logging levels operate on a **waterfall hierarchy** b
 
 **Important Note:** Standard `println!` and `print!` statements bypass this system entirely, which is why your UI menus always show up regardless of the `RUST_LOG` setting.
 
-### How the Hierarchy Applies
-
-**1. `RUST_LOG=off cargo run` or just `cargo run`**
-
-- **Where you are:** Top of hierarchy
-- **What you see:** Only explicit UI `println!` statements (the ASCII menus, the tables). Zero backend logs.
-
-**2. `RUST_LOG=info cargo run`**
-
-- **Where you are:** Middle of hierarchy
-- **What you see:** All `log::info!` messages (e.g., "Created database X", "Inserted 50 rows"). Due to the waterfall, you also see any `log::warn!` and `log::error!` messages if something goes wrong.
-
-**3. `RUST_LOG=debug cargo run`**
-
-- **Where you are:** Lower down (high detail)
-- **What you see:** `log::debug!` messages (e.g., checking file paths, calculating category limits). You also inherit all `info!`, `warn!`, and `error!` logs.
-
-**4. `RUST_LOG=trace cargo run`**
-
-- **Where you are:** Absolute bottom (maximum detail)
-- **What you see:** Every single log in the application. Deep byte-level calculations (`log::trace!`) PLUS all the `debug!`, `info!`, `warn!`, and `error!` logs.
-
-### Custom Filtering (Advanced)
-
-You can also filter logs to show up *only* for specific modules. For example, if you just want to see trace logs for the `fsm` module and nothing else:
-
-```bash
-RUST_LOG=storage_manager::backend::fsm=trace cargo run
-```
-
-Or for multiple modules:
-
-```bash
-RUST_LOG=storage_manager::backend::fsm=trace,storage_manager::backend::heap=debug cargo run
-```
-
-**TL;DR (Volume Knob Analogy):**
-
-- Setting it to `error` means you only want to hear loud alarms
-- Setting it to `trace` means you want to hear everything down to a pin dropping
 
 ### Running Tests with Logs
 
@@ -586,7 +450,7 @@ cargo test test_fsm_search_finds_candidate -- --nocapture
 
 ---
 
-## 9. Important: Catalog Manager Recovery
+## 4. Important: Catalog Manager Recovery
 
 ### Graceful Recovery Without Manual Intervention
 
@@ -602,70 +466,7 @@ A critical flaw of RookDB's architecture is **catalog persistence**. If the cata
 
 ---
 
-## 2. Sequential Insertion Guarantees & Fragmentation Handling
-
-### 2.1 Sequential Fill Within Pages
-
-RookDB's insertion strategy is **strictly sequential within each page** until that page is full:
-
-**Page Filling Sequence:**
-
-```
-Page 1:  Insert T1 → [Header][Slot 0] ........ [T1]
-         Insert T2 → [Header][Slot 0][Slot 1] ... [T2][T1]
-         Insert T3 → [Header][Slot 0..2] ..... [T3][T2][T1]
-                     (tuples pack toward end, slots grow from start)
-
-Page 1 Eventually:
-         50 inserts → [Header][50 Slots] [50 tuples packed at end]
-                      lower = 408         upper ≈ 100 (nearly full!)
-         
-Page 1 is FULL:
-         FSM marks category = 0, page becomes unavailable
-
-Next Insert searches FSM → finds Page 2 (category > 0) → repeats
-```
-
-**Why Sequential, Not Scattered?**
-
-1. **Minimize Disk Seeks:** Pages fill contiguously, reducing fragmented page access patterns
-2. **FSM Simplicity:** Only advertise space in pages with actual contiguous gaps
-3. **Optimal Caching:** Sequential access is cache-friendly on modern storage systems
-4. **Predictable Growth:** Table size growth is linear and predictable
-
-### 2.2 Fragmentation & Dead Space
-
-**What Happens on Deletion:**
-
-```
-Before Delete:     [Header][Slot A, B, C] [T1][T2][T3]
-                                          upper=100
-After Delete T2:   [Header][Slot A, _, C] [T1][XX][T3]
-                                          upper=100
-                   (Dead space left at T2's location)
-
-FSM sees:
-  Contiguous free = upper - lower = 100 - 24 = 76 bytes (unchanged!)
-  Total free = 76 + 50 (dead space) = 126 bytes (not tracked)
-```
-
-**Key Point:** RookDB does NOT reuse dead space during INSERT (no inline compaction). A page with 76 contiguous free bytes but 126 total will only accept tuples ≤ 76 bytes.
-
-**If insertion fails due to fragmentation:**
-
-```
-Attempt 1: Insert 100-byte tuple into page with 76 contiguous free
-           ├─ Fails (76 < 100)
-           └─ Update FSM: "Page actually has 76 free, not 80"
-
-Attempt 2: Search FSM again with corrected categories
-           └─ FSM routes to a less fragmented page
-
-Attempt 3: If all pages fragmented, allocate new page
-           └─ Guaranteed success
-```
-
-### 2.3 Future Compaction (Project 10)
+### 5. Future Compaction (Project 10)
 
 The Compaction Team (Project 10) will handle fragmentation elimination via:
 
@@ -684,11 +485,11 @@ The Compaction Team (Project 10) will handle fragmentation elimination via:
 
 ---
 
-## 3. Compaction Team Integration APIs
+## 6. Compaction Team Integration APIs
 
 RookDB provides **3 high-level facade APIs** for the Compaction Team (Project 10) to merge their code safely:
 
-### 3.1 `insert_raw_tuple(db_name, table_name, tuple_data) -> (page_id, slot_id)`
+### 6.1 `insert_raw_tuple(db_name, table_name, tuple_data) -> (page_id, slot_id)`
 
 **Purpose:** Insert a tuple without FSM search (for tuple relocation during compaction)
 
@@ -699,7 +500,7 @@ let (page_id, slot_id) = insert_raw_tuple("mydb", "users", tuple_bytes)?;
 // Internally searches FSM for available page and inserts
 ```
 
-### 3.2 `update_page_free_space(db_name, table_name, page_id, reclaimed_bytes) -> ()`
+### 6.2 `update_page_free_space(db_name, table_name, page_id, reclaimed_bytes) -> ()`
 
 **Purpose:** Notify FSM that a page's contiguous free space has changed
 
@@ -711,7 +512,7 @@ update_page_free_space("mydb", "users", 5, 5000)?;
 // Bubble-up propagates changes through tree
 ```
 
-### 3.3 `rebuild_table_fsm(db_name, table_name) -> ()`
+### 6.3 `rebuild_table_fsm(db_name, table_name) -> ()`
 
 **Purpose:** Full table FSM rebuild (after large-scale reorganization)
 
@@ -725,9 +526,9 @@ rebuild_table_fsm("mydb", "users")?;
 
 ---
 
-## 4. Backend Functions
+## 7. Backend Functions
 
-### 3.1 Functions to be Created
+### 7.1 Functions Created
 
 #### `FSM::build_from_heap`
 
@@ -765,22 +566,10 @@ pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<u32>>
 1. Read root FSM page (Level 2). If `root.tree[0] < min_category`: return `None`.
 2. Starting at Level 2, descend to Level 1 then Level 0:
    - At each internal node, choose a child whose value >= `min_category`.
-   - Search sequentially from first child; fall back to the other child.
+   - Uses binary search to navigate the tree efficiently.
 3. At the Level-0 leaf, read the slot index to compute: `heap_page_id = fsm_page_no × FSM_SLOTS_PER_PAGE + slot`.
 
 5. Return `Some(heap_page_id)`.
-
-**Implementation sketch:**
-
-```rust
-let root_page = self.read_fsm_page(fsm_block_for(2, 0))?;
-if root_page.tree[0] < min_category {
-    return Ok(None);
-}
-
-let heap_page_id = leaf_fsm_page * FSM_SLOTS_PER_PAGE + leaf_slot;
-Ok(Some(heap_page_id))
-```
 
 #### `FSM::fsm_set_avail` (Leaf Update + Bubble-Up)
 
@@ -813,8 +602,6 @@ pub fn fsm_vacuum_update(&mut self, heap_page_id: u32, reclaimed_bytes: u32) -> 
 
 1. Delegate to `self.fsm_set_avail(heap_page_id, reclaimed_bytes)`
 2. If the Level-0 root value increased, propagate up (handled inside `fsm_set_avail`).
-
-**Note:** There is no separate "free list" or page header modification. An empty page (category = 255) is simply searchable at the top of the binary max-tree. Recovery after a crash is handled by rebuilding from the heap via `build_from_heap`; no WAL entry is written.
 
 #### `HeapManager::open`
 
@@ -949,38 +736,9 @@ pub fn flush(&mut self) -> io::Result<()>
 1. Persist header using update_header_page
 2. file.sync_all()
 
-### 3.2 Functions to be Modified
-
-#### `heap/mod.rs::init_table`
-
-**Change:** Use HeaderMetadata instead of raw bytes  
-**Updated Steps:**
-
-1. Create file
-2. Create Page 0, write HeaderMetadata::new()
-3. Create Page 1, init as slotted page
-4. Write both pages
-
-#### `heap/mod.rs::insert_tuple` (Legacy)
-
-**Change:** Mark as deprecated
-
-```rust
-#[deprecated(note = "Use HeapManager::insert_tuple")]
-pub fn insert_tuple(...) { ... }
-```
-
 ---
 
-## 4. Frontend Changes (CLI Inputs)
-
-### Existing Commands
-
-All work transparently with FSM (no user-visible changes):
-
-- `CREATE TABLE` - Uses modified `init_table()`
-- `LOAD CSV` - Uses `HeapManager::insert_tuple()`
-- `SELECT *` - Uses `HeapManager::scan()`
+## 8. Frontend Changes (CLI Inputs)
 
 ### New Command: `CHECK_HEAP`
 
@@ -989,54 +747,60 @@ All work transparently with FSM (no user-visible changes):
 **Purpose:** Display FSM statistics and health metrics
 
 **Example Output:**
-
-```
-=== Heap Info: users ===
-Total Heap Pages:    10,240
-FSM Fork Pages:      8  (3-level tree: 1 root + 3 L1 + 4 L0)
-FSM Coverage:        10,240 heap pages tracked
-Total Tuples:        1,234,567
-FSM Root Value:      182/255  (pages with ~3.1 KB free space exist)
-Avg Free Category:   94/255   (~2 KB average free per tracked page)
 ```
 
-**Implementation:**
+Total Heap Pages:  2
+FSM Fork Pages:    1
+Total Tuples:      1
 
-```rust
-fn check_heap_command(table_name: &str) -> io::Result<()> {
-    let heap = HeapManager::open(table_path)?;
-    // Print statistics from heap.fsm
-}
+╔══════════════════════════════════════════════════════════════╗
+║                    OPERATION METRICS                         ║
+╠══════════════════════════════════════════════════════════════╣
+║ FSM Operations:                                              ║
+║  - fsm_search_avail:            1 calls                      ║
+║  - fsm_search_tree:             1 calls                      ║
+║  - fsm_read_page:               1 calls                      ║
+║  - fsm_write_page:              1 calls                      ║
+║  - fsm_serialize_page:          1 calls                      ║
+║  - fsm_deserialize_page:        1 calls                      ║
+║  - fsm_set_avail:               1 calls                      ║
+║  - fsm_vacuum_update:           0 calls                      ║
+╠══════════════════════════════════════════════════════════════╣
+║ Heap Operations:                                             ║
+║  - insert_tuple:                1 calls                      ║
+║  - get_tuple:                   0 calls                      ║
+║  - allocate_page:               0 calls                      ║
+║  - write_page:                  1 calls                      ║
+║  - read_page:                   1 calls                      ║
+║  - page_free_space:             0 calls                      ║
+╚══════════════════════════════════════════════════════════════╝
 ```
+
 
 ---
 
-## 5. Overall Component Workflow (End-to-End View)
+## 9. Overall Component Workflow (End-to-End View)
 
 ### Workflow 1: Tuple Insertion (FSM Binary Max-Tree)
 
 ```
-User: INSERT INTO users VALUES (...)
-           ↓
-Frontend: Parse SQL → serialize tuple (50 bytes)
-           ↓
 Executor: Call HeapManager::insert_tuple(&[u8])
            ↓
 HeapManager: min_category = ceil(58 × 255 / 8192) = 2
            ↓
+           FSM Binary Max-Tree Search:
     ┌──────────────────────────────────────┐
-    │ fsm_search_avail(2)                  │  FSM Binary Max-Tree
+    │ fsm_search_avail(2)                  │  
     │  1. Read root FSM page (Level 2)     │
-    │  2. root value ≥ 2? → YES, descend  │
-    │  3. L2 → L1 → L0, sequential traversal│
+    │  2. root value ≥ 2? → YES, descend   │
+    │  3. L2 → L1 → L0, traversal          │
     │  4. Reach leaf → return heap PageID  │
     └──────────────┬───────────────────────┘
                    │
     Found? ├─ YES → Page 47
 
            │
-           └─ NO (root < 2) → allocate_new_page()
-                              → fsm_set_avail(new_page, 8184)
+           └─ NO (root < 2) → allocate_new_page()  → fsm_set_avail(new_page, 8184)
            ↓
 Read Heap Page from Disk
            ↓
@@ -1092,7 +856,6 @@ Iterator Loop:
 Process all tuples
 ```
 
-**Optimization:** Each page read once, yielding all its tuples
 
 ### Workflow 4: Project 10 Integration (FSM Update After Compaction)
 
@@ -1104,12 +867,12 @@ Project 10: Calls fsm.fsm_vacuum_update(45, 8176)
 fsm_vacuum_update delegates to:
   fsm_set_avail(45, 8176)
            ↓
-category = floor(8176 × 255 / 8192) = 254
+category = floor(8176 /32 ) = 255
            ↓
 Locate Level-0 FSM page for heap page 45
   leaf_slot = 45 mod FSM_SLOTS_PER_PAGE
            ↓
-Write category 254 into tree[leaf_index(leaf_slot)]
+Write category 255 into tree[leaf_index(leaf_slot)]
            ↓
 Bubble up: recompute parent nodes as max(left, right)
   → root of Level-0 page may increase
@@ -1117,7 +880,7 @@ Bubble up: recompute parent nodes as max(left, right)
 If Level-0 root changed:
   propagate new root value up to Level-1, then Level-2
            ↓
-FSM tree now reflects page 45 as nearly empty (category 254)
+FSM tree now reflects page 45 as nearly empty (category 255)
 Next fsm_search_avail call will find page 45
 ```
 
@@ -1147,7 +910,7 @@ Next fsm_search_avail call will find page 45
 
 ---
 
-## 6. Codebase Structure Changes
+## 10. Codebase Structure Changes
 
 ### New Files
 
@@ -1204,112 +967,4 @@ pub use types::HeaderMetadata;
 
 
 ---
-
-## 7. Test Cases
-
-### 7.1 Testing Strategy
-
-**Approach:** Integration tests using Rust's `tests/` directory. Each test creates isolated table files to prevent interference.
-
-**Test Framework:**
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn setup_test_table(name: &str) -> PathBuf { ... }
-    fn teardown_test_table(path: &PathBuf) { ... }
-}
-```
-
----
-
-## 7. Test Cases
-
-### Testing Strategy
-
-- Integration tests in `tests/` directory
-- Isolated table files per test
-- 24 tests covering all components
-
-### Test Categories
-
-#### FSM Initialization (3 tests)
-
-1. **test_fsm_build_empty_table**: `build_from_heap` on empty table creates `.fsm` fork with all categories = 0
-2. **test_fsm_build_with_data**: `build_from_heap` with 100 tuples yields correct categories and tree root > 0
-3. **test_fsm_tree_parent_equals_max_children**: After build, every non-leaf node equals `max(left, right)` child
-
-#### FSM Tree Search (3 tests)
-
-4. **test_fsm_search_finds_candidate**: `fsm_search_avail` returns a page whose category ≥ requested minimum
-5. **test_fsm_search_root_early_exit**: When root < min_category, returns `None` without reading Level-0 pages
-
-
-#### Insertion (3 tests)
-
-7. **test_insert_uses_fsm_tree_search**: Insert uses `fsm_search_avail`; result page has category ≥ required min
-8. **test_insert_allocates_new_page**: When root < min_category, `allocate_new_page` is called and FSM extended
-9. **test_insert_returns_valid_location**: Returned (page_id, slot_id) can retrieve the original tuple
-
-#### FSM Tree Integrity (3 tests)
-
-10. **test_fsm_set_avail_bubbles_up**: Setting a leaf to category X causes all ancestor nodes to reflect X if X is new max
-11. **test_fsm_set_avail_root_equals_global_max**: Root always equals the maximum category across all leaves
-12. **test_fsm_vacuum_update_makes_page_searchable**: After `fsm_vacuum_update`, freed page is returned by next `fsm_search_avail`
-
-#### Get Tuple (3 tests)
-
-13. **test_get_tuple**: Retrieves inserted tuple by coordinates
-14. **test_get_tuple_across_pages**: Retrieves from multiple pages
-15. **test_get_tuple_invalid**: Errors on invalid page/slot
-
-#### Scan (3 tests)
-
-16. **test_scan_empty**: Empty table returns zero tuples
-17. **test_scan_single_page**: Yields all tuples from single page
-18. **test_scan_multiple_pages**: Scans 100 tuples with monotonic page IDs
-
-#### FSM Updates (2 tests)
-
-19. **test_fsm_set_avail_decreases_category**: After insert, leaf category decreases and parents update correctly
-20. **test_fsm_full_page_category_zero**: Page with no free space gets category 0 and is not returned by search
-
-#### Persistence (2 tests)
-
-21. **test_fsm_fork_persists_across_restart**: FSM fork file retains correct categories after `HeapManager` is closed and reopened
-22. **test_header_fsm_page_count_updated**: `fsm_page_count` in HeaderMetadata reflects actual FSM fork page count after growth
-
-#### Performance (2 tests)
-
-23. **bench_insert_throughput**: 10K inserts, verify >1K inserts/sec
-24. **bench_scan_throughput**: 100K tuples, verify >50K tuples/sec
-
-### Test Coverage Summary
-
-| Component        | Tests  | Coverage                                        |
-| ---------------- | ------ | ----------------------------------------------- |
-| FSM Init         | 3      | Build, categories, tree parent invariant         |
-| FSM Tree Search  | 3      | Candidate found, root early-exit, sequential traversal   |
-| Insertion        | 3      | Tree-guided reuse, allocation, location          |
-| FSM Tree Integrity | 3    | Bubble-up, root max, vacuum update               |
-| Get Tuple        | 3      | Basic, multi-page, invalid                       |
-| Scan             | 3      | Empty, single, multi-page                        |
-| FSM Updates      | 2      | Category decrease, full-page zeroed              |
-| Persistence      | 2      | FSM fork file, fsm_page_count header             |
-| Performance      | 2      | Insert/scan throughput                           |
-| **Total**        | **24** | **Comprehensive**                                |
-
----
-
-## Conclusion 
-
-This design implements RookDB's Free Space Manager and Heap File Manager (Project 6) with:
-
-1. **Scalability**: O(\log N) for internal and O(N) for leaves FSM tree search; O(1) early-exit via root node when table is full
-
-3. **Modularity**: Clear Project 6/10 separation; FSM fork is a pure sidecar with no heap-page overhead
-4. **Persistence**: FSM fork treated as a hint - rebuilt from heap on crash without WAL; header survives crashes
-5. **Testing**: 24 comprehensive tests covering tree invariants, search, insertion and persistence
 
