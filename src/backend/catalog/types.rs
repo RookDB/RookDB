@@ -133,7 +133,7 @@ impl CatalogDataType {
             type_align: 8,
             is_builtin: true,
         }
-    }
+ conflict    }
     pub fn bytes() -> Self {
         use crate::layout::OID_TYPE_BYTES;
         CatalogDataType {

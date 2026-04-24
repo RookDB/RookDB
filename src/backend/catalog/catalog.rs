@@ -451,10 +451,23 @@ pub fn create_table(
         });
     }
 
+  // Insert table metadata into catalog
+    let new_table = Table {
+        columns,
+        row_count: 0,      // Will be updated when table is populated
+        page_count: 0,     // Initial table has no data pages (only header)
+        avg_row_size: 0,   // Will be estimated from actual data
+    };
+    database.tables.insert(table_name.to_string(), new_table);
+
+    // Persist catalog changes
+    save_catalog(catalog);
+
     // Create table data file
     let file_path = TABLE_FILE_TEMPLATE
         .replace("{database}", db_name)
         .replace("{table}", table_name);
+  
     if !Path::new(&file_path).exists() {
         let mut f = OpenOptions::new()
             .create(true)

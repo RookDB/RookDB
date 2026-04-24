@@ -32,7 +32,7 @@ pub fn show_tuples(
     let columns = &table.columns;
 
     // 2. Read total number of pages
-    let total_pages = page_count(file)?;
+    let total_pages = page_count(file)?; // total pages currently in file
 
     println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
     println!("Total pages: {}", total_pages);

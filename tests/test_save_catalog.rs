@@ -34,6 +34,9 @@ fn test_save_catalog() {
             Column::new("name".to_string(), DataType::Varchar(10)),
             Column::new("email".to_string(), DataType::Varchar(10)),
         ],
+        row_count: 0,
+        page_count: 0,
+        avg_row_size: 0,
     };
 
     let db = catalog.databases.get_mut(db_name).unwrap();

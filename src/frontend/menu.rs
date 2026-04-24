@@ -7,6 +7,8 @@ use std::io::{self, Write};
 // Catalog
 use storage_manager::catalog::{init_catalog, load_catalog};
 
+// Frontend command handlers
+use crate::frontend::{data_cmd, database_cmd, join_cmd, table_cmd};
 
 use storage_manager::{BufferPool, PageId, ReplacementPolicy, LRUPolicy, ClockPolicy};
 // Command implementations
@@ -93,6 +95,9 @@ input.clear();
     // Tracks the currently selected database
     let mut current_db: Option<String> = None;
 
+    // Ensure tmp directory exists for joins
+    let _ = std::fs::create_dir_all("database/tmp");
+
     // Load 6 catalog pages into the buffer manager
     buffer_manager.preload_catalog_pages()
 
@@ -113,7 +118,8 @@ input.clear();
         println!("6. Load CSV");
         println!("7. Select tuples");
         println!("8. Show Table Statistics");
-        println!("9. Exit");
+        println!("9. Join Tables");
+        println!("10. Exit");
         println!("=============================");
 
         // Read user input
@@ -134,7 +140,8 @@ input.clear();
             "6" => data_cmd::load_csv_cmd(&mut buffer_manager, &current_db)?,
             "7" => data_cmd::show_tuples_cmd(&mut buffer_manager, &current_db)?,
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
-            "9" => {
+            "9" => join_cmd::run_join_cmd(&catalog, &current_db)?,
+            "10" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }

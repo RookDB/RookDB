@@ -4,7 +4,7 @@ use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
 
 use storage_manager::heap::init_table;
-use storage_manager::table::TABLE_HEADER_SIZE;
+// use storage_manager::table::TABLE_HEADER_SIZE; // Not needed in this test, but can be used for more detailed checks if desired
 use storage_manager::table::page_count;
 
 #[test]
