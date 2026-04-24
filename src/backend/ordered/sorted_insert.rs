@@ -4,11 +4,11 @@
 //! are <= all tuples on page P+1.
 
 use std::fs::File;
-use std::io::{self, Seek, SeekFrom, Write as IoWrite};
+use std::io;
 
 use crate::disk::{read_page, write_page};
 use crate::ordered::ordered_file::{read_ordered_file_header, write_ordered_file_header};
-use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, init_page};
+use crate::page::{init_page, Page, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE};
 use crate::sorting::comparator::TupleComparator;
 
 /// Binary search across pages of an ordered file to find the correct page
@@ -122,6 +122,25 @@ fn extract_all_tuples(page: &Page) -> Vec<Vec<u8>> {
     tuples
 }
 
+fn find_insert_pos_in_tuples(
+    tuples: &[Vec<u8>],
+    tuple_data: &[u8],
+    comparator: &TupleComparator,
+) -> usize {
+    let mut lo = 0usize;
+    let mut hi = tuples.len();
+
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match comparator.compare(tuple_data, &tuples[mid]) {
+            std::cmp::Ordering::Less => hi = mid,
+            _ => lo = mid + 1,
+        }
+    }
+
+    lo
+}
+
 /// Write a list of tuples into a page, assuming the page is freshly initialized.
 fn write_tuples_to_page(page: &mut Page, tuples: &[Vec<u8>]) {
     let mut lower = PAGE_HEADER_SIZE;
@@ -153,46 +172,39 @@ pub fn split_page(
     comparator: &TupleComparator,
     total_pages: u32,
 ) -> io::Result<()> {
-    // 1. Extract all tuples and add the new one
+    // 1. Extract all tuples and insert the new one at sorted position
     let mut all_tuples = extract_all_tuples(page);
-    all_tuples.push(tuple_data.to_vec());
+    let insert_pos = find_insert_pos_in_tuples(&all_tuples, tuple_data, comparator);
+    all_tuples.insert(insert_pos, tuple_data.to_vec());
 
-    // 2. Sort all tuples
-    all_tuples.sort_by(|a, b| comparator.compare(a, b));
-
-    // 3. Split at midpoint
+    // 2. Split at midpoint
     let mid = all_tuples.len() / 2;
     let left_tuples = &all_tuples[..mid];
     let right_tuples = &all_tuples[mid..];
 
-    // 4. Create left page (overwrites original)
+    // 3. Create left page (overwrites original)
     let mut left_page = Page::new();
     init_page(&mut left_page);
     write_tuples_to_page(&mut left_page, left_tuples);
 
-    // 5. Create right page (new page)
+    // 4. Create right page (new page)
     let mut right_page = Page::new();
     init_page(&mut right_page);
     write_tuples_to_page(&mut right_page, right_tuples);
 
-    // 6. Shift subsequent pages forward by one position
+    // 5. Shift subsequent pages forward by one position
     // Read from last page backwards to page_num + 1, write each one position later
+    let mut temp_page = Page::new();
     for p in (page_num + 1..total_pages).rev() {
-        let mut temp_page = Page::new();
         read_page(file, &mut temp_page, p)?;
-        // Write it one position later
-        let new_offset = (p + 1) as u64 * PAGE_SIZE as u64;
-        file.seek(SeekFrom::Start(new_offset))?;
-        file.write_all(&temp_page.data)?;
+        write_page(file, &mut temp_page, p + 1)?;
     }
 
-    // 7. Write the left page at original position
+    // 6. Write the left page at original position
     write_page(file, &mut left_page, page_num)?;
 
-    // 8. Write the right page at page_num + 1
-    let right_offset = (page_num + 1) as u64 * PAGE_SIZE as u64;
-    file.seek(SeekFrom::Start(right_offset))?;
-    file.write_all(&right_page.data)?;
+    // 7. Write the right page at page_num + 1
+    write_page(file, &mut right_page, page_num + 1)?;
 
     Ok(())
 }
@@ -236,11 +248,7 @@ pub fn sorted_insert(
             let src_start = (PAGE_HEADER_SIZE + slot_index * ITEM_ID_SIZE) as usize;
             let src_end = (PAGE_HEADER_SIZE + num_tuples * ITEM_ID_SIZE) as usize;
             let shift = ITEM_ID_SIZE as usize;
-
-            // Copy from end to avoid overlap issues
-            for i in (src_start..src_end).rev() {
-                page.data[i + shift] = page.data[i];
-            }
+            page.data.copy_within(src_start..src_end, src_start + shift);
         }
 
         // Write new ItemId at slot_index
