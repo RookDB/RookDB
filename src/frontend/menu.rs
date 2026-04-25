@@ -51,6 +51,8 @@ pub fn run() -> io::Result<()> {
         println!("│ 21. Export deduped table (no dups)          │");
         println!("│ 22. Export duplicates-only file             │");
         println!("│ 23. Show duplicate index (.dup file)        │");
+        println!("├──── Optimized Projection ──────────────────┤");
+        println!("│ 24. SELECT with optimized column reorder   │");
         println!("├─────────────────────────────────────────────┤");
         println!("│  0. Exit                                    │");
         println!("└─────────────────────────────────────────────┘");
@@ -84,6 +86,7 @@ pub fn run() -> io::Result<()> {
             "21" => duplicate_cmd::export_deduped_cmd(&current_db)?,
             "22" => duplicate_cmd::export_dups_only_cmd(&current_db)?,
             "23" => duplicate_cmd::show_dup_index_cmd(&current_db)?,
+            "24" => query_cmd::project_optimized_cmd(&current_db)?,
             "0"  => { println!("  Goodbye!"); break; }
             _    => println!("  Invalid option."),
         }

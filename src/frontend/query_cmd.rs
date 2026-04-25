@@ -9,8 +9,14 @@ use storage_manager::catalog::load_catalog;
 use storage_manager::catalog::types::Column;
 use storage_manager::executor::expr::Expr;
 use storage_manager::executor::projection::{
-    project, select, ProjectionInput, ProjectionItem, ResultTable,
+    project, select, OutputColumn, ProjectionInput, ProjectionItem, ResultTable,
 };
+use storage_manager::executor::projection_optimized::{
+    reorder_optimized, reorder_eager, reorder_streaming_batched, 
+    reorder_parallel_hybrid, reorder_columnar_staging,
+    ReorderStrategy, ReorderMetrics, OptimizedReorderConfig,
+};
+use storage_manager::executor::projection_enhanced::ColumnReorderSpec;
 use storage_manager::executor::set_ops::{except, intersect, union};
 use storage_manager::executor::streaming::{
     stream_count, stream_dedup_scan, stream_project, stream_select,
@@ -311,6 +317,127 @@ pub fn count_cmd(current_db: &Option<String>) -> io::Result<()> {
     let catalog = load_catalog();
     let result = select(&catalog, &db, &table, pred)?;
     println!("  COUNT = {}", result.rows.len());
+    Ok(())
+}
+
+// ─── Option 24: OPTIMIZED PROJECTION ─────────────────────────────────────────
+
+pub fn project_optimized_cmd(current_db: &Option<String>) -> io::Result<()> {
+    let db = match require_db(current_db) { Some(d) => d, None => return Ok(()) };
+    let table = prompt("  Table: ")?;
+    if table.is_empty() { return Ok(()); }
+    let schema = get_schema(&db, &table)?;
+    
+    // Ask for columns
+    let items = build_projection(&schema)?;
+    
+    // Ask for WHERE clause
+    let add_where = prompt("  Add WHERE? (y/n): ")?.to_lowercase();
+    let pred = if add_where == "y" { build_predicate(&schema)? } else { None };
+    
+    // Ask for strategy selection
+    println!("\n  Column Reordering Strategy:");
+    println!("    1. Auto-select (based on dataset size)");
+    println!("    2. EAGER (small datasets <1M rows)");
+    println!("    3. STREAMING_BATCHED (1M-10M rows)");
+    println!("    4. PARALLEL_HYBRID (10M-1B rows)");
+    println!("    5. COLUMNAR_STAGING (100M+ rows, many columns)");
+    let strategy_choice = prompt("  Choice [1-5, default=1]: ")?;
+    
+    let strategy = match strategy_choice.trim() {
+        "2" => Some(ReorderStrategy::Eager),
+        "3" => Some(ReorderStrategy::StreamingBatched),
+        "4" => Some(ReorderStrategy::ParallelHybrid),
+        "5" => Some(ReorderStrategy::ColumnarStaging),
+        _ => None, // Auto-select
+    };
+    
+    let catalog = load_catalog();
+    
+    // First get the rows with filter applied
+    let filtered_result = select(&catalog, &db, &table, pred.clone())?;
+    let rows = filtered_result.rows;
+    let original_columns: Vec<OutputColumn> = filtered_result.columns;
+    
+    if rows.is_empty() {
+        println!("  No rows match the filter.");
+        return Ok(());
+    }
+    
+    // Build column reorder spec from projection items
+    let mut indices: Vec<usize> = Vec::new();
+    let mut new_names: Vec<String> = Vec::new();
+    
+    for item in &items {
+        match item {
+            ProjectionItem::Star => {
+                // All columns in original order
+                indices = (0..original_columns.len()).collect();
+                break;
+            }
+            ProjectionItem::Expr(expr, alias) => {
+                if let Expr::Column(idx) = expr {
+                    indices.push(*idx);
+                    new_names.push(alias.clone());
+                }
+            }
+        }
+    }
+    
+    // If star was selected, clear new_names
+    if matches!(items.first(), Some(ProjectionItem::Star)) {
+        new_names.clear();
+    }
+    
+    let spec = ColumnReorderSpec {
+        indices,
+        new_names: if new_names.is_empty() { None } else { Some(new_names) },
+    };
+    
+    // Estimate row size (conservative)
+    let row_size_bytes = 128;
+    
+    // Apply optimized reordering
+    let (reordered_rows, reordered_cols, metrics): (Vec<Vec<Value>>, Vec<OutputColumn>, ReorderMetrics) = if let Some(strategy) = strategy {
+        // Force specific strategy
+        let config = OptimizedReorderConfig {
+            strategy,
+            available_ram_mb: 16000,
+            num_workers: 8,
+            batch_size: 10000,
+            track_metrics: true,
+        };
+        let m = ReorderMetrics::new(strategy);
+        
+        match strategy {
+            ReorderStrategy::Eager => {
+                reorder_eager(rows, &original_columns, &spec, m)?
+            }
+            ReorderStrategy::StreamingBatched => {
+                reorder_streaming_batched(rows, &original_columns, &spec, &config, m)?
+            }
+            ReorderStrategy::ParallelHybrid => {
+                reorder_parallel_hybrid(rows, &original_columns, &spec, &config, m)?
+            }
+            ReorderStrategy::ColumnarStaging => {
+                reorder_columnar_staging(rows, &original_columns, &spec, m)?
+            }
+        }
+    } else {
+        // Auto-select strategy
+        reorder_optimized(rows, &original_columns, &spec, Some(row_size_bytes))?
+    };
+    
+    // Print results
+    let result = ResultTable {
+        columns: reordered_cols,
+        rows: reordered_rows,
+    };
+    
+    println!("\n  [OPTIMIZED PROJECTION result]");
+    result.print();
+    metrics.print();
+    
     Ok(())
 }
 
