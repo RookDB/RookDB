@@ -10,3 +10,4 @@ pub use backend::page;
 pub use backend::statistics;
 pub use backend::table;
 pub use backend::types;
+pub use backend::query;

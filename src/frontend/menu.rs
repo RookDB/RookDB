@@ -39,7 +39,7 @@ pub fn run() -> io::Result<()> {
         println!("4. Show Tables");
         println!("5. Create Table");
         println!("6. Load CSV");
-        println!("7. Show Tuples");
+        println!("7. Select tuples");
         println!("8. Show Table Statistics");
         println!("9. Exit");
         println!("=============================");
