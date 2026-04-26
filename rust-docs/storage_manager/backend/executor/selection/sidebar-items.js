@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ComparisonOp","Constant","Expr","Instruction","LikePattern","Predicate","TriValue","VMValue"],"fn":["count_matching_tuples","filter_iter","filter_tuples","filter_tuples_detailed","filter_tuples_streaming"],"struct":["ColumnReference","InSet","SelectionExecutor"]};

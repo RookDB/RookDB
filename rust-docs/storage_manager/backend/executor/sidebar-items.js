@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["load_csv","seq_scan"]};
+window.SIDEBAR_ITEMS = {"mod":["load_csv","selection","seq_scan"]};
