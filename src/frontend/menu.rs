@@ -43,7 +43,8 @@ pub fn run() -> io::Result<()> {
         println!("8. Show Table Statistics");
         println!("9. Create Type");
         println!("10. Show Types");
-        println!("11. Exit");
+        println!("11. Filter Tuples");
+        println!("12. Exit");
         println!("=============================");
 
         // Read user input
@@ -66,7 +67,8 @@ pub fn run() -> io::Result<()> {
             "8" => table_cmd::show_table_statistics_cmd(&current_db)?,
             "9" => type_cmd::create_type_cmd(&mut catalog, &current_db)?,
             "10" => type_cmd::show_types_cmd(&catalog, &current_db),
-            "11" => {
+            "11" => data_cmd::filter_tuples_cmd(&current_db)?,
+            "12" => {
                 println!("Exiting RookDB. Goodbye!");
                 break;
             }

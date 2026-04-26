@@ -1,9 +1,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self};
 
-use crate::catalog::types::Catalog;
+use crate::catalog::types::{Catalog, Column, Database};
 use crate::disk::read_page;
 use crate::executor::jsonb::JsonbSerializer;
+use crate::executor::predicate::{Datum, Predicate, evaluate};
 use crate::executor::udt::UdtSerializer;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
@@ -37,11 +38,122 @@ fn deserialize_variable_length(
     }
 }
 
+/// Decode every column of a single tuple into a `Vec<Datum>` so the predicate
+/// evaluator can reason about typed values. JSONB columns are converted to
+/// `serde_json::Value` once per row; JSON columns are kept as raw text and
+/// parsed on demand by the evaluator.
+fn materialize_tuple(
+    columns: &[Column],
+    tuple_data: &[u8],
+    db: &Database,
+    toast_file: &mut Option<File>,
+) -> io::Result<Vec<Datum>> {
+    let mut row = Vec::with_capacity(columns.len());
+    let mut cursor = 0usize;
+
+    for col in columns {
+        let datum = match col.data_type.as_str() {
+            "INT" => {
+                if cursor + 4 > tuple_data.len() {
+                    Datum::Null
+                } else {
+                    let val = i32::from_le_bytes(
+                        tuple_data[cursor..cursor + 4].try_into().unwrap(),
+                    );
+                    cursor += 4;
+                    Datum::Int(val)
+                }
+            }
+            "TEXT" => {
+                if cursor + 10 > tuple_data.len() {
+                    Datum::Null
+                } else {
+                    let text = String::from_utf8_lossy(&tuple_data[cursor..cursor + 10])
+                        .trim()
+                        .to_string();
+                    cursor += 10;
+                    Datum::Text(text)
+                }
+            }
+            "BOOLEAN" => {
+                if cursor + 1 > tuple_data.len() {
+                    Datum::Null
+                } else {
+                    let v = tuple_data[cursor] != 0;
+                    cursor += 1;
+                    Datum::Bool(v)
+                }
+            }
+            "JSON" => {
+                let (bytes, new_cursor) =
+                    deserialize_variable_length(tuple_data, cursor, toast_file)?;
+                cursor = new_cursor;
+                Datum::JsonText(String::from_utf8_lossy(&bytes).into_owned())
+            }
+            "JSONB" => {
+                let (bytes, new_cursor) =
+                    deserialize_variable_length(tuple_data, cursor, toast_file)?;
+                cursor = new_cursor;
+                match JsonbSerializer::from_binary(&bytes) {
+                    Ok((value, _)) => Datum::Json(JsonbSerializer::to_serde(&value)),
+                    Err(_) => Datum::Null,
+                }
+            }
+            "XML" => {
+                let (bytes, new_cursor) =
+                    deserialize_variable_length(tuple_data, cursor, toast_file)?;
+                cursor = new_cursor;
+                Datum::Text(String::from_utf8_lossy(&bytes).into_owned())
+            }
+            dt if dt.starts_with("UDT:") => {
+                let udt_name = &dt[4..];
+                let (bytes, new_cursor) =
+                    deserialize_variable_length(tuple_data, cursor, toast_file)?;
+                cursor = new_cursor;
+                let display = db
+                    .types
+                    .get(udt_name)
+                    .and_then(|def| UdtSerializer::to_display_string(def, &bytes).ok())
+                    .unwrap_or_else(|| format!("<UDT '{}' not found>", udt_name));
+                Datum::Text(display)
+            }
+            _ => Datum::Null,
+        };
+        row.push(datum);
+    }
+
+    Ok(row)
+}
+
+/// Format a row of `Datum`s for display, matching the legacy `show_tuples` output.
+fn format_row(columns: &[Column], row: &[Datum]) -> String {
+    let mut out = String::new();
+    for (col, d) in columns.iter().zip(row.iter()) {
+        match d {
+            Datum::Null => out.push_str(&format!("{}=<null> ", col.name)),
+            Datum::Int(v) => out.push_str(&format!("{}={} ", col.name, v)),
+            Datum::Text(s) => {
+                if col.data_type == "TEXT" {
+                    out.push_str(&format!("{}='{}' ", col.name, s));
+                } else {
+                    out.push_str(&format!("{}={} ", col.name, s));
+                }
+            }
+            Datum::Bool(b) => out.push_str(&format!("{}={} ", col.name, b)),
+            Datum::Number(n) => out.push_str(&format!("{}={} ", col.name, n)),
+            Datum::Json(v) => out.push_str(&format!("{}={} ", col.name, v)),
+            Datum::JsonText(t) => out.push_str(&format!("{}={} ", col.name, t)),
+        }
+    }
+    out
+}
+
 pub fn show_tuples(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
     file: &mut File,
+    predicate: Option<&Predicate>,
 ) -> io::Result<()> {
     // 1. Get schema from catalog
     let db = catalog.databases.get(db_name).ok_or_else(|| {
@@ -82,89 +194,36 @@ pub fn show_tuples(
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-        println!("Lower: {}, Upper: {}", lower, upper);
         let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
 
         println!("Lower: {}, Upper: {}, Tuples: {}", lower, upper, num_items);
 
         // 4. For each tuple
+        let mut printed = 0u32;
         for i in 0..num_items {
             let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
             let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
             let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
             let tuple_data = &page.data[offset as usize..(offset + length) as usize];
 
-            print!("Tuple {}: ", i + 1);
+            let row = materialize_tuple(columns, tuple_data, db, &mut toast_file)?;
 
-            // 5. Decode each column
-            let mut cursor = 0usize;
-            for col in columns {
-                match col.data_type.as_str() {
-                    "INT" => {
-                        if cursor + 4 <= tuple_data.len() {
-                            let val = i32::from_le_bytes(
-                                tuple_data[cursor..cursor + 4].try_into().unwrap(),
-                            );
-                            print!("{}={} ", col.name, val);
-                            cursor += 4;
-                        }
-                    }
-                    "TEXT" => {
-                        if cursor + 10 <= tuple_data.len() {
-                            let text_bytes = &tuple_data[cursor..cursor + 10];
-                            let text = String::from_utf8_lossy(text_bytes).trim().to_string();
-                            print!("{}='{}' ", col.name, text);
-                            cursor += 10;
-                        }
-                    }
-                    "JSON" => {
-                        let (json_bytes, new_cursor) =
-                            deserialize_variable_length(tuple_data, cursor, &mut toast_file)?;
-                        let json = String::from_utf8_lossy(&json_bytes).to_string();
-                        print!("{}={} ", col.name, json);
-                        cursor = new_cursor;
-                    }
-                    "JSONB" => {
-                        let (jsonb_bytes, new_cursor) =
-                            deserialize_variable_length(tuple_data, cursor, &mut toast_file)?;
-                        match JsonbSerializer::from_binary(&jsonb_bytes) {
-                            Ok((value, _)) => {
-                                let display = JsonbSerializer::to_display_string(&value);
-                                print!("{}={} ", col.name, display);
-                            }
-                            Err(e) => {
-                                print!("{}=<JSONB error: {}> ", col.name, e);
-                            }
-                        }
-                        cursor = new_cursor;
-                    }
-                    "XML" => {
-                        let (xml_bytes, new_cursor) =
-                            deserialize_variable_length(tuple_data, cursor, &mut toast_file)?;
-                        let xml = String::from_utf8_lossy(&xml_bytes).to_string();
-                        print!("{}={} ", col.name, xml);
-                        cursor = new_cursor;
-                    }
-                    dt if dt.starts_with("UDT:") => {
-                        let udt_name = &dt[4..];
-                        let (udt_bytes, new_cursor) =
-                            deserialize_variable_length(tuple_data, cursor, &mut toast_file)?;
-                        if let Some(udt_def) = db.types.get(udt_name) {
-                            match UdtSerializer::to_display_string(udt_def, &udt_bytes) {
-                                Ok(display) => print!("{}={} ", col.name, display),
-                                Err(e) => print!("{}=<UDT error: {}> ", col.name, e),
-                            }
-                        } else {
-                            print!("{}=<UDT '{}' not found> ", col.name, udt_name);
-                        }
-                        cursor = new_cursor;
-                    }
-                    _ => {
-                        print!("{}=<unsupported> ", col.name);
-                    }
+            // Filter: keep only rows whose predicate evaluates to TRUE.
+            // UNKNOWN/NULL drop, matching SQL WHERE.
+            if let Some(p) = predicate {
+                if evaluate(p, &row) != Some(true) {
+                    continue;
                 }
             }
+
+            print!("Tuple {}: ", i + 1);
+            print!("{}", format_row(columns, &row));
             println!();
+            printed += 1;
+        }
+
+        if predicate.is_some() {
+            println!("Matched: {}", printed);
         }
     }
 

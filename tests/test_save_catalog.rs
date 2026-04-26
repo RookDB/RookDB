@@ -33,16 +33,20 @@ fn test_save_catalog() {
             Column {
                 name: "id".to_string(),
                 data_type: "INT".to_string(),
+                toast_strategy: "plain".to_string(),
             },
             Column {
                 name: "name".to_string(),
                 data_type: "TEXT".to_string(),
+                toast_strategy: "plain".to_string(),
             },
             Column {
                 name: "email".to_string(),
                 data_type: "TEXT".to_string(),
+                toast_strategy: "plain".to_string(),
             },
         ],
+        has_toast_table: false,
     };
 
     let db = catalog.databases.get_mut(db_name).unwrap();

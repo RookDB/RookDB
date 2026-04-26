@@ -35,9 +35,21 @@ fn test_xml_octet_length_invalid() {
 fn test_udt_octet_length() {
     let def = UdtDefinition {
         fields: vec![
-            Column { name: "id".into(), data_type: "INT".into() },
-            Column { name: "name".into(), data_type: "TEXT".into() },
-            Column { name: "active".into(), data_type: "BOOLEAN".into() },
+            Column {
+                name: "id".into(),
+                data_type: "INT".into(),
+                toast_strategy: "plain".into(),
+            },
+            Column {
+                name: "name".into(),
+                data_type: "TEXT".into(),
+                toast_strategy: "plain".into(),
+            },
+            Column {
+                name: "active".into(),
+                data_type: "BOOLEAN".into(),
+                toast_strategy: "plain".into(),
+            },
         ],
     };
     // INT=4, TEXT=10, BOOLEAN=1 → 15 bytes

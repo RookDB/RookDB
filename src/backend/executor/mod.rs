@@ -2,6 +2,7 @@ pub mod json_utils;
 pub mod jsonb;
 pub mod load_csv;
 pub mod payload_utils;
+pub mod predicate;
 pub mod seq_scan;
 pub mod udt;
 pub mod xml_utils;

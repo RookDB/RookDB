@@ -7,14 +7,17 @@ fn address_def() -> UdtDefinition {
             Column {
                 name: "street".to_string(),
                 data_type: "TEXT".to_string(),
+                toast_strategy: "plain".to_string(),
             },
             Column {
                 name: "city".to_string(),
                 data_type: "TEXT".to_string(),
+                toast_strategy: "plain".to_string(),
             },
             Column {
                 name: "zip".to_string(),
                 data_type: "INT".to_string(),
+                toast_strategy: "plain".to_string(),
             },
         ],
     }
@@ -61,10 +64,12 @@ fn test_boolean_field() {
             Column {
                 name: "active".to_string(),
                 data_type: "BOOLEAN".to_string(),
+                toast_strategy: "plain".to_string(),
             },
             Column {
                 name: "count".to_string(),
                 data_type: "INT".to_string(),
+                toast_strategy: "plain".to_string(),
             },
         ],
     };

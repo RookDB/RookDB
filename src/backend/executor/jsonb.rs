@@ -175,6 +175,28 @@ impl JsonbSerializer {
         }
     }
 
+    /// Convert a JsonbValue tree into a serde_json::Value for path queries.
+    pub fn to_serde(value: &JsonbValue) -> Value {
+        match value {
+            JsonbValue::Null => Value::Null,
+            JsonbValue::Bool(b) => Value::Bool(*b),
+            JsonbValue::Number(n) => serde_json::Number::from_f64(*n)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+            JsonbValue::String(s) => Value::String(s.clone()),
+            JsonbValue::Array(elems) => {
+                Value::Array(elems.iter().map(Self::to_serde).collect())
+            }
+            JsonbValue::Object(pairs) => {
+                let map = pairs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Self::to_serde(v)))
+                    .collect();
+                Value::Object(map)
+            }
+        }
+    }
+
     /// Convert a JsonbValue tree to a human-readable JSON string for display.
     pub fn to_display_string(value: &JsonbValue) -> String {
         match value {
