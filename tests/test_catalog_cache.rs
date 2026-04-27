@@ -20,9 +20,9 @@ fn make_db(name: &str, oid: u32) -> Database {
     }
 }
 
-/// Helper: create a minimal Table struct for cache testing
-fn make_table(name: &str, oid: u32, db_oid: u32) -> Table {
-    Table {
+/// Helper: create a minimal CatalogTable struct for cache testing
+fn make_table(name: &str, oid: u32, db_oid: u32) -> CatalogTable {
+    CatalogTable {
         table_oid: oid,
         table_name: name.to_string(),
         db_oid,

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::catalog::types::{Constraint, DataType, Database, Index, Table};
+use crate::catalog::types::{Constraint, DataType, Database, Index, CatalogTable};
 
 // ─────────────────────────────────────────────────────────────
 // Internal key types
@@ -35,7 +35,7 @@ pub struct CatalogCache {
     /// Database entries keyed by name
     pub databases: HashMap<String, Database>,
     /// Table entries keyed by (db_oid, table_name)
-    pub tables: HashMap<(u32, String), Table>,
+    pub tables: HashMap<(u32, String), CatalogTable>,
     /// Constraint lists per table OID
     pub constraints: HashMap<u32, Vec<Constraint>>,
     /// Index lists per table OID
@@ -97,7 +97,7 @@ impl CatalogCache {
     // Table access
     // ──────────────────────────────────────────────────────────────
 
-    pub fn get_table(&mut self, db_oid: u32, table_name: &str) -> Option<&Table> {
+    pub fn get_table(&mut self, db_oid: u32, table_name: &str) -> Option<&CatalogTable> {
         let key = (db_oid, table_name.to_string());
         if self.tables.contains_key(&key) {
             self.update_access(CacheKey::Table(db_oid, table_name.to_string()));
@@ -107,7 +107,7 @@ impl CatalogCache {
         }
     }
 
-    pub fn insert_table(&mut self, db_oid: u32, table_name: String, table: Table) {
+    pub fn insert_table(&mut self, db_oid: u32, table_name: String, table: CatalogTable) {
         self.evict_if_needed();
         self.tables.insert((db_oid, table_name.clone()), table);
         self.update_access(CacheKey::Table(db_oid, table_name));

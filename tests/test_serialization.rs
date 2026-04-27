@@ -420,7 +420,7 @@ fn test_serialize_type_variable_length() {
 #[test]
 fn test_calculate_tuple_size_fixed_only() {
     let columns = vec![
-        Column {
+        CatalogColumn {
             column_oid: 1,
             name: "id".into(),
             column_position: 1,
@@ -430,7 +430,7 @@ fn test_calculate_tuple_size_fixed_only() {
             default_value: None,
             constraints: vec![],
         },
-        Column {
+        CatalogColumn {
             column_oid: 2,
             name: "age".into(),
             column_position: 2,
@@ -449,7 +449,7 @@ fn test_calculate_tuple_size_fixed_only() {
 #[test]
 fn test_calculate_tuple_size_with_variable() {
     let columns = vec![
-        Column {
+        CatalogColumn {
             column_oid: 1,
             name: "id".into(),
             column_position: 1,
@@ -459,7 +459,7 @@ fn test_calculate_tuple_size_with_variable() {
             default_value: None,
             constraints: vec![],
         },
-        Column {
+        CatalogColumn {
             column_oid: 2,
             name: "name".into(),
             column_position: 2,

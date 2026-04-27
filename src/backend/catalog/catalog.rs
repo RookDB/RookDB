@@ -22,8 +22,8 @@ use crate::catalog::serialize::{
     serialize_column_tuple, serialize_database_tuple, serialize_table_tuple, serialize_type_tuple,
 };
 use crate::catalog::types::{
-    Catalog, CatalogError, Column, ColumnDefinition, ConstraintDefinition, DataType, Database,
-    Encoding, Table, TableMetadata, TableStatistics, TableType,
+    Catalog, CatalogError, CatalogColumn, ColumnDefinition, ConstraintDefinition, DataType, Database,
+    Encoding, CatalogTable, TableMetadata, TableStatistics, TableType,
 };
 use crate::heap::init_table;
 use crate::layout::{
@@ -349,7 +349,7 @@ pub fn get_table(
     bm: &mut BufferManager,
     db_oid: u32,
     table_name: &str,
-) -> Result<Table, CatalogError> {
+) -> Result<CatalogTable, CatalogError> {
     if let Some(table) = catalog.cache.get_table(db_oid, table_name) {
         return Ok(table.clone());
     }
@@ -360,7 +360,7 @@ pub fn get_table(
             deserialize_table_tuple(&bytes)
         {
             if tdb_oid == db_oid && tname == table_name {
-                let table = Table {
+                let table = CatalogTable {
                     table_oid: toid,
                     table_name: tname.clone(),
                     db_oid: tdb_oid,
@@ -445,7 +445,7 @@ pub fn create_table(
         serialize_table_tuple(table_oid, table_name, db_oid, 0, 0, 1, created_at),
     )?;
 
-    let table = Table {
+    let table = CatalogTable {
         table_oid,
         table_name: table_name.to_string(),
         db_oid,
@@ -656,14 +656,14 @@ pub fn get_columns(
     pm: &CatalogPageManager,
     bm: &mut BufferManager,
     table_oid: u32,
-) -> Result<Vec<Column>, CatalogError> {
+) -> Result<Vec<CatalogColumn>, CatalogError> {
     let mut columns = Vec::new();
     for bytes in pm.scan_catalog(bm, CAT_COLUMN)? {
         if let Ok((coid, toid, cname, cpos, dt, tm, is_nullable, default_val, constraint_oids)) =
             deserialize_column_tuple(&bytes)
         {
             if toid == table_oid {
-                columns.push(Column {
+                columns.push(CatalogColumn {
                     column_oid: coid,
                     name: cname,
                     column_position: cpos,

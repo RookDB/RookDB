@@ -562,7 +562,7 @@ pub fn type_category_from_u8(v: u8) -> TypeCategory {
 
 /// Calculate the approximate fixed and variable portions of a tuple's size.
 /// Returns `(fixed_bytes, has_variable_fields)`.
-pub fn calculate_tuple_size(columns: &[crate::catalog::types::Column]) -> (usize, bool) {
+pub fn calculate_tuple_size(columns: &[crate::catalog::types::CatalogColumn]) -> (usize, bool) {
     let mut fixed = 0usize;
     let mut has_variable = false;
     for col in columns {

@@ -218,7 +218,7 @@ pub enum DefaultValue {
 
 /// A column within a table (mirrors pg_column)
 #[derive(Debug, Clone)]
-pub struct Column {
+pub struct CatalogColumn {
     pub column_oid: u32,
     pub name: String,
     /// 1-based position within the table
@@ -461,7 +461,7 @@ impl Default for TableStatistics {
 
 /// A table entry (mirrors pg_table)
 #[derive(Debug, Clone)]
-pub struct Table {
+pub struct CatalogTable {
     pub table_oid: u32,
     pub table_name: String,
     pub db_oid: u32,
@@ -475,7 +475,7 @@ pub struct TableMetadata {
     pub table_oid: u32,
     pub table_name: String,
     pub db_oid: u32,
-    pub columns: Vec<Column>,
+    pub columns: Vec<CatalogColumn>,
     pub constraints: Vec<Constraint>,
     pub indexes: Vec<Index>,
     pub statistics: TableStatistics,
@@ -619,3 +619,35 @@ impl From<std::io::Error> for CatalogError {
         CatalogError::IoError(e)
     }
 }
+
+// ─────────────────────────────────────────────────────────────
+// 9. SCHEMA VIEW FOR SELECTION EXECUTOR
+// ─────────────────────────────────────────────────────────────
+
+/// Lightweight column descriptor used by the selection executor.
+/// Maps a column name to its SQL data type.
+#[derive(Debug, Clone)]
+pub struct ColumnSchema {
+    pub name: String,
+    pub data_type: crate::types::DataType,
+}
+
+impl ColumnSchema {
+    pub fn new(name: String, data_type: crate::types::DataType) -> Self {
+        ColumnSchema { name, data_type }
+    }
+}
+
+/// Lightweight table schema used by the selection executor.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    pub columns: Vec<ColumnSchema>,
+}
+
+/// Convenience alias: `Column` refers to the simple executor schema type.
+/// Use `CatalogColumn` when you need the full pg_column-style entry.
+pub type Column = ColumnSchema;
+
+/// Convenience alias: `Table` refers to the simple executor schema type.
+/// Use `CatalogTable` when you need the full pg_table-style entry.
+pub type Table = TableSchema;

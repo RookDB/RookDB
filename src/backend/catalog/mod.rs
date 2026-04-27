@@ -10,10 +10,15 @@ pub mod catalog;
 
 // ── Re-exports: core data types ──────────────────────────────────────────────
 pub use types::{
-    Catalog, CatalogError, Column, ColumnDefinition, Constraint, ConstraintDefinition,
+    Catalog, CatalogError, ColumnDefinition, Constraint, ConstraintDefinition,
     ConstraintMetadata, ConstraintType, ConstraintViolation, DataType, Database, DefaultValue,
-    Encoding, Index, IndexType, ReferentialAction, Table, TableMetadata, TableStatistics,
+    Encoding, Index, IndexType, ReferentialAction, TableMetadata, TableStatistics,
     TableType, TypeCategory, TypeModifier,
+    // Full catalog entry types (pg_table / pg_column mirrors)
+    CatalogTable, CatalogColumn,
+    // Simple schema view types for the selection executor (exported as Column / Table
+    // so test helpers can use the ergonomic names).
+    ColumnSchema as Column, TableSchema as Table,
 };
 
 // ── Re-exports: catalog operations ───────────────────────────────────────────
