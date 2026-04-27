@@ -218,9 +218,8 @@ pub enum Instruction {
     JumpIfTrue(usize),
 }
 
-// Catalog import
-
-use crate::catalog::types::Table;
+// Catalog import — reuse the lightweight schema types defined there
+pub use crate::catalog::types::{ColumnSchema, TableSchema};
 
 // Small type-check helpers
 
@@ -244,7 +243,7 @@ fn is_null_literal(expr: &Expr) -> bool {
 }
 
 /// Walk an expression and figure out its result type from the schema + literal types.
-fn infer_expr_type(expr: &Expr, schema: &Table) -> Result<SqlDataType, String> {
+fn infer_expr_type(expr: &Expr, schema: &TableSchema) -> Result<SqlDataType, String> {
     match expr {
         Expr::Column(col_ref) => {
             let idx = col_ref.column_index
@@ -342,10 +341,7 @@ fn infer_expr_type(expr: &Expr, schema: &Table) -> Result<SqlDataType, String> {
 /// - Lazy column extraction: only the columns the bytecode actually touches get decoded.
 /// - Short-circuit AND/OR via `JumpIfFalse`/`JumpIfTrue`.
 pub struct SelectionExecutor {
-    schema: Table,
     column_types: Vec<SqlDataType>,
-    /// Which logical column indices the bytecode actually reads (used to skip extraction).
-    used_columns: HashSet<usize>,
     bytecode: Vec<Instruction>,
     /// Constant pool for `Instruction::In(idx)` — holds the pre-built `InSet` objects.
     in_sets: Vec<InSet>,
@@ -355,7 +351,7 @@ pub struct SelectionExecutor {
 
 impl SelectionExecutor {
     /// Build the executor: normalize the predicate, bind column names to indices, then compile.
-    pub fn new(mut predicate: Predicate, schema: Table) -> Result<Self, String> {
+    pub fn new(mut predicate: Predicate, schema: TableSchema) -> Result<Self, String> {
         // Planning phase — fold constants, normalize shapes (BETWEEN → AND, etc.)
         Self::normalize_predicate(&mut predicate);
         Self::resolve_columns(&mut predicate, &schema)?;
@@ -369,21 +365,19 @@ impl SelectionExecutor {
 
         // Compile the predicate AST into bytecode and populate the constant pools
         let mut bytecode: Vec<Instruction> = Vec::new();
-        let mut used_columns: HashSet<usize> = HashSet::new();
+        let mut _used_columns: HashSet<usize> = HashSet::new();
         let mut in_sets: Vec<InSet> = Vec::new();
         let mut like_patterns: Vec<LikePattern> = Vec::new();
         Self::compile_predicate(
             &predicate,
             &mut bytecode,
-            &mut used_columns,
+            &mut _used_columns,
             &mut in_sets,
             &mut like_patterns,
         )?;
 
         Ok(SelectionExecutor {
-            schema,
             column_types,
-            used_columns,
             bytecode,
             in_sets,
             like_patterns,
@@ -594,7 +588,7 @@ impl SelectionExecutor {
     }
 
     /// Walk the predicate tree and bind every column name to its schema index.
-    fn resolve_columns(predicate: &mut Predicate, schema: &Table) -> Result<(), String> {
+    fn resolve_columns(predicate: &mut Predicate, schema: &TableSchema) -> Result<(), String> {
         match predicate {
             Predicate::Compare(left, op, right) => {
                 Self::resolve_expr(left, schema)?;
@@ -701,7 +695,7 @@ impl SelectionExecutor {
     }
 
     /// Walk an expression tree and resolve every column name to its schema index.
-    fn resolve_expr(expr: &mut Expr, schema: &Table) -> Result<(), String> {
+    fn resolve_expr(expr: &mut Expr, schema: &TableSchema) -> Result<(), String> {
         match expr {
             Expr::Column(col_ref) => {
                 let idx = schema

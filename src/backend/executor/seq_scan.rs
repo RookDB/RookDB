@@ -1,79 +1,126 @@
+//! Sequential scan executor – read and print all tuples in a table.
+
 use std::fs::File;
-use std::io::{self};
+use std::io;
 
 use crate::catalog::types::Catalog;
 use crate::disk::read_page;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
-use crate::types::{DataValue, deserialize_nullable_row};
 
 pub fn show_tuples(
-    catalog: &Catalog,
+    catalog: &mut Catalog,
+    pm: &mut crate::catalog::page_manager::CatalogPageManager,
+    bm: &mut crate::buffer_manager::BufferManager,
     db_name: &str,
     table_name: &str,
     file: &mut File,
 ) -> io::Result<()> {
-    // 1. Get schema from catalog
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
+    let table_meta = crate::catalog::catalog::get_table_metadata(catalog, pm, bm, db_name, table_name).map_err(|e| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
+            format!("Could not fetch metadata for '{}.{}': {}", db_name, table_name, e),
         )
     })?;
+    let columns = table_meta.columns;
 
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
-
-    let columns = &table.columns;
-
-    // 2. Read total number of pages
     let total_pages = page_count(file)?;
+    println!(
+        "\n=== Tuples in '{}.{}' ({} pages) ===",
+        db_name, table_name, total_pages
+    );
 
-    println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
-    println!("Total pages: {}", total_pages);
-
-    // Print column header
-    let header: Vec<String> = columns
-        .iter()
-        .map(|c| format!("{} ({})", c.name, c.data_type))
-        .collect();
-    println!("{}", header.join(" | "));
-
-    // 3. Loop through each data page (skip page 0 = table header)
     for page_num in 1..total_pages {
         let mut page = Page::new();
         read_page(file, &mut page, page_num)?;
+        println!("\n-- Page {} --", page_num);
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+        println!("Lower: {}, Tuples: {}", lower, num_items);
 
-        // 4. For each tuple
         for i in 0..num_items {
             let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
-            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-            let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
-            let tuple_data = &page.data[offset as usize..(offset + length) as usize];
+            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+            let length =
+                u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap()) as usize;
+            let tuple = &page.data[offset..offset + length];
 
             print!("Tuple {}: ", i + 1);
-
-            // 5. Decode each column using its DataType
-            let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
-            match deserialize_nullable_row(&schema_types, tuple_data) {
-                Ok(values) => {
-                    for (col, val_opt) in columns.iter().zip(values.iter()) {
-                        match val_opt {
-                            Some(val) => print!("{}={} ", col.name, val),
-                            None => print!("{}=NULL ", col.name),
+            let mut cursor = 0usize;
+            for col in &columns {
+                let type_name = col.data_type.type_name.to_uppercase();
+                match type_name.as_str() {
+                    "INT" | "INTEGER" => {
+                        if cursor + 4 <= tuple.len() {
+                            let v =
+                                i32::from_le_bytes(tuple[cursor..cursor + 4].try_into().unwrap());
+                            print!("{}={} ", col.name, v);
+                            cursor += 4;
                         }
                     }
+                    "BIGINT" => {
+                        if cursor + 8 <= tuple.len() {
+                            let v =
+                                i64::from_le_bytes(tuple[cursor..cursor + 8].try_into().unwrap());
+                            print!("{}={} ", col.name, v);
+                            cursor += 8;
+                        }
+                    }
+                    "FLOAT" | "REAL" => {
+                        if cursor + 4 <= tuple.len() {
+                            let v =
+                                f32::from_le_bytes(tuple[cursor..cursor + 4].try_into().unwrap());
+                            print!("{}={:.4} ", col.name, v);
+                            cursor += 4;
+                        }
+                    }
+                    "DOUBLE" => {
+                        if cursor + 8 <= tuple.len() {
+                            let v =
+                                f64::from_le_bytes(tuple[cursor..cursor + 8].try_into().unwrap());
+                            print!("{}={:.4} ", col.name, v);
+                            cursor += 8;
+                        }
+                    }
+                    "BOOL" | "BOOLEAN" => {
+                        if cursor + 1 <= tuple.len() {
+                            let v = tuple[cursor] != 0;
+                            print!("{}={} ", col.name, v);
+                            cursor += 1;
+                        }
+                    }
+                    "TEXT" | "STRING" => {
+                        if cursor + 2 <= tuple.len() {
+                            let len =
+                                u16::from_le_bytes(tuple[cursor..cursor + 2].try_into().unwrap())
+                                    as usize;
+                            cursor += 2;
+                            if cursor + len <= tuple.len() {
+                                let text = String::from_utf8_lossy(&tuple[cursor..cursor + len]);
+                                print!("{}='{}' ", col.name, text);
+                                cursor += len;
+                            }
+                        }
+                    }
+                    t if t.starts_with("VARCHAR") => {
+                        if cursor + 2 <= tuple.len() {
+                            let len =
+                                u16::from_le_bytes(tuple[cursor..cursor + 2].try_into().unwrap())
+                                    as usize;
+                            cursor += 2;
+                            if cursor + len <= tuple.len() {
+                                let text = String::from_utf8_lossy(&tuple[cursor..cursor + len]);
+                                print!("{}='{}' ", col.name, text);
+                                cursor += len;
+                            }
+                        }
+                    }
+                    _ => {
+                        print!("{}=<unsupported> ", col.name);
+                    }
                 }
-                Err(e) => print!("<decode-error: {}> ", e),
             }
-
             println!();
         }
     }

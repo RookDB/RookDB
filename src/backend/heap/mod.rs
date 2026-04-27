@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 
 use crate::disk::{create_page, read_page, write_page};
-use crate::page::{ITEM_ID_SIZE, Page, page_free_space};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, page_free_space};
 use crate::table::{TABLE_HEADER_SIZE, page_count};
 
 /// Initialize a new table file
@@ -27,7 +27,7 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
     Ok(())
 }
 
-pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
+pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<(u32, u32)> {
     let mut total_pages = page_count(file)?;
     let mut last_page_num = total_pages - 1;
 
@@ -57,9 +57,11 @@ pub fn insert_tuple(file: &mut File, data: &[u8]) -> io::Result<()> {
     page.data[lower as usize + 4..lower as usize + 8]
         .copy_from_slice(&(data.len() as u32).to_le_bytes());
 
+    let slot_id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+
     lower += ITEM_ID_SIZE;
     page.data[0..4].copy_from_slice(&lower.to_le_bytes());
 
     write_page(file, &mut page, last_page_num)?;
-    Ok(())
+    Ok((last_page_num, slot_id))
 }

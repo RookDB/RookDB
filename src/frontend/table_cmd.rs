@@ -4,20 +4,29 @@
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{Catalog, Column, DataType, create_table, show_tables};
+use storage_manager::catalog::types::ColumnDefinition;
+use storage_manager::catalog::{
+    Catalog, create_table, init_catalog_page_storage, show_tables,
+};
 use storage_manager::statistics::print_table_page_count;
 
 /// Displays tables in the currently selected database
-pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
+pub fn show_tables_cmd(
+    catalog: &mut Catalog,
+    bm: &mut BufferManager,
+    current_db: &Option<String>,
+) -> io::Result<()> {
     let db = match current_db {
         Some(db) => db,
         None => {
             println!("No database selected. Please select a database first.");
-            return;
+            return Ok(());
         }
     };
-    
-    show_tables(catalog, db);
+    let mut pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    show_tables(catalog, &mut pm, bm, db);
+    Ok(())
 }
 
 pub fn create_table_cmd(
@@ -42,7 +51,7 @@ pub fn create_table_cmd(
     print!("\nEnter columns in the format:- column_name:data_type\n");
     print!("Press Enter on an empty line to finish\n");
 
-    let mut columns = Vec::new();
+    let mut columns: Vec<ColumnDefinition> = Vec::new();
     loop {
         let mut input = String::new();
         print!("Enter column (name:type): ");
@@ -53,29 +62,42 @@ pub fn create_table_cmd(
             break;
         }
 
-        let parts: Vec<&str> = input.split(':').collect();
+        let parts: Vec<&str> = input.splitn(2, ':').collect();
         if parts.len() != 2 {
             println!("Invalid format. Please use name:type (e.g. id:INT)");
             continue;
         }
 
-        let type_str = parts[1].trim();
-        let data_type = match type_str.parse::<DataType>() {
-            Ok(dt) => dt,
-            Err(e) => {
-                println!(
-                    "Unknown type '{}': {}. Supported: SMALLINT, INT, BIGINT, REAL, \"DOUBLE PRECISION\", NUMERIC(p,s), DECIMAL(p,s), BOOLEAN, CHAR(n), CHARACTER(n), VARCHAR(n), DATE, TIME, TIMESTAMP, BIT(n)",
-                    type_str, e
-                );
-                continue;
-            }
-        };
+        let col_name = parts[0].trim().to_string();
+        let type_str = parts[1].trim().to_string();
 
-        columns.push(Column::new(parts[0].trim().to_string(), data_type));
+        columns.push(ColumnDefinition {
+            name: col_name,
+            type_name: type_str,
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+        });
     }
 
-    create_table(catalog, &db, &table_name, columns);
-    buffer_manager.load_table_from_disk(&db, &table_name)?;
+    let mut pm = init_catalog_page_storage()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    match create_table(
+        catalog,
+        &mut pm,
+        buffer_manager,
+        &db,
+        &table_name,
+        columns,
+        vec![],
+    ) {
+        Ok(_) => {
+            println!("Table '{}' created in database '{}'.", table_name, db);
+        }
+        Err(e) => {
+            println!("Failed to create table '{}': {:?}", table_name, e);
+        }
+    }
 
     Ok(())
 }

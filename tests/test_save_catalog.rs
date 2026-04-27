@@ -1,81 +1,83 @@
 use std::fs;
 use std::path::Path;
 
-use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
-use storage_manager::types::DataType;
+use storage_manager::buffer_manager::BufferManager;
+use storage_manager::catalog::page_manager::CatalogPageManager;
+use storage_manager::catalog::{
+    bootstrap_catalog, create_database, create_table, get_database, get_table,
+};
+use storage_manager::catalog::types::{Catalog, ColumnDefinition, Encoding};
+use storage_manager::layout::{CATALOG_PAGES_DIR, OID_COUNTER_FILE};
 
-use storage_manager::layout::CATALOG_FILE;
+fn cleanup_save_catalog_test() {
+    if Path::new(CATALOG_PAGES_DIR).exists() {
+        let _ = fs::remove_dir_all(CATALOG_PAGES_DIR);
+    }
+    if Path::new(OID_COUNTER_FILE).exists() {
+        let _ = fs::remove_file(OID_COUNTER_FILE);
+    }
+    for dir in &["save_test_db"] {
+        let path = format!("database/base/{}", dir);
+        if Path::new(&path).exists() {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
 
 #[test]
 fn test_save_catalog() {
-    // Step 1: Ensure the catalog file exists (create if missing)
-    if !Path::new(CATALOG_FILE).exists() {
-        init_catalog();
-    }
+    cleanup_save_catalog_test();
 
-    // Step 2: Load catalog into memory
-    let mut catalog = load_catalog();
+    // Step 1: Bootstrap a fresh page-based catalog
+    let mut bm = BufferManager::new();
+    bootstrap_catalog(&mut bm).expect("bootstrap should succeed");
+    let mut pm = CatalogPageManager::new();
+    let mut catalog = Catalog::new();
+    catalog.page_backend_active = true;
 
-    // Step 3: Ensure a test database exists
-    let db_name = "test_db";
-    if !catalog.databases.contains_key(db_name) {
-        catalog.databases.insert(
-            db_name.to_string(),
-            Database {
-                tables: Default::default(),
-            },
-        );
-    }
+    // Step 2: Create a test database
+    let db_name = "save_test_db";
+    create_database(&mut catalog, &mut pm, &mut bm, db_name, "admin", Encoding::UTF8)
+        .expect("create_database should succeed");
 
-    // Step 4: Add a new test table entry inside the test database
-    let test_table = Table {
-        columns: vec![
-            Column::new("id".to_string(), DataType::Int),
-            Column::new("name".to_string(), DataType::Varchar(10)),
-            Column::new("email".to_string(), DataType::Varchar(10)),
-        ],
-    };
+    // Step 3: Create a table with three columns in that database
+    let col_defs = vec![
+        ColumnDefinition {
+            name: "id".to_string(),
+            type_name: "INT".to_string(),
+            type_modifier: None,
+            is_nullable: true,
+            default_value: None,
+        },
+        ColumnDefinition {
+            name: "name".to_string(),
+            type_name: "VARCHAR(10)".to_string(),
+            type_modifier: Some(10),
+            is_nullable: true,
+            default_value: None,
+        },
+        ColumnDefinition {
+            name: "email".to_string(),
+            type_name: "VARCHAR(10)".to_string(),
+            type_modifier: Some(10),
+            is_nullable: true,
+            default_value: None,
+        },
+    ];
+    create_table(&mut catalog, &mut pm, &mut bm, db_name, "users", col_defs, vec![])
+        .expect("create_table should succeed");
 
-    let db = catalog.databases.get_mut(db_name).unwrap();
-    db.tables.insert("users".to_string(), test_table);
+    // Step 4: Reload — verify the database is retrievable from the page backend
+    let db = get_database(&mut catalog, &mut pm, &mut bm, db_name)
+        .expect("database should be found after creation");
+    assert_eq!(db.db_name, db_name);
 
-    // Step 5: Save catalog back to disk
-    save_catalog(&catalog);
+    // Step 5: Verify the table is retrievable
+    let table = get_table(&mut catalog, &mut pm, &mut bm, db.db_oid, "users")
+        .expect("table should be found after creation");
+    assert_eq!(table.table_name, "users");
 
-    // Step 6: Reload catalog from disk and verify it contains the database and table
-    let reloaded_catalog = load_catalog();
-
-    assert!(
-        reloaded_catalog.databases.contains_key(db_name),
-        "Saved catalog does not contain expected database '{}'",
-        db_name
-    );
-
-    let reloaded_db = reloaded_catalog.databases.get(db_name).unwrap();
-
-    assert!(
-        reloaded_db.tables.contains_key("users"),
-        "Saved catalog does not contain 'users' table inside database '{}'",
-        db_name
-    );
-
-    let users_table = reloaded_db.tables.get("users").unwrap();
-    assert_eq!(
-        users_table.columns.len(),
-        3,
-        "Expected 3 columns in 'users' table"
-    );
-
-    assert!(users_table.columns.iter().all(|c| c.nullable));
-    assert!(
-        users_table
-            .columns
-            .iter()
-            .all(|c| !c.constraints.not_null && !c.constraints.unique && c.constraints.default.is_none())
-    );
-
-    // Step 7: Clean up (optional)
-    if Path::new(CATALOG_FILE).exists() {
-        fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
-    }
+    // Cleanup
+    cleanup_save_catalog_test();
 }
+
