@@ -5,7 +5,7 @@ use crate::catalog::types::Catalog;
 use crate::disk::read_page;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
-use crate::backend::types_validator::DataType;
+use crate::types::deserialize_nullable_row;
 
 pub fn show_tuples(
     catalog: &Catalog,
@@ -79,7 +79,7 @@ pub fn show_tuples(
 
     let mut total_tuples = 0u32;
 
-    // 3. Loop through each page
+    // 3. Loop through each data page (skip page 0 = table header)
     for page_num in 1..total_pages {
         let mut page = Page::new();
         read_page(file, &mut page, page_num)?;
@@ -142,38 +142,20 @@ pub fn show_tuples(
 
             print!("│ {:>3} │", total_tuples);
 
-            // 5. Decode each column
-            let mut cursor = 0usize;
-            for col in columns.iter() {
-                match DataType::from_str(&col.data_type) {
-                    Ok(data_type) => {
-                        let byte_size = data_type.byte_size();
-                        if cursor + byte_size <= tuple_data.len() {
-                            match data_type.deserialize_value(&tuple_data[cursor..cursor + byte_size]) {
-                                Ok(value) => {
-                                    let val_str = value.to_string();
-                                    let display = if val_str.len() > col_width {
-                                        format!("{}…", &val_str[..col_width - 1])
-                                    } else {
-                                        val_str
-                                    };
-                                    print!(" {:<width$} │", display, width = col_width);
-                                }
-                                Err(e) => {
-                                    log::error!("[ERROR] Failed to deserialize: {}", e);
-                                    print!(" {:<width$} │", "<error>", width = col_width);
-                                }
-                            }
-                            cursor += byte_size;
-                        } else {
-                            print!(" {:<width$} │", "<incomplete>", width = col_width);
+            // 5. Decode each column using its DataType
+            let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
+            match deserialize_nullable_row(&schema_types, tuple_data) {
+                Ok(values) => {
+                    for (col, val_opt) in columns.iter().zip(values.iter()) {
+                        match val_opt {
+                            Some(val) => print!("{}={} ", col.name, val),
+                            None => print!("{}=NULL ", col.name),
                         }
                     }
-                    Err(_) => {
-                        print!(" {:<width$} │", "<unsupported>", width = col_width);
-                    }
                 }
+                Err(e) => print!("<decode-error: {}> ", e),
             }
+
             println!();
         }
     }

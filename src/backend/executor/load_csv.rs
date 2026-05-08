@@ -2,9 +2,10 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 
-use crate::catalog::types::Catalog;
 use crate::backend::heap::HeapManager;
-use crate::backend::types_validator::DataType;
+use crate::catalog::types::Catalog;
+use crate::types::DataValue;
+use crate::types::validation::validate_value;
 
 /// Load CSV file with full validation and error handling using HeapManager.
 ///
@@ -14,7 +15,8 @@ use crate::backend::types_validator::DataType;
 /// 3. Performs row-by-row validation and type checking
 /// 4. Uses HeapManager for FSM-aware insertion
 ///
-/// Returns count of successfully inserted rows on success.
+/// Returns count of successfully inserted rows on success.use crate::types::DataValue;
+
 pub fn load_csv(
     catalog: &Catalog,
     db_name: &str,
@@ -22,7 +24,12 @@ pub fn load_csv(
     csv_path: &str,
 ) -> io::Result<u32> {
     log::info!(" Starting CSV load operation");
-    log::info!(" Database: '{}', Table: '{}', CSV: '{}'", db_name, table_name, csv_path);
+    log::info!(
+        " Database: '{}', Table: '{}', CSV: '{}'",
+        db_name,
+        table_name,
+        csv_path
+    );
 
     // --- 1. Fetch table schema from catalog ---
     let db = catalog.databases.get(db_name).ok_or_else(|| {
@@ -53,20 +60,7 @@ pub fn load_csv(
     log::info!(" Validating schema data types...");
     for (idx, col) in columns.iter().enumerate() {
         log::info!("   Column {}: '{}' → {}", idx + 1, col.name, col.data_type);
-        
-        match DataType::from_str(&col.data_type) {
-            Ok(dt) => {
-                log::info!("   Supported data type: {:?}", dt);
-            }
-            Err(e) => {
-                log::info!("   VALIDATION FAILED: {}", e);
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Column '{}' has unsupported type '{}'. Supported types: INT, TEXT",
-                        col.name, col.data_type),
-                ));
-            }
-        }
+        log::info!("   Supported data type: {:?}", col.data_type);
     }
     log::info!(" All data types validated successfully");
 
@@ -115,7 +109,7 @@ pub fn load_csv(
 
     for (line_num, line) in lines.enumerate() {
         let line_idx = line_num + 2; // +2 because we skipped header and start from line 2
-        
+
         let row = match line {
             Ok(r) => r,
             Err(e) => {
@@ -131,10 +125,8 @@ pub fn load_csv(
             continue;
         }
 
-        // Split CSV fields by comma
         let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
 
-        // Validate number of columns
         if values.len() != columns.len() {
             log::warn!(
                 "[CSV LOADER] Line {}: Expected {} columns, found {}. Skipping row.",
@@ -149,21 +141,18 @@ pub fn load_csv(
         // --- 5. Validate each value before serialization ---
         let mut validation_passed = true;
         for (col_idx, (val, col)) in values.iter().zip(columns.iter()).enumerate() {
-            match DataType::from_str(&col.data_type) {
-                Ok(data_type) => {
-                    if let Err(validation_err) = data_type.validate_value(val) {
-                        log::warn!(
-                            "[CSV LOADER] Line {}, Column {} ('{}'): {} Value: '{}'",
-                            line_idx, col_idx + 1, col.name, validation_err, val
-                        );
-                        validation_passed = false;
-                        break;
-                    }
-                }
-                Err(_) => {
-                    validation_passed = false;
-                    break;
-                }
+            let data_type = &col.data_type;
+            if let Err(validation_err) = validate_value(data_type, val) {
+                log::warn!(
+                    "[CSV LOADER] Line {}, Column {} ('{}'): {} Value: '{}'",
+                    line_idx,
+                    col_idx + 1,
+                    col.name,
+                    validation_err,
+                    val
+                );
+                validation_passed = false;
+                break;
             }
         }
 
@@ -175,33 +164,20 @@ pub fn load_csv(
 
         // --- 6. Serialize row based on schema ---
         let mut tuple_bytes: Vec<u8> = Vec::new();
+        let mut row_ok = true;
 
         for (val, col) in values.iter().zip(columns.iter()) {
-            match DataType::from_str(&col.data_type) {
-                Ok(data_type) => {
-                    match data_type.serialize_value(val) {
-                        Ok(bytes) => {
-                            tuple_bytes.extend_from_slice(&bytes);
-                        }
-                        Err(e) => {
-                            log::error!("Line {}: Serialization error for column '{}': {}", 
-                                line_idx, col.name, e);
-                            validation_passed = false;
-                            break;
-                        }
-                    }
-                }
+            match DataValue::parse_and_encode(&col.data_type, val) {
+                Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
                 Err(e) => {
-                    log::error!("Line {}: Invalid data type for column '{}': {}", 
-                        line_idx, col.name, e);
-                    validation_passed = false;
+                    println!("Skipping row {}: column '{}' — {}", line_idx, col.name, e);
+                    row_ok = false;
                     break;
                 }
             }
         }
 
-        if !validation_passed {
-            failed += 1;
+        if !row_ok {
             continue;
         }
 
@@ -229,7 +205,9 @@ pub fn load_csv(
     log::info!(" ═══════════════════════════════════\n");
 
     if inserted == 0 && (skipped > 0 || failed > 0) {
-        log::warn!("WARNING: No rows were inserted. Please check your CSV file format and data types.");
+        log::warn!(
+            "WARNING: No rows were inserted. Please check your CSV file format and data types."
+        );
     }
 
     Ok(inserted)
@@ -267,35 +245,22 @@ pub fn insert_single_tuple(
 
     // Validate all values
     for (val, col) in values.iter().zip(columns.iter()) {
-        match DataType::from_str(&col.data_type) {
-            Ok(data_type) => {
-                if let Err(e) = data_type.validate_value(val) {
-                    log::info!(" Column '{}': {}", col.name, e);
-                    return Ok(false);
-                }
-            }
-            Err(e) => {
-                log::info!(" Column '{}' has invalid type: {}", col.name, e);
-                return Ok(false);
-            }
+        let data_type = col.data_type.clone();
+
+        if let Err(e) = validate_value(&data_type, val) {
+            log::info!("Column '{}': {}", col.name, e);
+            return Ok(false);
         }
     }
 
     // Serialize tuple
     let mut tuple_bytes: Vec<u8> = Vec::new();
     for (val, col) in values.iter().zip(columns.iter()) {
-        match DataType::from_str(&col.data_type) {
-            Ok(data_type) => {
-                match data_type.serialize_value(val) {
-                    Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
-                    Err(e) => {
-                        log::info!(" Failed to serialize column '{}': {}", col.name, e);
-                        return Ok(false);
-                    }
-                }
-            }
+        let data_type = &col.data_type;
+        match DataValue::parse_and_encode(data_type, val) {
+            Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
             Err(e) => {
-                log::info!(" Invalid type for column '{}': {}", col.name, e);
+                log::info!(" Failed to serialize column '{}': {}", col.name, e);
                 return Ok(false);
             }
         }
@@ -303,24 +268,25 @@ pub fn insert_single_tuple(
 
     // Open HeapManager and insert tuple
     let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
-    
+
     match HeapManager::open(table_path) {
-        Ok(mut heap_manager) => {
-            match heap_manager.insert_tuple(&tuple_bytes) {
-                Ok((page_id, slot_id)) => {
-                    log::info!(" Successfully inserted at (page={}, slot={})", page_id, slot_id);
-                    Ok(true)
-                }
-                Err(e) => {
-                    log::info!(" Failed to insert tuple: {}", e);
-                    Ok(false)
-                }
+        Ok(mut heap_manager) => match heap_manager.insert_tuple(&tuple_bytes) {
+            Ok((page_id, slot_id)) => {
+                log::info!(
+                    " Successfully inserted at (page={}, slot={})",
+                    page_id,
+                    slot_id
+                );
+                Ok(true)
             }
-        }
+            Err(e) => {
+                log::info!(" Failed to insert tuple: {}", e);
+                Ok(false)
+            }
+        },
         Err(e) => {
             log::info!(" Failed to open HeapManager: {}", e);
             Ok(false)
         }
     }
 }
-

@@ -43,7 +43,7 @@ pub fn run() -> io::Result<()> {
         println!("║  Data Operations:                      ║");
         println!("║    6. Load CSV                         ║");
         println!("║    7. Insert Single Tuple              ║");
-        println!("║    8. Show Tuples                      ║");
+        println!("║    8. Select tuples                      ║");
         println!("║    9. Show Table Statistics            ║");
         println!("║                                        ║");
         println!("║  Maintenance:                          ║");

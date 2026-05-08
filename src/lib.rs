@@ -11,4 +11,5 @@ pub use backend::page;
 pub use backend::page_api;
 pub use backend::statistics;
 pub use backend::table;
-pub use backend::types_validator;
+pub use backend::types;
+pub use backend::query;pub use backend::types_validator;

@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use storage_manager::buffer_manager::BufferManager;
-use storage_manager::catalog::{Catalog, Column, create_table, show_tables};
-use storage_manager::statistics::print_table_page_count;
+use storage_manager::catalog::{Catalog, Column, DataType, create_table, show_tables};
+use storage_manager::statistics::print_table_statistics;
 
 /// Displays tables in the currently selected database
 pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
@@ -13,6 +13,7 @@ pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
             return;
         }
     };
+    
     show_tables(catalog, db);
 }
 
@@ -55,10 +56,19 @@ pub fn create_table_cmd(
             continue;
         }
 
-        columns.push(Column {
-            name: parts[0].to_string(),
-            data_type: parts[1].to_string(),
-        });
+        let type_str = parts[1].trim();
+        let data_type = match type_str.parse::<DataType>() {
+            Ok(dt) => dt,
+            Err(e) => {
+                println!(
+                    "Unknown type '{}': {}. Supported: SMALLINT, INT, BIGINT, REAL, \"DOUBLE PRECISION\", NUMERIC(p,s), DECIMAL(p,s), BOOLEAN, CHAR(n), CHARACTER(n), VARCHAR(n), DATE, TIME, TIMESTAMP, BIT(n)",
+                    type_str, e
+                );
+                continue;
+            }
+        };
+
+        columns.push(Column::new(parts[0].trim().to_string(), data_type));
     }
 
     create_table(catalog, &db, &table_name, columns);
@@ -67,7 +77,10 @@ pub fn create_table_cmd(
     Ok(())
 }
 
-pub fn show_table_statistics_cmd(catalog: &Catalog, current_db: &Option<String>) -> io::Result<()> {
+pub fn show_table_statistics_cmd(
+    catalog: &Catalog,
+    current_db: &Option<String>,
+) -> io::Result<()> {
     let db_name = match current_db {
         Some(db) => db,
         None => {
@@ -83,7 +96,7 @@ pub fn show_table_statistics_cmd(catalog: &Catalog, current_db: &Option<String>)
     io::stdin().read_line(&mut table_name)?;
     let table_name = table_name.trim();
 
-    print_table_page_count(catalog, db_name, table_name)?;
+    print_table_statistics(catalog, db_name, table_name)?;
 
     Ok(())
 }
