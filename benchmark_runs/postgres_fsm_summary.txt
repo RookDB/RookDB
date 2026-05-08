@@ -1,0 +1,14 @@
+engine=postgres
+rows_configured=1000
+create_seconds=0
+insert_seconds=0
+update_seconds=0
+delete_vacuum_seconds=0
+rows_after_delete=900
+avg_payload_len_after_delete=55.56
+heap_pages=14
+avg_fsm_free_bytes=2269.71
+fsm_metrics_csv=benchmark_runs/postgres_fsm_metrics.csv
+database=rookbench
+host=127.0.0.1
+port=5432

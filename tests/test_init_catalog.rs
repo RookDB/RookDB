@@ -32,6 +32,4 @@ fn test_init_catalog() {
         "catalog.json does not contain 'databases' field"
     );
 
-    // Step 6: Clean up (optional)
-    fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
 }

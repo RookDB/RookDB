@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::{Catalog, init_catalog, load_catalog};
@@ -22,6 +21,4 @@ fn test_load_catalog() {
         "load_catalog did not return a valid Catalog struct"
     );
 
-    // Step 4: Clean up (optional)
-    fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
 }

@@ -1,28 +1,27 @@
 use std::fs::{OpenOptions, remove_file};
 use std::io::{Read, Seek, SeekFrom};
 
-use storage_manager::heap::init_table;
+use storage_manager::heap::heap_manager::HeapManager;
 use storage_manager::page::PAGE_SIZE;
 use storage_manager::table::TABLE_HEADER_SIZE;
 
-const TEST_FILE: &str = "test_table_file.bin";
+const TEST_FILE: &str = "tests/test_table_file.bin";
 
 #[test]
 fn test_init_table() {
     // Cleanup before test
     let _ = remove_file(TEST_FILE);
+    let _ = remove_file(format!("{}.fsm", TEST_FILE));
+
+    // Initialize table
+    let _hm = HeapManager::create(std::path::PathBuf::from(TEST_FILE)).expect("Failed to create map manager");
 
     // Open file with read + write
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(true)
         .open(TEST_FILE)
-        .expect("Failed to create test file");
-
-    // Initialize table
-    init_table(&mut file).expect("init_table failed");
+        .expect("Failed to open test file");
 
     // Rewind to start
     file.seek(SeekFrom::Start(0)).expect("Seek failed");
@@ -60,4 +59,6 @@ fn test_init_table() {
     let mut page_buf = vec![0u8; PAGE_SIZE as usize];
     file.read_exact(&mut page_buf)
         .expect("Failed to read first data page");
+    let _ = remove_file(TEST_FILE);
+    let _ = remove_file(format!("{}.fsm", TEST_FILE));
 }

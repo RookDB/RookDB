@@ -5,7 +5,7 @@ use crate::catalog::types::Catalog;
 use crate::disk::read_page;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use crate::table::page_count;
-use crate::types::{DataValue, deserialize_nullable_row};
+use crate::types::deserialize_nullable_row;
 
 pub fn show_tuples(
     catalog: &Catalog,
@@ -31,17 +31,53 @@ pub fn show_tuples(
     let columns = &table.columns;
 
     // 2. Read total number of pages
-    let total_pages = page_count(file)?;
+    let total_pages = page_count(file)?; // total pages currently in file
 
-    println!("\n=== Tuples in '{}.{}' ===", db_name, table_name);
-    println!("Total pages: {}", total_pages);
+    println!("\n════════════════════════════════════════════");
+    println!("   Tuples in '{}.{}'", db_name, table_name);
+    println!("   Total pages: {}", total_pages);          
+    println!("════════════════════════════════════════════");
 
-    // Print column header
-    let header: Vec<String> = columns
-        .iter()
-        .map(|c| format!("{} ({})", c.name, c.data_type))
-        .collect();
-    println!("{}", header.join(" | "));
+    // Display column headers
+    println!("\n[TABLE DISPLAY] Columns:");
+    for (idx, col) in columns.iter().enumerate() {
+        println!("  {}: {} ({})", idx + 1, col.name, col.data_type);
+    }
+
+    // 3. Print table header dynamically
+    let col_width = 22usize;
+    let mut top_border = String::from("┌─────┬");
+    let mut mid_border = String::from("├─────┼");
+    let mut bot_border = String::from("└─────┴");
+
+    for idx in 0..columns.len() {
+        let line = "─".repeat(col_width + 2);
+        if idx < columns.len() - 1 {
+            top_border.push_str(&format!("{}┬", line));
+            mid_border.push_str(&format!("{}┼", line));
+            bot_border.push_str(&format!("{}┴", line));
+        } else {
+            top_border.push_str(&format!("{}┐", line));
+            mid_border.push_str(&format!("{}┤", line));
+            bot_border.push_str(&format!("{}┘", line));
+        }
+    }
+
+    println!("\n{}", top_border);
+    print!("│ ID  │");
+    for col in columns.iter() {
+        let col_display = format!("{}: {}", col.name, col.data_type);
+        let display = if col_display.len() > col_width {
+            format!("{}…", &col_display[..col_width - 1])
+        } else {
+            col_display
+        };
+        print!(" {:<width$} │", display, width = col_width);
+    }
+    println!();
+    println!("{}", mid_border);
+
+    let mut total_tuples = 0u32;
 
     // 3. Loop through each data page (skip page 0 = table header)
     for page_num in 1..total_pages {
@@ -49,16 +85,62 @@ pub fn show_tuples(
         read_page(file, &mut page, page_num)?;
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+        let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+
+        if lower < PAGE_HEADER_SIZE || lower > upper || upper > page.data.len() as u32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Corrupted page header on page {}: lower={}, upper={}, page_size={}",
+                    page_num,
+                    lower,
+                    upper,
+                    page.data.len()
+                ),
+            ));
+        }
+
+        if (lower - PAGE_HEADER_SIZE) % ITEM_ID_SIZE != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Corrupted slot directory alignment on page {}: lower={}, header={}, item_size={}",
+                    page_num,
+                    lower,
+                    PAGE_HEADER_SIZE,
+                    ITEM_ID_SIZE
+                ),
+            ));
+        }
+
         let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+
+        log::trace!("[PAGE {}] Lower: {}, Upper: {}, Tuples: {}", page_num, lower, upper, num_items);
 
         // 4. For each tuple
         for i in 0..num_items {
+            total_tuples += 1;
             let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
             let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
             let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
+
+            if offset > page.data.len() as u32 || length > page.data.len() as u32 || offset + length > page.data.len() as u32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Corrupted slot bounds on page {} slot {}: offset={}, length={}, page_size={}",
+                        page_num,
+                        i,
+                        offset,
+                        length,
+                        page.data.len()
+                    ),
+                ));
+            }
+
             let tuple_data = &page.data[offset as usize..(offset + length) as usize];
 
-            print!("Tuple {}: ", i + 1);
+            print!("│ {:>3} │", total_tuples);
 
             // 5. Decode each column using its DataType
             let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
@@ -78,6 +160,8 @@ pub fn show_tuples(
         }
     }
 
-    println!("\n=== End of tuples ===\n");
+    println!("{}", bot_border);
+    println!("\nTotal tuples displayed: {}\n", total_tuples);
+
     Ok(())
 }

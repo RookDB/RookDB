@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
@@ -15,6 +14,20 @@ fn test_save_catalog() {
 
     // Step 2: Load catalog into memory
     let mut catalog = load_catalog();
+
+    // Setup cleanup guard to remove the test database from catalog json when test ends
+    struct CatalogCleanup(&'static str);
+    impl Drop for CatalogCleanup {
+        fn drop(&mut self) {
+            let mut cat = load_catalog();
+            if cat.databases.remove(self.0).is_some() {
+                let _ = save_catalog(&cat);
+            }
+            // Also clean up any directory it might have created
+            let _ = std::fs::remove_dir_all(format!("database/base/{}", self.0));
+        }
+    }
+    let _cleanup = CatalogCleanup("test_db");
 
     // Step 3: Ensure a test database exists
     let db_name = "test_db";
@@ -40,7 +53,7 @@ fn test_save_catalog() {
     db.tables.insert("users".to_string(), test_table);
 
     // Step 5: Save catalog back to disk
-    save_catalog(&catalog);
+    let _ = save_catalog(&catalog);
 
     // Step 6: Reload catalog from disk and verify it contains the database and table
     let reloaded_catalog = load_catalog();

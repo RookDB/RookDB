@@ -6,7 +6,7 @@ use storage_manager::page::{PAGE_SIZE, Page};
 #[test]
 fn test_write_page() {
     // Create a file with both read + write permissions
-    let file_path = "test_write_page.bin";
+    let file_path = "tests/test_write_page.bin";
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)

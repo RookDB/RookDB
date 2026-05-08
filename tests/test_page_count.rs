@@ -3,8 +3,7 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
 
-use storage_manager::heap::init_table;
-use storage_manager::table::TABLE_HEADER_SIZE;
+use storage_manager::heap::heap_manager::HeapManager;
 use storage_manager::table::page_count;
 
 #[test]
@@ -12,15 +11,15 @@ fn test_page_count() {
     // Create a temporary file with read + write access
     let mut temp_path = PathBuf::from(env::temp_dir());
     temp_path.push("test_table_page_count.tbl");
+
+    // Initialize table (writes 8192 bytes with page_count = 0)
+    let _hm = HeapManager::create(temp_path.clone()).expect("Failed to create heap manager");
+
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
         .open(&temp_path)
-        .expect("Failed to create/open temp file");
-
-    // Initialize table (writes 8192 bytes with page_count = 0)
-    init_table(&mut file).expect("Failed to initialize table");
+        .expect("Failed to open temp file");
 
     // Move cursor back to start (for fresh read)
     file.seek(SeekFrom::Start(0)).unwrap();
