@@ -23,5 +23,3 @@ Please see the [Contribution Guidelines](.github/CONTRIBUTING.md) for more infor
 ## Testing
 Run all tests: `cargo test`
 Run a specific test: `cargo test --test <file_name>`
-
----
