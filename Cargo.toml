@@ -3,6 +3,8 @@ name = "storage_manager"
 version = "0.2.0"
 edition = "2024"
 default-run = "storage_manager"
+description = "A lightweight Storage Manager for Object Releational Database written in Rust"
+license = "Apache-2.0"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
