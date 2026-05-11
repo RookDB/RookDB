@@ -11,3 +11,4 @@ code/.DS_Store
 .tex
 .txt
 .sh
+node_modules
