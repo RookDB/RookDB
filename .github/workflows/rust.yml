@@ -40,25 +40,3 @@ jobs:
 
     - name: Generate Code Docs
       run: cargo doc --no-deps --verbose
-    
-    - name: Install Docusaurus dependencies
-      run: npm install
-      working-directory: docs
-
-    - name: Build Docusaurus
-      run: npm run build
-      working-directory: docs
-    
-    - name: Merge Rust docs and Docusaurus
-      working-directory: .
-      run: |
-        mkdir public
-        cp -r docs/build/* public/
-        mkdir public/rust-docs
-        cp -r target/doc/* public/rust-docs/
-
-    - name: Deploy Docs to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v4
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./public
