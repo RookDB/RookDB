@@ -6,6 +6,7 @@ use crate::backend::heap::HeapManager;
 use crate::catalog::types::Catalog;
 use crate::types::DataValue;
 use crate::types::validation::validate_value;
+use crate::types::row::serialize_nullable_row;
 
 /// Load CSV file with full validation and error handling using HeapManager.
 ///
@@ -163,12 +164,11 @@ pub fn load_csv(
         }
 
         // --- 6. Serialize row based on schema ---
-        let mut tuple_bytes: Vec<u8> = Vec::new();
         let mut row_ok = true;
 
         for (val, col) in values.iter().zip(columns.iter()) {
             match DataValue::parse_and_encode(&col.data_type, val) {
-                Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
+                Ok(_) => {}
                 Err(e) => {
                     println!("Skipping row {}: column '{}' — {}", line_idx, col.name, e);
                     row_ok = false;
@@ -180,6 +180,30 @@ pub fn load_csv(
         if !row_ok {
             continue;
         }
+
+        // Build datatype list
+        let data_types: Vec<_> = columns
+            .iter()
+            .map(|c| c.data_type.clone())
+            .collect();
+
+        // Build nullable value list
+        let nullable_values: Vec<Option<&str>> =
+            values.iter().map(|v| Some(*v)).collect();
+
+        // Serialize using tuple layout serializer
+        let tuple_bytes = match serialize_nullable_row(&data_types, &nullable_values) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!(
+                    "Line {}: Failed to serialize row: {}",
+                    line_idx,
+                    e
+                );
+                failed += 1;
+                continue;
+            }
+        };
 
         // --- 7. Insert tuple using HeapManager (FSM-aware) ---
         match heap_manager.insert_tuple(&tuple_bytes) {
@@ -254,17 +278,43 @@ pub fn insert_single_tuple(
     }
 
     // Serialize tuple
-    let mut tuple_bytes: Vec<u8> = Vec::new();
+    let mut row_ok = true;
+
     for (val, col) in values.iter().zip(columns.iter()) {
         let data_type = &col.data_type;
+
         match DataValue::parse_and_encode(data_type, val) {
-            Ok(bytes) => tuple_bytes.extend_from_slice(&bytes),
+            Ok(_) => {}
             Err(e) => {
                 log::info!(" Failed to serialize column '{}': {}", col.name, e);
-                return Ok(false);
+                row_ok = false;
+                break;
             }
         }
     }
+
+    if !row_ok {
+        return Ok(false);
+    }
+
+    // Build datatype list
+    let data_types: Vec<_> = columns
+        .iter()
+        .map(|c| c.data_type.clone())
+        .collect();
+
+    // Build nullable value list
+    let nullable_values: Vec<Option<&str>> =
+        values.iter().map(|v| Some(*v)).collect();
+
+    // Serialize using tuple layout serializer
+    let tuple_bytes = match serialize_nullable_row(&data_types, &nullable_values) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::info!(" Failed to serialize tuple: {}", e);
+            return Ok(false);
+        }
+    };
 
     // Open HeapManager and insert tuple
     let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
