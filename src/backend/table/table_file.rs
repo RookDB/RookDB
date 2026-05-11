@@ -22,12 +22,6 @@ impl Table {
     }
 }
 
-// Table metadata stored inside the header page
-pub struct TableHeader {
-    // Total number of pages in the table
-    pub page_count: u32,
-}
-
 // Read page count from page 0
 pub fn page_count(file: &mut File) -> io::Result<u32> {
     // Page 0 starts at offset 0

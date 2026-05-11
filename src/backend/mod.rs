@@ -13,4 +13,3 @@ pub mod page_api;
 pub mod statistics;
 pub mod table;
 pub mod types;
-pub mod types_validator;

@@ -14,6 +14,7 @@ RookDB is a lightweight storage manager for a relational database management sys
 
 - Install Rust: [Rust Documentation](https://www.rust-lang.org/tools/install)
 - Run the project: `cargo run`
+- Run: `RUST_LOG=trace cargo run` to view detailed trace-level logs for all operations and commands.
 
 
 ## Contributing
