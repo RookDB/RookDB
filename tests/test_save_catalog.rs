@@ -1,5 +1,5 @@
 use std::path::Path;
-
+use std::fs;
 use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
 use storage_manager::types::DataType;
 
