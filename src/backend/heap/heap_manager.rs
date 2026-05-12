@@ -201,9 +201,9 @@ impl HeapManager {
         let header = HeaderMetadata::new();
         let header_bytes = header.serialize()?;
 
-        // Write header page (20 bytes metadata + padding)
+        // Write header page (24 bytes metadata + padding)
         let mut header_page = vec![0u8; PAGE_SIZE];
-        header_page[0..20].copy_from_slice(&header_bytes);
+        header_page[0..24].copy_from_slice(&header_bytes);
         file_handle.write_all(&header_page)?;
 
         // Create first data page (Page 1)

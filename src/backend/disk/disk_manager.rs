@@ -95,7 +95,7 @@ pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> io::Resul
     // Seek to page 0, offset 0
     file.seek(SeekFrom::Start(0))?;
     
-    // Write the 20-byte header
+    // Write the 24-byte header
     file.write_all(&header_bytes)?;
     
     log::trace!("[disk::update_header_page] Header successfully written");
@@ -110,8 +110,8 @@ pub fn read_header_page(file: &mut File) -> io::Result<HeaderMetadata> {
     // Seek to page 0, offset 0
     file.seek(SeekFrom::Start(0))?;
     
-    // Read 20 bytes
-    let mut buf = [0u8; 20];
+    // Read 24 bytes
+    let mut buf = [0u8; 24];
     file.read_exact(&mut buf)?;
     
     // Deserialize

@@ -43,12 +43,15 @@ pub fn run() -> io::Result<()> {
         println!("║  Data Operations:                      ║");
         println!("║    6. Load CSV                         ║");
         println!("║    7. Insert Single Tuple              ║");
-        println!("║    8. Select tuples                      ║");
-        println!("║    9. Show Table Statistics            ║");
+        println!("║    8. Select tuples                    ║");
+        println!("║    9. Delete Tuples                    ║");
+        println!("║    10. Update Tuples                   ║");
+        println!("║    11. Compact Table                   ║");
+        println!("║    12. Show Table Statistics           ║");
         println!("║                                        ║");
         println!("║  Maintenance:                          ║");
-        println!("║    10. Check Heap Health               ║");
-        println!("║    11. Exit                            ║");
+        println!("║    13. Check Heap Health               ║");
+        println!("║    14. Exit                            ║");
         println!("╚════════════════════════════════════════╝");
 
         // Read user input
@@ -69,9 +72,12 @@ pub fn run() -> io::Result<()> {
             "6" => data_cmd::load_csv_cmd(&current_db)?,
             "7" => data_cmd::insert_tuple_cmd(&current_db)?,
             "8" => data_cmd::show_tuples_cmd(&current_db)?,
-            "9" => table_cmd::show_table_statistics_cmd(&catalog, &current_db)?,
-            "10" => data_cmd::check_heap_cmd(&current_db)?,
-            "11" => {
+            "9" => data_cmd::delete_tuples_cmd(&current_db)?,
+            "10" => data_cmd::update_tuples_cmd(&current_db)?,
+            "11" => data_cmd::compact_table_cmd(&current_db)?,
+            "12" => table_cmd::show_table_statistics_cmd(&catalog, &current_db)?,
+            "13" => data_cmd::check_heap_cmd(&current_db)?,
+            "14" => {
                 println!("\n╔═══════════════════════════════════╗");
                 println!("║   Exiting RookDB. Goodbye!        ║");
                 println!("╚═══════════════════════════════════╝\n");

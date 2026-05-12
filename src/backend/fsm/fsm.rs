@@ -182,7 +182,7 @@ impl FSM {
         );
 
         // Read header page (Page 0) to get heap page count
-        let mut header_bytes = vec![0u8; 20];
+        let mut header_bytes = vec![0u8; 24];
         heap_file.seek(SeekFrom::Start(0))?;
         heap_file.read_exact(&mut header_bytes)?;
 

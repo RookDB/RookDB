@@ -7,6 +7,12 @@ pub const PAGE_HEADER_SIZE: u32 = 8;
 // Size of one item slot
 pub const ITEM_ID_SIZE: u32 = 8;
 
+// Slot flag bit: tuple is soft-deleted
+pub const SLOT_FLAG_DELETED: u16 = 0b0000_0000_0000_0001;
+
+// Page size in bytes (8 KB)
+pub mod page_lock;
+
 // Represents a single database page
 pub struct Page {
     // Raw page bytes
@@ -177,6 +183,52 @@ pub fn get_slot_entry(page: &Page, slot_id: u32) -> std::io::Result<(u32, u32)> 
              slot_id, offset, length);
     
     Ok((offset, length))
+}
+
+/// Read slot `slot_index`
+/// Returns: (offset, length, flags)
+pub fn read_slot(page: &Page, slot_index: u32) -> (u32, u16, u16) {
+    let base = (PAGE_HEADER_SIZE + slot_index * ITEM_ID_SIZE) as usize;
+
+    let offset = u32::from_le_bytes(
+        page.data[base..base + 4]
+            .try_into()
+            .unwrap(),
+    );
+
+    let length = u16::from_le_bytes(
+        page.data[base + 4..base + 6]
+            .try_into()
+            .unwrap(),
+    );
+
+    let flags = u16::from_le_bytes(
+        page.data[base + 6..base + 8]
+            .try_into()
+            .unwrap(),
+    );
+
+    (offset, length, flags)
+}
+
+/// Write slot `slot_index` with (offset, length, flags)
+pub fn write_slot(
+    page: &mut Page,
+    slot_index: u32,
+    offset: u32,
+    length: u16,
+    flags: u16,
+) {
+    let base = (PAGE_HEADER_SIZE + slot_index * ITEM_ID_SIZE) as usize;
+
+    page.data[base..base + 4]
+        .copy_from_slice(&offset.to_le_bytes());
+
+    page.data[base + 4..base + 6]
+        .copy_from_slice(&length.to_le_bytes());
+
+    page.data[base + 6..base + 8]
+        .copy_from_slice(&flags.to_le_bytes());
 }
 
 #[cfg(test)]

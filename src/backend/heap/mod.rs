@@ -5,15 +5,15 @@ use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, Page};
 use crate::table::{TABLE_HEADER_SIZE, page_count};
 
+
 pub mod types;
 pub mod heap_manager;
-
 pub use heap_manager::HeapManager;
 
 /// Initialize a new table file with HeaderMetadata.
 /// 
 /// Creates a new table file with:
-/// - Page 0: HeaderMetadata (20 bytes) + padding (remaining 8192 - 20 bytes)
+/// - Page 0: HeaderMetadata (24 bytes) + padding (remaining 8192 - 24 bytes)
 /// - Page 1: First data page (empty slotted page)
 /// 
 /// This new version uses the improved header format that tracks FSM pages
@@ -33,7 +33,7 @@ pub fn init_table(file: &mut File) -> io::Result<()> {
 
     // Create header page with metadata
     let mut header_page_buf = vec![0u8; TABLE_HEADER_SIZE as usize];
-    header_page_buf[0..20].copy_from_slice(&header_bytes);
+    header_page_buf[0..24].copy_from_slice(&header_bytes);
 
     file.write_all(&header_page_buf)?;
     file.flush()?;
