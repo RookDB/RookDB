@@ -1,6 +1,6 @@
 [package]
 name = "storage_manager"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 default-run = "storage_manager"
 description = "A lightweight Storage Manager for Object Releational Database written in Rust"
