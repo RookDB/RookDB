@@ -10,6 +10,10 @@
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use storage_manager::catalog::Column;
+use storage_manager::executor::selection::{
+    ColumnReference, ComparisonOp, Constant, Expr, Predicate,
+};
+use storage_manager::join::RelationSchema;
 use storage_manager::types::{DataType, DataValue, NumericValue, OrderedF32, OrderedF64};
 
 // ── Deterministic RNG ────────────────────────────────────────────────────────
@@ -121,6 +125,66 @@ pub fn columns_from_types(types: &[DataType]) -> Vec<Column> {
         .enumerate()
         .map(|(i, ty)| Column::new(format!("c{i}"), ty.clone()))
         .collect()
+}
+
+/// A relation whose columns are named `c0`, `c1`, … over the given types.
+pub fn relation(alias: &str, types: &[DataType]) -> RelationSchema {
+    RelationSchema::new(alias, columns_from_types(types))
+}
+
+/// A relation with explicit column names.
+pub fn named_relation(alias: &str, columns: &[(&str, DataType)]) -> RelationSchema {
+    RelationSchema::new(
+        alias,
+        columns
+            .iter()
+            .map(|(name, ty)| Column::new((*name).to_string(), ty.clone()))
+            .collect(),
+    )
+}
+
+// ── Predicate builders ───────────────────────────────────────────────────────
+
+pub fn col(name: &str) -> Expr {
+    Expr::Column(ColumnReference::new(name.to_string()))
+}
+
+/// A column already bound to an index in the concatenated `left ++ right`
+/// space, for testing the residual evaluator without going through resolution.
+pub fn vcol(index: usize) -> Expr {
+    Expr::Column(ColumnReference::with_index(format!("v{index}"), index))
+}
+
+pub fn int_literal(value: i32) -> Expr {
+    Expr::Constant(Constant::Int(value))
+}
+
+pub fn text_literal(value: &str) -> Expr {
+    Expr::Constant(Constant::Text(value.to_string()))
+}
+
+pub fn null_literal() -> Expr {
+    Expr::Constant(Constant::Null)
+}
+
+pub fn compare(left: Expr, op: ComparisonOp, right: Expr) -> Predicate {
+    Predicate::Compare(Box::new(left), op, Box::new(right))
+}
+
+pub fn eq(left: Expr, right: Expr) -> Predicate {
+    compare(left, ComparisonOp::Equals, right)
+}
+
+pub fn lt(left: Expr, right: Expr) -> Predicate {
+    compare(left, ComparisonOp::LessThan, right)
+}
+
+/// Conjoin a list of predicates left-to-right; panics on an empty list because
+/// an empty conjunction is not a predicate.
+pub fn all_of(parts: Vec<Predicate>) -> Predicate {
+    let mut iter = parts.into_iter();
+    let first = iter.next().expect("at least one predicate");
+    iter.fold(first, Predicate::and)
 }
 
 // ── Value generation ─────────────────────────────────────────────────────────

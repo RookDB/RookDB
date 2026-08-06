@@ -10,10 +10,19 @@
 // crash of the whole engine. Every fallible path returns `JoinError`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod algorithm;
 pub mod error;
+pub mod key;
+pub mod predicate;
 pub mod row;
 pub mod schema;
 
+pub use algorithm::{
+    ALGORITHMS, AlgorithmSpec, JoinAlgorithm, JoinRequest, JoinType, Pushdown, ValidatedJoinSpec,
+    pushdown_plan, spec_for,
+};
 pub use error::JoinError;
+pub use key::{JoinKey, KeyClass, KeyColumn, KeySpec, resolve_key_class};
+pub use predicate::{ColumnBinding, JoinPredicate, PredicateSplit, SideResolver, split_conjuncts};
 pub use row::{RowBuilder, RowCodec};
 pub use schema::{OutputColumn, OutputSchema, RelationSchema, RelationSide};

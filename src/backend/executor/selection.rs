@@ -1359,7 +1359,9 @@ impl SelectionExecutor {
 /// when at least one operand is `DoublePrecision`.
 ///
 /// Division by zero: returns `Err` — no silent NaN or infinity.
-fn compute_arithmetic(
+/// Public so the join subsystem can evaluate arithmetic in join conditions
+/// with exactly these semantics rather than maintaining a second copy of them.
+pub fn compute_arithmetic(
     op: &Instruction,
     left: Option<DataValue>,
     right: Option<DataValue>,
@@ -1469,7 +1471,9 @@ fn compute_arithmetic(
 
 // Utility functions
 
-fn constant_to_data_value(constant: &Constant) -> Option<DataValue> {
+/// Public for the same reason as [`compute_arithmetic`]: literal handling in a
+/// join condition must match literal handling everywhere else.
+pub fn constant_to_data_value(constant: &Constant) -> Option<DataValue> {
     match constant {
         Constant::Int(i) => Some(DataValue::Int(*i)),
         Constant::Float(f) => Some(DataValue::DoublePrecision(OrderedF64(*f))),

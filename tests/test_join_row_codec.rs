@@ -9,8 +9,8 @@
 #[path = "join_common/mod.rs"]
 mod common;
 
-use common::{Rng, columns_from_types, random_row, random_schema, seed_from_env};
-use storage_manager::join::{OutputSchema, RelationSchema, RowBuilder, RowCodec};
+use common::{Rng, random_row, random_schema, relation, seed_from_env};
+use storage_manager::join::{OutputSchema, RowBuilder, RowCodec};
 use storage_manager::types::row::serialize_nullable_typed_row;
 use storage_manager::types::{DataType, DataValue, deserialize_nullable_row};
 
@@ -269,10 +269,6 @@ fn over_long_varchar_is_refused_although_upstream_accepts_it() {
 }
 
 // ── RowBuilder ───────────────────────────────────────────────────────────────
-
-fn relation(alias: &str, types: &[DataType]) -> RelationSchema {
-    RelationSchema::new(alias, columns_from_types(types))
-}
 
 /// Joined output is the left row's columns followed by the right row's.
 #[test]
