@@ -8,12 +8,19 @@
 //! unused-item warnings are expected and silenced here rather than per item.
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use storage_manager::catalog::Column;
 use storage_manager::executor::selection::{
     ColumnReference, ComparisonOp, Constant, Expr, Predicate,
 };
-use storage_manager::join::RelationSchema;
+use storage_manager::heap::HeapManager;
+use storage_manager::join::{
+    JoinError, JoinType, MatchEvaluator, RelationSchema, RowCodec, RowStream, TableRef,
+};
+use storage_manager::types::row::serialize_nullable_typed_row;
 use storage_manager::types::{DataType, DataValue, NumericValue, OrderedF32, OrderedF64};
 
 // ── Deterministic RNG ────────────────────────────────────────────────────────
@@ -294,4 +301,247 @@ fn random_time(rng: &mut Rng) -> NaiveTime {
 
 fn random_timestamp(rng: &mut Rng) -> NaiveDateTime {
     random_date(rng).and_time(random_time(rng))
+}
+
+// ── Scratch database ─────────────────────────────────────────────────────────
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A throwaway directory of heap files, removed when it drops.
+///
+/// The join subsystem never reads the catalog and never resolves paths through
+/// `layout::*`, so tests do not share the process-wide `database/` tree. That
+/// is what lets these tests run in parallel with no lock - and therefore with
+/// no lock to poison when one of them fails.
+pub struct TempDb {
+    root: PathBuf,
+}
+
+impl TempDb {
+    pub fn new() -> Self {
+        let unique = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("rookdb-join-{}-{}", std::process::id(), unique));
+        // A leftover directory from a killed run would otherwise be reused.
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch directory");
+        Self { root }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+
+    /// Create an empty heap file and return a handle for populating it.
+    pub fn create_table(&self, name: &str, columns: &[(&str, DataType)]) -> TableHandle {
+        let path = self.root.join(format!("{name}.dat"));
+        let manager = HeapManager::create(path.clone()).expect("create heap file");
+        let columns: Vec<Column> = columns
+            .iter()
+            .map(|(name, ty)| Column::new((*name).to_string(), ty.clone()))
+            .collect();
+
+        TableHandle {
+            table: TableRef::new(name, path, columns),
+            manager,
+            rows: Vec::new(),
+        }
+    }
+}
+
+impl Default for TempDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TempDb {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// A populated relation, plus the rows it was given.
+///
+/// Inserts go through `serialize_nullable_typed_row` rather than
+/// `insert_single_tuple`, because that entry point takes `&[&str]` and so
+/// cannot express a NULL at all - which would make the entire NULL test matrix
+/// impossible to write.
+pub struct TableHandle {
+    table: TableRef,
+    manager: HeapManager,
+    rows: Vec<Vec<Option<DataValue>>>,
+}
+
+impl TableHandle {
+    pub fn table_ref(&self) -> TableRef {
+        self.table.clone()
+    }
+
+    pub fn relation_schema(&self) -> RelationSchema {
+        self.table.relation_schema()
+    }
+
+    pub fn types(&self) -> Vec<DataType> {
+        self.table
+            .columns
+            .iter()
+            .map(|c| c.data_type.clone())
+            .collect()
+    }
+
+    /// The rows as inserted, in insertion order - the oracle's input.
+    pub fn rows(&self) -> &[Vec<Option<DataValue>>] {
+        &self.rows
+    }
+
+    pub fn insert(&mut self, values: Vec<Option<DataValue>>) {
+        let bytes =
+            serialize_nullable_typed_row(&self.types(), &values).expect("row should serialize");
+        self.manager
+            .insert_tuple(&bytes)
+            .expect("insert should succeed");
+        self.rows.push(values);
+    }
+
+    pub fn insert_all(&mut self, rows: Vec<Vec<Option<DataValue>>>) {
+        for row in rows {
+            self.insert(row);
+        }
+    }
+
+    /// Must be called before the table is scanned.
+    pub fn flush(&mut self) {
+        self.manager.flush().expect("flush should succeed");
+    }
+}
+
+// ── Reference join ───────────────────────────────────────────────────────────
+
+/// A deliberately naive join, used as the oracle for every operator.
+///
+/// It shares the match evaluator with the real operators - predicate semantics
+/// are covered exhaustively by their own tests, and re-deriving them here
+/// would only test this file. What it does *not* share is the loop: no
+/// blocking, no partitioning, no spilling, no sorting, no early exit. That is
+/// precisely the part the operators get wrong.
+pub fn reference_join(
+    left_rows: &[Vec<Option<DataValue>>],
+    right_rows: &[Vec<Option<DataValue>>],
+    join_type: JoinType,
+    evaluator: &MatchEvaluator,
+    left_width: usize,
+    right_width: usize,
+) -> Result<Vec<Vec<Option<DataValue>>>, JoinError> {
+    let mut out = Vec::new();
+    let mut right_matched = vec![false; right_rows.len()];
+    let left_only = join_type.emits_left_only();
+
+    let concat = |left: Option<&Vec<Option<DataValue>>>, right: Option<&Vec<Option<DataValue>>>| {
+        let mut row = Vec::with_capacity(left_width + right_width);
+        match left {
+            Some(values) => row.extend(values.iter().cloned()),
+            None => row.extend(std::iter::repeat_n(None, left_width)),
+        }
+        if !left_only {
+            match right {
+                Some(values) => row.extend(values.iter().cloned()),
+                None => row.extend(std::iter::repeat_n(None, right_width)),
+            }
+        }
+        row
+    };
+
+    for left in left_rows {
+        let mut matched = false;
+        for (index, right) in right_rows.iter().enumerate() {
+            if evaluator.matches(left, right)? {
+                matched = true;
+                right_matched[index] = true;
+                if !left_only {
+                    out.push(concat(Some(left), Some(right)));
+                }
+            }
+        }
+
+        let emit_unmatched = match join_type {
+            JoinType::Semi => matched,
+            JoinType::Anti => !matched,
+            _ => !matched && join_type.keeps_unmatched_left(),
+        };
+        if emit_unmatched {
+            out.push(concat(Some(left), None));
+        }
+    }
+
+    if join_type.keeps_unmatched_right() {
+        for (index, right) in right_rows.iter().enumerate() {
+            if !right_matched[index] {
+                out.push(concat(None, Some(right)));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+// ── Comparing results ────────────────────────────────────────────────────────
+
+/// Decode every row a stream produces.
+pub fn collect_rows(
+    mut stream: Box<dyn RowStream>,
+) -> Result<Vec<Vec<Option<DataValue>>>, JoinError> {
+    let codec = RowCodec::new(stream.schema().types.clone());
+    let mut out = Vec::new();
+    while let Some(row) = stream.next() {
+        out.push(codec.decode(&row?)?);
+    }
+    Ok(out)
+}
+
+fn canonical(row: &[Option<DataValue>]) -> String {
+    format!("{row:?}")
+}
+
+/// Assert two result sets are equal as multisets.
+///
+/// Join output order is not defined, but multiplicity is: a join that emits a
+/// row twice is as wrong as one that drops it. Comparing lengths alone - which
+/// is all the previous test suite ever did - would miss wrong values, wrong
+/// column order, and NULLs in the wrong place.
+pub fn assert_rows_eq(
+    actual: &[Vec<Option<DataValue>>],
+    expected: &[Vec<Option<DataValue>>],
+    context: &str,
+) {
+    let mut actual_sorted: Vec<String> = actual.iter().map(|r| canonical(r)).collect();
+    let mut expected_sorted: Vec<String> = expected.iter().map(|r| canonical(r)).collect();
+    actual_sorted.sort();
+    expected_sorted.sort();
+
+    if actual_sorted == expected_sorted {
+        return;
+    }
+
+    let missing: Vec<&String> = expected_sorted
+        .iter()
+        .filter(|row| !actual_sorted.contains(row))
+        .collect();
+    let extra: Vec<&String> = actual_sorted
+        .iter()
+        .filter(|row| !expected_sorted.contains(row))
+        .collect();
+
+    panic!(
+        "{context}: join result differs from the reference\n\
+         expected {} rows, got {}\n\
+         missing ({}): {:#?}\n\
+         unexpected ({}): {:#?}",
+        expected_sorted.len(),
+        actual_sorted.len(),
+        missing.len(),
+        missing,
+        extra.len(),
+        extra
+    );
 }

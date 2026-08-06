@@ -13,8 +13,8 @@
 use regex::Regex;
 
 use crate::executor::selection::{
-    ComparisonOp, Expr, Instruction, Predicate, TriValue, apply_and, apply_or, compute_arithmetic,
-    constant_to_data_value,
+    ColumnReference, ComparisonOp, Expr, Instruction, Predicate, TriValue, apply_and, apply_or,
+    compute_arithmetic, constant_to_data_value,
 };
 use crate::types::comparison::compare_nullable;
 use crate::types::value::DataValue;
@@ -203,42 +203,86 @@ fn predicate_touch(predicate: &Predicate, resolver: &SideResolver) -> Result<Tou
 
 // ── Index rewriting ──────────────────────────────────────────────────────────
 
-/// Rewrite every column reference's index using `map`, and compile any LIKE
-/// pattern that has not been compiled yet.
+/// Which index space a rewritten predicate is expressed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rebind {
+    /// The concatenated `left ++ right` space the residual evaluator uses.
+    /// Names are left as written, since only indices are consulted.
+    Virtual,
+    /// One relation's own space, for a filter pushed into its scan. Names must
+    /// be stripped of their qualifier: `SelectionExecutor` resolves against a
+    /// single table whose columns are unqualified.
+    LeftLocal,
+    RightLocal,
+}
+
+/// Resolve a binding into the target space, returning the index and the name
+/// the rewritten reference should carry.
+fn rebind(
+    resolver: &SideResolver,
+    binding: ColumnBinding,
+    original_name: &str,
+    mode: Rebind,
+) -> Result<(usize, String), JoinError> {
+    match mode {
+        Rebind::Virtual => Ok((resolver.virtual_index(binding), original_name.to_string())),
+        Rebind::LeftLocal => match binding.side {
+            RelationSide::Left => Ok((
+                binding.index,
+                resolver.left().columns[binding.index].name.clone(),
+            )),
+            RelationSide::Right => Err(JoinError::schema(format!(
+                "internal: '{original_name}' is a right-side column in a left-only conjunct"
+            ))),
+        },
+        Rebind::RightLocal => match binding.side {
+            RelationSide::Right => Ok((
+                binding.index,
+                resolver.right().columns[binding.index].name.clone(),
+            )),
+            RelationSide::Left => Err(JoinError::schema(format!(
+                "internal: '{original_name}' is a left-side column in a right-only conjunct"
+            ))),
+        },
+    }
+}
+
+/// Rewrite every column reference into `mode`'s index space, and compile any
+/// LIKE pattern that has not been compiled yet.
 fn rewrite_predicate(
     predicate: &Predicate,
     resolver: &SideResolver,
-    map: &dyn Fn(ColumnBinding) -> Result<usize, JoinError>,
+    mode: Rebind,
 ) -> Result<Predicate, JoinError> {
     Ok(match predicate {
         Predicate::Compare(a, op, b) => Predicate::Compare(
-            Box::new(rewrite_expr(a, resolver, map)?),
+            Box::new(rewrite_expr(a, resolver, mode)?),
             *op,
-            Box::new(rewrite_expr(b, resolver, map)?),
+            Box::new(rewrite_expr(b, resolver, mode)?),
         ),
-        Predicate::IsNull(e) => Predicate::IsNull(Box::new(rewrite_expr(e, resolver, map)?)),
-        Predicate::IsNotNull(e) => Predicate::IsNotNull(Box::new(rewrite_expr(e, resolver, map)?)),
-        Predicate::Not(p) => Predicate::Not(Box::new(rewrite_predicate(p, resolver, map)?)),
-        Predicate::Exists(p) => Predicate::Exists(Box::new(rewrite_predicate(p, resolver, map)?)),
+        Predicate::IsNull(e) => Predicate::IsNull(Box::new(rewrite_expr(e, resolver, mode)?)),
+        Predicate::IsNotNull(e) => Predicate::IsNotNull(Box::new(rewrite_expr(e, resolver, mode)?)),
+        Predicate::Not(p) => Predicate::Not(Box::new(rewrite_predicate(p, resolver, mode)?)),
+        Predicate::Exists(p) => Predicate::Exists(Box::new(rewrite_predicate(p, resolver, mode)?)),
         Predicate::And(a, b) => Predicate::And(
-            Box::new(rewrite_predicate(a, resolver, map)?),
-            Box::new(rewrite_predicate(b, resolver, map)?),
+            Box::new(rewrite_predicate(a, resolver, mode)?),
+            Box::new(rewrite_predicate(b, resolver, mode)?),
         ),
         Predicate::Or(a, b) => Predicate::Or(
-            Box::new(rewrite_predicate(a, resolver, map)?),
-            Box::new(rewrite_predicate(b, resolver, map)?),
+            Box::new(rewrite_predicate(a, resolver, mode)?),
+            Box::new(rewrite_predicate(b, resolver, mode)?),
         ),
         Predicate::Between(e, low, high) => Predicate::Between(
-            Box::new(rewrite_expr(e, resolver, map)?),
-            Box::new(rewrite_expr(low, resolver, map)?),
-            Box::new(rewrite_expr(high, resolver, map)?),
+            Box::new(rewrite_expr(e, resolver, mode)?),
+            Box::new(rewrite_expr(low, resolver, mode)?),
+            Box::new(rewrite_expr(high, resolver, mode)?),
         ),
         Predicate::In(e, list) => {
             let mut rewritten = Vec::with_capacity(list.len());
             for item in list {
-                rewritten.push(rewrite_expr(item, resolver, map)?);
+                rewritten.push(rewrite_expr(item, resolver, mode)?);
             }
-            Predicate::In(Box::new(rewrite_expr(e, resolver, map)?), rewritten)
+            Predicate::In(Box::new(rewrite_expr(e, resolver, mode)?), rewritten)
         }
         Predicate::Like(e, pattern, compiled) => {
             let regex = match compiled {
@@ -246,7 +290,7 @@ fn rewrite_predicate(
                 None => compile_like(pattern)?,
             };
             Predicate::Like(
-                Box::new(rewrite_expr(e, resolver, map)?),
+                Box::new(rewrite_expr(e, resolver, mode)?),
                 pattern.clone(),
                 Some(regex),
             )
@@ -254,34 +298,29 @@ fn rewrite_predicate(
     })
 }
 
-fn rewrite_expr(
-    expr: &Expr,
-    resolver: &SideResolver,
-    map: &dyn Fn(ColumnBinding) -> Result<usize, JoinError>,
-) -> Result<Expr, JoinError> {
+fn rewrite_expr(expr: &Expr, resolver: &SideResolver, mode: Rebind) -> Result<Expr, JoinError> {
     Ok(match expr {
         Expr::Column(reference) => {
             let binding = resolver.resolve(&reference.column_name)?;
-            let mut resolved = reference.clone();
-            resolved.column_index = Some(map(binding)?);
-            Expr::Column(resolved)
+            let (index, name) = rebind(resolver, binding, &reference.column_name, mode)?;
+            Expr::Column(ColumnReference::with_index(name, index))
         }
         Expr::Constant(constant) => Expr::Constant(constant.clone()),
         Expr::Add(a, b) => Expr::Add(
-            Box::new(rewrite_expr(a, resolver, map)?),
-            Box::new(rewrite_expr(b, resolver, map)?),
+            Box::new(rewrite_expr(a, resolver, mode)?),
+            Box::new(rewrite_expr(b, resolver, mode)?),
         ),
         Expr::Sub(a, b) => Expr::Sub(
-            Box::new(rewrite_expr(a, resolver, map)?),
-            Box::new(rewrite_expr(b, resolver, map)?),
+            Box::new(rewrite_expr(a, resolver, mode)?),
+            Box::new(rewrite_expr(b, resolver, mode)?),
         ),
         Expr::Mul(a, b) => Expr::Mul(
-            Box::new(rewrite_expr(a, resolver, map)?),
-            Box::new(rewrite_expr(b, resolver, map)?),
+            Box::new(rewrite_expr(a, resolver, mode)?),
+            Box::new(rewrite_expr(b, resolver, mode)?),
         ),
         Expr::Div(a, b) => Expr::Div(
-            Box::new(rewrite_expr(a, resolver, map)?),
-            Box::new(rewrite_expr(b, resolver, map)?),
+            Box::new(rewrite_expr(a, resolver, mode)?),
+            Box::new(rewrite_expr(b, resolver, mode)?),
         ),
     })
 }
@@ -358,20 +397,6 @@ pub fn split_conjuncts(
     let mut left_parts = Vec::new();
     let mut right_parts = Vec::new();
 
-    let to_virtual = |binding: ColumnBinding| Ok(resolver.virtual_index(binding));
-    let to_left = |binding: ColumnBinding| match binding.side {
-        RelationSide::Left => Ok(binding.index),
-        RelationSide::Right => Err(JoinError::schema(
-            "internal: right column in a left-only conjunct".to_string(),
-        )),
-    };
-    let to_right = |binding: ColumnBinding| match binding.side {
-        RelationSide::Right => Ok(binding.index),
-        RelationSide::Left => Err(JoinError::schema(
-            "internal: left column in a right-only conjunct".to_string(),
-        )),
-    };
-
     for conjunct in conjuncts {
         if let Some(key) = equi_key_column(conjunct, resolver)? {
             key_columns.push(key);
@@ -380,17 +405,17 @@ pub fn split_conjuncts(
 
         let touch = predicate_touch(conjunct, resolver)?;
         if touch.is_both() || touch == Touch::NONE {
-            residual_parts.push(rewrite_predicate(conjunct, resolver, &to_virtual)?);
+            residual_parts.push(rewrite_predicate(conjunct, resolver, Rebind::Virtual)?);
         } else if touch.left {
             if pushdown.left {
-                left_parts.push(rewrite_predicate(conjunct, resolver, &to_left)?);
+                left_parts.push(rewrite_predicate(conjunct, resolver, Rebind::LeftLocal)?);
             } else {
-                residual_parts.push(rewrite_predicate(conjunct, resolver, &to_virtual)?);
+                residual_parts.push(rewrite_predicate(conjunct, resolver, Rebind::Virtual)?);
             }
         } else if pushdown.right {
-            right_parts.push(rewrite_predicate(conjunct, resolver, &to_right)?);
+            right_parts.push(rewrite_predicate(conjunct, resolver, Rebind::RightLocal)?);
         } else {
-            residual_parts.push(rewrite_predicate(conjunct, resolver, &to_virtual)?);
+            residual_parts.push(rewrite_predicate(conjunct, resolver, Rebind::Virtual)?);
         }
     }
 

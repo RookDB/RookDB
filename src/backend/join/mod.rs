@@ -12,17 +12,23 @@
 
 pub mod algorithm;
 pub mod error;
+pub mod exec;
 pub mod key;
+pub mod plan;
 pub mod predicate;
 pub mod row;
 pub mod schema;
+pub mod source;
 
 pub use algorithm::{
     ALGORITHMS, AlgorithmSpec, JoinAlgorithm, JoinRequest, JoinType, Pushdown, ValidatedJoinSpec,
     pushdown_plan, spec_for,
 };
 pub use error::JoinError;
+pub use exec::{ExecStats, MatchEvaluator, RowStream};
 pub use key::{JoinKey, KeyClass, KeyColumn, KeySpec, resolve_key_class};
+pub use plan::JoinBuilder;
 pub use predicate::{ColumnBinding, JoinPredicate, PredicateSplit, SideResolver, split_conjuncts};
 pub use row::{RowBuilder, RowCodec};
 pub use schema::{OutputColumn, OutputSchema, RelationSchema, RelationSide};
+pub use source::{RowSource, TableRef, TableSource};

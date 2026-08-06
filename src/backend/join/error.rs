@@ -25,6 +25,8 @@ pub enum JoinError {
     /// The requested plan cannot be built - an algorithm that does not support
     /// the join type, a hash join without equijoin keys, and so on.
     Plan(String),
+    /// A filesystem failure while reading a relation or a spill file.
+    Io(String),
 }
 
 impl JoinError {
@@ -60,8 +62,15 @@ impl fmt::Display for JoinError {
             ),
             JoinError::Schema(message) => write!(f, "schema error: {message}"),
             JoinError::Plan(message) => write!(f, "plan error: {message}"),
+            JoinError::Io(message) => write!(f, "i/o error: {message}"),
         }
     }
 }
 
 impl std::error::Error for JoinError {}
+
+impl From<std::io::Error> for JoinError {
+    fn from(error: std::io::Error) -> Self {
+        JoinError::Io(error.to_string())
+    }
+}
