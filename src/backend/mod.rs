@@ -6,6 +6,7 @@ pub mod executor;
 pub mod fsm;
 pub mod heap;
 pub mod instrumentation;
+pub mod join;
 pub mod layout;
 pub mod log;
 pub mod page;
