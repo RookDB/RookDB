@@ -1,12 +1,7 @@
-//! Turning catalog entries into join inputs.
+//! Catalog lookups.
 //!
-//! This is the *only* place the join subsystem reads the catalog. Everything
-//! below it works from a [`TableRef`] - a path, an alias and a column list -
-//! which is what lets joins be tested against scratch files with no global
-//! state, no shared `database/` directory, and therefore no lock to serialise
-//! or poison.
-//!
-//! It is also the only place that knows where a relation's file lives.
+//! The only place the join subsystem reads the catalog. Everything below works
+//! from a `TableRef`.
 
 use std::path::PathBuf;
 
@@ -24,10 +19,6 @@ pub fn table_path(database: &str, table: &str) -> PathBuf {
 }
 
 /// Resolve a catalog entry into a join input.
-///
-/// `alias` is what the join condition qualifies the relation's columns with.
-/// Passing the table name gives the familiar behaviour; passing something else
-/// is what makes a self-join expressible.
 pub fn resolve(
     catalog: &Catalog,
     database: &str,

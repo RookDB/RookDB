@@ -1,23 +1,11 @@
 //! Cardinality estimation and the cost model.
 //!
-//! Costs are in estimated milliseconds, built from PostgreSQL-shaped
-//! coefficients. Absolute values matter less than relative ones: the planner
-//! only ever compares them.
+//! Costs are estimated milliseconds; only their relative order matters.
+//! Cardinalities are `u64` with saturating arithmetic and risky products go
+//! through `f64`, whose casts saturate. `usize` is not used here.
 //!
-//! **Arithmetic rules, enforced throughout this module.** Cardinalities are
-//! `u64` and combine with saturating operations. Any product that could
-//! overflow is computed in `f64` and converted back with `as u64`, which
-//! saturates rather than wrapping. Costs are `f64`. `usize` is not used
-//! anywhere here - it is 32 bits on some targets, and the previous
-//! implementation's `tuple_count as usize * bytes_per_tuple` panicked in debug
-//! builds and wrapped in release ones.
-//!
-//! **What is an estimate, and which way it is wrong**, is set out in
-//! `docs/join/cost-model.md`. In short: distinct-value counts carry the
-//! sketch's error; conjuncts are assumed independent, which under-estimates
-//! output for correlated predicates; and buffer-cache hits are assumed to be
-//! zero, which over-estimates I/O uniformly and so does not distort the
-//! comparison between plans.
+//! What stays an estimate, and which way it is wrong, is in
+//! `docs/join/cost-model.md`.
 
 use crate::executor::selection::{ComparisonOp, Expr, Predicate};
 
@@ -28,9 +16,13 @@ use super::stats::{ColumnStats, TableStats};
 /// Selectivity assumed for a conjunct nothing is known about.
 pub const UNKNOWN_SELECTIVITY: f64 = 0.25;
 
-/// Selectivity assumed for a range comparison with no histogram, the classic
-/// textbook default.
+/// Selectivity assumed for a range comparison with no histogram.
 pub const DEFAULT_RANGE_SELECTIVITY: f64 = 1.0 / 3.0;
+
+/// Cost multipliers applied to the adaptive operator, by whether the
+/// statistics behind the estimate were measured.
+const ADAPTIVE_PREMIUM_ANALYZED: f64 = 1.05;
+const ADAPTIVE_DISCOUNT_GUESSED: f64 = 0.85;
 
 /// Bytes per page, matching the storage layer.
 const PAGE_BYTES: f64 = crate::page::PAGE_SIZE as f64;
@@ -78,11 +70,6 @@ pub struct SideEstimate {
 impl SideEstimate {
     /// Derive an input estimate from a relation's statistics and its key
     /// columns.
-    ///
-    /// For a composite key the distinct count is the product of the
-    /// per-column counts, capped at the row count - a table cannot hold more
-    /// distinct combinations than it has rows. Independence between key
-    /// columns is assumed, and stated as such.
     pub fn from_stats(stats: &TableStats, key_columns: &[usize]) -> Self {
         let mut distinct = 1.0_f64;
         let mut retained = 1.0_f64;
@@ -146,21 +133,12 @@ pub struct JoinEstimate {
 }
 
 /// Estimate an equijoin's output before any residual is applied.
-///
-/// System-R containment: each side's matchable rows are spread over its
-/// distinct values, and the join pairs them through the *larger* of the two
-/// distinct counts.
 pub fn equijoin_rows(left: &SideEstimate, right: &SideEstimate) -> f64 {
     let divisor = left.distinct.max(right.distinct).max(1) as f64;
     left.matchable_rows() * right.matchable_rows() / divisor
 }
 
 /// Fraction of left rows that match at least one right row.
-///
-/// Bounded by construction: `min(ndv) / ndv_left` is at most one, so a semi
-/// join can never be estimated to produce more rows than its left input has.
-/// The previous implementation used `min/max` scaled by both row counts and
-/// over-estimated a ten-row semi join by a hundredfold.
 pub fn semi_selectivity(left: &SideEstimate, right: &SideEstimate) -> f64 {
     let left_distinct = left.distinct.max(1) as f64;
     let shared = left.distinct.min(right.distinct).max(1) as f64;
@@ -225,11 +203,6 @@ pub fn estimate_join(
 // ── Residual selectivity ─────────────────────────────────────────────────────
 
 /// Estimate how much of the candidate pairs a residual predicate keeps.
-///
-/// Conjuncts are assumed independent, so their selectivities multiply. A
-/// cross-relation range comparison between two columns is estimated by
-/// convolving their histograms when both have been analyzed; everything else
-/// falls back to a documented constant.
 pub fn residual_selectivity(
     residual: Option<&Predicate>,
     left_stats: &TableStats,
@@ -384,11 +357,6 @@ impl CostModel {
     }
 
     /// Passes an external sort makes over `pages`.
-    ///
-    /// Zero when the input fits in memory - no run is written, so there is
-    /// nothing to merge. Otherwise one pass to write the runs plus
-    /// `log_fanin(runs)` to merge them, with a fan-in one below the memory
-    /// budget because one buffer is needed for output.
     pub fn sort_passes(&self, pages: f64) -> f64 {
         if pages <= self.memory_pages {
             return 0.0;
@@ -400,20 +368,15 @@ impl CostModel {
 
     /// How much cheaper or dearer the adaptive operator is than the plain one
     /// it wraps.
-    ///
-    /// Estimate confidence is a first-class cost input. When the statistics are
-    /// measured, the simpler operator is preferred - adaptivity buys nothing if
-    /// the prediction is right. When they are guesses, the operator that can
-    /// correct itself mid-flight is worth a discount.
     pub fn adaptive_factor(&self, analyzed: bool) -> f64 {
-        if analyzed { 1.05 } else { 0.85 }
+        if analyzed {
+            ADAPTIVE_PREMIUM_ANALYZED
+        } else {
+            ADAPTIVE_DISCOUNT_GUESSED
+        }
     }
 
     /// Cost of a join, given both inputs and how many rows it will produce.
-    ///
-    /// `has_keys` matters for the adaptive operator, which runs a nested loop
-    /// when there is no equality to hash; costing it as a hash join would be
-    /// costing something it will not do.
     pub fn cost(
         &self,
         algorithm: JoinAlgorithm,
@@ -423,13 +386,9 @@ impl CostModel {
         block_rows: u64,
         has_keys: bool,
     ) -> JoinCost {
-        // Cost the adaptive operator as what it will actually run.
-        //
-        // With an equality it is a hash join that builds from whichever side
-        // turns out smaller, so it is costed with the sides put in that order.
-        // Measurement drove this: on a 200-row relation joined to a 20 000-row
-        // one it is roughly a third faster than a hash join fixed to build
-        // from the right, and without this the planner could not see why.
+        // Cost the adaptive operator as what it will actually run. With an
+        // equality it is a hash join that builds from whichever side turns
+        // out smaller, so it is costed with the sides put in that order.
         if algorithm == JoinAlgorithm::Adaptive {
             if !has_keys {
                 return self.cost(
@@ -533,13 +492,9 @@ impl CostModel {
                 let io = (left_pages + right_pages + 2.0 * spilled * (left_pages + right_pages))
                     * c.seq_page;
 
-                // Building costs more per row than probing - an allocation and
-                // a bucket insert against a lookup - so the two are charged
-                // separately. Charging them alike makes the formula symmetric
-                // in its inputs, and the planner then cannot see why building
-                // from the smaller side is worth anything. Benchmarking a
-                // 200-row relation against a 20 000-row one is what surfaced
-                // this.
+                // Building costs more per row than probing - an allocation
+                // and a bucket insert against a lookup - so the two are
+                // charged separately.
                 let cpu = right_rows * (c.cpu_hash + c.cpu_key + c.cpu_tuple)
                     + left_rows * (c.cpu_hash + c.cpu_key)
                     + emit;

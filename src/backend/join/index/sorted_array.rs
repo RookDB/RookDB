@@ -1,16 +1,11 @@
 //! A bulk-built, sorted-array index.
 //!
-//! Chosen over a B-tree for one reason above all: [`JoinKey`] is already an
-//! order-preserving byte encoding, so a sorted array gives O(log n) point
-//! probes, O(1) per additional duplicate, and perfect cache locality with no
-//! separate comparator. A tree with its own key comparison would reintroduce
-//! exactly the class of divergence - two notions of equality in one system -
-//! that this subsystem exists to remove.
+//! `JoinKey` is already an order-preserving encoding, so a sorted array gives
+//! O(log n) probes with no separate comparator - and it is built with the same
+//! encoder the join matches on, so the two cannot drift.
 //!
-//! It has no update path, and does not need one. An index here is either built
-//! for a query and dropped, or written as a sidecar and rebuilt when the table
-//! changes. Building a durable, concurrently-updatable tree would duplicate the
-//! index subsystem in upstream PR #48 rather than complement it.
+//! It has no update path: an index is either built for a query or written as a
+//! stamped sidecar and rebuilt when the table changes.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -63,9 +58,7 @@ impl SortedKeyIndex {
             .map_err(|e| JoinError::Io(format!("cannot open {}: {e}", table.path.display())))?;
 
         // Read the stamp after opening: `HeapManager::open` synchronises the
-        // header and so may rewrite the file. A stamp taken beforehand would
-        // describe a state that no longer exists, and this index would look
-        // stale the moment it was built.
+        // header and so may rewrite the file.
         let stamp = ValidityStamp::read(&table.path)?;
 
         let mut entries = Vec::new();

@@ -1,14 +1,8 @@
-//! Memory accounting for join operators.
+//! Memory accounting.
 //!
 //! Rust exposes no allocator introspection, so this is a deliberate
-//! over-estimate of what an operator is holding, not a measurement. Its job is
-//! to trigger a strategy change - spill, repartition, fall back to a nested
-//! loop - well before the real allocator is under pressure. Treating it as a
-//! hard limit would be wrong; treating it as a budget is exactly right.
-//!
-//! Accountants form a tree so a hash join's resident partition can be charged
-//! against the operator's budget. There is no process-wide accountant: a
-//! global would couple every operator, and every test, to every other.
+//! over-estimate. It exists to trigger a spill or a strategy change before the
+//! allocator is under real pressure, not to be a hard limit.
 
 use std::cell::Cell;
 use std::fmt;
@@ -130,11 +124,6 @@ impl MemoryAccountant {
     }
 
     /// Reduce the budget in response to real system memory pressure.
-    ///
-    /// Never below [`crate::join::config::MIN_WORK_MEMORY`]: an operator with
-    /// no budget cannot make progress. Memory already charged is not clawed
-    /// back - the effect is that the *next* charge fails, and the operator
-    /// responds by spilling or changing strategy.
     pub fn shrink_to(&self, budget: u64) {
         let floor = super::config::MIN_WORK_MEMORY;
         self.budget.set(budget.max(floor).min(self.budget.get()));

@@ -1,21 +1,9 @@
 //! Indexes usable by a join.
 //!
-//! The trait is deliberately narrow, and its contract is the load-bearing
-//! part:
-//!
-//! > **A probe returns candidates, never the authority.**
-//!
-//! Callers must fetch each candidate row and re-verify the join condition
-//! against it. That costs almost nothing next to the page fetch, and it is
-//! what lets an index with a coarser notion of equality than the join's - one
-//! that maps CHAR and VARCHAR onto the same key type, say - be used safely.
-//! Without it, adapting a foreign index would mean trusting its key semantics
-//! to match ours exactly, which is the class of assumption this subsystem
-//! exists to eliminate.
-//!
-//! `sorted_array::SortedKeyIndex` is the implementation shipped here. Adding
-//! another - the index subsystem in upstream PR #48, when it lands - is a new
-//! `impl JoinIndex` and nothing else; see `docs/join/pr48-index-adapter.md`.
+//! The contract that matters: a probe returns *candidates*, never the
+//! authority. Callers re-verify, which is what lets an index with a coarser key
+//! model than the join's be adopted safely. See
+//! `docs/join/pr48-index-adapter.md`.
 
 pub mod sorted_array;
 
@@ -53,10 +41,6 @@ impl IndexKeySpec {
 /// An index a join can probe.
 pub trait JoinIndex {
     /// Rows that *may* carry `key`.
-    ///
-    /// Returning a superset is allowed; returning a subset is not. Callers
-    /// re-verify, so extra candidates cost time, while missing ones would cost
-    /// correctness.
     fn probe(&self, key: &JoinKey) -> Result<Vec<RowLocator>, JoinError>;
 
     fn key_spec(&self) -> &IndexKeySpec;
@@ -66,12 +50,6 @@ pub trait JoinIndex {
 }
 
 /// Restrict a join's key specification to the columns an index covers.
-///
-/// Returns `None` when the index cannot serve this join at all. A partial
-/// match is usable: probing on a prefix yields a superset of the true matches,
-/// and the caller re-verifies the whole condition anyway. What is *not*
-/// negotiable is that the key classes agree - an index built over a different
-/// notion of equality would silently miss rows.
 pub fn probe_spec(index: &dyn JoinIndex, keys: &KeySpec) -> Option<KeySpec> {
     let spec = index.key_spec();
     if spec.columns.is_empty() || spec.columns.len() != spec.classes.len() {
@@ -112,11 +90,6 @@ pub fn index_path(table_path: &Path, columns: &[usize]) -> PathBuf {
 }
 
 /// Find an index on the inner relation that can serve these join keys.
-///
-/// A sidecar whose validity stamp no longer matches the table is rejected
-/// outright rather than used and hoped for. That guarantee is what makes it
-/// safe for the join to skip a row the index points at but the heap no longer
-/// has: no *inserts* can have been missed, so a missing row is a deleted one.
 pub fn find_usable(table: &TableRef, keys: &KeySpec) -> Option<(Rc<dyn JoinIndex>, KeySpec)> {
     if keys.is_empty() {
         return None;

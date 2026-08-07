@@ -1,15 +1,7 @@
-//! HyperLogLog, for estimating how many distinct values a column holds.
+//! HyperLogLog, for estimating distinct values.
 //!
-//! Distinct-value counts are the single most important input to equijoin
-//! selectivity: the System-R estimate divides by the larger of the two sides'
-//! counts. The previous implementation had none at all and used a hardcoded
-//! `0.01` for every predicate.
-//!
-//! An exact `HashSet` would be simpler but grows without bound; this is 4 KiB
-//! per column regardless of cardinality, and mergeable. The small-range
-//! correction is not optional: without it a fifty-row test fixture estimates
-//! wildly, and a cost model that cannot be checked on small fixtures cannot be
-//! checked at all.
+//! 4 KiB per column regardless of cardinality. The small-range correction is not
+//! optional - without it a fifty-row fixture estimates wildly.
 
 use serde::{Deserialize, Serialize};
 
@@ -40,10 +32,6 @@ impl HyperLogLog {
     }
 
     /// Add an encoded value.
-    ///
-    /// The caller passes key-encoded bytes, so two values the join considers
-    /// equal are counted once - which is what makes this estimate meaningful
-    /// for join selectivity rather than merely for the column.
     pub fn add(&mut self, encoded: &[u8]) {
         let hash = hash_bytes(encoded);
         let index = (hash >> (64 - PRECISION)) as usize;

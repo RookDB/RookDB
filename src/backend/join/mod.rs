@@ -1,10 +1,6 @@
 //! Join subsystem.
 //!
-//! This module documents *what* each piece does. The reasoning behind the
-//! design - why keys are a single order-preserving byte encoding, why NULL
-//! join keys are unrepresentable rather than merely handled, why spilling
-//! uses length-framed run files, and what the cost model does and does not
-//! know - lives in `docs/join/design-rationale.md`.
+//! The reasoning behind the design is in `docs/join/design-rationale.md`.
 
 // User input reaches this subsystem through the CLI, so a panic here is a
 // crash of the whole engine. Every fallible path returns `JoinError`.

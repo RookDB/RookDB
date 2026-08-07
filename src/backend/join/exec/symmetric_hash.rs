@@ -1,15 +1,8 @@
 //! Symmetric hash join.
 //!
-//! Both inputs are consumed together, each row probing the other side's table
-//! before joining its own. A match is emitted as soon as the second of its two
-//! rows arrives, so output starts before either input is exhausted - which is
-//! what the previous implementation claimed to do while actually buffering
-//! everything into a `Vec` and returning nothing until both scans finished.
-//!
-//! It holds both inputs in memory and cannot spill. That is inherent: it has
-//! no build phase to partition. When the budget runs out it says so rather
-//! than growing without bound, and the adaptive operator responds by choosing
-//! an algorithm that can spill.
+//! Both inputs are consumed together, each row probing the other side before
+//! joining its own, so output starts before either input is exhausted. It holds
+//! both sides in memory and cannot spill; when the budget runs out it says so.
 
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;

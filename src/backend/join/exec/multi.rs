@@ -1,29 +1,15 @@
 //! Executing a chosen multi-relation join order.
 //!
-//! `order.rs` produces a tree; this runs it. Two problems have to be solved
-//! that a two-relation join does not have.
+//! A conjunct is applied at the lowest node whose subtree mentions every
+//! relation it names. Each node names its inputs' columns by position and
+//! rewrites those conjuncts to match, which reuses the two-relation machinery
+//! rather than growing a second copy.
 //!
-//! **A predicate can only be evaluated once every relation it names is
-//! present.** Each conjunct carries the set of relations it mentions, and is
-//! applied at the lowest node whose subtree covers that set. A three-relation
-//! conjunct therefore waits until the third relation joins, rather than being
-//! forced onto an edge where a third of it cannot be resolved.
-//!
-//! **Conditions are written against leaf aliases, but a node's inputs are
-//! subtrees.** Each node builds a synthetic schema whose columns are named by
-//! position (`l0`, `r3`) and rewrites the conjuncts it is applying to match.
-//! That reuses the whole two-relation apparatus - resolution, conjunct
-//! splitting, key extraction, three-valued evaluation - instead of growing a
-//! second one. The *output* schema keeps the real qualified names, so a column
-//! is called `orders.id` however many joins it passes through.
-//!
-//! Only the right input of each node is materialised. The left spine streams,
-//! so a left-deep plan holds one intermediate at a time, and that one spills
-//! if it outgrows the memory budget.
+//! Only the right input of a node is materialised; the left spine streams.
 
 use std::sync::Arc;
 
-use crate::executor::selection::{ColumnReference, Expr, Predicate};
+use crate::executor::selection::{ColumnReference, Expr, Predicate, TriValue};
 use crate::types::value::DataValue;
 
 use super::super::algorithm::{JoinAlgorithm, JoinRequest, JoinType, spec_for};
@@ -58,26 +44,92 @@ pub fn execute_ordered(
 ) -> Result<Box<dyn RowStream>, JoinError> {
     let mut applied = vec![false; graph.conjuncts().len()];
     let subtree = build(graph, plan, config, &mut applied)?;
+    let covered = mask_of(&subtree.relations);
 
-    // Anything still unapplied mentions relations this plan never brought
-    // together, which would silently drop a condition.
-    if let Some(index) = applied.iter().position(|done| !done) {
-        let mask = graph.conjuncts()[index].mask;
-        return Err(JoinError::plan(format!(
-            "a join condition mentions relations {mask:#b} that the plan never combines"
-        )));
+    // A single relation has no join node to evaluate a condition at, and a
+    // plan can leave a conjunct unapplied for the same reason.
+    let mut leftover = Vec::new();
+    for (index, conjunct) in graph.conjuncts().iter().enumerate() {
+        if applied[index] {
+            continue;
+        }
+        if conjunct.mask & !covered != 0 {
+            return Err(JoinError::plan(format!(
+                "a join condition mentions relations {:#b} that the plan never combines",
+                conjunct.mask
+            )));
+        }
+        let names = synthetic_names(&subtree, "l");
+        leftover.push(rewrite(graph, &conjunct.predicate, &names, &[])?);
+        applied[index] = true;
     }
 
     // The optimiser is free to join the relations in any order, but the
-    // output must not depend on which order it chose - a caller asked for
-    // `a JOIN b` and expects a's columns first. Restore the declared order if
-    // the plan produced another.
+    // output must not depend on which order it chose - a caller asked for `a
+    // JOIN b` and expects a's columns first.
+    let mut stream = subtree.source.open()?;
+
+    if let Some(condition) = combine(leftover) {
+        let relation = RelationSchema::new("l", positional_columns(&subtree.schema, "l"));
+        let empty = RelationSchema::new("r", Vec::new());
+        let width = relation.len();
+        let resolver = SideResolver::new(&relation, &empty)?;
+        let split = split_conjuncts(Some(&condition), &resolver, JoinType::FullOuter)?;
+        if let Some(residual) = split.residual {
+            stream = Box::new(Filter {
+                inner: stream,
+                codec: RowCodec::for_schema(&subtree.schema),
+                predicate: JoinPredicate::new(residual, width),
+                scratch: Vec::new(),
+            });
+        }
+    }
+
     let declared: Vec<usize> = (0..graph.relations().len()).collect();
-    let stream = subtree.source.open()?;
     if subtree.relations == declared {
         return Ok(stream);
     }
     reorder(graph, stream, &subtree)
+}
+
+/// Applies a condition that no join node could evaluate.
+struct Filter {
+    inner: Box<dyn RowStream>,
+    codec: RowCodec,
+    predicate: JoinPredicate,
+    scratch: Vec<Option<DataValue>>,
+}
+
+impl Iterator for Filter {
+    type Item = Result<Vec<u8>, JoinError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let row = match self.inner.next()? {
+                Ok(row) => row,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Err(e) = self.codec.decode_into(&row, &mut self.scratch) {
+                return Some(Err(e));
+            }
+            match self.predicate.evaluate(&self.scratch, &[]) {
+                // Only a definite match passes; UNKNOWN does not.
+                Ok(TriValue::True) => return Some(Ok(row)),
+                Ok(_) => continue,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
+
+impl RowStream for Filter {
+    fn schema(&self) -> &Arc<OutputSchema> {
+        self.inner.schema()
+    }
+
+    fn stats(&self) -> super::ExecStats {
+        self.inner.stats()
+    }
 }
 
 /// Permute a subtree's columns back into the declared relation order.
@@ -192,11 +244,6 @@ fn build(
 }
 
 /// A leaf relation.
-///
-/// A conjunct naming only this relation is left for the first join above it:
-/// a leaf has no condition of its own to evaluate against, and every node in a
-/// reordered block is an inner join, where evaluating a single-relation
-/// conjunct in the condition and pushing it into the scan give the same rows.
 fn scan(graph: &JoinGraph, relation: usize) -> Result<Subtree, JoinError> {
     let table = graph
         .relation(relation)

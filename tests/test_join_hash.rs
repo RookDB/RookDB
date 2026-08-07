@@ -321,10 +321,15 @@ fn the_hybrid_form_keeps_one_partition_resident() {
         8 * 1024,
     );
 
+    let fan_out = storage_manager::join::config::JoinTuning::default().hash_fan_out as u64;
     assert!(stats.partitions > 0, "expected partitioning: {stats:?}");
     assert!(
-        stats.partitions < 32,
+        stats.partitions <= fan_out,
         "one level of partitioning should suffice here: {stats:?}"
+    );
+    assert_eq!(
+        stats.repartition_depth, 0,
+        "no repartitioning should have been needed: {stats:?}"
     );
 }
 

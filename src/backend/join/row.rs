@@ -1,10 +1,8 @@
-//! Row encoding and decoding for join pipelines.
+//! Row encoding and decoding for joins.
 //!
-//! [`RowCodec`] is byte-compatible with `types::row::serialize_nullable_typed_row`
-//! and value-compatible with `types::row::deserialize_nullable_row`; the
-//! equivalence is enforced by `tests/test_join_row_codec.rs`. Why the join
-//! subsystem carries its own codec at all is explained in
-//! `docs/join/design-rationale.md`.
+//! `RowCodec` matches `types::row` exactly but precomputes the layout once per
+//! schema instead of once per row. `tests/test_join_row_codec.rs` checks the
+//! two agree.
 
 use crate::types::datatype::DataType;
 use crate::types::null_bitmap::NullBitmap;
@@ -15,10 +13,6 @@ use super::error::JoinError;
 use super::schema::OutputSchema;
 
 /// Returns `true` if `value` is the `DataValue` variant that `ty` stores.
-///
-/// Mirrors the upstream private check in `types::row`. Without it,
-/// `to_bytes_for_type` would fall through to `to_bytes()` for a mismatched
-/// pair and silently write bytes the decoder would misread.
 fn value_matches_type(ty: &DataType, value: &DataValue) -> bool {
     matches!(
         (ty, value),
@@ -118,12 +112,8 @@ impl RowCodec {
         Ok((bitmap, bytes))
     }
 
-    /// Byte range of a variable-length payload, or `None` when the offset slot
-    /// holds the NULL sentinel.
-    ///
-    /// A payload runs until the next *non-null* offset slot, or to the end of
-    /// the row for the last one - which is why the caller must supply a slice
-    /// whose length is exactly the row's length.
+    /// Byte range of a variable-length payload, or `None` when the offset
+    /// slot holds the NULL sentinel.
     fn varlen_range(
         &self,
         bytes: &[u8],
@@ -301,11 +291,9 @@ impl RowCodec {
                         .to_bytes_for_type(ty)
                         .map_err(|e| JoinError::codec(format!("column {index} ({ty}): {e}")))?;
 
-                    // `to_bytes_for_type` enforces the declared width for CHAR
-                    // but not for VARCHAR, while the decoder enforces it for
-                    // both. Encoding an over-long VARCHAR would therefore
-                    // produce a row that cannot be read back - including out
-                    // of a spill file, mid-join.
+                    // `to_bytes_for_type` enforces the declared width for
+                    // CHAR but not for VARCHAR, while the decoder enforces it
+                    // for both.
                     if let DataType::Varchar(limit) = ty {
                         if bytes.len() > usize::from(*limit) {
                             return Err(JoinError::codec(format!(

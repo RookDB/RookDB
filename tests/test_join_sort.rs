@@ -14,6 +14,7 @@
 mod common;
 
 use common::{Rng, TempDb, seed_from_env};
+use storage_manager::join::config::JoinTuning;
 use storage_manager::join::{
     JoinError, KeyClass, KeyColumn, KeySide, KeySpec, MemoryAccountant, RowCodec, SortOutput,
     SpillScope, sort_rows,
@@ -65,6 +66,7 @@ fn run_sort(rows: &[Vec<u8>], budget_bytes: u64, db: &TempDb) -> SortOutput {
         &scope,
         "side",
         FINGERPRINT,
+        JoinTuning::default().merge_buffer_bytes,
     )
     .expect("sort should succeed")
 }

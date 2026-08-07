@@ -1,14 +1,8 @@
-//! Planning a join: choosing an algorithm, estimating what it will produce,
-//! and rendering the result.
+//! Planning a join: choosing an algorithm, estimating its cost, rendering it.
 //!
-//! Everything that can be rejected is rejected here, before a single row is
-//! read: unresolvable or ambiguous columns, incomparable key types, and
-//! algorithms that do not implement the requested join type. An executor that
-//! exists is an executor that will produce the join it was asked for.
-//!
-//! Plans carry the confidence of the statistics they were built from, and
-//! EXPLAIN prints it. An estimate derived from a measured distinct-value count
-//! and one derived from a fallback guess should not look alike.
+//! Everything that can be rejected is rejected here, before any row is read.
+//! Plans carry the confidence of the statistics behind them, and EXPLAIN prints
+//! it.
 
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -27,7 +21,7 @@ use super::error::JoinError;
 use super::exec::adaptive::AdaptiveJoin;
 use super::exec::hash::HashJoin;
 use super::exec::index_nested_loop::IndexNestedLoopJoin;
-use super::exec::nested_loop::{DEFAULT_BLOCK_ROWS, NestedLoopJoin};
+use super::exec::nested_loop::NestedLoopJoin;
 use super::exec::sort_merge::SortMergeJoin;
 use super::exec::symmetric_hash::SymmetricHashJoin;
 use super::exec::{MatchEvaluator, RowStream};
@@ -41,10 +35,6 @@ use super::spill::SpillScope;
 use super::stats::{StatsConfidence, TableStatsCache};
 
 /// Algorithms this module can currently construct.
-///
-/// The capability matrix in `algorithm.rs` describes what each one *supports*;
-/// this is what has an executor behind it. The planner never proposes
-/// something it cannot build.
 const AVAILABLE: [JoinAlgorithm; 7] = [
     JoinAlgorithm::SimpleNestedLoop,
     JoinAlgorithm::BlockNestedLoop,
@@ -159,14 +149,15 @@ pub struct JoinBuilder {
 
 impl JoinBuilder {
     pub fn new(left: TableRef, right: TableRef, join_type: JoinType) -> Self {
+        let config = JoinConfig::resolve();
         Self {
             left,
             right,
             join_type,
             condition: None,
-            block_rows: DEFAULT_BLOCK_ROWS,
+            block_rows: config.tuning.block_rows,
             algorithm: None,
-            config: JoinConfig::resolve(),
+            config,
             stats: Rc::new(TableStatsCache::new()),
         }
     }
@@ -180,6 +171,7 @@ impl JoinBuilder {
     }
 
     pub fn with_config(mut self, config: JoinConfig) -> Self {
+        self.block_rows = config.tuning.block_rows;
         self.config = config;
         self
     }
@@ -232,10 +224,6 @@ impl JoinBuilder {
     }
 
     /// An index on the inner relation that can serve this join's keys.
-    ///
-    /// Absence is not an error: it simply removes index nested loop from the
-    /// candidates. A sidecar that no longer matches the table is treated as
-    /// absent rather than trusted.
     fn inner_index(&self, keys: &KeySpec) -> Option<InnerIndex> {
         find_usable(&self.right, keys)
     }
@@ -458,9 +446,7 @@ impl JoinBuilder {
         let evaluator = MatchEvaluator::new(split.keys.clone(), residual);
 
         // The left relation is the outer (probe) side and the right is the
-        // inner (build) side, uniformly across every algorithm. That is what
-        // makes unmatched-left rows streamable and unmatched-right rows a
-        // post-pass, in all of them.
+        // inner (build) side, uniformly across every algorithm.
         if spec.algorithm() == JoinAlgorithm::Adaptive {
             // The adaptive operator decides which side to build from, so it
             // needs both inputs re-openable rather than one already streaming.
@@ -472,7 +458,7 @@ impl JoinBuilder {
                 plan.schema,
                 MemoryAccountant::new(self.config.work_memory_bytes),
                 spill_scope_in(&self.config)?,
-                self.block_rows,
+                self.config.tuning,
             )?));
         }
 
@@ -511,12 +497,6 @@ impl JoinBuilder {
 }
 
 /// Construct an operator from inputs that are already streams and sources.
-///
-/// `JoinBuilder` works from two table references; this is the same dispatch
-/// for callers whose inputs are themselves joins. `inner_table` is only needed
-/// by the index nested loop, which fetches rows by their location in a heap
-/// file - an intermediate result has none, so it is `None` there and the
-/// algorithm is not offered.
 #[allow(clippy::too_many_arguments)]
 pub fn build_operator_with(
     spec: &ValidatedJoinSpec,
@@ -571,6 +551,7 @@ pub fn build_operator_with(
                 schema,
                 MemoryAccountant::new(self_config.work_memory_bytes),
                 spill_scope_in(self_config)?,
+                self_config.tuning,
             ))),
             JoinAlgorithm::SortMerge => Ok(Box::new(SortMergeJoin::new(
                 spec,
@@ -580,6 +561,7 @@ pub fn build_operator_with(
                 schema,
                 MemoryAccountant::new(self_config.work_memory_bytes),
                 spill_scope_in(self_config)?,
+                self_config.tuning,
             ))),
             JoinAlgorithm::SymmetricHash => Ok(Box::new(SymmetricHashJoin::new(
                 spec,

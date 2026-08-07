@@ -1,21 +1,11 @@
 //! Index nested-loop join.
 //!
-//! The outer relation is streamed; each row's key is looked up in an index on
-//! the inner relation, and only the rows the index points at are fetched. When
-//! the outer side is small and the key is selective this beats every other
-//! algorithm, because it never reads the inner relation in full.
+//! The outer side streams and each key is looked up in an index on the inner
+//! side. Every candidate the index returns is fetched and re-checked against
+//! the whole condition - an index may return a superset.
 //!
-//! Every candidate the index returns is fetched and re-checked against the
-//! full join condition. That is not defensive coding, it is the contract in
-//! [`JoinIndex`]: an index may return a
-//! superset. It is what allows an index whose key model is coarser than the
-//! join's - one that cannot distinguish CHAR from VARCHAR, say - to be used
-//! without inheriting its imprecision.
-//!
-//! Only INNER, LEFT OUTER, SEMI and ANTI are supported. Enumerating unmatched
-//! *inner* rows would need a set of every row the index pointed at, which is
-//! the size of the inner relation and defeats the point; RIGHT and FULL are
-//! served by mirroring the join instead.
+//! RIGHT and FULL are excluded: enumerating unmatched inner rows would need a
+//! set the size of the inner relation.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

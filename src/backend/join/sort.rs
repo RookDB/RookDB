@@ -1,19 +1,9 @@
 //! External sort on join keys.
 //!
-//! Rows are accumulated until the memory budget is spent, sorted, and written
-//! out as a run; runs are then merged k-way. Because the run count is derived
-//! from bytes actually held rather than from a row-count guess, the number of
-//! merge passes the cost model predicts is the number that actually happens.
-//!
-//! Ordering comes from [`JoinKey`] bytes, which are a genuine total order.
-//! The previous implementation compared values directly and fell back to
-//! `Ordering::Equal` whenever two were incomparable - which silently violates
-//! the contract `BinaryHeap` and `sort_by` rely on, and leaves the merge phase
-//! reading runs that are not actually sorted.
-//!
-//! Rows whose key is NULL are set aside rather than sorted. They cannot match
-//! anything, so they must not participate in the merge; an outer join still
-//! needs them, so they are kept in a re-readable buffer.
+//! Rows accumulate until the budget is spent, then sort and flush as a run;
+//! runs are merged k-way. Ordering is `JoinKey` bytes, which are a total order,
+//! so the merge never sees an unsorted run. NULL-keyed rows are set aside
+//! rather than sorted - they cannot match anything.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
@@ -24,11 +14,6 @@ use super::key::{JoinKey, KeySpec};
 use super::memory::{MemoryAccountant, row_footprint};
 use super::row::RowCodec;
 use super::spill::{RowBuffer, RowBufferBuilder, RunHandle, RunReader, RunWriter, SpillScope};
-
-/// Assumed read-ahead per run during a merge. Used only to decide the merge
-/// fan-in, so an approximate value is fine; being conservative costs an extra
-/// pass at most.
-const MERGE_BUFFER_PER_RUN: u64 = 64 * 1024;
 
 /// Which side of the key specification a relation supplies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +66,7 @@ pub fn sort_rows(
     scope: &Arc<SpillScope>,
     label: &str,
     fingerprint: u64,
+    merge_buffer_bytes: u64,
 ) -> Result<SortOutput, JoinError> {
     let mut stats = SortStats::default();
     let mut resident: Vec<(JoinKey, Vec<u8>)> = Vec::new();
@@ -115,9 +101,7 @@ pub fn sort_rows(
         }
 
         // A single row larger than the whole budget is held anyway: refusing
-        // it would leave the operator unable to make any progress at all. It
-        // is deliberately not counted, so the accounting stays truthful about
-        // what was actually reserved.
+        // it would leave the operator unable to make any progress at all.
         if accepted {
             charged += footprint;
         }
@@ -144,7 +128,7 @@ pub fn sort_rows(
         budget.release(charged);
     }
 
-    let fan_in = merge_fan_in(budget.budget());
+    let fan_in = merge_fan_in(budget.budget(), merge_buffer_bytes);
 
     // Reduce to at most `fan_in` runs, so the final merge can be lazy.
     while runs.len() > fan_in {
@@ -171,9 +155,9 @@ fn entry_footprint(key: &JoinKey, row: &[u8]) -> u64 {
     row_footprint(row.len()) + key.byte_len() as u64 + 24
 }
 
-fn merge_fan_in(budget: u64) -> usize {
-    // At least a two-way merge, or the loop below would never terminate.
-    ((budget / MERGE_BUFFER_PER_RUN) as usize).max(2)
+fn merge_fan_in(budget: u64, buffer_bytes: u64) -> usize {
+    // At least two, or the reduction loop would never terminate.
+    ((budget / buffer_bytes.max(1)) as usize).max(2)
 }
 
 fn flush_run(

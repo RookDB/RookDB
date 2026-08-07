@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use storage_manager::catalog::{Catalog, Column, Database, Table};
 use storage_manager::executor::selection::{ComparisonOp, Predicate};
 use storage_manager::join::{
-    JoinBuilder, JoinGraph, JoinType, TableStatsCache, catalog_bridge, optimize,
+    JoinBuilder, JoinConfig, JoinGraph, JoinType, TableStatsCache, catalog_bridge, optimize,
 };
 use storage_manager::types::{DataType, DataValue};
 
@@ -261,7 +261,7 @@ fn hostile_conditions_do_not_panic_the_optimiser() {
         let condition = eq(col(name), col("b.k"));
         // Building the graph either resolves the name or refuses it.
         if let Ok(graph) = JoinGraph::build(relations.clone(), Some(&condition), &stats) {
-            let _ = optimize(&graph, 1024 * 1024);
+            let _ = optimize(&graph, &JoinConfig::with_work_memory(1024 * 1024));
         }
     }
 }

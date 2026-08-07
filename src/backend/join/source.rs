@@ -1,14 +1,8 @@
-//! Re-openable row sources.
+//! Row sources and streams.
 //!
-//! Nested-loop joins rescan their inner input once per outer block, so an
-//! input has to be more than a one-shot iterator. A [`RowSource`] can be
-//! opened repeatedly; each [`RowSource::open`] yields a fresh, independent
-//! stream.
-//!
-//! A source is described by a [`TableRef`] - a path, an alias, and a column
-//! list. The join subsystem never reads the catalog itself; the CLI resolves a
-//! catalog entry into a `TableRef` and hands it over. That is what keeps joins
-//! testable against scratch files with no global state.
+//! A `RowSource` can be opened repeatedly, which nested loops need for their
+//! inner side. Sources are described by a `TableRef`, never by a catalog entry
+//! - that is what keeps joins testable against scratch files.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,16 +45,9 @@ impl TableRef {
 pub trait RowSource {
     fn schema(&self) -> &Arc<OutputSchema>;
     fn open(&self) -> Result<Box<dyn RowStream>, JoinError>;
-    /// Rows produced by the most recent complete scan, when known. Used by the
-    /// planner only as a hint; correctness never depends on it.
-    fn estimated_rows(&self) -> Option<u64>;
 }
 
 /// A re-openable source over rows already held in memory or in a spill file.
-///
-/// Lets an operator hand a materialised partition to another operator - a
-/// nested loop over one oversized hash partition, for instance - without
-/// caring where those rows currently live.
 pub struct BufferSource {
     buffer: RowBuffer,
     schema: Arc<OutputSchema>,
@@ -87,10 +74,6 @@ impl RowSource for BufferSource {
             schema: Arc::clone(&self.schema),
             stats: new_stats(),
         }))
-    }
-
-    fn estimated_rows(&self) -> Option<u64> {
-        Some(self.buffer.len())
     }
 }
 
@@ -177,13 +160,6 @@ impl RowSource for TableSource {
             filter: self.filter.clone(),
             stats: new_stats(),
         }))
-    }
-
-    fn estimated_rows(&self) -> Option<u64> {
-        // Maintained by the heap on insert and delete, so it is exact and
-        // costs nothing to read - unlike counting slots, which over-counts
-        // rows that have been deleted but not yet compacted away.
-        Some(self.manager.header.total_tuples)
     }
 }
 

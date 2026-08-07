@@ -1,51 +1,25 @@
 //! Choosing the order of a multi-relation join.
 //!
-//! The optimiser searches only *connected* subsets of the join graph. That is
-//! the whole point: enumerating disconnected subsets means costing plans that
-//! form a Cartesian product in the middle of a query that never asked for one,
-//! and the previous implementation did exactly that because it kept its join
-//! conditions but never consulted them.
+//! Only connected subsets are searched, so a cross product never appears in the
+//! middle of a query that did not ask for one. Where the graph genuinely is
+//! disconnected, components are optimised separately and combined afterwards.
 //!
-//! Cross products are still reachable, but only where the query genuinely has
-//! no path between two relations. Then the graph is split into connected
-//! components, each optimised on its own, and the components are combined
-//! smallest-first - outside the search, where the cost is explicit.
-//!
-//! **Outer joins are barriers.** Reordering across one changes the answer, and
-//! doing it correctly needs conflict and eligibility sets that are easy to get
-//! subtly wrong. Only inner-join blocks are reordered; that limitation is
-//! deliberate and recorded in `docs/join/design-rationale.md`.
-//!
-//! **Interesting orders are not tracked.** A memo entry keeps the cheapest plan
-//! for a subset, not the cheapest plan per sort order, so a chain of
-//! sort-merge joins re-sorts rather than reusing an existing order. Every node
-//! is still costed across all applicable algorithms, which is the part that
-//! matters here - the previous implementation hardcoded block nested loop for
-//! every node it considered.
+//! Outer joins are reordering barriers, and interesting orders are not tracked;
+//! both are noted in `docs/join/design-rationale.md`.
 
 use std::collections::HashMap;
 
 use crate::executor::selection::{ComparisonOp, Expr, Predicate};
 
 use super::algorithm::JoinAlgorithm;
+use super::config::JoinConfig;
 use super::cost::{CostModel, SideEstimate};
 use super::error::JoinError;
 use super::key::resolve_key_class;
 use super::source::TableRef;
 use super::stats::TableStatsCache;
 
-/// Relations above which the exhaustive search is replaced by a greedy one.
-///
-/// The search is O(3^n) in subset splits; at eight relations that is a few
-/// thousand evaluations and instant, and it grows fast enough afterwards that
-/// a cutoff is not optional.
-pub const MAX_EXHAUSTIVE_RELATIONS: usize = 8;
-
 /// A conjunct together with the relations it mentions.
-///
-/// Execution needs this: a predicate can only be evaluated once every relation
-/// it names is present, so it is applied at the lowest node of the plan whose
-/// subtree covers its mask.
 #[derive(Debug, Clone)]
 pub struct Conjunct {
     /// Bit `i` set means relation `i` is mentioned.
@@ -493,14 +467,10 @@ impl OrderedPlan {
 }
 
 /// Cost a specific left-deep order, joining the relations as listed.
-///
-/// Exists so a caller - or a test - can ask what a particular order would
-/// cost, rather than only what the optimiser chose. Comparing the two is the
-/// check that the search is finding something worth finding.
 pub fn cost_of_order(
     graph: &JoinGraph,
     order: &[usize],
-    work_memory_bytes: u64,
+    config: &JoinConfig,
 ) -> Result<f64, JoinError> {
     if order.is_empty() {
         return Err(JoinError::plan(
@@ -520,7 +490,7 @@ pub fn cost_of_order(
         seen |= 1u64 << relation;
     }
 
-    let model = CostModel::new(work_memory_bytes);
+    let model = CostModel::new(config.work_memory_bytes);
     let mut current = leaf(graph, order[0]);
     let mut mask = 1u64 << order[0];
 
@@ -545,17 +515,26 @@ struct MemoEntry {
 }
 
 /// Choose an order for the relations in `graph`.
-pub fn optimize(graph: &JoinGraph, work_memory_bytes: u64) -> Result<OrderedPlan, JoinError> {
-    let model = CostModel::new(work_memory_bytes);
+pub fn optimize(graph: &JoinGraph, config: &JoinConfig) -> Result<OrderedPlan, JoinError> {
+    // Refuse an ordering for a join that could not execute anyway.
+    validate_edges(graph)?;
+
+    let model = CostModel::new(config.work_memory_bytes);
+    let max_exhaustive = config.tuning.max_exhaustive_relations;
     let components = graph.components();
 
     // Each connected component is optimised on its own. A cross product
-    // between two of them is unavoidable - the query relates them by nothing -
-    // so it is applied here, explicitly, rather than being discovered inside
-    // the search.
+    // between two of them is unavoidable - the query relates them by nothing
+    // - so it is applied here, explicitly, rather than being discovered
+    // inside the search.
     let mut solved: Vec<MemoEntry> = Vec::with_capacity(components.len());
     for component in &components {
-        solved.push(optimize_component(graph, *component, &model)?);
+        solved.push(optimize_component(
+            graph,
+            *component,
+            &model,
+            max_exhaustive,
+        )?);
     }
 
     // Combine components smallest-first, so the product grows as slowly as it
@@ -582,13 +561,14 @@ fn optimize_component(
     graph: &JoinGraph,
     component: u64,
     model: &CostModel,
+    max_exhaustive: usize,
 ) -> Result<MemoEntry, JoinError> {
     let relations = members(component);
     if relations.len() == 1 {
         return Ok(leaf(graph, relations[0]));
     }
 
-    if relations.len() <= MAX_EXHAUSTIVE_RELATIONS {
+    if relations.len() <= max_exhaustive {
         exhaustive(graph, component, model)
     } else {
         greedy(graph, component, model)
@@ -605,11 +585,6 @@ fn leaf(graph: &JoinGraph, relation: usize) -> MemoEntry {
 }
 
 /// Dynamic programming over connected subsets.
-///
-/// Bushy plans are considered, not only left-deep ones: with spilling hash
-/// joins, building two small intermediates and joining those can beat dragging
-/// one large intermediate through every step, and this engine has no
-/// parallelism for a left-deep pipeline to exploit.
 fn exhaustive(
     graph: &JoinGraph,
     component: u64,

@@ -1,13 +1,6 @@
-//! A small deterministic pseudo-random generator.
+//! A small deterministic generator.
 //!
-//! Statistics sample rows, and a sample driven by an unseeded generator makes
-//! every plan - and therefore every EXPLAIN - different between runs. This is
-//! seeded from a constant, so `ANALYZE` over the same data always produces the
-//! same histogram and the same estimates. That reproducibility is itself
-//! tested.
-//!
-//! SplitMix64 is used because it is a dozen lines, needs no dependency, and
-//! passes the statistical quality bar for reservoir sampling comfortably.
+//! Seeded, so sampling is reproducible and a failing case can be replayed.
 
 /// SplitMix64.
 #[derive(Debug, Clone)]

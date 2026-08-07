@@ -1,26 +1,14 @@
-//! Hash join: in-memory, hybrid and Grace, as one operator.
+//! Hash join: in-memory, hybrid and Grace in one operator.
 //!
-//! Which of the three it behaves as is a runtime consequence of how much of
-//! the build side fits in the memory budget, not a separate algorithm the
-//! planner picks between:
+//! Which one it behaves as depends on how much of the build side fits. On the
+//! first over-budget insert the rows already built are repartitioned in place,
+//! keeping partition 0 resident, so the build input is never re-read. A
+//! partition that still does not fit is repartitioned again with the depth
+//! mixed into the hash.
 //!
-//! * everything fits - one resident hash table, one pass over each input;
-//! * it does not - the rows already built are repartitioned in place, the
-//!   first partition stays resident, and the rest spill. Probe rows belonging
-//!   to the resident partition are joined as they arrive rather than written
-//!   out and read back, which is the whole point of the hybrid form;
-//! * a partition still does not fit - it is repartitioned again, up to a
-//!   depth limit.
-//!
-//! Past that limit the partition is loaded anyway. A partition that will not
-//! shrink is one where a single key dominates it, and no amount of further
-//! hashing separates rows that share a key. That is recorded in
-//! `ExecStats::oversized_partitions` so the adaptive operator can see it and
-//! switch to a nested loop, which is the only strategy that handles it.
-//!
-//! The build side is the *right* input. Unmatched probe rows are therefore
-//! unmatched left rows and stream out immediately; unmatched build rows are
-//! known only once a partition's probe side is exhausted.
+//! Past the depth limit it is loaded anyway and counted in
+//! `oversized_partitions` - a partition that will not shrink is one where a
+//! single key dominates, and hashing cannot split a key.
 
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -29,6 +17,7 @@ use std::sync::Arc;
 use crate::types::value::DataValue;
 
 use super::super::algorithm::{JoinType, ValidatedJoinSpec};
+use super::super::config::JoinTuning;
 use super::super::error::JoinError;
 use super::super::key::JoinKey;
 use super::super::memory::{HASH_ENTRY_OVERHEAD, MemoryAccountant, row_footprint};
@@ -38,18 +27,7 @@ use super::super::source::RowSource;
 use super::super::spill::{RowBuffer, RowBufferBuilder, RunHandle, RunWriter, SpillScope};
 use super::{ExecStats, MatchEvaluator, RowStream, StatsHandle, new_stats};
 
-/// Partitions created at each level of partitioning.
-const FAN_OUT: usize = 16;
-
-/// Beyond this, further partitioning cannot help: rows that will not separate
-/// share a key, and hashing does not split a key.
-const MAX_REPARTITION_DEPTH: u32 = 3;
-
 /// Chooses a partition for a key at a given recursion depth.
-///
-/// The depth is mixed into the hash so repartitioning actually redistributes;
-/// hashing the same way again would put every row of an oversized partition
-/// straight back into one partition.
 fn partition_of(key: &JoinKey, depth: u32, count: usize) -> usize {
     if count <= 1 {
         return 0;
@@ -148,10 +126,6 @@ enum Stage {
 pub struct HashJoin {
     join_type: JoinType,
     /// Whether the probe input is the join's declared *left* relation.
-    ///
-    /// The adaptive operator may build from whichever side turns out smaller,
-    /// so this decides which half of an output row each input fills. Output
-    /// column order never changes; only which input feeds which half does.
     probe_is_left: bool,
     evaluator: MatchEvaluator,
     builder: RowBuilder,
@@ -162,6 +136,7 @@ pub struct HashJoin {
     probe_fingerprint: u64,
     budget: Rc<MemoryAccountant>,
     scope: Arc<SpillScope>,
+    tuning: JoinTuning,
 
     probe_input: Option<Box<dyn RowStream>>,
     build_input: Option<Box<dyn RowSource>>,
@@ -188,16 +163,14 @@ impl HashJoin {
         schema: Arc<OutputSchema>,
         budget: Rc<MemoryAccountant>,
         scope: Arc<SpillScope>,
+        tuning: JoinTuning,
     ) -> Self {
-        Self::with_roles(spec, evaluator, probe, build, schema, budget, scope, true)
+        Self::with_roles(
+            spec, evaluator, probe, build, schema, budget, scope, tuning, true,
+        )
     }
 
     /// Build from a chosen side.
-    ///
-    /// `probe_is_left` false means the *right* relation is being probed and the
-    /// left is in the hash table. SEMI and ANTI are not reversible - they are
-    /// defined in terms of left rows - so the adaptive operator never asks for
-    /// it, and the assertion below records that.
     #[allow(clippy::too_many_arguments)]
     pub fn with_roles(
         spec: &ValidatedJoinSpec,
@@ -207,6 +180,7 @@ impl HashJoin {
         schema: Arc<OutputSchema>,
         budget: Rc<MemoryAccountant>,
         scope: Arc<SpillScope>,
+        tuning: JoinTuning,
         probe_is_left: bool,
     ) -> Self {
         debug_assert!(
@@ -230,6 +204,7 @@ impl HashJoin {
             probe_fingerprint,
             budget,
             scope,
+            tuning,
             probe_input: Some(probe),
             build_input: Some(build),
             stage: Stage::NotStarted,
@@ -411,8 +386,8 @@ impl HashJoin {
     /// resident. This is the single-pass transition to a hybrid join: the
     /// build input is never re-read.
     fn split_build(&mut self, table: &mut HashTable) -> Result<Vec<RunWriter>, JoinError> {
-        let mut writers = Vec::with_capacity(FAN_OUT);
-        for index in 0..FAN_OUT {
+        let mut writers = Vec::with_capacity(self.tuning.hash_fan_out);
+        for index in 0..self.tuning.hash_fan_out {
             writers.push(RunWriter::create(
                 &self.scope,
                 &format!("build-p{index:02}"),
@@ -426,7 +401,7 @@ impl HashJoin {
         table.release(&self.budget);
 
         for (key, indices) in buckets {
-            let partition = partition_of(&key, 0, FAN_OUT);
+            let partition = partition_of(&key, 0, self.tuning.hash_fan_out);
             for index in indices {
                 let row = &rows[index as usize];
                 if partition == 0 {
@@ -597,7 +572,7 @@ impl HashJoin {
             }
         }
 
-        if overflowed && pair.depth < MAX_REPARTITION_DEPTH {
+        if overflowed && pair.depth < self.tuning.max_repartition_depth {
             table.release(&self.budget);
             self.repartition(pair)?;
             return Ok(Stage::NextPartition);
@@ -626,7 +601,7 @@ impl HashJoin {
         }))
     }
 
-    /// Split one oversized pair into `FAN_OUT` smaller pairs at the next
+    /// Split one oversized pair into `self.tuning.hash_fan_out` smaller pairs at the next
     /// depth.
     fn repartition(&mut self, pair: PartitionPair) -> Result<(), JoinError> {
         let depth = pair.depth + 1;
@@ -635,9 +610,9 @@ impl HashJoin {
             stats.repartition_depth = stats.repartition_depth.max(depth);
         }
 
-        let mut build_writers = Vec::with_capacity(FAN_OUT);
-        let mut probe_writers = Vec::with_capacity(FAN_OUT);
-        for index in 0..FAN_OUT {
+        let mut build_writers = Vec::with_capacity(self.tuning.hash_fan_out);
+        let mut probe_writers = Vec::with_capacity(self.tuning.hash_fan_out);
+        for index in 0..self.tuning.hash_fan_out {
             build_writers.push(RunWriter::create(
                 &self.scope,
                 &format!("build-d{depth}p{index:02}"),
@@ -656,7 +631,7 @@ impl HashJoin {
             let Some(key) = self.build_key(&self.build_values)? else {
                 continue;
             };
-            build_writers[partition_of(&key, depth, FAN_OUT)].write_row(&row)?;
+            build_writers[partition_of(&key, depth, self.tuning.hash_fan_out)].write_row(&row)?;
         }
 
         for row in pair.probe.reader()? {
@@ -665,7 +640,7 @@ impl HashJoin {
             let Some(key) = self.probe_key(&self.probe_values)? else {
                 continue;
             };
-            probe_writers[partition_of(&key, depth, FAN_OUT)].write_row(&row)?;
+            probe_writers[partition_of(&key, depth, self.tuning.hash_fan_out)].write_row(&row)?;
         }
 
         for (build, probe) in build_writers.into_iter().zip(probe_writers) {

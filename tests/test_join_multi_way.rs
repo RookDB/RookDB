@@ -32,9 +32,8 @@ fn run(
 ) -> Vec<Vec<Option<DataValue>>> {
     let graph = JoinGraph::build(relations, condition, &TableStatsCache::new())
         .expect("graph should build");
-    let plan = optimize(&graph, work_memory).expect("should order");
-
     let config = JoinConfig::with_work_memory(work_memory).spill_root(scratch.path());
+    let plan = optimize(&graph, &config).expect("should order");
     let mut stream = execute_ordered(&graph, &plan, &config).expect("should execute");
 
     let codec = RowCodec::new(stream.schema().types.clone());
@@ -52,8 +51,8 @@ fn column_names(
     scratch: &TempDb,
 ) -> Vec<String> {
     let graph = JoinGraph::build(relations, condition, &TableStatsCache::new()).expect("graph");
-    let plan = optimize(&graph, 4 * 1024 * 1024).expect("order");
     let config = JoinConfig::with_work_memory(4 * 1024 * 1024).spill_root(scratch.path());
+    let plan = optimize(&graph, &config).expect("order");
     let stream = execute_ordered(&graph, &plan, &config).expect("execute");
     stream
         .schema()
@@ -487,8 +486,8 @@ fn intermediates_leave_no_files_behind() {
         &TableStatsCache::new(),
     )
     .expect("graph");
-    let plan = optimize(&graph, 8 * 1024).expect("order");
     let config = JoinConfig::with_work_memory(8 * 1024).spill_root(&spill_root);
+    let plan = optimize(&graph, &config).expect("order");
 
     {
         let mut stream = execute_ordered(&graph, &plan, &config).expect("execute");
@@ -529,4 +528,25 @@ fn a_single_relation_is_scanned() {
     let actual = run(vec![tables[0].table_ref()], None, 4 * 1024 * 1024, &db);
     assert_eq!(actual.len(), 4);
     assert_eq!(actual[0].len(), 2);
+}
+
+/// A single relation with a filter on it: there is no join node to evaluate
+/// the condition at, so it has to be applied after the plan.
+#[test]
+fn a_single_relation_with_a_filter_is_filtered() {
+    let db = TempDb::new();
+    let tables = chain(&db);
+
+    let actual = run(
+        vec![tables[0].table_ref()],
+        Some(&lt(col("a.id"), col("a.v"))),
+        4 * 1024 * 1024,
+        &db,
+    );
+
+    // Every non-NULL row has id < v; the NULL-id row cannot compare.
+    assert_eq!(actual.len(), 3, "got {actual:#?}");
+    for row in &actual {
+        assert!(row[0].is_some());
+    }
 }

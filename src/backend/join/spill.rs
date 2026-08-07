@@ -1,24 +1,8 @@
 //! Spilling rows to disk.
 //!
-//! Three properties matter, and each fixes a defect in the previous
-//! implementation:
-//!
-//! * **Length framing.** `deserialize_nullable_row` derives its last
-//!   variable-length payload from the length of the slice it is given, so a
-//!   row read back out of a padded buffer decodes incorrectly. Every row is
-//!   therefore written with an explicit length.
-//! * **Per-operator directories.** Each operator gets its own directory, named
-//!   with the process id and a process-global counter, so the two sides of a
-//!   self-join cannot collide. Cleanup removes only that directory and never
-//!   enumerates the root, so one operator can no longer delete another's
-//!   files.
-//! * **Cleanup by `Drop`.** It cannot be forgotten, and it runs while the
-//!   stack unwinds, so a panic mid-join leaves nothing behind.
-//!
-//! Rows are written as plain framed records rather than into a heap file. A
-//! heap file would add a header page and a free-space-map fork per partition,
-//! and charge an FSM search plus a header rewrite per row, to buy random
-//! access and space reuse that a spill file never needs.
+//! Rows are length-framed, because `deserialize_nullable_row` needs an exactly
+//! sized slice. Each operator gets its own directory, removed by `Drop` - so a
+//! self-join's two sides cannot collide and a panic leaves nothing behind.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -46,10 +30,6 @@ fn epoch_seconds() -> u64 {
 }
 
 /// A directory owned by one operator, removed when the last reference drops.
-///
-/// `RunHandle`s hold an `Arc` to the scope, so the directory outlives any
-/// reader still in flight - a partition cannot be deleted while another is
-/// still being read.
 #[derive(Debug)]
 pub struct SpillScope {
     dir: PathBuf,
@@ -284,10 +264,6 @@ impl Iterator for RunReader {
 // ── Buffers that spill when they outgrow their budget ────────────────────────
 
 /// Accumulates rows in memory, moving to a run file once the budget is spent.
-///
-/// This is what stops a single hot key from being unbounded: a sort-merge
-/// join's duplicate group, a hash partition, and the NULL-keyed rows a sort
-/// sets aside all use it.
 pub struct RowBufferBuilder {
     scope: Arc<SpillScope>,
     label: String,
@@ -399,12 +375,6 @@ impl RowBuffer {
 
 /// Remove spill directories left behind by processes that are no longer
 /// running.
-///
-/// `Drop` covers normal exits and panics; this covers the rest - a `SIGKILL`,
-/// a power loss, `panic = "abort"`. It only ever removes directories whose
-/// names it recognises, and only when the owning process is gone *and* the
-/// directory is older than `min_age`, so it cannot race a process that has
-/// just started or trip over a recycled process id.
 pub fn sweep_orphans(root: &Path, min_age: Duration) -> Result<usize, JoinError> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
@@ -434,7 +404,8 @@ pub fn sweep_orphans(root: &Path, min_age: Duration) -> Result<usize, JoinError>
             continue;
         };
 
-        if pid == own_pid || process_is_alive(pid) {
+        // `None` means this platform cannot tell, so age alone decides.
+        if pid == own_pid || process_is_alive(pid) == Some(true) {
             continue;
         }
         if now.saturating_sub(created) < min_age.as_secs() {
@@ -464,14 +435,12 @@ fn parse_scope_name(name: &str) -> Option<(u32, u64)> {
 }
 
 #[cfg(target_os = "linux")]
-fn process_is_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+fn process_is_alive(pid: u32) -> Option<bool> {
+    Some(Path::new(&format!("/proc/{pid}")).exists())
 }
 
-/// Without a way to ask, assume the process is alive and let the age check be
-/// the only criterion. Reclaiming space late is better than deleting a running
-/// query's spill files.
+/// No way to ask here, so the age check is the only criterion.
 #[cfg(not(target_os = "linux"))]
-fn process_is_alive(_pid: u32) -> bool {
-    true
+fn process_is_alive(_pid: u32) -> Option<bool> {
+    None
 }

@@ -28,6 +28,11 @@ fn text(value: &str) -> Option<DataValue> {
 
 // ── HyperLogLog ──────────────────────────────────────────────────────────────
 
+/// Explicit limits, so ambient `ROOKDB_JOIN_*` settings cannot change what
+/// these tests assert.
+const BUCKETS: usize = 64;
+const SAMPLE_ROWS: usize = 20_000;
+
 fn encoded_int(value: i64) -> Vec<u8> {
     encode_value(KeyClass::Integer, &DataValue::BigInt(value)).expect("encode")
 }
@@ -104,13 +109,13 @@ fn merging_sketches_unions_their_values() {
 
 #[test]
 fn histogram_boundaries_are_monotone() {
-    let mut sampler = ReservoirSampler::new();
+    let mut sampler = ReservoirSampler::with_limits(SAMPLE_ROWS, BUCKETS);
     for value in 0..5_000i64 {
         sampler.add(&encoded_int(value));
     }
     let histogram = sampler.finish().expect("enough rows for a histogram");
 
-    assert_eq!(histogram.buckets(), 64);
+    assert_eq!(histogram.buckets(), BUCKETS);
     for pair in histogram.bounds.windows(2) {
         assert!(
             pair[0] <= pair[1],
@@ -122,9 +127,23 @@ fn histogram_boundaries_are_monotone() {
 
 /// Too few rows means no histogram: boundaries drawn from a handful of values
 /// would be worse than admitting ignorance.
+/// `new()` takes its limits from configuration, so an override reaches it.
+#[test]
+fn a_default_sampler_follows_the_configured_bucket_count() {
+    let configured = storage_manager::join::config::JoinTuning::from_env().histogram_buckets;
+
+    let mut sampler = ReservoirSampler::new();
+    for value in 0..(configured as i64 * 100) {
+        sampler.add(&encoded_int(value));
+    }
+
+    let histogram = sampler.finish().expect("enough rows");
+    assert_eq!(histogram.buckets(), configured);
+}
+
 #[test]
 fn too_few_rows_yield_no_histogram() {
-    let mut sampler = ReservoirSampler::new();
+    let mut sampler = ReservoirSampler::with_limits(SAMPLE_ROWS, BUCKETS);
     for value in 0..10i64 {
         sampler.add(&encoded_int(value));
     }
@@ -133,7 +152,7 @@ fn too_few_rows_yield_no_histogram() {
 
 #[test]
 fn the_fraction_below_a_value_grows_with_the_value() {
-    let mut sampler = ReservoirSampler::new();
+    let mut sampler = ReservoirSampler::with_limits(SAMPLE_ROWS, BUCKETS);
     for value in 0..5_000i64 {
         sampler.add(&encoded_int(value));
     }
@@ -153,8 +172,8 @@ fn the_fraction_below_a_value_grows_with_the_value() {
 /// upper one.
 #[test]
 fn convolving_disjoint_histograms_is_decisive() {
-    let mut low = ReservoirSampler::new();
-    let mut high = ReservoirSampler::new();
+    let mut low = ReservoirSampler::with_limits(SAMPLE_ROWS, BUCKETS);
+    let mut high = ReservoirSampler::with_limits(SAMPLE_ROWS, BUCKETS);
     for value in 0..2_000i64 {
         low.add(&encoded_int(value));
         high.add(&encoded_int(value + 1_000_000));
@@ -177,7 +196,7 @@ fn convolving_disjoint_histograms_is_decisive() {
 #[test]
 fn sampling_is_deterministic() {
     let build = || {
-        let mut sampler = ReservoirSampler::new();
+        let mut sampler = ReservoirSampler::with_limits(SAMPLE_ROWS, BUCKETS);
         for value in 0..50_000i64 {
             sampler.add(&encoded_int(value.wrapping_mul(7919)));
         }

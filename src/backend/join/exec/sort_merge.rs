@@ -1,19 +1,8 @@
 //! Sort-merge join.
 //!
-//! Both inputs are sorted by join key, then walked in step. The subtlety is
-//! duplicate keys on both sides: every left row of a group must see every
-//! right row of it, so the right group is buffered and replayed once per left
-//! row.
-//!
-//! That buffer is the thing that has to be bounded. The previous
-//! implementation held the group in a plain `Vec`, so a single hot key larger
-//! than memory took the process down. Here it is a spillable row buffer, which
-//! moves to disk when the budget is spent and replays from there. Only one
-//! side is ever buffered - left rows stream through the group one at a time.
-//!
-//! Rows whose key is NULL never enter the merge at all. They cannot match, so
-//! ordering them against real keys would be meaningless; the sort sets them
-//! aside and they are emitted here as unmatched if the join type wants them.
+//! Both sides are sorted, then walked in step. The right-hand group of a
+//! duplicate key is buffered and replayed per left row; that buffer spills if
+//! it outgrows the budget, so one hot key cannot exhaust memory.
 
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -22,6 +11,7 @@ use std::sync::Arc;
 use crate::types::value::DataValue;
 
 use super::super::algorithm::{JoinType, ValidatedJoinSpec};
+use super::super::config::JoinTuning;
 use super::super::error::JoinError;
 use super::super::key::JoinKey;
 use super::super::memory::MemoryAccountant;
@@ -75,6 +65,7 @@ pub struct SortMergeJoin {
     right_codec: RowCodec,
     budget: Rc<MemoryAccountant>,
     scope: Arc<SpillScope>,
+    tuning: JoinTuning,
 
     left_input: Option<Box<dyn RowStream>>,
     right_input: Option<Box<dyn RowSource>>,
@@ -100,6 +91,7 @@ impl SortMergeJoin {
         schema: Arc<OutputSchema>,
         budget: Rc<MemoryAccountant>,
         scope: Arc<SpillScope>,
+        tuning: JoinTuning,
     ) -> Self {
         let left_codec = RowCodec::new(left.schema().types.clone());
         let right_codec = RowCodec::new(right.schema().types.clone());
@@ -113,6 +105,7 @@ impl SortMergeJoin {
             right_codec,
             budget,
             scope,
+            tuning,
             left_input: Some(left),
             right_input: Some(right),
             left: None,
@@ -149,6 +142,7 @@ impl SortMergeJoin {
             &self.scope,
             "smj-left",
             left_fingerprint,
+            self.tuning.merge_buffer_bytes,
         )?;
 
         let mut right_iter = right_source.open()?;
@@ -161,6 +155,7 @@ impl SortMergeJoin {
             &self.scope,
             "smj-right",
             right_fingerprint,
+            self.tuning.merge_buffer_bytes,
         )?;
 
         {

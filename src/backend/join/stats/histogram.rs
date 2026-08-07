@@ -1,24 +1,13 @@
-//! Equi-depth histograms over key-encoded column values.
+//! Equi-depth histograms over key-encoded values.
 //!
-//! Used for range selectivity - `l.a < r.b` - where a distinct-value count
-//! says nothing useful. Two histograms are convolved bucket-pair by
-//! bucket-pair, which is cheap at 64 buckets a side and vastly better than the
-//! hardcoded constant it replaces.
-//!
-//! Boundaries are drawn from a reservoir sample rather than the whole column,
-//! so building one costs a bounded amount of memory whatever the table's size.
-//! The sample is seeded, so the boundaries - and therefore every estimate
-//! derived from them - are reproducible.
+//! Used for range selectivity, where a distinct count says nothing useful.
+//! Boundaries come from a bounded, seeded reservoir sample, so ANALYZE is
+//! reproducible.
 
 use serde::{Deserialize, Serialize};
 
+use super::super::config::JoinTuning;
 use super::rng::Rng;
-
-/// Values retained for boundary selection.
-pub const SAMPLE_LIMIT: usize = 20_000;
-
-/// Buckets in a finished histogram.
-pub const BUCKETS: usize = 64;
 
 /// Seed for reservoir sampling. Fixed so ANALYZE is deterministic.
 const SAMPLE_SEED: u64 = 0x5EED_A15D_0000_0001;
@@ -29,6 +18,8 @@ pub struct ReservoirSampler {
     sample: Vec<Vec<u8>>,
     seen: u64,
     rng: Rng,
+    limit: usize,
+    buckets: usize,
 }
 
 impl Default for ReservoirSampler {
@@ -38,23 +29,31 @@ impl Default for ReservoirSampler {
 }
 
 impl ReservoirSampler {
+    /// Uses the configured sample size and bucket count.
     pub fn new() -> Self {
+        let tuning = JoinTuning::from_env();
+        Self::with_limits(tuning.histogram_sample_rows, tuning.histogram_buckets)
+    }
+
+    pub fn with_limits(limit: usize, buckets: usize) -> Self {
         Self {
             sample: Vec::new(),
             seen: 0,
             rng: Rng::new(SAMPLE_SEED),
+            limit: limit.max(buckets),
+            buckets: buckets.max(2),
         }
     }
 
     /// Algorithm R: every value seen has an equal chance of being retained.
     pub fn add(&mut self, encoded: &[u8]) {
         self.seen += 1;
-        if self.sample.len() < SAMPLE_LIMIT {
+        if self.sample.len() < self.limit {
             self.sample.push(encoded.to_vec());
             return;
         }
         let slot = self.rng.below(self.seen);
-        if slot < SAMPLE_LIMIT as u64 {
+        if slot < self.limit as u64 {
             self.sample[slot as usize] = encoded.to_vec();
         }
     }
@@ -64,19 +63,15 @@ impl ReservoirSampler {
     }
 
     /// Cut the sample into equi-depth buckets.
-    ///
-    /// Returns `None` when there is too little data for boundaries to mean
-    /// anything; callers fall back to a default selectivity rather than
-    /// trusting a histogram built from three rows.
     pub fn finish(mut self) -> Option<Histogram> {
-        if self.sample.len() < BUCKETS {
+        if self.sample.len() < self.buckets {
             return None;
         }
         self.sample.sort();
 
-        let per_bucket = self.sample.len() as f64 / BUCKETS as f64;
-        let mut bounds = Vec::with_capacity(BUCKETS);
-        for bucket in 1..=BUCKETS {
+        let per_bucket = self.sample.len() as f64 / self.buckets as f64;
+        let mut bounds = Vec::with_capacity(self.buckets);
+        for bucket in 1..=self.buckets {
             // Upper bound of each bucket, by sample position.
             let position = ((bucket as f64 * per_bucket).ceil() as usize)
                 .saturating_sub(1)
@@ -126,9 +121,6 @@ impl Histogram {
 
     /// Fraction of this histogram's rows that are strictly below a randomly
     /// chosen row of `other`, assuming the two columns are independent.
-    ///
-    /// Each of the `buckets × buckets` pairs contributes its share: wholly
-    /// below counts fully, wholly above not at all, overlapping counts half.
     pub fn fraction_less_than(&self, other: &Histogram) -> f64 {
         if self.bounds.is_empty() || other.bounds.is_empty() {
             return 1.0 / 3.0;

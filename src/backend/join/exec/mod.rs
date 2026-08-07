@@ -1,10 +1,7 @@
-//! The execution layer: what a join operator is, and what it means for two
-//! rows to join.
+//! The execution layer.
 //!
-//! Operators are plain `Iterator`s over serialized rows. That choice buys
-//! composition with the engine's existing `filter_iter`, and it makes cleanup
-//! `Drop`'s job rather than a `close()` a caller can forget - which matters
-//! once operators own spill directories.
+//! Operators are plain `Iterator`s, so `filter_iter` composes with them and
+//! cleanup is `Drop`'s job rather than a `close()` a caller can forget.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -80,12 +77,6 @@ pub trait RowStream: Iterator<Item = Result<Vec<u8>, JoinError>> {
 }
 
 /// The single definition of "these two rows join".
-///
-/// Every operator uses this, so a hash join, a sort-merge join and a nested
-/// loop cannot disagree about what a match is. Equality comes from the key
-/// encoding - the same bytes the hash table and the merge comparator use - so
-/// a NULL key never matches, in any algorithm, including after a row has been
-/// written to and read back from a spill file.
 #[derive(Debug, Clone)]
 pub struct MatchEvaluator {
     keys: KeySpec,

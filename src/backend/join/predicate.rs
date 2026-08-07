@@ -1,14 +1,9 @@
-//! Join conditions: column resolution, conjunct splitting, and two-relation
-//! evaluation under SQL three-valued logic.
+//! Join conditions.
 //!
-//! The predicate representation is `executor::selection`'s - the same `Expr`,
-//! `Predicate`, `ComparisonOp` and `TriValue` the rest of the engine uses.
-//! What this module adds is a resolver that binds column references to a
-//! *side*, and an evaluator that takes two rows instead of one.
-//!
-//! Splitting a condition into equijoin keys plus a residual is what makes
-//! multi-predicate and mixed equi/non-equi joins correct; see
-//! `docs/join/design-rationale.md`.
+//! Reuses `executor::selection`'s `Predicate` and `Expr`, adding a resolver
+//! that binds columns to a side and an evaluator that takes two rows.
+//! `split_conjuncts` pulls the equijoin keys out of a condition and leaves the
+//! rest as a residual.
 
 use regex::Regex;
 
@@ -34,10 +29,6 @@ pub struct ColumnBinding {
 }
 
 /// Binds column names in a join condition to a side and an index.
-///
-/// Qualified names (`e.id`) bind by alias. An unqualified name that exists on
-/// both sides is an error rather than a silent choice - picking one is how a
-/// self-join ends up comparing a column to itself.
 #[derive(Debug)]
 pub struct SideResolver<'a> {
     left: &'a RelationSchema,
@@ -348,12 +339,6 @@ fn compile_like(pattern: &str) -> Result<Regex, JoinError> {
 // ── Conjunct splitting ───────────────────────────────────────────────────────
 
 /// The result of decomposing a join condition.
-///
-/// `keys` drives hash, sort-merge and index joins. `residual` is everything
-/// those algorithms cannot express as a key and must still check per candidate
-/// pair; its column indices are in the concatenated `left ++ right` space.
-/// `left_local` and `right_local` touch one side only, are indexed in that
-/// side's own space, and are safe to push into that side's scan.
 #[derive(Debug, Clone, Default)]
 pub struct PredicateSplit {
     pub keys: KeySpec,
@@ -363,21 +348,6 @@ pub struct PredicateSplit {
 }
 
 /// Decompose a join condition into keys, residual, and per-side filters.
-///
-/// Every top-level `=` between opposite sides becomes a key component, with
-/// its orientation normalised so the left column always comes first. No
-/// executor ever sees an unnormalised condition, and no executor has to guess
-/// which conjunct is "the" join key.
-///
-/// Equality under a `NOT`, inside an `OR`, or over an arithmetic expression is
-/// *not* hoisted: those are not equijoins and hoisting them would change the
-/// result.
-///
-/// The join type matters because it decides whether a single-relation conjunct
-/// may be pushed into that relation's scan. On the row-preserving side of an
-/// outer join it may not, so such a conjunct is emitted into `residual`
-/// instead - already rewritten into the concatenated index space, since that
-/// is the only space the residual evaluator understands.
 pub fn split_conjuncts(
     condition: Option<&Predicate>,
     resolver: &SideResolver,

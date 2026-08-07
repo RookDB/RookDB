@@ -1,24 +1,11 @@
-//! Table and column statistics for the join planner.
+//! Table and column statistics.
 //!
-//! Two decisions shape this module.
+//! Row counts come from the heap header, which is exact. Column values are
+//! measured in join key encoding, so a distinct count counts the equivalence
+//! classes the join actually matches on.
 //!
-//! **Row counts come from the heap header, not from a page scan.**
-//! `HeaderMetadata::total_tuples` is maintained on insert and delete, so it is
-//! exact and free. The engine's own `collect_table_statistics` counts slot
-//! entries and does not skip dead ones, so it over-reports after a DELETE
-//! until the table is compacted; it is used here only for tuple widths, and
-//! only behind the cache.
-//!
-//! **Column values are measured in join key encoding.** A distinct-value count
-//! is only useful for join selectivity if it counts the equivalence classes
-//! the join actually matches on. Encoding first means two CHARs differing in
-//! trailing spaces count once, exactly as the join treats them, so estimates
-//! and execution cannot drift apart.
-//!
-//! Statistics are never refreshed implicitly. A stale sidecar is detected by
-//! its validity stamp and the planner degrades to what it can prove, reporting
-//! which - see [`StatsConfidence`]. Silently planning from stale numbers is
-//! worse than planning from admitted ignorance.
+//! Statistics are never refreshed implicitly; a stale sidecar is detected by its
+//! stamp and the planner degrades to what it can prove.
 
 pub mod histogram;
 pub mod hll;
@@ -36,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::heap::HeapManager;
 use crate::types::value::DataValue;
 
+use super::config::JoinTuning;
 use super::error::JoinError;
 use super::key::{KeyClass, encode_value};
 use super::row::RowCodec;
@@ -46,12 +34,10 @@ use hll::HyperLogLog;
 /// Extension of a table's statistics sidecar.
 pub const STATS_EXTENSION: &str = "stats.json";
 
-/// Assumed row count when a table cannot be read at all.
-const DEFAULT_ROWS: u64 = 1_000;
-/// Assumed data pages in the same case.
-const DEFAULT_PAGES: u32 = 10;
-/// Assumed row width in the same case.
-const DEFAULT_ROW_BYTES: f64 = 100.0;
+/// Distinct values guessed for an unanalyzed column, as `rows^exponent`.
+/// Sub-linear, so it neither claims every value is unique nor that they all
+/// collide.
+const UNANALYZED_DISTINCT_EXPONENT: f64 = 0.75;
 
 /// How much the planner actually knows about a relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,11 +138,6 @@ impl TableStats {
     pub fn column(&self, index: usize) -> Option<&ColumnStats> {
         self.columns.get(index)
     }
-
-    /// Bytes the relation occupies, as the cost model sees it.
-    pub fn total_bytes(&self) -> u64 {
-        (self.rows as f64 * self.avg_row_bytes).round().max(0.0) as u64
-    }
 }
 
 /// Path of a relation's statistics sidecar.
@@ -182,9 +163,7 @@ pub fn analyze_table(table: &TableRef) -> Result<TableStats, JoinError> {
     })?;
 
     // The stamp is read *after* opening: `HeapManager::open` synchronises the
-    // header and so may rewrite the file. A stamp taken beforehand would
-    // describe a state that no longer exists, and every later lookup would
-    // decide these statistics were stale.
+    // header and so may rewrite the file.
     let stamp = ValidityStamp::read(&table.path)?;
 
     let types: Vec<_> = table.columns.iter().map(|c| c.data_type.clone()).collect();
@@ -301,9 +280,6 @@ struct CacheEntry {
 
 /// Per-process statistics cache, keyed by relation path and validated by
 /// stamp.
-///
-/// Without it the planner would re-read a table's pages for every candidate
-/// plan it costs.
 #[derive(Debug, Default)]
 pub struct TableStatsCache {
     entries: RefCell<HashMap<PathBuf, CacheEntry>>,
@@ -367,11 +343,6 @@ impl TableStatsCache {
 }
 
 /// Exact cardinality and page counts, with per-column values inferred.
-///
-/// The distinct-value guess is `n^0.75`, the usual default for an unanalyzed
-/// column: it grows with the table but sub-linearly, so it neither claims
-/// every value is unique nor that they all collide. A column the catalog
-/// declares unique is known to have exactly `n`.
 fn header_only_stats(table: &TableRef, stamp: ValidityStamp) -> Result<TableStats, JoinError> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -381,7 +352,8 @@ fn header_only_stats(table: &TableRef, stamp: ValidityStamp) -> Result<TableStat
         .map_err(|e| JoinError::Io(format!("cannot read header: {e}")))?;
 
     let rows = header.total_tuples;
-    let avg_row_bytes = measure_row_width(&mut file).unwrap_or(DEFAULT_ROW_BYTES);
+    let avg_row_bytes =
+        measure_row_width(&mut file).unwrap_or_else(|| JoinTuning::from_env().fallback_row_bytes);
 
     let columns = table
         .columns
@@ -390,7 +362,10 @@ fn header_only_stats(table: &TableRef, stamp: ValidityStamp) -> Result<TableStat
             let distinct = if column.constraints.unique {
                 rows
             } else {
-                (rows as f64).powf(0.75).round().max(1.0) as u64
+                (rows as f64)
+                    .powf(UNANALYZED_DISTINCT_EXPONENT)
+                    .round()
+                    .max(1.0) as u64
             };
             ColumnStats {
                 name: column.name.clone(),
@@ -425,22 +400,25 @@ fn measure_row_width(file: &mut File) -> Option<f64> {
 }
 
 fn default_stats(table: &TableRef) -> TableStats {
+    let tuning = JoinTuning::from_env();
     TableStats {
         stamp: ValidityStamp {
             file_len: 0,
             modified_secs: 0,
             total_tuples: 0,
         },
-        rows: DEFAULT_ROWS,
-        data_pages: DEFAULT_PAGES,
-        avg_row_bytes: DEFAULT_ROW_BYTES,
+        rows: tuning.fallback_rows,
+        data_pages: tuning.fallback_pages,
+        avg_row_bytes: tuning.fallback_row_bytes,
         columns: table
             .columns
             .iter()
             .map(|column| ColumnStats {
                 name: column.name.clone(),
                 null_fraction: 0.0,
-                distinct: (DEFAULT_ROWS as f64).powf(0.75).round() as u64,
+                distinct: (tuning.fallback_rows as f64)
+                    .powf(UNANALYZED_DISTINCT_EXPONENT)
+                    .round() as u64,
                 min: None,
                 max: None,
                 histogram: None,

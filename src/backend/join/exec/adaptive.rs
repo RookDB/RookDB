@@ -1,48 +1,23 @@
 //! Adaptive join.
 //!
-//! Two decisions are made from what the data turns out to be, rather than from
-//! what the statistics predicted:
-//!
-//! **Which side to build from.** Both inputs are read a little way in
-//! alternation; whichever reaches its end first is *provably* the smaller, and
-//! becomes the hash table. This does not depend on distinct-value estimates,
-//! row counts, or an ANALYZE having been run - it is a measurement. Reversing
-//! the roles never changes the output: the operator fills each half of an
-//! output row from whichever input the declared schema says belongs there.
-//!
-//! **Whether hashing applies at all.** With no equality between the relations
-//! there is no key to hash, and the operator runs a block nested loop instead
-//! of failing.
-//!
-//! Beneath that, the hash join it delegates to already degrades on its own -
-//! resident, to hybrid, to Grace, to a nested loop over one partition that a
-//! single dominant key will not let it split. The adaptive layer adds the
-//! decisions that have to be made *before* building starts, plus a periodic
-//! check of real system memory so a budget set when the machine was idle does
-//! not stand while it is under pressure.
+//! Reads both inputs in alternation and builds from whichever ends first, so
+//! the choice is a measurement rather than an estimate. With no equality to
+//! hash it runs a nested loop instead. Reversing the sides never changes the
+//! output.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::super::algorithm::{JoinType, ValidatedJoinSpec};
+use super::super::config::JoinTuning;
 use super::super::error::JoinError;
 use super::super::memory::MemoryAccountant;
 use super::super::schema::OutputSchema;
 use super::super::source::RowSource;
 use super::super::spill::SpillScope;
 use super::hash::HashJoin;
-use super::nested_loop::{DEFAULT_BLOCK_ROWS, NestedLoopJoin};
+use super::nested_loop::NestedLoopJoin;
 use super::{ExecStats, MatchEvaluator, RowStream};
-
-/// Rows read from each side while deciding which is smaller.
-const SAMPLE_ROWS: u64 = 8_192;
-
-/// Rows between checks of real system memory. Polling is not free, and memory
-/// pressure does not change per row.
-const PRESSURE_INTERVAL: u64 = 65_536;
-
-/// Below this fraction of system memory still available, the budget is halved.
-const PRESSURE_THRESHOLD: f64 = 0.10;
 
 /// Which input ends first, and therefore which is smaller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,15 +29,15 @@ enum SmallerSide {
 }
 
 /// Read both inputs in alternation until one ends.
-///
-/// The sampled rows are discarded. Both inputs are re-openable relations, so
-/// reading a bounded prefix twice is cheaper - and far simpler - than the
-/// machinery needed to splice a buffered prefix back onto a stream.
-fn smaller_side(left: &dyn RowSource, right: &dyn RowSource) -> Result<SmallerSide, JoinError> {
+fn smaller_side(
+    left: &dyn RowSource,
+    right: &dyn RowSource,
+    sample_rows: u64,
+) -> Result<SmallerSide, JoinError> {
     let mut left_stream = left.open()?;
     let mut right_stream = right.open()?;
 
-    for _ in 0..SAMPLE_ROWS {
+    for _ in 0..sample_rows {
         let left_row = left_stream.next().transpose()?;
         let right_row = right_stream.next().transpose()?;
 
@@ -82,6 +57,7 @@ fn smaller_side(left: &dyn RowSource, right: &dyn RowSource) -> Result<SmallerSi
 pub struct AdaptiveJoin {
     inner: Box<dyn RowStream>,
     budget: Rc<MemoryAccountant>,
+    tuning: JoinTuning,
     role_reversed: bool,
     rows_seen: u64,
     pressure_reductions: u64,
@@ -99,15 +75,15 @@ impl AdaptiveJoin {
         schema: Arc<OutputSchema>,
         budget: Rc<MemoryAccountant>,
         scope: Arc<SpillScope>,
-        block_rows: usize,
+        tuning: JoinTuning,
     ) -> Result<Self, JoinError> {
-        let (inner, role_reversed) = Self::choose(
-            spec, evaluator, left, right, schema, &budget, scope, block_rows,
-        )?;
+        let (inner, role_reversed) =
+            Self::choose(spec, evaluator, left, right, schema, &budget, scope, tuning)?;
 
         Ok(Self {
             inner,
             budget,
+            tuning,
             role_reversed,
             rows_seen: 0,
             pressure_reductions: 0,
@@ -124,7 +100,7 @@ impl AdaptiveJoin {
         schema: Arc<OutputSchema>,
         budget: &Rc<MemoryAccountant>,
         scope: Arc<SpillScope>,
-        block_rows: usize,
+        tuning: JoinTuning,
     ) -> Result<(Box<dyn RowStream>, bool), JoinError> {
         // No equality means no key, and a hash table needs one.
         if spec.keys().is_empty() {
@@ -136,7 +112,7 @@ impl AdaptiveJoin {
                     outer,
                     right,
                     schema,
-                    block_rows.max(DEFAULT_BLOCK_ROWS),
+                    tuning.block_rows,
                 )),
                 false,
             ));
@@ -146,7 +122,7 @@ impl AdaptiveJoin {
         // not interchangeable; everything else is.
         let reversible = !spec.join_type().emits_left_only() && spec.join_type() != JoinType::Cross;
         let smaller = if reversible {
-            smaller_side(left.as_ref(), right.as_ref())?
+            smaller_side(left.as_ref(), right.as_ref(), tuning.adaptive_sample_rows)?
         } else {
             SmallerSide::Unknown
         };
@@ -163,6 +139,7 @@ impl AdaptiveJoin {
                     schema,
                     Rc::clone(budget),
                     scope,
+                    tuning,
                     false,
                 )),
                 true,
@@ -179,6 +156,7 @@ impl AdaptiveJoin {
                 schema,
                 Rc::clone(budget),
                 scope,
+                tuning,
                 true,
             )),
             false,
@@ -186,11 +164,6 @@ impl AdaptiveJoin {
     }
 
     /// Shrink the budget if the machine is genuinely short of memory.
-    ///
-    /// A budget chosen when the system was idle should not stand while it is
-    /// under pressure. Reducing it makes the next charge fail, which the hash
-    /// join answers by spilling - so this reaches the right behaviour through
-    /// the mechanism that already exists, rather than a second one.
     fn check_pressure(&mut self) {
         if self.total_memory == 0 {
             return;
@@ -201,7 +174,7 @@ impl AdaptiveJoin {
         }
 
         let fraction = available as f64 / self.total_memory as f64;
-        if fraction >= PRESSURE_THRESHOLD {
+        if fraction >= self.tuning.pressure_threshold {
             return;
         }
 
@@ -226,7 +199,10 @@ impl Iterator for AdaptiveJoin {
         let row = self.inner.next()?;
 
         self.rows_seen += 1;
-        if self.rows_seen.is_multiple_of(PRESSURE_INTERVAL) {
+        if self
+            .rows_seen
+            .is_multiple_of(self.tuning.pressure_check_rows)
+        {
             self.check_pressure();
         }
 

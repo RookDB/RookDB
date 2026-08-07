@@ -1,8 +1,7 @@
-//! Relation and output schemas for join plans.
+//! Relation and output schemas.
 //!
-//! A join's output schema is derived once, at plan time, and carried by both
-//! the plan node and the stream it produces. Rationale, including why the
-//! fingerprint exists, is in `docs/join/design-rationale.md`.
+//! The fingerprint is a hash of the column types, written into spill-file
+//! headers so a run cannot be read back under the wrong schema.
 
 use crate::catalog::Column;
 use crate::types::DataType;
@@ -87,10 +86,6 @@ impl OutputSchema {
     }
 
     /// The columns of two already-joined subtrees, concatenated.
-    ///
-    /// Used when a join's inputs are themselves joins: qualified names are
-    /// carried through unchanged, so a column keeps the name it had at the
-    /// leaf however many joins it passes through.
     pub fn join_of(left: &OutputSchema, right: &OutputSchema) -> Self {
         let mut columns = Vec::with_capacity(left.len() + right.len());
         for (index, column) in left.columns.iter().enumerate() {
@@ -187,10 +182,6 @@ fn push_side(
 }
 
 /// FNV-1a over the rendered type list.
-///
-/// `DataType`'s `Display` is its canonical serialized form (upstream
-/// `Serialize` writes the same string), so this is stable across runs and
-/// across processes, which is what makes it usable in a spill-file header.
 fn fingerprint_of(types: &[DataType]) -> u64 {
     use std::fmt::Write as _;
 

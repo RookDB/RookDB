@@ -1,13 +1,7 @@
 //! Interactive join operations.
 //!
-//! Everything is chosen from numbered prompts - relations, aliases, join type,
-//! conditions - in the same style as the rest of the CLI. There is no query
-//! language to learn and nothing to parse, so a mistyped entry is re-prompted
-//! rather than producing a confusing error.
-//!
-//! No input path here may panic. Every index into a list is bounds-checked,
-//! every parse is matched, and end-of-input returns to the menu instead of
-//! spinning on an empty string.
+//! Everything is chosen from numbered prompts, in the same style as the rest of
+//! the CLI. No input path here may panic, and end of input returns to the menu.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -24,10 +18,6 @@ use storage_manager::join::{
     analyze_table, catalog_bridge, execute_ordered, optimize, save_stats, spill,
 };
 use storage_manager::types::DataValue;
-
-/// Rows printed before the output is truncated, so a large join does not
-/// scroll the terminal away.
-const MAX_DISPLAY_ROWS: usize = 200;
 
 /// Read a line, trimmed. `None` means end of input.
 fn prompt(label: &str) -> io::Result<Option<String>> {
@@ -430,7 +420,7 @@ fn run_join(
         };
 
         produced += 1;
-        if produced > MAX_DISPLAY_ROWS {
+        if produced > config.tuning.max_display_rows {
             truncated = true;
             continue;
         }
@@ -444,7 +434,7 @@ fn run_join(
     if truncated {
         println!(
             "  ... {} more row(s) not shown",
-            produced.saturating_sub(MAX_DISPLAY_ROWS)
+            produced.saturating_sub(config.tuning.max_display_rows)
         );
     }
     println!("\n  {produced} row(s) in {:.2?}", started.elapsed());
@@ -567,7 +557,7 @@ fn run_multi_join(catalog: &Catalog, database: &str, config: &JoinConfig) -> io:
         return Ok(());
     }
 
-    let plan = match optimize(&graph, config.work_memory_bytes) {
+    let plan = match optimize(&graph, config) {
         Ok(plan) => plan,
         Err(e) => {
             println!("\n  Cannot order this join: {e}");
@@ -612,7 +602,7 @@ fn run_multi_join(catalog: &Catalog, database: &str, config: &JoinConfig) -> io:
             }
         };
         produced += 1;
-        if produced > MAX_DISPLAY_ROWS {
+        if produced > config.tuning.max_display_rows {
             continue;
         }
         match codec.decode(&row) {
@@ -621,10 +611,10 @@ fn run_multi_join(catalog: &Catalog, database: &str, config: &JoinConfig) -> io:
         }
     }
 
-    if produced > MAX_DISPLAY_ROWS {
+    if produced > config.tuning.max_display_rows {
         println!(
             "  ... {} more row(s) not shown",
-            produced - MAX_DISPLAY_ROWS
+            produced - config.tuning.max_display_rows
         );
     }
     println!("\n  {produced} row(s) in {:.2?}", started.elapsed());

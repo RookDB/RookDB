@@ -1,13 +1,10 @@
-//! Order-preserving join key encoding.
+//! Join key encoding.
 //!
-//! A [`JoinKey`] is a byte string whose `Hash`, `Eq` and `Ord` all derive from
-//! the same bytes. Hash joins and sort-merge joins therefore agree on equality
-//! and ordering by construction rather than by convention, and the ordering is
-//! a genuine total order even for values `Comparable::compare` would refuse.
-//!
-//! The encoding deliberately follows `types::comparison::Comparable`, not
-//! `DataValue`'s derived `PartialEq` - the two disagree, and the SQL-correct
-//! answer is the former. `docs/join/design-rationale.md` records where and why.
+//! A `JoinKey` is a byte string whose `Hash`, `Eq` and `Ord` all come from the
+//! same bytes, so hash equality and merge ordering cannot disagree. The
+//! encoding follows `Comparable::compare`, not `DataValue`'s derived
+//! `PartialEq` - the two disagree on signed zero, CHAR padding and NUMERIC
+//! scale, and `compare` gives the SQL answer.
 
 use chrono::{Datelike, Timelike};
 
@@ -19,11 +16,6 @@ use super::error::JoinError;
 // ── Key classes ──────────────────────────────────────────────────────────────
 
 /// The set of values a join key column may hold.
-///
-/// Two values in the same class are always comparable; two values in different
-/// classes never are. Classes therefore collapse exactly the coercions
-/// `Comparable::compare` performs (integer widening, CHAR/CHARACTER) and
-/// separate exactly the ones it refuses (INT vs REAL, CHAR vs VARCHAR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyClass {
     /// SMALLINT, INT and BIGINT - mutually comparable by widening.
@@ -67,10 +59,6 @@ impl KeyClass {
     }
 
     /// Discriminator byte written ahead of each component.
-    ///
-    /// Within one join every component's class is fixed, so these bytes are
-    /// constant and do not influence ordering; they exist so a key is
-    /// self-describing and two classes can never collide.
     fn tag(self) -> u8 {
         match self {
             KeyClass::Integer => 0x10,
@@ -89,10 +77,6 @@ impl KeyClass {
 }
 
 /// Resolve the key class shared by both sides of an equijoin conjunct.
-///
-/// Returns an error rather than coercing. An implicit cast here would route
-/// through a string literal and could truncate (`REAL` to `INT`) or fail per
-/// row (`VARCHAR` to `INT`), turning a wrong query into a wrong answer.
 pub fn resolve_key_class(left: &DataType, right: &DataType) -> Result<KeyClass, JoinError> {
     let left_class = KeyClass::of(left);
     let right_class = KeyClass::of(right);
@@ -130,10 +114,6 @@ pub struct JoinKey(Box<[u8]>);
 
 impl JoinKey {
     /// Wrap bytes that were produced by this module's encoders.
-    ///
-    /// Used where a key is assembled component by component, or read back from
-    /// an index file. Passing arbitrary bytes would not be unsafe, but the key
-    /// would order and compare as those bytes rather than as any value.
     pub fn from_bytes(bytes: impl Into<Box<[u8]>>) -> Self {
         JoinKey(bytes.into())
     }
@@ -186,11 +166,7 @@ fn order_bits_64(bits: u64) -> u64 {
 }
 
 /// `Ord for OrderedF32` treats every NaN as equal and greater than any real
-/// value, and `+0.0` as equal to `-0.0`. Both are normalised here so the key
-/// encoding says the same thing.
-///
-/// `u32::MAX` is above the encoding of `+INFINITY` (`0xFF80_0000`) and is not
-/// produced by any non-NaN value, so it is a safe canonical NaN.
+/// value, and `+0.0` as equal to `-0.0`.
 fn encode_f32(value: f32, out: &mut Vec<u8>) {
     let ordered = if value.is_nan() {
         u32::MAX
@@ -282,12 +258,6 @@ fn encode_component(
 }
 
 /// Encode one value on its own, in the key class its column resolves to.
-///
-/// Statistics use this so distinct-value counts, minima and maxima are
-/// measured in exactly the equivalence classes the join matches on: two CHAR
-/// values differing only in trailing spaces count once, as do two NUMERICs
-/// that differ only in representation. Estimates and execution therefore
-/// cannot drift apart.
 pub fn encode_value(class: KeyClass, value: &DataValue) -> Result<Vec<u8>, JoinError> {
     let mut buffer = Vec::with_capacity(16);
     encode_component(class, value, &mut buffer)?;
@@ -296,10 +266,6 @@ pub fn encode_value(class: KeyClass, value: &DataValue) -> Result<Vec<u8>, JoinE
 
 /// Encode a time as `(seconds, nanoseconds)` rather than a single nanosecond
 /// count.
-///
-/// `NaiveTime` orders on that pair, and during a leap second its nanosecond
-/// field exceeds one second - so a flattened count would order a leap second
-/// after the following whole second. The pair cannot.
 fn encode_time(value: &chrono::NaiveTime, out: &mut Vec<u8>) {
     out.extend_from_slice(&value.num_seconds_from_midnight().to_be_bytes());
     out.extend_from_slice(&value.nanosecond().to_be_bytes());
@@ -336,11 +302,6 @@ impl KeySpec {
     }
 
     /// Encode the key of a left-side row.
-    ///
-    /// `Ok(None)` means at least one key component is NULL. There is no
-    /// encoding for NULL, so a NULL key cannot equal anything - including
-    /// another NULL - no matter which algorithm or how many times the row is
-    /// written to and read back from a spill file.
     pub fn left_key(&self, row: &[Option<DataValue>]) -> Result<Option<JoinKey>, JoinError> {
         self.encode(row, |column| column.left_index, "left")
     }

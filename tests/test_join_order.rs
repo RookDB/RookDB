@@ -11,13 +11,16 @@ mod common;
 
 use common::{TempDb, all_of, col, eq, lt};
 use storage_manager::executor::selection::Predicate;
-use storage_manager::join::order::{MAX_EXHAUSTIVE_RELATIONS, cost_of_order, validate_edges};
+use storage_manager::join::JoinConfig;
+use storage_manager::join::order::{cost_of_order, validate_edges};
 use storage_manager::join::{
     JoinError, JoinGraph, OrderedPlan, TableRef, TableStatsCache, optimize,
 };
 use storage_manager::types::{DataType, DataValue};
 
-const WORK_MEMORY: u64 = 4 * 1024 * 1024;
+fn config() -> JoinConfig {
+    JoinConfig::with_work_memory(4 * 1024 * 1024)
+}
 
 fn int(value: i32) -> Option<DataValue> {
     Some(DataValue::Int(value))
@@ -46,7 +49,7 @@ fn graph_of(relations: Vec<TableRef>, condition: Option<&Predicate>) -> JoinGrap
 
 fn plan_of(relations: Vec<TableRef>, condition: Option<&Predicate>) -> (JoinGraph, OrderedPlan) {
     let graph = graph_of(relations, condition);
-    let plan = optimize(&graph, WORK_MEMORY).expect("should order");
+    let plan = optimize(&graph, &config()).expect("should order");
     (graph, plan)
 }
 
@@ -119,7 +122,7 @@ fn a_disconnected_query_is_planned_component_by_component() {
     let graph = graph_of(relations, Some(&condition));
     assert_eq!(graph.components().len(), 2, "two independent components");
 
-    let plan = optimize(&graph, WORK_MEMORY).expect("orders");
+    let plan = optimize(&graph, &config()).expect("orders");
     assert!(
         plan.has_cross_product(),
         "the two components can only be combined by a product"
@@ -168,7 +171,7 @@ fn cheapest_permutation(graph: &JoinGraph, count: usize) -> f64 {
     let mut best = f64::MAX;
 
     permute(&mut order, 0, &mut |candidate| {
-        if let Ok(cost) = cost_of_order(graph, candidate, WORK_MEMORY) {
+        if let Ok(cost) = cost_of_order(graph, candidate, &config()) {
             if cost < best {
                 best = cost;
             }
@@ -230,10 +233,10 @@ fn ordering_is_reproducible() {
     ]);
 
     let graph = graph_of(relations, Some(&condition));
-    let first = optimize(&graph, WORK_MEMORY).expect("orders");
+    let first = optimize(&graph, &config()).expect("orders");
     for _ in 0..5 {
         assert_eq!(
-            optimize(&graph, WORK_MEMORY).expect("orders"),
+            optimize(&graph, &config()).expect("orders"),
             first,
             "the same graph must always order the same way"
         );
@@ -270,7 +273,7 @@ fn the_search_matches_or_beats_every_permutation() {
         let condition = all_of(conjuncts);
 
         let graph = graph_of(relations, Some(&condition));
-        let chosen = optimize(&graph, WORK_MEMORY).expect("orders");
+        let chosen = optimize(&graph, &config()).expect("orders");
         let best_permutation = cheapest_permutation(&graph, count);
 
         assert!(
@@ -286,7 +289,7 @@ fn the_search_matches_or_beats_every_permutation() {
 #[test]
 fn large_graphs_fall_back_to_a_greedy_search() {
     let db = TempDb::new();
-    let count = MAX_EXHAUSTIVE_RELATIONS + 2;
+    let count = config().tuning.max_exhaustive_relations + 2;
 
     let relations: Vec<TableRef> = (0..count)
         .map(|i| relation(&db, &format!("r{i}"), 100 * (i as i32 + 1), 50))

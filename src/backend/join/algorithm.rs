@@ -1,11 +1,8 @@
-//! Join types, the algorithm capability matrix, and the token that proves a
-//! combination was checked.
+//! Join types and the algorithm capability matrix.
 //!
-//! The matrix exists in exactly one place. Executors cannot be constructed
-//! without a [`ValidatedJoinSpec`], whose fields are private and which only
-//! [`AlgorithmSpec::validate`] can produce - so an algorithm can never quietly
-//! run a join type it does not implement. `docs/join/design-rationale.md`
-//! explains why that is enforced by the type system rather than by review.
+//! The matrix lives in one place, and executors can only be built from a
+//! `ValidatedJoinSpec` - so an algorithm cannot run a join type it does not
+//! implement.
 
 use super::error::JoinError;
 use super::key::KeySpec;
@@ -13,10 +10,6 @@ use super::key::KeySpec;
 // ── Join types ───────────────────────────────────────────────────────────────
 
 /// The join types the subsystem executes.
-///
-/// `NATURAL` is not here: it is rewritten into one of these plus an equality
-/// conjunction and a projection before planning. `LATERAL` is not here either,
-/// because nothing in the engine can evaluate a correlated subquery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JoinType {
     Inner,
@@ -67,16 +60,6 @@ impl JoinType {
     /// has no right-side columns at all.
     pub fn emits_left_only(self) -> bool {
         matches!(self, JoinType::Semi | JoinType::Anti)
-    }
-
-    /// The mirror image of this join type, used when an operator swaps its
-    /// build and probe sides.
-    pub fn mirrored(self) -> JoinType {
-        match self {
-            JoinType::LeftOuter => JoinType::RightOuter,
-            JoinType::RightOuter => JoinType::LeftOuter,
-            other => other,
-        }
     }
 }
 
@@ -151,9 +134,9 @@ pub struct AlgorithmSpec {
     /// Cannot run without a usable index on the inner relation.
     pub requires_inner_index: bool,
     pub supported: &'static [JoinType],
-    /// Can bound its memory by writing to disk. Algorithms that cannot are
-    /// rejected by the planner when the inputs do not fit.
-    pub can_spill: bool,
+    /// Holds both inputs in memory at once and cannot spill, so the planner
+    /// must not offer it when they will not fit.
+    pub holds_both_inputs: bool,
 }
 
 const NESTED_LOOP_TYPES: &[JoinType] = &JoinType::ALL;
@@ -169,11 +152,7 @@ const EQUI_TYPES: &[JoinType] = &[
     JoinType::Anti,
 ];
 
-/// Index nested loop drives from the outer side and probes the inner. It can
-/// report unmatched *outer* rows, so LEFT and ANTI work, but enumerating
-/// unmatched *inner* rows would need a matched-RID set the size of the inner
-/// relation, so RIGHT and FULL are excluded. RIGHT is still reachable: the
-/// planner mirrors it into LEFT with the sides swapped.
+/// Index nested loop drives from the outer side and probes the inner.
 const INDEX_NESTED_LOOP_TYPES: &[JoinType] = &[
     JoinType::Inner,
     JoinType::LeftOuter,
@@ -187,49 +166,49 @@ pub const ALGORITHMS: [AlgorithmSpec; 7] = [
         requires_equi_keys: false,
         requires_inner_index: false,
         supported: NESTED_LOOP_TYPES,
-        can_spill: false,
+        holds_both_inputs: false,
     },
     AlgorithmSpec {
         algorithm: JoinAlgorithm::BlockNestedLoop,
         requires_equi_keys: false,
         requires_inner_index: false,
         supported: NESTED_LOOP_TYPES,
-        can_spill: true,
+        holds_both_inputs: false,
     },
     AlgorithmSpec {
         algorithm: JoinAlgorithm::IndexNestedLoop,
         requires_equi_keys: true,
         requires_inner_index: true,
         supported: INDEX_NESTED_LOOP_TYPES,
-        can_spill: false,
+        holds_both_inputs: false,
     },
     AlgorithmSpec {
         algorithm: JoinAlgorithm::SortMerge,
         requires_equi_keys: true,
         requires_inner_index: false,
         supported: EQUI_TYPES,
-        can_spill: true,
+        holds_both_inputs: false,
     },
     AlgorithmSpec {
         algorithm: JoinAlgorithm::Hash,
         requires_equi_keys: true,
         requires_inner_index: false,
         supported: EQUI_TYPES,
-        can_spill: true,
+        holds_both_inputs: false,
     },
     AlgorithmSpec {
         algorithm: JoinAlgorithm::SymmetricHash,
         requires_equi_keys: true,
         requires_inner_index: false,
         supported: EQUI_TYPES,
-        can_spill: false,
+        holds_both_inputs: true,
     },
     AlgorithmSpec {
         algorithm: JoinAlgorithm::Adaptive,
         requires_equi_keys: false,
         requires_inner_index: false,
         supported: NESTED_LOOP_TYPES,
-        can_spill: true,
+        holds_both_inputs: false,
     },
 ];
 
@@ -290,10 +269,6 @@ impl AlgorithmSpec {
     }
 
     /// Check the request against this algorithm's capabilities.
-    ///
-    /// Every rejection here is a plan-time error with a reason, which is the
-    /// alternative to an executor silently computing a different join than the
-    /// one that was asked for.
     pub fn validate(&self, request: &JoinRequest) -> Result<ValidatedJoinSpec, JoinError> {
         let name = self.algorithm.name();
 

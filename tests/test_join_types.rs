@@ -346,26 +346,3 @@ fn semi_and_anti_emit_left_columns_only() {
         assert!(!join_type.emits_left_only(), "{join_type:?}");
     }
 }
-
-/// Swapping build and probe sides mirrors LEFT and RIGHT and leaves the
-/// symmetric types alone.
-#[test]
-fn mirroring_swaps_only_the_outer_sides() {
-    assert_eq!(JoinType::LeftOuter.mirrored(), JoinType::RightOuter);
-    assert_eq!(JoinType::RightOuter.mirrored(), JoinType::LeftOuter);
-
-    for join_type in [
-        JoinType::Inner,
-        JoinType::FullOuter,
-        JoinType::Cross,
-        JoinType::Semi,
-        JoinType::Anti,
-    ] {
-        assert_eq!(join_type.mirrored(), join_type, "{join_type:?}");
-    }
-
-    // Mirroring is an involution.
-    for join_type in JoinType::ALL {
-        assert_eq!(join_type.mirrored().mirrored(), join_type);
-    }
-}

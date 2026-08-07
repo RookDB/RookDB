@@ -1,14 +1,8 @@
 //! Nested-loop join.
 //!
-//! One operator serves both the simple and the blocked variants: the simple
-//! one is the blocked one with a block of a single row. Keeping them as one
-//! implementation is deliberate - two copies would be two chances to disagree
-//! about outer-join bookkeeping, and the planner still distinguishes them
-//! because their costs differ sharply.
-//!
-//! This is the only family that can execute every join type, including CROSS
-//! and arbitrary non-equi conditions, so it is also the fallback the planner
-//! reaches for when nothing else applies.
+//! One operator for both the simple and blocked variants - the simple one is a
+//! block of a single row. The only family that can run every join type,
+//! including CROSS and arbitrary non-equi conditions.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -21,11 +15,6 @@ use super::super::row::{RowBuilder, RowCodec};
 use super::super::schema::OutputSchema;
 use super::super::source::RowSource;
 use super::{ExecStats, MatchEvaluator, RowStream, StatsHandle, new_stats};
-
-/// Rows of the outer input buffered per inner scan when the caller does not
-/// choose. Large enough to amortise the inner rescan, small enough to stay
-/// well inside any sane memory budget.
-pub const DEFAULT_BLOCK_ROWS: usize = 1024;
 
 pub struct NestedLoopJoin {
     join_type: JoinType,
