@@ -414,6 +414,28 @@ impl TableHandle {
     pub fn flush(&mut self) {
         self.manager.flush().expect("flush should succeed");
     }
+
+    /// Delete the first `count` rows, keeping the recorded row list in step.
+    ///
+    /// Used to check that statistics report live rows rather than slot
+    /// entries: the two differ until the table is compacted.
+    pub fn delete_first(&mut self, count: usize) -> usize {
+        let targets: Vec<(u32, u32)> = self
+            .manager
+            .scan()
+            .take(count)
+            .filter_map(|item| item.ok().map(|(page, slot, _)| (page, slot)))
+            .collect();
+
+        for (page, slot) in &targets {
+            self.manager
+                .delete_tuple(*page, *slot)
+                .expect("delete should succeed");
+        }
+        self.manager.flush().expect("flush should succeed");
+        self.rows.drain(..targets.len().min(self.rows.len()));
+        targets.len()
+    }
 }
 
 // ── Reference join ───────────────────────────────────────────────────────────

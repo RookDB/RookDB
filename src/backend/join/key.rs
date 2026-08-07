@@ -272,6 +272,19 @@ fn encode_component(
     Ok(())
 }
 
+/// Encode one value on its own, in the key class its column resolves to.
+///
+/// Statistics use this so distinct-value counts, minima and maxima are
+/// measured in exactly the equivalence classes the join matches on: two CHAR
+/// values differing only in trailing spaces count once, as do two NUMERICs
+/// that differ only in representation. Estimates and execution therefore
+/// cannot drift apart.
+pub fn encode_value(class: KeyClass, value: &DataValue) -> Result<Vec<u8>, JoinError> {
+    let mut buffer = Vec::with_capacity(16);
+    encode_component(class, value, &mut buffer)?;
+    Ok(buffer)
+}
+
 /// Encode a time as `(seconds, nanoseconds)` rather than a single nanosecond
 /// count.
 ///

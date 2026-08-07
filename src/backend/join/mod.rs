@@ -23,6 +23,7 @@ pub mod schema;
 pub mod sort;
 pub mod source;
 pub mod spill;
+pub mod stats;
 
 pub use algorithm::{
     ALGORITHMS, AlgorithmSpec, JoinAlgorithm, JoinRequest, JoinType, Pushdown, ValidatedJoinSpec,
@@ -40,3 +41,7 @@ pub use schema::{OutputColumn, OutputSchema, RelationSchema, RelationSide};
 pub use sort::{KeySide, SortOutput, SortStats, SortedRows, sort_rows};
 pub use source::{RowSource, TableRef, TableSource};
 pub use spill::{RowBuffer, RowBufferBuilder, RunHandle, RunReader, RunWriter, SpillScope};
+pub use stats::{
+    ColumnStats, StatsConfidence, TableStats, TableStatsCache, ValidityStamp, analyze_table,
+    load_stats, save_stats,
+};
