@@ -25,10 +25,13 @@ use super::cost::{
 };
 use super::error::JoinError;
 use super::exec::hash::HashJoin;
+use super::exec::index_nested_loop::IndexNestedLoopJoin;
 use super::exec::nested_loop::{DEFAULT_BLOCK_ROWS, NestedLoopJoin};
 use super::exec::sort_merge::SortMergeJoin;
 use super::exec::symmetric_hash::SymmetricHashJoin;
 use super::exec::{MatchEvaluator, RowStream};
+use super::index::{JoinIndex, find_usable};
+use super::key::KeySpec;
 use super::memory::MemoryAccountant;
 use super::predicate::{JoinPredicate, PredicateSplit, SideResolver, split_conjuncts};
 use super::schema::OutputSchema;
@@ -41,13 +44,17 @@ use super::stats::{StatsConfidence, TableStatsCache};
 /// The capability matrix in `algorithm.rs` describes what each one *supports*;
 /// this is what has an executor behind it. The planner never proposes
 /// something it cannot build.
-const AVAILABLE: [JoinAlgorithm; 5] = [
+const AVAILABLE: [JoinAlgorithm; 6] = [
     JoinAlgorithm::SimpleNestedLoop,
     JoinAlgorithm::BlockNestedLoop,
+    JoinAlgorithm::IndexNestedLoop,
     JoinAlgorithm::SortMerge,
     JoinAlgorithm::Hash,
     JoinAlgorithm::SymmetricHash,
 ];
+
+/// An index on the inner relation, with the key it can answer.
+type InnerIndex = (std::rc::Rc<dyn JoinIndex>, KeySpec);
 
 /// One input of a planned join, as EXPLAIN describes it.
 #[derive(Debug, Clone)]
@@ -73,6 +80,8 @@ pub struct PhysicalPlan {
     pub key_conditions: Vec<String>,
     /// Whatever the keys could not express.
     pub residual: Option<String>,
+    /// Entries in the index the plan will probe, when it uses one.
+    pub index_entries: Option<u64>,
     /// Alternatives that were costed and not chosen, cheapest first.
     pub rejected: Vec<(JoinAlgorithm, f64)>,
 }
@@ -96,6 +105,13 @@ impl PhysicalPlan {
         }
         if let Some(residual) = &self.residual {
             let _ = writeln!(out, "  Residual:  {residual}");
+        }
+        if let Some(entries) = self.index_entries {
+            let _ = writeln!(
+                out,
+                "  Index:     {entries} entries on {}",
+                self.right.alias
+            );
         }
         let _ = writeln!(
             out,
@@ -213,14 +229,24 @@ impl JoinBuilder {
         split_conjuncts(self.condition.as_ref(), &resolver, self.join_type)
     }
 
+    /// An index on the inner relation that can serve this join's keys.
+    ///
+    /// Absence is not an error: it simply removes index nested loop from the
+    /// candidates. A sidecar that no longer matches the table is treated as
+    /// absent rather than trusted.
+    fn inner_index(&self, keys: &KeySpec) -> Option<InnerIndex> {
+        find_usable(&self.right, keys)
+    }
+
     /// Choose an algorithm and estimate what it will cost.
     pub fn plan(&self) -> Result<PhysicalPlan, JoinError> {
         let split = self.split()?;
+        let index = self.inner_index(&split.keys);
         let request = JoinRequest {
             join_type: self.join_type,
             keys: &split.keys,
             has_residual: split.residual.is_some(),
-            has_inner_index: false,
+            has_inner_index: index.is_some(),
         };
 
         let (left_stats, left_confidence) = self.stats.stats_for(&self.left);
@@ -273,6 +299,7 @@ impl JoinBuilder {
             },
             key_conditions: self.render_keys(&split),
             residual: split.residual.as_ref().map(render_predicate),
+            index_entries: index.as_ref().map(|(index, _)| index.entry_count()),
             rejected,
         })
     }
@@ -381,13 +408,14 @@ impl JoinBuilder {
     pub fn execute(&self) -> Result<Box<dyn RowStream>, JoinError> {
         let plan = self.plan()?;
         let split = self.split()?;
+        let index = self.inner_index(&split.keys);
         let left_relation = self.left.relation_schema();
 
         let request = JoinRequest {
             join_type: self.join_type,
             keys: &split.keys,
             has_residual: split.residual.is_some(),
-            has_inner_index: false,
+            has_inner_index: index.is_some(),
         };
         let spec = spec_of(plan.algorithm).validate(&request)?;
 
@@ -411,7 +439,14 @@ impl JoinBuilder {
         // makes unmatched-left rows streamable and unmatched-right rows a
         // post-pass, in all of them.
         let outer = left_source.open()?;
-        self.build_operator(&spec, evaluator, outer, Box::new(right_source), plan.schema)
+        self.build_operator(
+            &spec,
+            evaluator,
+            outer,
+            Box::new(right_source),
+            plan.schema,
+            index,
+        )
     }
 
     fn build_operator(
@@ -421,8 +456,27 @@ impl JoinBuilder {
         outer: Box<dyn RowStream>,
         inner: Box<dyn RowSource>,
         schema: Arc<OutputSchema>,
+        index: Option<InnerIndex>,
     ) -> Result<Box<dyn RowStream>, JoinError> {
         match spec.algorithm() {
+            JoinAlgorithm::IndexNestedLoop => {
+                // Validation already established that an index exists; this
+                // only unpacks it.
+                let (index, probe_keys) = index.ok_or_else(|| {
+                    JoinError::plan(
+                        "index nested loop was planned without a usable index".to_string(),
+                    )
+                })?;
+                Ok(Box::new(IndexNestedLoopJoin::new(
+                    spec,
+                    evaluator,
+                    probe_keys,
+                    index,
+                    &self.right,
+                    outer,
+                    schema,
+                )?))
+            }
             JoinAlgorithm::SimpleNestedLoop | JoinAlgorithm::BlockNestedLoop => {
                 // Asking for the simple variant means a block of one row;
                 // otherwise the operator would claim to be simple while

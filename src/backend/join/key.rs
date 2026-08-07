@@ -129,6 +129,15 @@ pub fn resolve_key_class(left: &DataType, right: &DataType) -> Result<KeyClass, 
 pub struct JoinKey(Box<[u8]>);
 
 impl JoinKey {
+    /// Wrap bytes that were produced by this module's encoders.
+    ///
+    /// Used where a key is assembled component by component, or read back from
+    /// an index file. Passing arbitrary bytes would not be unsafe, but the key
+    /// would order and compare as those bytes rather than as any value.
+    pub fn from_bytes(bytes: impl Into<Box<[u8]>>) -> Self {
+        JoinKey(bytes.into())
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

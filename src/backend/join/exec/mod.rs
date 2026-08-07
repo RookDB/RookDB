@@ -19,6 +19,7 @@ use super::predicate::JoinPredicate;
 use super::schema::OutputSchema;
 
 pub mod hash;
+pub mod index_nested_loop;
 pub mod nested_loop;
 pub mod sort_merge;
 pub mod symmetric_hash;
