@@ -173,8 +173,6 @@ pub fn stats_path(table_path: &Path) -> PathBuf {
 /// The scan goes through `HeapScanIterator`, which skips dead slots, so a
 /// deleted row is not counted - unlike a slot-directory walk.
 pub fn analyze_table(table: &TableRef) -> Result<TableStats, JoinError> {
-    let stamp = ValidityStamp::read(&table.path)?;
-
     let manager = HeapManager::open(table.path.clone()).map_err(|e| {
         JoinError::Io(format!(
             "cannot open '{}' at {}: {e}",
@@ -182,6 +180,12 @@ pub fn analyze_table(table: &TableRef) -> Result<TableStats, JoinError> {
             table.path.display()
         ))
     })?;
+
+    // The stamp is read *after* opening: `HeapManager::open` synchronises the
+    // header and so may rewrite the file. A stamp taken beforehand would
+    // describe a state that no longer exists, and every later lookup would
+    // decide these statistics were stale.
+    let stamp = ValidityStamp::read(&table.path)?;
 
     let types: Vec<_> = table.columns.iter().map(|c| c.data_type.clone()).collect();
     let classes: Vec<KeyClass> = types.iter().map(KeyClass::of).collect();

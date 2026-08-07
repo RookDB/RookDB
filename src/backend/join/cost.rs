@@ -398,7 +398,22 @@ impl CostModel {
         1.0 + (runs.ln() / fan_in.ln()).ceil().max(0.0)
     }
 
+    /// How much cheaper or dearer the adaptive operator is than the plain one
+    /// it wraps.
+    ///
+    /// Estimate confidence is a first-class cost input. When the statistics are
+    /// measured, the simpler operator is preferred - adaptivity buys nothing if
+    /// the prediction is right. When they are guesses, the operator that can
+    /// correct itself mid-flight is worth a discount.
+    pub fn adaptive_factor(&self, analyzed: bool) -> f64 {
+        if analyzed { 1.05 } else { 0.85 }
+    }
+
     /// Cost of a join, given both inputs and how many rows it will produce.
+    ///
+    /// `has_keys` matters for the adaptive operator, which runs a nested loop
+    /// when there is no equality to hash; costing it as a hash join would be
+    /// costing something it will not do.
     pub fn cost(
         &self,
         algorithm: JoinAlgorithm,
@@ -406,7 +421,15 @@ impl CostModel {
         right: &SideEstimate,
         output_rows: u64,
         block_rows: u64,
+        has_keys: bool,
     ) -> JoinCost {
+        // Resolve what the adaptive operator will actually run before costing.
+        let algorithm = match algorithm {
+            JoinAlgorithm::Adaptive if !has_keys => JoinAlgorithm::BlockNestedLoop,
+            JoinAlgorithm::Adaptive => JoinAlgorithm::Hash,
+            other => other,
+        };
+
         let c = &self.coefficients;
         let left_pages = left.pages_or_one();
         let right_pages = right.pages_or_one();

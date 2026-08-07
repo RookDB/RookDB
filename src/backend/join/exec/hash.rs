@@ -147,6 +147,12 @@ enum Stage {
 
 pub struct HashJoin {
     join_type: JoinType,
+    /// Whether the probe input is the join's declared *left* relation.
+    ///
+    /// The adaptive operator may build from whichever side turns out smaller,
+    /// so this decides which half of an output row each input fills. Output
+    /// column order never changes; only which input feeds which half does.
+    probe_is_left: bool,
     evaluator: MatchEvaluator,
     builder: RowBuilder,
     schema: Arc<OutputSchema>,
@@ -183,6 +189,30 @@ impl HashJoin {
         budget: Rc<MemoryAccountant>,
         scope: Arc<SpillScope>,
     ) -> Self {
+        Self::with_roles(spec, evaluator, probe, build, schema, budget, scope, true)
+    }
+
+    /// Build from a chosen side.
+    ///
+    /// `probe_is_left` false means the *right* relation is being probed and the
+    /// left is in the hash table. SEMI and ANTI are not reversible - they are
+    /// defined in terms of left rows - so the adaptive operator never asks for
+    /// it, and the assertion below records that.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_roles(
+        spec: &ValidatedJoinSpec,
+        evaluator: MatchEvaluator,
+        probe: Box<dyn RowStream>,
+        build: Box<dyn RowSource>,
+        schema: Arc<OutputSchema>,
+        budget: Rc<MemoryAccountant>,
+        scope: Arc<SpillScope>,
+        probe_is_left: bool,
+    ) -> Self {
+        debug_assert!(
+            probe_is_left || !spec.join_type().emits_left_only(),
+            "SEMI and ANTI cannot be evaluated from the right side"
+        );
         let probe_codec = RowCodec::new(probe.schema().types.clone());
         let build_codec = RowCodec::new(build.schema().types.clone());
         let probe_fingerprint = probe.schema().fingerprint;
@@ -190,6 +220,7 @@ impl HashJoin {
 
         Self {
             join_type: spec.join_type(),
+            probe_is_left,
             evaluator,
             builder: RowBuilder::new(&schema),
             schema,
@@ -212,8 +243,68 @@ impl HashJoin {
         }
     }
 
+    /// Whether unmatched *build* rows have to be emitted, and therefore
+    /// whether match flags need tracking at all.
     fn tracks_build_matches(&self) -> bool {
-        self.join_type.keeps_unmatched_right()
+        if self.probe_is_left {
+            self.join_type.keeps_unmatched_right()
+        } else {
+            self.join_type.keeps_unmatched_left()
+        }
+    }
+
+    fn keeps_unmatched_probe(&self) -> bool {
+        match self.join_type {
+            JoinType::Anti => true,
+            JoinType::Semi => false,
+            other if self.probe_is_left => other.keeps_unmatched_left(),
+            other => other.keeps_unmatched_right(),
+        }
+    }
+
+    /// The key of a probe-side row. Which half of the key specification that
+    /// is depends on which relation is being probed.
+    fn probe_key(&self, values: &[Option<DataValue>]) -> Result<Option<JoinKey>, JoinError> {
+        if self.probe_is_left {
+            self.evaluator.keys().left_key(values)
+        } else {
+            self.evaluator.keys().right_key(values)
+        }
+    }
+
+    /// The key of a build-side row.
+    fn build_key(&self, values: &[Option<DataValue>]) -> Result<Option<JoinKey>, JoinError> {
+        if self.probe_is_left {
+            self.evaluator.keys().right_key(values)
+        } else {
+            self.evaluator.keys().left_key(values)
+        }
+    }
+
+    /// Check the residual, which is always written in terms of the declared
+    /// left and right relations regardless of which side is being probed.
+    fn residual_ok(&self) -> Result<bool, JoinError> {
+        if self.probe_is_left {
+            self.evaluator
+                .residual_matches(&self.probe_values, &self.build_values)
+        } else {
+            self.evaluator
+                .residual_matches(&self.build_values, &self.probe_values)
+        }
+    }
+
+    /// Build an output row from a matched pair, putting each input in the half
+    /// the declared schema expects.
+    fn emit_pair(&mut self) -> Result<(), JoinError> {
+        let built = if self.probe_is_left {
+            self.builder
+                .build(Some(&self.probe_values), Some(&self.build_values))?
+        } else {
+            self.builder
+                .build(Some(&self.build_values), Some(&self.probe_values))?
+        };
+        self.pending.push_back(built);
+        Ok(())
     }
 
     fn take_probe_stream(&mut self) -> Box<dyn Iterator<Item = Result<Vec<u8>, JoinError>>> {
@@ -241,9 +332,9 @@ impl HashJoin {
             self.stats.borrow_mut().inner_rows += 1;
             self.build_codec.decode_into(&row, &mut self.build_values)?;
 
-            let Some(key) = self.evaluator.keys().right_key(&self.build_values)? else {
-                // No key, so no partition and no match - but RIGHT and FULL
-                // still owe this row.
+            let Some(key) = self.build_key(&self.build_values)? else {
+                // No key, so no partition and no match - but an outer join on
+                // the build side still owes this row.
                 nulls.push(&row, &self.budget)?;
                 continue;
             };
@@ -355,7 +446,7 @@ impl HashJoin {
         self.stats.borrow_mut().outer_rows += 1;
         self.probe_codec.decode_into(&row, &mut self.probe_values)?;
 
-        let Some(key) = self.evaluator.keys().left_key(&self.probe_values)? else {
+        let Some(key) = self.probe_key(&self.probe_values)? else {
             // A NULL key matches nothing, in any algorithm and at any depth.
             return self.emit_unmatched_probe();
         };
@@ -382,10 +473,7 @@ impl HashJoin {
 
             // Bucket membership proves the keys are equal; the residual is
             // whatever the condition asked for beyond that.
-            if !self
-                .evaluator
-                .residual_matches(&self.probe_values, &self.build_values)?
-            {
+            if !self.residual_ok()? {
                 continue;
             }
 
@@ -401,10 +489,7 @@ impl HashJoin {
                 break;
             }
 
-            let built = self
-                .builder
-                .build(Some(&self.probe_values), Some(&self.build_values))?;
-            self.pending.push_back(built);
+            self.emit_pair()?;
         }
 
         if matched {
@@ -419,15 +504,26 @@ impl HashJoin {
     }
 
     fn emit_unmatched_probe(&mut self) -> Result<(), JoinError> {
-        let emit = match self.join_type {
-            JoinType::Anti => true,
-            JoinType::Semi => false,
-            other => other.keeps_unmatched_left(),
-        };
-        if emit {
-            let built = self.builder.build(Some(&self.probe_values), None)?;
-            self.pending.push_back(built);
+        if !self.keeps_unmatched_probe() {
+            return Ok(());
         }
+        let built = if self.probe_is_left {
+            self.builder.build(Some(&self.probe_values), None)?
+        } else {
+            self.builder.build(None, Some(&self.probe_values))?
+        };
+        self.pending.push_back(built);
+        Ok(())
+    }
+
+    /// A build row nothing matched.
+    fn emit_unmatched_build(&mut self) -> Result<(), JoinError> {
+        let built = if self.probe_is_left {
+            self.builder.build(None, Some(&self.build_values))?
+        } else {
+            self.builder.build(Some(&self.build_values), None)?
+        };
+        self.pending.push_back(built);
         Ok(())
     }
 
@@ -445,8 +541,7 @@ impl HashJoin {
                 }
                 let row = table.rows[index].clone();
                 self.build_codec.decode_into(&row, &mut self.build_values)?;
-                let built = self.builder.build(None, Some(&self.build_values))?;
-                self.pending.push_back(built);
+                self.emit_unmatched_build()?;
             }
         }
         table.release(&self.budget);
@@ -493,7 +588,7 @@ impl HashJoin {
         for row in pair.build.reader()? {
             let row = row?;
             self.build_codec.decode_into(&row, &mut self.build_values)?;
-            let Some(key) = self.evaluator.keys().right_key(&self.build_values)? else {
+            let Some(key) = self.build_key(&self.build_values)? else {
                 continue;
             };
             if !table.insert(key, row, &self.budget) {
@@ -517,7 +612,7 @@ impl HashJoin {
             for row in pair.build.reader()? {
                 let row = row?;
                 self.build_codec.decode_into(&row, &mut self.build_values)?;
-                let Some(key) = self.evaluator.keys().right_key(&self.build_values)? else {
+                let Some(key) = self.build_key(&self.build_values)? else {
                     continue;
                 };
                 table.insert(key, row, &self.budget);
@@ -558,7 +653,7 @@ impl HashJoin {
         for row in pair.build.reader()? {
             let row = row?;
             self.build_codec.decode_into(&row, &mut self.build_values)?;
-            let Some(key) = self.evaluator.keys().right_key(&self.build_values)? else {
+            let Some(key) = self.build_key(&self.build_values)? else {
                 continue;
             };
             build_writers[partition_of(&key, depth, FAN_OUT)].write_row(&row)?;
@@ -567,7 +662,7 @@ impl HashJoin {
         for row in pair.probe.reader()? {
             let row = row?;
             self.probe_codec.decode_into(&row, &mut self.probe_values)?;
-            let Some(key) = self.evaluator.keys().left_key(&self.probe_values)? else {
+            let Some(key) = self.probe_key(&self.probe_values)? else {
                 continue;
             };
             probe_writers[partition_of(&key, depth, FAN_OUT)].write_row(&row)?;
@@ -603,8 +698,7 @@ impl HashJoin {
         let rows: Vec<Vec<u8>> = buffer.reader()?.collect::<Result<Vec<_>, JoinError>>()?;
         for row in rows {
             self.build_codec.decode_into(&row, &mut self.build_values)?;
-            let built = self.builder.build(None, Some(&self.build_values))?;
-            self.pending.push_back(built);
+            self.emit_unmatched_build()?;
         }
         Ok(())
     }

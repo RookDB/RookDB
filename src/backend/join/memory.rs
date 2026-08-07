@@ -128,4 +128,15 @@ impl MemoryAccountant {
     pub fn reset(&self) {
         self.release(self.used.get());
     }
+
+    /// Reduce the budget in response to real system memory pressure.
+    ///
+    /// Never below [`crate::join::config::MIN_WORK_MEMORY`]: an operator with
+    /// no budget cannot make progress. Memory already charged is not clawed
+    /// back - the effect is that the *next* charge fails, and the operator
+    /// responds by spilling or changing strategy.
+    pub fn shrink_to(&self, budget: u64) {
+        let floor = super::config::MIN_WORK_MEMORY;
+        self.budget.set(budget.max(floor).min(self.budget.get()));
+    }
 }

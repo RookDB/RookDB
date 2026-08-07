@@ -27,12 +27,13 @@ fn text(value: &str) -> Option<DataValue> {
 }
 
 /// Algorithms that accept an equijoin. Nested loops also accept anything else.
-const EQUI_ALGORITHMS: [JoinAlgorithm; 5] = [
+const EQUI_ALGORITHMS: [JoinAlgorithm; 6] = [
     JoinAlgorithm::SimpleNestedLoop,
     JoinAlgorithm::BlockNestedLoop,
     JoinAlgorithm::Hash,
     JoinAlgorithm::SortMerge,
     JoinAlgorithm::SymmetricHash,
+    JoinAlgorithm::Adaptive,
 ];
 
 const ALL_JOIN_TYPES: [JoinType; 6] = [

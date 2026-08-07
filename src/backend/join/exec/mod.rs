@@ -18,6 +18,7 @@ use super::key::KeySpec;
 use super::predicate::JoinPredicate;
 use super::schema::OutputSchema;
 
+pub mod adaptive;
 pub mod hash;
 pub mod index_nested_loop;
 pub mod nested_loop;
@@ -56,6 +57,12 @@ pub struct ExecStats {
     pub merge_passes: u64,
     /// Duplicate groups a sort-merge join had to spill.
     pub spilled_groups: u64,
+    /// Times the adaptive operator reduced its budget under real memory
+    /// pressure.
+    pub strategy_switches: u64,
+    /// Whether the adaptive operator built from the right relation rather than
+    /// the declared inner side.
+    pub role_reversed: bool,
 }
 
 pub type StatsHandle = Rc<RefCell<ExecStats>>;

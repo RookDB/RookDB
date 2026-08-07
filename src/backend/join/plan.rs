@@ -24,6 +24,7 @@ use super::cost::{
     residual_selectivity,
 };
 use super::error::JoinError;
+use super::exec::adaptive::AdaptiveJoin;
 use super::exec::hash::HashJoin;
 use super::exec::index_nested_loop::IndexNestedLoopJoin;
 use super::exec::nested_loop::{DEFAULT_BLOCK_ROWS, NestedLoopJoin};
@@ -44,13 +45,14 @@ use super::stats::{StatsConfidence, TableStatsCache};
 /// The capability matrix in `algorithm.rs` describes what each one *supports*;
 /// this is what has an executor behind it. The planner never proposes
 /// something it cannot build.
-const AVAILABLE: [JoinAlgorithm; 6] = [
+const AVAILABLE: [JoinAlgorithm; 7] = [
     JoinAlgorithm::SimpleNestedLoop,
     JoinAlgorithm::BlockNestedLoop,
     JoinAlgorithm::IndexNestedLoop,
     JoinAlgorithm::SortMerge,
     JoinAlgorithm::Hash,
     JoinAlgorithm::SymmetricHash,
+    JoinAlgorithm::Adaptive,
 ];
 
 /// An index on the inner relation, with the key it can answer.
@@ -275,8 +277,14 @@ impl JoinBuilder {
         );
 
         let model = CostModel::new(self.config.work_memory_bytes);
-        let (algorithm, cost, rejected) =
-            self.choose(&request, &model, &left_estimate, &right_estimate, &estimate)?;
+        let (algorithm, cost, rejected) = self.choose(
+            &request,
+            &model,
+            &left_estimate,
+            &right_estimate,
+            &estimate,
+            confidence,
+        )?;
 
         Ok(PhysicalPlan {
             algorithm,
@@ -312,7 +320,11 @@ impl JoinBuilder {
         left: &SideEstimate,
         right: &SideEstimate,
         estimate: &JoinEstimate,
+        confidence: StatsConfidence,
     ) -> Result<(JoinAlgorithm, JoinCost, Vec<(JoinAlgorithm, f64)>), JoinError> {
+        let has_keys = !request.keys.is_empty();
+        let analyzed = confidence == StatsConfidence::Analyzed;
+
         // An explicit choice still has to pass validation.
         if let Some(forced) = self.algorithm {
             spec_of(forced).validate(request)?;
@@ -322,6 +334,7 @@ impl JoinBuilder {
                 right,
                 estimate.output_rows,
                 self.block_rows as u64,
+                has_keys,
             );
             return Ok((forced, cost, Vec::new()));
         }
@@ -339,16 +352,26 @@ impl JoinBuilder {
             {
                 continue;
             }
-            candidates.push((
+            // Without an equality the adaptive operator is a block nested loop
+            // wearing a different name; offering both only adds noise.
+            if algorithm == JoinAlgorithm::Adaptive && !has_keys {
+                continue;
+            }
+
+            let mut cost = model.cost(
                 algorithm,
-                model.cost(
-                    algorithm,
-                    left,
-                    right,
-                    estimate.output_rows,
-                    self.block_rows as u64,
-                ),
-            ));
+                left,
+                right,
+                estimate.output_rows,
+                self.block_rows as u64,
+                has_keys,
+            );
+            if algorithm == JoinAlgorithm::Adaptive {
+                let factor = model.adaptive_factor(analyzed);
+                cost.io *= factor;
+                cost.cpu *= factor;
+            }
+            candidates.push((algorithm, cost));
         }
 
         candidates.sort_by(|a, b| {
@@ -438,6 +461,21 @@ impl JoinBuilder {
         // inner (build) side, uniformly across every algorithm. That is what
         // makes unmatched-left rows streamable and unmatched-right rows a
         // post-pass, in all of them.
+        if spec.algorithm() == JoinAlgorithm::Adaptive {
+            // The adaptive operator decides which side to build from, so it
+            // needs both inputs re-openable rather than one already streaming.
+            return Ok(Box::new(AdaptiveJoin::new(
+                &spec,
+                evaluator,
+                Box::new(left_source),
+                Box::new(right_source),
+                plan.schema,
+                MemoryAccountant::new(self.config.work_memory_bytes),
+                self.spill_scope()?,
+                self.block_rows,
+            )?));
+        }
+
         let outer = left_source.open()?;
         self.build_operator(
             &spec,

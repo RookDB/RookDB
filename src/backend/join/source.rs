@@ -21,6 +21,7 @@ use crate::heap::heap_manager::HeapScanIterator;
 use super::error::JoinError;
 use super::exec::{ExecStats, RowStream, StatsHandle, new_stats};
 use super::schema::{OutputSchema, RelationSchema};
+use super::spill::RowBuffer;
 
 /// Everything the join subsystem needs to read one relation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,81 @@ pub trait RowSource {
     /// Rows produced by the most recent complete scan, when known. Used by the
     /// planner only as a hint; correctness never depends on it.
     fn estimated_rows(&self) -> Option<u64>;
+}
+
+/// A re-openable source over rows already held in memory or in a spill file.
+///
+/// Lets an operator hand a materialised partition to another operator - a
+/// nested loop over one oversized hash partition, for instance - without
+/// caring where those rows currently live.
+pub struct BufferSource {
+    buffer: RowBuffer,
+    schema: Arc<OutputSchema>,
+}
+
+impl BufferSource {
+    pub fn new(buffer: RowBuffer, schema: Arc<OutputSchema>) -> Self {
+        Self { buffer, schema }
+    }
+}
+
+impl RowSource for BufferSource {
+    fn schema(&self) -> &Arc<OutputSchema> {
+        &self.schema
+    }
+
+    fn open(&self) -> Result<Box<dyn RowStream>, JoinError> {
+        let rows: Vec<Vec<u8>> = self
+            .buffer
+            .reader()?
+            .collect::<Result<Vec<_>, JoinError>>()?;
+        Ok(Box::new(VecStream {
+            rows: rows.into_iter(),
+            schema: Arc::clone(&self.schema),
+            stats: new_stats(),
+        }))
+    }
+
+    fn estimated_rows(&self) -> Option<u64> {
+        Some(self.buffer.len())
+    }
+}
+
+/// A one-shot stream over rows already in hand.
+pub struct VecStream {
+    rows: std::vec::IntoIter<Vec<u8>>,
+    schema: Arc<OutputSchema>,
+    stats: StatsHandle,
+}
+
+impl VecStream {
+    pub fn new(rows: Vec<Vec<u8>>, schema: Arc<OutputSchema>) -> Self {
+        Self {
+            rows: rows.into_iter(),
+            schema,
+            stats: new_stats(),
+        }
+    }
+}
+
+impl Iterator for VecStream {
+    type Item = Result<Vec<u8>, JoinError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = self.rows.next()?;
+        self.stats.borrow_mut().rows_out += 1;
+        Some(Ok(row))
+    }
+}
+
+impl RowStream for VecStream {
+    fn schema(&self) -> &Arc<OutputSchema> {
+        &self.schema
+    }
+
+    fn stats(&self) -> ExecStats {
+        self.stats.borrow().clone()
+    }
 }
 
 /// A base-table scan, optionally with a filter pushed into it.

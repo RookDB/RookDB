@@ -45,7 +45,6 @@ impl SortedKeyIndex {
             ));
         }
 
-        let stamp = ValidityStamp::read(&table.path)?;
         let types: Vec<_> = table.columns.iter().map(|c| c.data_type.clone()).collect();
 
         let mut classes = Vec::with_capacity(columns.len());
@@ -62,6 +61,12 @@ impl SortedKeyIndex {
         let codec = RowCodec::new(types);
         let manager = HeapManager::open(table.path.clone())
             .map_err(|e| JoinError::Io(format!("cannot open {}: {e}", table.path.display())))?;
+
+        // Read the stamp after opening: `HeapManager::open` synchronises the
+        // header and so may rewrite the file. A stamp taken beforehand would
+        // describe a state that no longer exists, and this index would look
+        // stale the moment it was built.
+        let stamp = ValidityStamp::read(&table.path)?;
 
         let mut entries = Vec::new();
         let mut values: Vec<Option<DataValue>> = Vec::new();

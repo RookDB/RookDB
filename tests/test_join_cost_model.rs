@@ -176,7 +176,7 @@ fn enormous_inputs_produce_finite_costs() {
         JoinAlgorithm::SymmetricHash,
         JoinAlgorithm::Adaptive,
     ] {
-        let cost = model.cost(algorithm, &huge, &huge, u64::MAX, 1024);
+        let cost = model.cost(algorithm, &huge, &huge, u64::MAX, 1024, true);
         assert!(
             cost.total() >= 0.0 && !cost.total().is_nan(),
             "{algorithm:?} produced {}",
@@ -201,7 +201,7 @@ fn zero_sized_inputs_do_not_divide_by_zero() {
         JoinAlgorithm::Hash,
         JoinAlgorithm::IndexNestedLoop,
     ] {
-        let cost = model.cost(algorithm, &empty, &empty, 0, 1024);
+        let cost = model.cost(algorithm, &empty, &empty, 0, 1024, true);
         assert!(cost.total().is_finite(), "{algorithm:?}");
     }
 
@@ -298,15 +298,72 @@ fn an_equi_join_prefers_a_key_based_algorithm() {
     assert!(
         matches!(
             plan.algorithm,
-            JoinAlgorithm::Hash | JoinAlgorithm::SortMerge | JoinAlgorithm::SymmetricHash
+            JoinAlgorithm::Hash
+                | JoinAlgorithm::SortMerge
+                | JoinAlgorithm::SymmetricHash
+                | JoinAlgorithm::Adaptive
         ),
         "expected a key-based algorithm, got {:?}",
         plan.algorithm
+    );
+    assert!(
+        !matches!(
+            plan.algorithm,
+            JoinAlgorithm::SimpleNestedLoop | JoinAlgorithm::BlockNestedLoop
+        ),
+        "a nested loop is quadratic here"
     );
     assert_eq!(plan.key_conditions, vec!["l.k = r.k".to_string()]);
     assert!(
         !plan.rejected.is_empty(),
         "other algorithms should have been costed and ranked"
+    );
+}
+
+/// Estimate confidence decides whether adaptivity is worth paying for.
+///
+/// With guessed statistics the operator that can correct itself mid-flight is
+/// preferred; once they are measured, the simpler one is - adaptivity buys
+/// nothing if the prediction is already right.
+#[test]
+fn adaptivity_is_preferred_only_while_the_estimates_are_guesses() {
+    let db = TempDb::new();
+    let mut left = db.create_table("l", &[("k", DataType::Int)]);
+    let mut right = db.create_table("r", &[("k", DataType::Int)]);
+    for i in 0..2_000 {
+        left.insert(vec![int(i % 500)]);
+        right.insert(vec![int(i % 400)]);
+    }
+    left.flush();
+    right.flush();
+
+    let plan_now = || {
+        JoinBuilder::new(left.table_ref(), right.table_ref(), JoinType::Inner)
+            .with_condition(eq(col("l.k"), col("r.k")))
+            .plan()
+            .expect("plans")
+    };
+
+    let guessed = plan_now();
+    assert_eq!(guessed.confidence, StatsConfidence::HeaderOnly);
+    assert_eq!(
+        guessed.algorithm,
+        JoinAlgorithm::Adaptive,
+        "unanalyzed, the self-correcting operator should win"
+    );
+
+    for table in [&left, &right] {
+        let stats = analyze_table(&table.table_ref()).expect("analyze");
+        save_stats(&table.table_ref(), &stats).expect("save");
+    }
+
+    let measured = plan_now();
+    assert_eq!(measured.confidence, StatsConfidence::Analyzed);
+    assert_ne!(
+        measured.algorithm,
+        JoinAlgorithm::Adaptive,
+        "measured, the plain operator should win; considered {:?}",
+        measured.rejected
     );
 }
 
