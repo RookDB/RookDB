@@ -7,9 +7,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// Never budget less than this: below it, even a single row plus its hash
-/// entry would not fit and the operator could make no progress.
-pub const MIN_WORK_MEMORY: u64 = 64 * 1024;
+/// Never budget less than this.
+///
+/// It only has to comfortably exceed one row plus its hash-table entry, so
+/// that an operator can always make progress. Keeping it small also keeps the
+/// spilling paths reachable from a unit test with a modest fixture, rather
+/// than only under production-sized data - which is why the previous
+/// implementation's Grace and hybrid paths were never once executed under
+/// test.
+pub const MIN_WORK_MEMORY: u64 = 4 * 1024;
 
 /// Refuse absurd budgets rather than trusting a mistyped environment variable.
 pub const MAX_WORK_MEMORY: u64 = 16 * 1024 * 1024 * 1024;

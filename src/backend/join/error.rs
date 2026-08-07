@@ -27,6 +27,10 @@ pub enum JoinError {
     Plan(String),
     /// A filesystem failure while reading a relation or a spill file.
     Io(String),
+    /// An operator that cannot spill ran out of memory. Recoverable by
+    /// choosing an algorithm that can, which is what the adaptive operator
+    /// does automatically.
+    OutOfMemory(String),
 }
 
 impl JoinError {
@@ -63,6 +67,7 @@ impl fmt::Display for JoinError {
             JoinError::Schema(message) => write!(f, "schema error: {message}"),
             JoinError::Plan(message) => write!(f, "plan error: {message}"),
             JoinError::Io(message) => write!(f, "i/o error: {message}"),
+            JoinError::OutOfMemory(message) => write!(f, "out of memory: {message}"),
         }
     }
 }

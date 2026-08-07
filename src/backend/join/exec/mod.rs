@@ -18,7 +18,10 @@ use super::key::KeySpec;
 use super::predicate::JoinPredicate;
 use super::schema::OutputSchema;
 
+pub mod hash;
 pub mod nested_loop;
+pub mod sort_merge;
+pub mod symmetric_hash;
 
 /// Counters describing what an operator actually did.
 ///
@@ -35,6 +38,23 @@ pub struct ExecStats {
     pub candidate_pairs: u64,
     /// Times the inner input was reopened.
     pub inner_rescans: u64,
+
+    /// Row bytes written to spill files. Non-zero proves a spilling path was
+    /// genuinely taken, which is what makes those paths testable.
+    pub spilled_bytes: u64,
+    /// Partition pairs created by a hash join, including repartitioned ones.
+    pub partitions: u64,
+    /// Deepest level of recursive repartitioning reached.
+    pub repartition_depth: u32,
+    /// Partitions that still did not fit after repartitioning, because a
+    /// single key dominates them.
+    pub oversized_partitions: u64,
+    /// Sorted runs written by an external sort.
+    pub sort_runs: u64,
+    /// Passes made over those runs.
+    pub merge_passes: u64,
+    /// Duplicate groups a sort-merge join had to spill.
+    pub spilled_groups: u64,
 }
 
 pub type StatsHandle = Rc<RefCell<ExecStats>>;

@@ -11,12 +11,18 @@ use crate::catalog::Table;
 use crate::executor::selection::{Predicate, SelectionExecutor};
 
 use super::algorithm::{JoinAlgorithm, JoinRequest, JoinType, spec_for};
+use super::config::JoinConfig;
 use super::error::JoinError;
+use super::exec::hash::HashJoin;
 use super::exec::nested_loop::{DEFAULT_BLOCK_ROWS, NestedLoopJoin};
+use super::exec::sort_merge::SortMergeJoin;
+use super::exec::symmetric_hash::SymmetricHashJoin;
 use super::exec::{MatchEvaluator, RowStream};
+use super::memory::MemoryAccountant;
 use super::predicate::{JoinPredicate, SideResolver, split_conjuncts};
 use super::schema::OutputSchema;
 use super::source::{RowSource, TableRef, TableSource};
+use super::spill::SpillScope;
 
 /// Describes one join, and turns it into a running operator.
 pub struct JoinBuilder {
@@ -25,6 +31,8 @@ pub struct JoinBuilder {
     join_type: JoinType,
     condition: Option<Predicate>,
     block_rows: usize,
+    algorithm: Option<JoinAlgorithm>,
+    config: JoinConfig,
 }
 
 impl JoinBuilder {
@@ -35,7 +43,22 @@ impl JoinBuilder {
             join_type,
             condition: None,
             block_rows: DEFAULT_BLOCK_ROWS,
+            algorithm: None,
+            config: JoinConfig::resolve(),
         }
+    }
+
+    /// Force a specific algorithm instead of letting the builder choose.
+    /// Validation still applies, so an algorithm that cannot serve the join
+    /// type is refused rather than silently substituted.
+    pub fn with_algorithm(mut self, algorithm: JoinAlgorithm) -> Self {
+        self.algorithm = Some(algorithm);
+        self
+    }
+
+    pub fn with_config(mut self, config: JoinConfig) -> Self {
+        self.config = config;
+        self
     }
 
     pub fn with_condition(mut self, condition: Predicate) -> Self {
@@ -51,6 +74,9 @@ impl JoinBuilder {
     }
 
     fn algorithm(&self) -> JoinAlgorithm {
+        if let Some(algorithm) = self.algorithm {
+            return algorithm;
+        }
         if self.block_rows == 1 {
             JoinAlgorithm::SimpleNestedLoop
         } else {
@@ -110,16 +136,77 @@ impl JoinBuilder {
             .map(|predicate| JoinPredicate::new(predicate, left_relation.len()));
         let evaluator = MatchEvaluator::new(split.keys.clone(), residual);
 
+        // The left relation is the outer (probe) side and the right is the
+        // inner (build) side, uniformly across every algorithm. That is what
+        // makes unmatched-left rows streamable and unmatched-right rows a
+        // post-pass, in all of them.
         let outer = left_source.open()?;
 
-        Ok(Box::new(NestedLoopJoin::new(
-            &spec,
-            evaluator,
-            outer,
-            Box::new(right_source),
-            schema,
-            self.block_rows,
-        )))
+        match spec.algorithm() {
+            JoinAlgorithm::SimpleNestedLoop | JoinAlgorithm::BlockNestedLoop => {
+                // Asking for the simple variant means a block of one row;
+                // otherwise the operator would claim to be simple while
+                // blocking.
+                let block_rows = if spec.algorithm() == JoinAlgorithm::SimpleNestedLoop {
+                    1
+                } else {
+                    self.block_rows.max(2)
+                };
+                Ok(Box::new(NestedLoopJoin::new(
+                    &spec,
+                    evaluator,
+                    outer,
+                    Box::new(right_source),
+                    schema,
+                    block_rows,
+                )))
+            }
+            JoinAlgorithm::Hash => {
+                let budget = MemoryAccountant::new(self.config.work_memory_bytes);
+                let scope = self.spill_scope()?;
+                Ok(Box::new(HashJoin::new(
+                    &spec,
+                    evaluator,
+                    outer,
+                    Box::new(right_source),
+                    schema,
+                    budget,
+                    scope,
+                )))
+            }
+            JoinAlgorithm::SortMerge => {
+                let budget = MemoryAccountant::new(self.config.work_memory_bytes);
+                let scope = self.spill_scope()?;
+                Ok(Box::new(SortMergeJoin::new(
+                    &spec,
+                    evaluator,
+                    outer,
+                    Box::new(right_source),
+                    schema,
+                    budget,
+                    scope,
+                )))
+            }
+            JoinAlgorithm::SymmetricHash => {
+                let budget = MemoryAccountant::new(self.config.work_memory_bytes);
+                Ok(Box::new(SymmetricHashJoin::new(
+                    &spec,
+                    evaluator,
+                    outer,
+                    Box::new(right_source),
+                    schema,
+                    budget,
+                )))
+            }
+            other => Err(JoinError::plan(format!(
+                "{} join is not available yet",
+                other.name()
+            ))),
+        }
+    }
+
+    fn spill_scope(&self) -> Result<Arc<SpillScope>, JoinError> {
+        SpillScope::create(&self.config.spill_root)
     }
 }
 
