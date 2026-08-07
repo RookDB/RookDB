@@ -56,7 +56,7 @@ const AVAILABLE: [JoinAlgorithm; 7] = [
 ];
 
 /// An index on the inner relation, with the key it can answer.
-type InnerIndex = (std::rc::Rc<dyn JoinIndex>, KeySpec);
+pub type InnerIndex = (std::rc::Rc<dyn JoinIndex>, KeySpec);
 
 /// One input of a planned join, as EXPLAIN describes it.
 #[derive(Debug, Clone)]
@@ -471,7 +471,7 @@ impl JoinBuilder {
                 Box::new(right_source),
                 plan.schema,
                 MemoryAccountant::new(self.config.work_memory_bytes),
-                self.spill_scope()?,
+                spill_scope_in(&self.config)?,
                 self.block_rows,
             )?));
         }
@@ -496,6 +496,42 @@ impl JoinBuilder {
         schema: Arc<OutputSchema>,
         index: Option<InnerIndex>,
     ) -> Result<Box<dyn RowStream>, JoinError> {
+        build_operator_with(
+            spec,
+            evaluator,
+            outer,
+            inner,
+            schema,
+            index,
+            &self.config,
+            self.block_rows,
+            Some(&self.right),
+        )
+    }
+}
+
+/// Construct an operator from inputs that are already streams and sources.
+///
+/// `JoinBuilder` works from two table references; this is the same dispatch
+/// for callers whose inputs are themselves joins. `inner_table` is only needed
+/// by the index nested loop, which fetches rows by their location in a heap
+/// file - an intermediate result has none, so it is `None` there and the
+/// algorithm is not offered.
+#[allow(clippy::too_many_arguments)]
+pub fn build_operator_with(
+    spec: &ValidatedJoinSpec,
+    evaluator: MatchEvaluator,
+    outer: Box<dyn RowStream>,
+    inner: Box<dyn RowSource>,
+    schema: Arc<OutputSchema>,
+    index: Option<InnerIndex>,
+    config: &JoinConfig,
+    block_rows: usize,
+    inner_table: Option<&TableRef>,
+) -> Result<Box<dyn RowStream>, JoinError> {
+    {
+        let self_block_rows = block_rows;
+        let self_config = config;
         match spec.algorithm() {
             JoinAlgorithm::IndexNestedLoop => {
                 // Validation already established that an index exists; this
@@ -505,14 +541,13 @@ impl JoinBuilder {
                         "index nested loop was planned without a usable index".to_string(),
                     )
                 })?;
+                let table = inner_table.ok_or_else(|| {
+                    JoinError::plan(
+                        "index nested loop needs a base relation on its inner side".to_string(),
+                    )
+                })?;
                 Ok(Box::new(IndexNestedLoopJoin::new(
-                    spec,
-                    evaluator,
-                    probe_keys,
-                    index,
-                    &self.right,
-                    outer,
-                    schema,
+                    spec, evaluator, probe_keys, index, table, outer, schema,
                 )?))
             }
             JoinAlgorithm::SimpleNestedLoop | JoinAlgorithm::BlockNestedLoop => {
@@ -522,7 +557,7 @@ impl JoinBuilder {
                 let block_rows = if spec.algorithm() == JoinAlgorithm::SimpleNestedLoop {
                     1
                 } else {
-                    self.block_rows.max(2)
+                    self_block_rows.max(2)
                 };
                 Ok(Box::new(NestedLoopJoin::new(
                     spec, evaluator, outer, inner, schema, block_rows,
@@ -534,8 +569,8 @@ impl JoinBuilder {
                 outer,
                 inner,
                 schema,
-                MemoryAccountant::new(self.config.work_memory_bytes),
-                self.spill_scope()?,
+                MemoryAccountant::new(self_config.work_memory_bytes),
+                spill_scope_in(self_config)?,
             ))),
             JoinAlgorithm::SortMerge => Ok(Box::new(SortMergeJoin::new(
                 spec,
@@ -543,8 +578,8 @@ impl JoinBuilder {
                 outer,
                 inner,
                 schema,
-                MemoryAccountant::new(self.config.work_memory_bytes),
-                self.spill_scope()?,
+                MemoryAccountant::new(self_config.work_memory_bytes),
+                spill_scope_in(self_config)?,
             ))),
             JoinAlgorithm::SymmetricHash => Ok(Box::new(SymmetricHashJoin::new(
                 spec,
@@ -552,7 +587,7 @@ impl JoinBuilder {
                 outer,
                 inner,
                 schema,
-                MemoryAccountant::new(self.config.work_memory_bytes),
+                MemoryAccountant::new(self_config.work_memory_bytes),
             ))),
             // Every other algorithm has an executor. The adaptive one needs
             // both inputs re-openable, so `execute` builds it before reaching
@@ -562,10 +597,11 @@ impl JoinBuilder {
             )),
         }
     }
+}
 
-    fn spill_scope(&self) -> Result<Arc<SpillScope>, JoinError> {
-        SpillScope::create(&self.config.spill_root)
-    }
+/// A fresh spill directory for one operator.
+pub fn spill_scope_in(config: &JoinConfig) -> Result<Arc<SpillScope>, JoinError> {
+    SpillScope::create(&config.spill_root)
 }
 
 fn spec_of(algorithm: JoinAlgorithm) -> &'static AlgorithmSpec {

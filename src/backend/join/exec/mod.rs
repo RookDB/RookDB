@@ -21,6 +21,7 @@ use super::schema::OutputSchema;
 pub mod adaptive;
 pub mod hash;
 pub mod index_nested_loop;
+pub mod multi;
 pub mod nested_loop;
 pub mod sort_merge;
 pub mod symmetric_hash;

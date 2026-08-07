@@ -18,9 +18,10 @@ use storage_manager::catalog::Catalog;
 use storage_manager::executor::selection::{ComparisonOp, Constant, Expr, Predicate};
 use storage_manager::join::index::JoinIndex;
 use storage_manager::join::index::sorted_array::{create_index, drop_index};
+use storage_manager::join::order::validate_edges;
 use storage_manager::join::{
-    ExecStats, JoinBuilder, JoinConfig, JoinType, RowCodec, TableRef, analyze_table,
-    catalog_bridge, save_stats, spill,
+    ExecStats, JoinBuilder, JoinConfig, JoinGraph, JoinType, RowCodec, TableRef, TableStatsCache,
+    analyze_table, catalog_bridge, execute_ordered, optimize, save_stats, spill,
 };
 use storage_manager::types::DataValue;
 
@@ -90,28 +91,30 @@ pub fn join_menu(catalog: &Catalog, current_db: &Option<String>) -> io::Result<(
         println!("\n╔════════════════════════════════════════╗");
         println!("║          JOIN OPERATIONS               ║");
         println!("╠════════════════════════════════════════╣");
-        println!("║    1. Run a join                       ║");
+        println!("║    1. Run a join (two tables)          ║");
         println!("║    2. Explain a join (plan only)       ║");
-        println!("║    3. Analyze a table                  ║");
-        println!("║    4. Build a join index               ║");
-        println!("║    5. Drop a join index                ║");
-        println!("║    6. Join settings                    ║");
-        println!("║    7. Back to main menu                ║");
+        println!("║    3. Run a multi-table join           ║");
+        println!("║    4. Analyze a table                  ║");
+        println!("║    5. Build a join index               ║");
+        println!("║    6. Drop a join index                ║");
+        println!("║    7. Join settings                    ║");
+        println!("║    8. Back to main menu                ║");
         println!("╚════════════════════════════════════════╝");
 
-        let Some(choice) = prompt("\nEnter your choice (1-7): ")? else {
+        let Some(choice) = prompt("\nEnter your choice (1-8): ")? else {
             return Ok(());
         };
 
         match choice.as_str() {
             "1" => run_join(catalog, &database, &config, true)?,
             "2" => run_join(catalog, &database, &config, false)?,
-            "3" => analyze_cmd(catalog, &database)?,
-            "4" => build_index_cmd(catalog, &database)?,
-            "5" => drop_index_cmd(catalog, &database)?,
-            "6" => settings_cmd(&mut config)?,
-            "7" | "" => return Ok(()),
-            _ => println!("  Invalid option. Please enter a number between 1 and 7."),
+            "3" => run_multi_join(catalog, &database, &config)?,
+            "4" => analyze_cmd(catalog, &database)?,
+            "5" => build_index_cmd(catalog, &database)?,
+            "6" => drop_index_cmd(catalog, &database)?,
+            "7" => settings_cmd(&mut config)?,
+            "8" | "" => return Ok(()),
+            _ => println!("  Invalid option. Please enter a number between 1 and 8."),
         }
     }
 }
@@ -495,6 +498,218 @@ fn print_stats(stats: &ExecStats) {
             stats.strategy_switches
         );
     }
+}
+
+/// Join three or more relations, letting the optimiser choose the order.
+///
+/// Inner joins only: reordering across an outer join changes the answer, so a
+/// reordered block contains none.
+fn run_multi_join(catalog: &Catalog, database: &str, config: &JoinConfig) -> io::Result<()> {
+    let names = catalog_bridge::table_names(catalog, database);
+    if names.len() < 2 {
+        println!("\n  A join needs at least two tables in '{database}'.");
+        return Ok(());
+    }
+
+    println!("\n  Choose the tables to join (blank when finished).");
+    println!("  Every table is joined with INNER semantics.");
+
+    let mut relations: Vec<TableRef> = Vec::new();
+    loop {
+        let title = format!("Table {} (blank to finish):", relations.len() + 1);
+        let Some(index) = choose(&title, &names)? else {
+            break;
+        };
+        let Some(name) = names.get(index) else { break };
+
+        // A relation used twice needs a distinct alias, or no qualified name
+        // means anything.
+        let default = if relations.iter().any(|r| r.alias == *name) {
+            format!("{name}_{}", relations.len() + 1)
+        } else {
+            name.clone()
+        };
+        let Some(alias) = prompt(&format!("  Alias [{default}]: "))? else {
+            return Ok(());
+        };
+        let alias = if alias.is_empty() { default } else { alias };
+
+        if relations.iter().any(|r| r.alias == alias) {
+            println!("  '{alias}' is already in use.");
+            continue;
+        }
+
+        match catalog_bridge::resolve(catalog, database, name, &alias) {
+            Ok(table) => relations.push(table),
+            Err(e) => println!("  {e}"),
+        }
+    }
+
+    if relations.len() < 2 {
+        println!("  Nothing to join.");
+        return Ok(());
+    }
+
+    let Some(condition) = gather_multi_condition(&relations)? else {
+        return Ok(());
+    };
+
+    let stats = TableStatsCache::new();
+    let graph = match JoinGraph::build(relations, condition.as_ref(), &stats) {
+        Ok(graph) => graph,
+        Err(e) => {
+            println!("\n  Cannot plan this join: {e}");
+            return Ok(());
+        }
+    };
+    if let Err(e) = validate_edges(&graph) {
+        println!("\n  Cannot plan this join: {e}");
+        return Ok(());
+    }
+
+    let plan = match optimize(&graph, config.work_memory_bytes) {
+        Ok(plan) => plan,
+        Err(e) => {
+            println!("\n  Cannot order this join: {e}");
+            return Ok(());
+        }
+    };
+
+    println!("\n{}", plan.render(&graph));
+    if plan.has_cross_product() {
+        println!("  Note: some tables have no condition between them, so a");
+        println!("  cross product is unavoidable. Expect a large result.\n");
+    }
+
+    let started = Instant::now();
+    let mut stream = match execute_ordered(&graph, &plan, config) {
+        Ok(stream) => stream,
+        Err(e) => {
+            println!("  Cannot run this join: {e}");
+            return Ok(());
+        }
+    };
+
+    let codec = RowCodec::new(stream.schema().types.clone());
+    let headers: Vec<String> = stream
+        .schema()
+        .columns
+        .iter()
+        .map(|column| column.qualified_name.clone())
+        .collect();
+    let header_line = headers.join(" | ");
+    println!("  {header_line}");
+    println!("  {}", "-".repeat(header_line.len()));
+
+    let mut produced = 0usize;
+    loop {
+        let Some(row) = stream.next() else { break };
+        let row = match row {
+            Ok(row) => row,
+            Err(e) => {
+                println!("\n  The join stopped: {e}");
+                break;
+            }
+        };
+        produced += 1;
+        if produced > MAX_DISPLAY_ROWS {
+            continue;
+        }
+        match codec.decode(&row) {
+            Ok(values) => println!("  {}", render_row(&values)),
+            Err(e) => println!("  <undecodable row: {e}>"),
+        }
+    }
+
+    if produced > MAX_DISPLAY_ROWS {
+        println!(
+            "  ... {} more row(s) not shown",
+            produced - MAX_DISPLAY_ROWS
+        );
+    }
+    println!("\n  {produced} row(s) in {:.2?}", started.elapsed());
+
+    Ok(())
+}
+
+/// Conditions across any two of the chosen relations.
+fn gather_multi_condition(relations: &[TableRef]) -> io::Result<Option<Option<Predicate>>> {
+    let mut columns: Vec<String> = Vec::new();
+    for relation in relations {
+        columns.extend(qualified_columns(relation));
+    }
+
+    let operator_names: Vec<String> = OPERATORS
+        .iter()
+        .map(|(symbol, _)| (*symbol).to_string())
+        .collect();
+    let mut conjuncts: Vec<Predicate> = Vec::new();
+
+    loop {
+        let actions = vec![
+            "Compare two columns".to_string(),
+            "Compare a column to a value".to_string(),
+            if conjuncts.is_empty() {
+                "Done (no condition - every table crossed)".to_string()
+            } else {
+                format!("Done ({} condition(s))", conjuncts.len())
+            },
+        ];
+        let Some(action) = choose("Add a join condition:", &actions)? else {
+            return Ok(None);
+        };
+        if action == 2 {
+            break;
+        }
+
+        let Some(left_index) = choose("First column:", &columns)? else {
+            continue;
+        };
+        let Some(operator_index) = choose("Operator:", &operator_names)? else {
+            continue;
+        };
+        let (Some(left), Some((_, operator))) =
+            (columns.get(left_index), OPERATORS.get(operator_index))
+        else {
+            continue;
+        };
+
+        let right = if action == 0 {
+            let Some(right_index) = choose("Second column:", &columns)? else {
+                continue;
+            };
+            let Some(right) = columns.get(right_index) else {
+                continue;
+            };
+            column_expr(right)
+        } else {
+            let Some(literal) = prompt("  Value (blank for NULL): ")? else {
+                return Ok(None);
+            };
+            Expr::Constant(if literal.is_empty() {
+                Constant::Null
+            } else if let Ok(number) = literal.parse::<i32>() {
+                Constant::Int(number)
+            } else {
+                Constant::Text(literal)
+            })
+        };
+
+        conjuncts.push(Predicate::Compare(
+            Box::new(column_expr(left)),
+            *operator,
+            Box::new(right),
+        ));
+    }
+
+    if conjuncts.is_empty() {
+        return Ok(Some(None));
+    }
+    let mut iter = conjuncts.into_iter();
+    let Some(first) = iter.next() else {
+        return Ok(Some(None));
+    };
+    Ok(Some(Some(iter.fold(first, Predicate::and))))
 }
 
 fn pick_table(catalog: &Catalog, database: &str, title: &str) -> io::Result<Option<TableRef>> {

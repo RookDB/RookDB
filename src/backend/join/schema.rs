@@ -86,11 +86,44 @@ impl OutputSchema {
         Self::from_columns(columns)
     }
 
+    /// The columns of two already-joined subtrees, concatenated.
+    ///
+    /// Used when a join's inputs are themselves joins: qualified names are
+    /// carried through unchanged, so a column keeps the name it had at the
+    /// leaf however many joins it passes through.
+    pub fn join_of(left: &OutputSchema, right: &OutputSchema) -> Self {
+        let mut columns = Vec::with_capacity(left.len() + right.len());
+        for (index, column) in left.columns.iter().enumerate() {
+            columns.push(OutputColumn {
+                source: RelationSide::Left,
+                source_index: index,
+                qualified_name: column.qualified_name.clone(),
+                data_type: column.data_type.clone(),
+                nullable: column.nullable,
+            });
+        }
+        for (index, column) in right.columns.iter().enumerate() {
+            columns.push(OutputColumn {
+                source: RelationSide::Right,
+                source_index: index,
+                qualified_name: column.qualified_name.clone(),
+                data_type: column.data_type.clone(),
+                nullable: column.nullable,
+            });
+        }
+        Self::from_columns(columns)
+    }
+
     /// Only the left relation's columns - the output shape of SEMI and ANTI
     /// joins, which never emit right-side data.
     pub fn left_only(left: &RelationSchema) -> Self {
         let mut columns = Vec::with_capacity(left.len());
         push_side(&mut columns, left, RelationSide::Left, false);
+        Self::from_columns(columns)
+    }
+
+    /// Build a schema from columns taken from an existing one, in a new order.
+    pub fn from_output_columns(columns: Vec<OutputColumn>) -> Self {
         Self::from_columns(columns)
     }
 

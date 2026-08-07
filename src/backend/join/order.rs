@@ -41,6 +41,18 @@ use super::stats::TableStatsCache;
 /// a cutoff is not optional.
 pub const MAX_EXHAUSTIVE_RELATIONS: usize = 8;
 
+/// A conjunct together with the relations it mentions.
+///
+/// Execution needs this: a predicate can only be evaluated once every relation
+/// it names is present, so it is applied at the lowest node of the plan whose
+/// subtree covers its mask.
+#[derive(Debug, Clone)]
+pub struct Conjunct {
+    /// Bit `i` set means relation `i` is mentioned.
+    pub mask: u64,
+    pub predicate: Predicate,
+}
+
 /// A conjunct relating exactly two relations.
 #[derive(Debug, Clone)]
 pub struct JoinEdge {
@@ -58,6 +70,8 @@ pub struct JoinGraph {
     edges: Vec<JoinEdge>,
     /// Conjuncts touching a single relation.
     filters: Vec<(usize, Predicate)>,
+    /// Every conjunct, with the relations it mentions.
+    conjuncts: Vec<Conjunct>,
     /// Bit `j` set in `neighbours[i]` means an edge joins `i` and `j`.
     neighbours: Vec<u64>,
     /// Rows and width per relation, from statistics.
@@ -119,6 +133,7 @@ impl JoinGraph {
             relations,
             edges: Vec::new(),
             filters: Vec::new(),
+            conjuncts: Vec::new(),
             neighbours: Vec::new(),
             cardinality,
             row_bytes,
@@ -130,6 +145,11 @@ impl JoinGraph {
 
         for conjunct in conjuncts {
             let touched = graph.relations_touched(conjunct)?;
+            let mask = touched.iter().fold(0u64, |mask, r| mask | (1u64 << r));
+            graph.conjuncts.push(Conjunct {
+                mask,
+                predicate: conjunct.clone(),
+            });
             match touched.len() {
                 // A constant conjunct has to be evaluated somewhere; the first
                 // relation is as good a place as any.
@@ -174,6 +194,16 @@ impl JoinGraph {
 
     pub fn filters(&self) -> &[(usize, Predicate)] {
         &self.filters
+    }
+
+    /// Every conjunct, with the relations it mentions.
+    pub fn conjuncts(&self) -> &[Conjunct] {
+        &self.conjuncts
+    }
+
+    /// Column count of a relation, used when laying out a subtree's schema.
+    pub fn relation(&self, index: usize) -> Option<&TableRef> {
+        self.relations.get(index)
     }
 
     /// Which relations a conjunct mentions, in ascending order.
