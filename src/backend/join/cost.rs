@@ -423,12 +423,38 @@ impl CostModel {
         block_rows: u64,
         has_keys: bool,
     ) -> JoinCost {
-        // Resolve what the adaptive operator will actually run before costing.
-        let algorithm = match algorithm {
-            JoinAlgorithm::Adaptive if !has_keys => JoinAlgorithm::BlockNestedLoop,
-            JoinAlgorithm::Adaptive => JoinAlgorithm::Hash,
-            other => other,
-        };
+        // Cost the adaptive operator as what it will actually run.
+        //
+        // With an equality it is a hash join that builds from whichever side
+        // turns out smaller, so it is costed with the sides put in that order.
+        // Measurement drove this: on a 200-row relation joined to a 20 000-row
+        // one it is roughly a third faster than a hash join fixed to build
+        // from the right, and without this the planner could not see why.
+        if algorithm == JoinAlgorithm::Adaptive {
+            if !has_keys {
+                return self.cost(
+                    JoinAlgorithm::BlockNestedLoop,
+                    left,
+                    right,
+                    output_rows,
+                    block_rows,
+                    has_keys,
+                );
+            }
+            let (probe, build) = if left.bytes() <= right.bytes() {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            return self.cost(
+                JoinAlgorithm::Hash,
+                probe,
+                build,
+                output_rows,
+                block_rows,
+                has_keys,
+            );
+        }
 
         let c = &self.coefficients;
         let left_pages = left.pages_or_one();
@@ -499,13 +525,25 @@ impl CostModel {
             }
 
             JoinAlgorithm::Hash | JoinAlgorithm::Adaptive => {
-                // The resident fraction of the build side needs no spilling;
-                // the rest is written once and read once.
+                // The right input is the build side; the left probes it. The
+                // resident fraction of the build side needs no spilling; the
+                // rest is written once and read once.
                 let resident = (self.memory_pages / right_pages).min(1.0);
                 let spilled = 1.0 - resident;
                 let io = (left_pages + right_pages + 2.0 * spilled * (left_pages + right_pages))
                     * c.seq_page;
-                let cpu = (left_rows + right_rows) * (c.cpu_hash + c.cpu_key) + emit;
+
+                // Building costs more per row than probing - an allocation and
+                // a bucket insert against a lookup - so the two are charged
+                // separately. Charging them alike makes the formula symmetric
+                // in its inputs, and the planner then cannot see why building
+                // from the smaller side is worth anything. Benchmarking a
+                // 200-row relation against a 20 000-row one is what surfaced
+                // this.
+                let cpu = right_rows * (c.cpu_hash + c.cpu_key + c.cpu_tuple)
+                    + left_rows * (c.cpu_hash + c.cpu_key)
+                    + emit;
+
                 JoinCost {
                     io,
                     cpu,

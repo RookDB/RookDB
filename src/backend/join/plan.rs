@@ -554,10 +554,12 @@ impl JoinBuilder {
                 schema,
                 MemoryAccountant::new(self.config.work_memory_bytes),
             ))),
-            other => Err(JoinError::plan(format!(
-                "{} join is not available yet",
-                other.name()
-            ))),
+            // Every other algorithm has an executor. The adaptive one needs
+            // both inputs re-openable, so `execute` builds it before reaching
+            // here; arriving with it means the two have drifted apart.
+            JoinAlgorithm::Adaptive => Err(JoinError::plan(
+                "internal: the adaptive operator is built by execute(), not here".to_string(),
+            )),
         }
     }
 
