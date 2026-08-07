@@ -13,7 +13,8 @@ use common::{
 };
 use storage_manager::executor::selection::{ComparisonOp, Predicate};
 use storage_manager::join::{
-    JoinBuilder, JoinPredicate, JoinType, MatchEvaluator, SideResolver, split_conjuncts,
+    JoinAlgorithm, JoinBuilder, JoinPredicate, JoinType, MatchEvaluator, SideResolver,
+    split_conjuncts,
 };
 use storage_manager::types::{DataType, DataValue};
 
@@ -59,6 +60,7 @@ fn check(
     block_rows: usize,
 ) {
     let mut builder = JoinBuilder::new(left.table_ref(), right.table_ref(), join_type)
+        .with_algorithm(nested_loop_for(block_rows))
         .with_block_rows(block_rows);
     if let Some(condition) = condition.clone() {
         builder = builder.with_condition(condition);
@@ -129,6 +131,18 @@ fn equi() -> Predicate {
     eq(col("e.dept_id"), col("d.id"))
 }
 
+/// Which nested-loop variant a block size corresponds to.
+///
+/// The planner chooses by cost, so these tests force the algorithm; otherwise
+/// they would quietly exercise whichever operator happened to be cheapest.
+fn nested_loop_for(block_rows: usize) -> JoinAlgorithm {
+    if block_rows == 1 {
+        JoinAlgorithm::SimpleNestedLoop
+    } else {
+        JoinAlgorithm::BlockNestedLoop
+    }
+}
+
 // ── Every join type, both block sizes ────────────────────────────────────────
 
 /// The full matrix of join types, run as a simple nested loop (block of one)
@@ -173,6 +187,7 @@ fn cross_join_produces_the_full_product() {
         departments.table_ref(),
         JoinType::Cross,
     )
+    .with_algorithm(JoinAlgorithm::BlockNestedLoop)
     .execute()
     .expect("cross join should plan");
     let rows = collect_rows(stream).expect("cross join should run");
@@ -195,6 +210,7 @@ fn null_keys_never_match_each_other() {
         departments.table_ref(),
         JoinType::Inner,
     )
+    .with_algorithm(JoinAlgorithm::BlockNestedLoop)
     .with_condition(equi())
     .execute()
     .expect("plans");
@@ -214,6 +230,7 @@ fn null_keys_never_match_each_other() {
         departments.table_ref(),
         JoinType::LeftOuter,
     )
+    .with_algorithm(JoinAlgorithm::BlockNestedLoop)
     .with_condition(equi())
     .execute()
     .expect("plans");
@@ -232,6 +249,7 @@ fn null_keys_never_match_each_other() {
         departments.table_ref(),
         JoinType::Anti,
     )
+    .with_algorithm(JoinAlgorithm::BlockNestedLoop)
     .with_condition(equi())
     .execute()
     .expect("plans");
@@ -296,6 +314,7 @@ fn reversed_condition_orientation_gives_the_same_result() {
     for join_type in [JoinType::Inner, JoinType::LeftOuter, JoinType::FullOuter] {
         let forward = collect_rows(
             JoinBuilder::new(employees.table_ref(), departments.table_ref(), join_type)
+                .with_algorithm(JoinAlgorithm::BlockNestedLoop)
                 .with_condition(eq(col("e.dept_id"), col("d.id")))
                 .execute()
                 .expect("plans"),
@@ -304,6 +323,7 @@ fn reversed_condition_orientation_gives_the_same_result() {
 
         let reversed = collect_rows(
             JoinBuilder::new(employees.table_ref(), departments.table_ref(), join_type)
+                .with_algorithm(JoinAlgorithm::BlockNestedLoop)
                 .with_condition(eq(col("d.id"), col("e.dept_id")))
                 .execute()
                 .expect("plans"),
@@ -386,6 +406,7 @@ fn a_self_join_resolves_the_two_sides_separately() {
     managers.alias = "e2".to_string();
 
     let stream = JoinBuilder::new(employees.table_ref(), managers, JoinType::Inner)
+        .with_algorithm(JoinAlgorithm::BlockNestedLoop)
         .with_condition(eq(col("e1.manager_id"), col("e2.id")))
         .execute()
         .expect("plans");
@@ -412,6 +433,7 @@ fn semi_and_anti_emit_left_columns_only() {
 
     for join_type in [JoinType::Semi, JoinType::Anti] {
         let builder = JoinBuilder::new(employees.table_ref(), departments.table_ref(), join_type)
+            .with_algorithm(JoinAlgorithm::BlockNestedLoop)
             .with_condition(equi());
         let schema = builder.output_schema().expect("schema");
         assert_eq!(schema.len(), 3, "{join_type:?} must emit only e's columns");
@@ -493,6 +515,7 @@ fn block_size_controls_the_number_of_inner_scans() {
             departments.table_ref(),
             JoinType::Inner,
         )
+        .with_algorithm(nested_loop_for(block_rows))
         .with_condition(equi())
         .with_block_rows(block_rows)
         .execute()

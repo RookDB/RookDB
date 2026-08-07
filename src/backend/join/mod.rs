@@ -12,6 +12,7 @@
 
 pub mod algorithm;
 pub mod config;
+pub mod cost;
 pub mod error;
 pub mod exec;
 pub mod key;
@@ -30,11 +31,12 @@ pub use algorithm::{
     pushdown_plan, spec_for,
 };
 pub use config::JoinConfig;
+pub use cost::{CostCoefficients, CostModel, JoinCost, JoinEstimate, SideEstimate};
 pub use error::JoinError;
 pub use exec::{ExecStats, MatchEvaluator, RowStream};
 pub use key::{JoinKey, KeyClass, KeyColumn, KeySpec, resolve_key_class};
 pub use memory::{MemoryAccountant, OverBudget};
-pub use plan::JoinBuilder;
+pub use plan::{JoinBuilder, PhysicalPlan, PlanSide};
 pub use predicate::{ColumnBinding, JoinPredicate, PredicateSplit, SideResolver, split_conjuncts};
 pub use row::{RowBuilder, RowCodec};
 pub use schema::{OutputColumn, OutputSchema, RelationSchema, RelationSide};
