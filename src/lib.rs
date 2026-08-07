@@ -6,6 +6,7 @@ pub use backend::disk;
 pub use backend::error_handler;
 pub use backend::executor;
 pub use backend::heap;
+pub use backend::join;
 pub use backend::layout;
 pub use backend::page;
 pub use backend::page_api;

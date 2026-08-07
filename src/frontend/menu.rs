@@ -5,7 +5,7 @@ use storage_manager::buffer_manager::BufferManager;
 use storage_manager::catalog::{init_catalog, load_catalog};
 
 // Frontend command handlers
-use crate::frontend::{data_cmd, database_cmd, table_cmd};
+use crate::frontend::{data_cmd, database_cmd, join_cmd, table_cmd};
 
 /// Runs the main interactive menu loop
 pub fn run() -> io::Result<()> {
@@ -49,17 +49,28 @@ pub fn run() -> io::Result<()> {
         println!("║    11. Compact Table                   ║");
         println!("║    12. Show Table Statistics           ║");
         println!("║                                        ║");
+        println!("║  Query:                                ║");
+        println!("║    15. Join Operations                 ║");
+        println!("║                                        ║");
         println!("║  Maintenance:                          ║");
         println!("║    13. Check Heap Health               ║");
         println!("║    14. Exit                            ║");
         println!("╚════════════════════════════════════════╝");
 
         // Read user input
-        print!("\nEnter your choice (1-11): ");
+        print!("\nEnter your choice (1-15): ");
         io::stdout().flush()?;
 
         let mut choice = String::new();
-        io::stdin().read_line(&mut choice)?;
+        // `Ok(0)` is end of input - Ctrl-D, or a piped script running out.
+        // Without this the empty string falls through to the catch-all arm and
+        // the menu loops forever.
+        if io::stdin().read_line(&mut choice)? == 0 {
+            println!("\n╔═══════════════════════════════════╗");
+            println!("║   Exiting RookDB. Goodbye!        ║");
+            println!("╚═══════════════════════════════════╝\n");
+            break;
+        }
         let choice = choice.trim();
 
         // Dispatch command based on user selection
@@ -77,13 +88,14 @@ pub fn run() -> io::Result<()> {
             "11" => data_cmd::compact_table_cmd(&current_db)?,
             "12" => table_cmd::show_table_statistics_cmd(&catalog, &current_db)?,
             "13" => data_cmd::check_heap_cmd(&current_db)?,
+            "15" => join_cmd::join_menu(&catalog, &current_db)?,
             "14" => {
                 println!("\n╔═══════════════════════════════════╗");
                 println!("║   Exiting RookDB. Goodbye!        ║");
                 println!("╚═══════════════════════════════════╝\n");
                 break;
             }
-            _ => println!(" Invalid option. Please enter a number between 1 and 11."),
+            _ => println!(" Invalid option. Please enter a number between 1 and 15."),
         }
     }
 
