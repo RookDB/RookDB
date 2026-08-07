@@ -11,6 +11,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 pub mod algorithm;
+pub mod catalog_bridge;
 pub mod config;
 pub mod cost;
 pub mod error;
@@ -32,6 +33,7 @@ pub use algorithm::{
     ALGORITHMS, AlgorithmSpec, JoinAlgorithm, JoinRequest, JoinType, Pushdown, ValidatedJoinSpec,
     pushdown_plan, spec_for,
 };
+pub use catalog_bridge::{resolve, table_names};
 pub use config::JoinConfig;
 pub use cost::{CostCoefficients, CostModel, JoinCost, JoinEstimate, SideEstimate};
 pub use error::JoinError;
