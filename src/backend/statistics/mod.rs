@@ -1,3 +1,9 @@
+pub mod hll;
+pub mod column_stats;
+
+pub use hll::*;
+pub use column_stats::*;
+
 use std::fs::File;
 use std::io::{self};
 

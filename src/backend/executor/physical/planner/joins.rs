@@ -107,18 +107,41 @@ impl PhysicalPlanner {
                 if let Some((build_keys, probe_keys, residual)) =
                     extract_equi_join_keys(pred, &left_schema, &right_schema)
                     && !build_keys.is_empty() {
+                        let left_card = left.estimate_cardinality();
+                        let right_card = right.estimate_cardinality();
+
+                        // CBO Sizing & Swap:
+                        // Build on the smaller relation to bound the in-memory hash table footprint.
+                        let swap = right_card > 0 && (left_card == 0 || right_card < left_card);
+
                         log::info!(
-                            "[Volcano] Using HashJoin: {} equi-key pair(s), residual predicate: {}",
+                            "[Volcano] Using HashJoin: {} equi-key pair(s), residual: {}, swap={} (left_card={}, right_card={})",
                             build_keys.len(),
-                            residual.is_some()
+                            residual.is_some(),
+                            swap,
+                            left_card,
+                            right_card
                         );
-                        return Ok(Box::new(HashJoinOperator::new(
-                            left,
-                            right,
-                            build_keys,
-                            probe_keys,
-                            residual,
-                        )));
+
+                        if swap {
+                            return Ok(Box::new(HashJoinOperator::new_with_swap(
+                                right,
+                                left,
+                                probe_keys,
+                                build_keys,
+                                residual,
+                                true,
+                            )));
+                        } else {
+                            return Ok(Box::new(HashJoinOperator::new_with_swap(
+                                left,
+                                right,
+                                build_keys,
+                                probe_keys,
+                                residual,
+                                false,
+                            )));
+                        }
                     }
             }
 

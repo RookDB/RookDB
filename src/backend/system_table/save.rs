@@ -10,38 +10,32 @@ use super::*;
 /// Deletes and recreates all system table files from scratch to prevent
 /// duplicate rows on subsequent saves.
 pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
-    // 1. Load existing FOREIGN KEY constraints from sys_constraints before deleting it.
-    //
-    // CRITICAL: FK rows store the child table's numeric `table_id`.  After system tables
-    // are rebuilt below, `populate_system_tables()` assigns new table_ids by iterating
-    // a HashMap — whose iteration order is NOT deterministic (SwissTable random seed).
-    // To prevent FK rows from pointing to wrong tables, we resolve the numeric table_id
-    // to the table NAME before deletion, then re-resolve to the new table_id after rebuild.
+    // 1. Load existing table_id → table_name mapping before deleting sys_tables
+    let mut tbl_id_to_name: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
+    let tbl_path = sys_path("tables");
+    if tbl_path.exists()
+        && let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path) {
+            for result in heap.scan() {
+                if let Ok((_, _, raw_bytes)) = result
+                    && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
+                        && decoded.len() >= 3
+                            && let Some(Some(crate::types::DataValue::Int(tid))) = decoded.first() {
+                                let name_opt = match decoded.get(2) {
+                                    Some(Some(crate::types::DataValue::Varchar(name))) => Some(name.clone()),
+                                    Some(Some(crate::types::DataValue::Char(name))) => Some(name.clone()),
+                                    _ => None,
+                                };
+                                if let Some(name) = name_opt {
+                                    tbl_id_to_name.insert(*tid, name);
+                                }
+                            }
+            }
+        }
+
+    // 2. Load existing FOREIGN KEY constraints from sys_constraints before deleting it.
     let mut fk_rows = Vec::new();
     let constr_path = sys_path("constraints");
     if constr_path.exists() {
-        // Also load sys_tables to resolve table_id → table_name
-        let mut tbl_id_to_name: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
-        let tbl_path = sys_path("tables");
-        if tbl_path.exists()
-            && let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path) {
-                for result in heap.scan() {
-                    if let Ok((_, _, raw_bytes)) = result
-                        && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
-                            && decoded.len() >= 3
-                                && let Some(Some(crate::types::DataValue::Int(tid))) = decoded.first() {
-                                    let name_opt = match decoded.get(2) {
-                                        Some(Some(crate::types::DataValue::Varchar(name))) => Some(name.clone()),
-                                        Some(Some(crate::types::DataValue::Char(name))) => Some(name.clone()),
-                                        _ => None,
-                                    };
-                                    if let Some(name) = name_opt {
-                                        tbl_id_to_name.insert(*tid, name);
-                                    }
-                                }
-                }
-            }
-
         if let Ok(heap) = crate::backend::heap::HeapManager::open(constr_path.clone()) {
             for result in heap.scan() {
                 if let Ok((_, _, raw_bytes)) = result
@@ -67,11 +61,6 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
                                 let ref_table = decoded[4].as_ref().map(value_to_string);
                                 let ref_columns = decoded[5].as_ref().map(value_to_string);
 
-                                // Store CHILD TABLE NAME as the "table_id" field.
-                                // After rebuilding, populate_system_tables will resolve
-                                // this name back to a numeric table_id. We use a special
-                                // "NAME:" prefix to distinguish name-based entries from
-                                // legacy numeric entries loaded by older code paths.
                                 fk_rows.push(vec![
                                     None,                                      // constraint_id (auto-assigned)
                                     Some(format!("TABLE_NAME:{}", child_table_name)),  // resolved by name
@@ -86,8 +75,40 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
         }
     }
 
+    // 3. Load existing statistics from sys_statistics before deleting it.
+    let mut stat_rows = Vec::new();
+    let stat_path = sys_path("statistics");
+    if stat_path.exists()
+        && let Ok(heap) = crate::backend::heap::HeapManager::open(stat_path.clone()) {
+            for result in heap.scan() {
+                if let Ok((_, _, raw_bytes)) = result
+                    && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_STATISTICS_SCHEMA, &raw_bytes)
+                        && decoded.len() >= 9 {
+                            let old_table_id = match &decoded[1] {
+                                Some(crate::types::DataValue::Int(id)) => *id,
+                                _ => 0,
+                            };
+                            let tbl_name = tbl_id_to_name.get(&old_table_id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("<table_id={}>", old_table_id));
+
+                            stat_rows.push(vec![
+                                decoded[0].as_ref().map(value_to_string),
+                                Some(format!("TABLE_NAME:{}", tbl_name)),
+                                decoded[2].as_ref().map(value_to_string),
+                                decoded[3].as_ref().map(value_to_string),
+                                decoded[4].as_ref().map(value_to_string),
+                                decoded[5].as_ref().map(value_to_string),
+                                decoded[6].as_ref().map(value_to_string),
+                                decoded[7].as_ref().map(value_to_string),
+                                decoded[8].as_ref().map(value_to_string),
+                            ]);
+                        }
+            }
+        }
+
     // Delete existing system table files to start fresh
-    for name in &["databases", "tables", "columns", "constraints", "indexes", "views"] {
+    for name in &["databases", "tables", "columns", "constraints", "indexes", "views", "statistics"] {
         let path = sys_path(name);
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -100,7 +121,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     }
     // Create fresh files and populate
     create_system_table_files();
-    populate_system_tables(catalog, fk_rows);
+    populate_system_tables(catalog, fk_rows, stat_rows);
     // System tables rewritten wholesale: table_ids may have changed and
     // constraint/index rows were rebuilt — forget all memoised metadata.
     crate::backend::cache::invalidate_metadata();
@@ -112,7 +133,11 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
 ///
 /// Writes databases, tables, columns, constraints, and (where possible)
 /// indexes to their respective heap files.
-pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec<Option<String>>>) {
+pub(crate) fn populate_system_tables(
+    catalog: &Catalog,
+    mut constr_rows: Vec<Vec<Option<String>>>,
+    mut stat_rows: Vec<Vec<Option<String>>>,
+) {
     // Sequence counters for auto-generated IDs
     let mut next_db_id = 1i32;
     let mut next_table_id = 1i32;
@@ -281,6 +306,24 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
             }
     }
 
+    // ── Resolve "TABLE_NAME:xxx" statistics entries ───────────────────
+    for row in &mut stat_rows {
+        if row.len() < 9 {
+            continue;
+        }
+        if let Some(Some(table_id_str)) = &row.get(1).cloned()
+            && let Some(table_name) = table_id_str.strip_prefix("TABLE_NAME:") {
+                let resolved_id = table_name_to_new_id.get(table_name)
+                    .cloned()
+                    .unwrap_or(0);
+                row[1] = if resolved_id != 0 {
+                    Some(resolved_id.to_string())
+                } else {
+                    Some("0".to_string())
+                };
+            }
+    }
+
     // Batch-write each system table
     if let Err(e) = insert_system_rows("databases", SYS_DATABASES_SCHEMA, &db_rows) {
         log::error!("[SystemCatalog] Failed to write sys_databases: {}", e);
@@ -294,6 +337,10 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
     if let Err(e) = insert_system_rows("constraints", SYS_CONSTRAINTS_SCHEMA, &constr_rows) {
         log::error!("[SystemCatalog] Failed to write sys_constraints: {}", e);
     }
+    if !stat_rows.is_empty()
+        && let Err(e) = insert_system_rows("statistics", SYS_STATISTICS_SCHEMA, &stat_rows) {
+            log::error!("[SystemCatalog] Failed to write sys_statistics: {}", e);
+        }
 
     // ── Populate sys_indexes by scanning .idx.meta files on disk ────────
     // Build a table_name → table_id mapping for index rows.

@@ -373,6 +373,10 @@ impl PhysicalOperator for ProjectionOperator {
     fn name(&self) -> &'static str {
         "Project"
     }
+
+    fn estimate_cardinality(&self) -> usize {
+        self.child.estimate_cardinality()
+    }
 }
 
 // ── Limit Operator ────────────────────────────────────────────────────────────
@@ -427,6 +431,15 @@ impl PhysicalOperator for LimitOperator {
 
     fn name(&self) -> &'static str {
         "Limit"
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        let child_card = self.child.estimate_cardinality();
+        if child_card == 0 {
+            self.limit
+        } else {
+            self.limit.min(child_card)
+        }
     }
 }
 

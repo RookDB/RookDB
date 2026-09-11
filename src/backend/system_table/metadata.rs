@@ -62,6 +62,7 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
     total += delete_rows_by_table_id("constraints", SYS_CONSTRAINTS_SCHEMA, table_id)?;
     total += delete_rows_by_table_id("columns", SYS_COLUMNS_SCHEMA, table_id)?;
     total += delete_rows_by_table_id("indexes", SYS_INDEXES_SCHEMA, table_id)?;
+    total += delete_rows_by_table_id("statistics", SYS_STATISTICS_SCHEMA, table_id)?;
 
     log::info!(
         "[SystemCatalog] Deleted {} metadata rows for table '{}.{}' (table_id={})",
@@ -543,11 +544,12 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
 
     let mut total = 0usize;
 
-    // 3. Delete metadata for each table (columns, constraints, indexes)
+    // 3. Delete metadata for each table (columns, constraints, indexes, statistics)
     for table_id in &table_ids {
         total += delete_rows_by_table_id("constraints", SYS_CONSTRAINTS_SCHEMA, *table_id)?;
         total += delete_rows_by_table_id("columns", SYS_COLUMNS_SCHEMA, *table_id)?;
         total += delete_rows_by_table_id("indexes", SYS_INDEXES_SCHEMA, *table_id)?;
+        total += delete_rows_by_table_id("statistics", SYS_STATISTICS_SCHEMA, *table_id)?;
     }
 
     // 4. Delete table entries from sys_tables (db_id is at column index 1)
@@ -608,7 +610,7 @@ fn delete_rows_by_column(name: &str, schema: &[DataType], column_idx: usize, tar
 /// `table_id` column (index 1) matches `target_table_id`.
 ///
 /// Uses `HeapManager::delete_tuple` to mark each matching slot as deleted.
-fn delete_rows_by_table_id(name: &str, schema: &[DataType], target_table_id: i32) -> std::io::Result<usize> {
+pub(crate) fn delete_rows_by_table_id(name: &str, schema: &[DataType], target_table_id: i32) -> std::io::Result<usize> {
     delete_rows_by_column(name, schema, 1, target_table_id)
 }
 

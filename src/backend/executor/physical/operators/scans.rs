@@ -340,4 +340,12 @@ impl PhysicalOperator for IndexScanOperator {
             IndexScanMode::FullScan => "IndexScan(Full)",
         }
     }
+
+    fn estimate_cardinality(&self) -> usize {
+        match self.mode {
+            IndexScanMode::PointLookup(_) | IndexScanMode::CompositePointLookup(_) => 1,
+            IndexScanMode::RangeLookup(..) => (self.heap_manager.header.page_count as usize * 10).max(1),
+            IndexScanMode::FullScan => self.heap_manager.header.page_count as usize * 100,
+        }
+    }
 }

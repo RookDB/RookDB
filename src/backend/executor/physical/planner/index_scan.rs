@@ -13,6 +13,7 @@ use super::super::operators::{IndexScanOperator, IndexScanMode, PhysicalOperator
 use crate::types::Comparable;
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
+use super::cost::CostModel;
 use crate::backend::heap::HeapManager;
 use crate::backend::index::BTree;
 use crate::types::{DataType, DataValue};
@@ -23,7 +24,7 @@ impl PhysicalPlanner {
     /// Examines the filter predicate and table indexes to determine if a
     /// PointLookup or RangeLookup can replace the SeqScan + FilterOperator.
     /// When multiple indexes exist, selects the best one (dynamic index selection, M2).
-    pub(crate) fn try_plan_index_scan_with_predicate(
+    pub fn try_plan_index_scan_with_predicate(
         &self,
         ts: &LogicalTableScan,
         pred_node: &rook_ast::PredicateNode,
@@ -55,27 +56,51 @@ impl PhysicalPlanner {
             return Ok(None);
         }
 
+        // Fetch table and column statistics for Cost-Based Optimization (CBO)
+        let (data_pages, total_tuples) = match crate::backend::cache::table_statistics(&self.db_name, &ts.table) {
+            Ok(s) => (s.data_pages.max(1), s.total_tuple_count),
+            Err(_) => (1, 100),
+        };
+        let col_stats_map = crate::backend::cache::column_statistics(&self.db_name, &ts.table);
+
         // Load indexes (both named and legacy), preserving composite layouts
         let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
             &self.db_name, &ts.table,
         ).unwrap_or_default();
 
-        // Try named indexes first (dynamic selection — M2)
+        // Try named indexes first (dynamic selection with cost model)
         let mut best_idx_name: Option<String> = None;
         let mut best_col_name: Option<String> = None;
         let mut best_key_types: Vec<DataType> = Vec::new();
         let mut best_mode: Option<IndexScanMode> = None;
+        let mut best_cost_idx: f64 = f64::INFINITY;
+        let mut best_selectivity: f64 = 1.0;
+        let mut best_priority: u8 = u8::MAX;
 
         for (idx_name, col_names, _is_unique) in &named_indexes {
             // Composite index: equality on ALL key columns → exact lookup.
             if col_names.len() > 1 {
                 if let Some(key_values) = self.extract_composite_point_key(pred_node, col_names) {
+                    let mode = IndexScanMode::CompositePointLookup(key_values);
                     let priority = 0; // most selective
-                    let should_replace = match &best_mode {
-                        Some(existing) => priority < Self::scan_mode_priority(existing),
-                        None => true,
-                    };
-                    if should_replace {
+                    let primary_col = &col_names[0];
+                    let col_type = table_schema.iter()
+                        .find(|c| c.name.eq_ignore_ascii_case(primary_col))
+                        .map(|c| &c.data_type)
+                        .unwrap_or(&DataType::Int);
+                    let sel = Self::estimate_candidate_selectivity(
+                        &mode,
+                        primary_col,
+                        col_type,
+                        col_stats_map.get(&primary_col.to_ascii_lowercase()),
+                        total_tuples,
+                    );
+                    let cost = CostModel::cost_index_scan(data_pages, total_tuples, sel);
+
+                    if cost < best_cost_idx || ((cost - best_cost_idx).abs() < 1e-6 && priority < best_priority) {
+                        best_cost_idx = cost;
+                        best_selectivity = sel;
+                        best_priority = priority;
                         best_idx_name = Some(idx_name.clone());
                         best_col_name = Some(col_names.join(","));
                         best_key_types = col_names.iter()
@@ -84,7 +109,7 @@ impl PhysicalPlanner {
                                 .map(|c| c.data_type.clone())
                                 .unwrap_or(DataType::Int))
                             .collect();
-                        best_mode = Some(IndexScanMode::CompositePointLookup(key_values));
+                        best_mode = Some(mode);
                     }
                 }
                 continue;
@@ -98,11 +123,19 @@ impl PhysicalPlanner {
                 .unwrap_or_else(|| &DataType::Int);
             if let Some(mode) = self.extract_index_mode_from_predicate(pred_node, col_name, col_type) {
                 let priority = Self::scan_mode_priority(&mode);
-                let should_replace = match &best_mode {
-                    Some(existing) => priority < Self::scan_mode_priority(existing),
-                    None => true,
-                };
-                if should_replace {
+                let sel = Self::estimate_candidate_selectivity(
+                    &mode,
+                    col_name,
+                    col_type,
+                    col_stats_map.get(&col_name.to_ascii_lowercase()),
+                    total_tuples,
+                );
+                let cost = CostModel::cost_index_scan(data_pages, total_tuples, sel);
+
+                if cost < best_cost_idx || ((cost - best_cost_idx).abs() < 1e-6 && priority < best_priority) {
+                    best_cost_idx = cost;
+                    best_selectivity = sel;
+                    best_priority = priority;
                     best_idx_name = Some(idx_name.clone());
                     best_col_name = Some(col_name.clone());
                     best_key_types.clear();
@@ -128,12 +161,44 @@ impl PhysicalPlanner {
                             .unwrap_or_else(|| &DataType::Int);
                         if let Some(mode) = self.extract_index_mode_from_predicate(pred_node, &meta.column_name, col_type) {
                             let col_name = meta.column_name.clone();
-                            best_mode = Some(mode);
-                            best_col_name = Some(col_name);
-                            best_idx_name = Some(format!("idx_{}_{}", ts.table, meta.column_name));
+                            let priority = Self::scan_mode_priority(&mode);
+                            let sel = Self::estimate_candidate_selectivity(
+                                &mode,
+                                &col_name,
+                                col_type,
+                                col_stats_map.get(&col_name.to_ascii_lowercase()),
+                                total_tuples,
+                            );
+                            let cost = CostModel::cost_index_scan(data_pages, total_tuples, sel);
+
+                            if cost < best_cost_idx || ((cost - best_cost_idx).abs() < 1e-6 && priority < best_priority) {
+                                best_cost_idx = cost;
+                                best_selectivity = sel;
+                                best_mode = Some(mode);
+                                best_col_name = Some(col_name);
+                                best_idx_name = Some(format!("idx_{}_{}", ts.table, meta.column_name));
+                            }
                         }
                     }
                 }
+        }
+
+        // CBO Decision: compare chosen IndexScan cost with SeqScan cost
+        if best_mode.is_some() {
+            let cost_seq = CostModel::cost_seq_scan(data_pages, total_tuples);
+            let use_index = if total_tuples <= 50 || data_pages <= 1 {
+                best_selectivity <= 0.30
+            } else {
+                best_cost_idx < cost_seq
+            };
+
+            if !use_index {
+                log::info!(
+                    "[CBO] Sequential scan chosen over index scan for table '{}' (cost_seq={:.2} vs best_cost_idx={:.2}, selectivity={:.4})",
+                    ts.table, cost_seq, best_cost_idx, best_selectivity
+                );
+                return Ok(None);
+            }
         }
 
         // Build the index scan operator if a matching index was found
@@ -238,6 +303,66 @@ impl PhysicalPlanner {
             IndexScanMode::CompositePointLookup(_) => 0,
             IndexScanMode::RangeLookup(..) => 1,
             IndexScanMode::FullScan => 2,
+        }
+    }
+
+    /// Estimate selectivity for a candidate index scan mode using column statistics or fallback heuristics.
+    pub(crate) fn estimate_candidate_selectivity(
+        mode: &IndexScanMode,
+        _col_name: &str,
+        col_type: &DataType,
+        col_stats: Option<&crate::backend::statistics::ColumnStatistics>,
+        total_tuples: u64,
+    ) -> f64 {
+        use crate::backend::statistics::column_stats::StatOp;
+        match mode {
+            IndexScanMode::PointLookup(val) => {
+                if let Some(cs) = col_stats {
+                    cs.estimate_selectivity(StatOp::Eq, val)
+                } else if total_tuples > 0 {
+                    (1.0 / total_tuples as f64).clamp(0.0001, 1.0)
+                } else {
+                    0.001
+                }
+            }
+            IndexScanMode::CompositePointLookup(_) => {
+                if let Some(cs) = col_stats {
+                    if cs.distinct_count > 0 {
+                        (1.0 / cs.distinct_count as f64).clamp(0.0001, 1.0)
+                    } else {
+                        (1.0 / cs.total_count.max(1) as f64).clamp(0.0001, 1.0)
+                    }
+                } else if total_tuples > 0 {
+                    (1.0 / total_tuples as f64).clamp(0.0001, 1.0)
+                } else {
+                    0.001
+                }
+            }
+            IndexScanMode::RangeLookup(low, high) => {
+                let is_low_min = *low == DataValue::min_for_type(col_type);
+                let is_high_max = *high == DataValue::max_for_type(col_type);
+
+                if let Some(cs) = col_stats {
+                    if is_low_min && is_high_max {
+                        1.0
+                    } else if is_low_min {
+                        cs.estimate_selectivity(StatOp::Le, high)
+                    } else if is_high_max {
+                        cs.estimate_selectivity(StatOp::Ge, low)
+                    } else {
+                        cs.estimate_between(low, high)
+                    }
+                } else {
+                    if is_low_min && is_high_max {
+                        1.0
+                    } else if is_low_min || is_high_max {
+                        0.33
+                    } else {
+                        0.10
+                    }
+                }
+            }
+            IndexScanMode::FullScan => 1.0,
         }
     }
 

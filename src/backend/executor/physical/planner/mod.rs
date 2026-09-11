@@ -40,6 +40,7 @@ pub mod helpers;
 pub mod subqueries;
 pub mod joins;
 pub mod index_scan;
+pub mod cost;
 
 /// Converts a `LogicalPlan` into an executable `PhysicalOperator` tree.
 pub struct PhysicalPlanner {

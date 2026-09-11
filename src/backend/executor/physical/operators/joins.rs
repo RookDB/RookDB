@@ -234,6 +234,18 @@ impl PhysicalOperator for NestedLoopJoinOperator {
     fn name(&self) -> &'static str {
         "NestedLoopJoin"
     }
+
+    fn estimate_cardinality(&self) -> usize {
+        let l = self.left.estimate_cardinality();
+        let r = self.right.estimate_cardinality();
+        match self.join_type {
+            JoinType::Inner => l.max(r),
+            JoinType::Left => l,
+            JoinType::Right => r,
+            JoinType::Full => l + r,
+            JoinType::Cross => l * r,
+        }
+    }
 }
 
 // ── HashJoin Operator ─────────────────────────────────────────────────────────
@@ -283,6 +295,10 @@ pub struct HashJoinOperator {
     /// True once this join has taken the spill path (stays set after the
     /// temp files are cleaned up — useful for tests and diagnostics).
     did_spill: bool,
+    /// Whether build and probe children were swapped by the optimizer
+    /// (to build on the smaller relation). When true, output rows are
+    /// concatenated as probe + build so the outer query sees original order.
+    pub swapped: bool,
 }
 
 /// Tunable in-memory budget for the hash-join build side (tuples).
@@ -452,8 +468,27 @@ impl HashJoinOperator {
         probe_keys: Vec<Expr>,
         remaining_predicate: Option<Predicate>,
     ) -> Self {
-        let mut output_schema = build.schema().to_vec();
-        output_schema.extend(probe.schema().iter().cloned());
+        Self::new_with_swap(build, probe, build_keys, probe_keys, remaining_predicate, false)
+    }
+
+    /// Create a new hash join operator with an explicit swap flag.
+    pub fn new_with_swap(
+        build: Box<dyn PhysicalOperator>,
+        probe: Box<dyn PhysicalOperator>,
+        build_keys: Vec<Expr>,
+        probe_keys: Vec<Expr>,
+        remaining_predicate: Option<Predicate>,
+        swapped: bool,
+    ) -> Self {
+        let output_schema = if swapped {
+            let mut s = probe.schema().to_vec();
+            s.extend(build.schema().iter().cloned());
+            s
+        } else {
+            let mut s = build.schema().to_vec();
+            s.extend(probe.schema().iter().cloned());
+            s
+        };
 
         Self {
             build,
@@ -473,6 +508,25 @@ impl HashJoinOperator {
             build_count: 0,
             spill: None,
             did_spill: false,
+            swapped,
+        }
+    }
+
+    #[inline]
+    fn combine_tuples(&self, build_tuple: &Tuple, probe_tuple: &Tuple) -> Tuple {
+        if self.swapped {
+            probe_tuple.concatenate(build_tuple)
+        } else {
+            build_tuple.concatenate(probe_tuple)
+        }
+    }
+
+    #[inline]
+    fn combine_tuples_into(&self, build_tuple: &Tuple, probe_tuple: &Tuple, out: &mut Tuple) {
+        if self.swapped {
+            probe_tuple.concatenate_into(build_tuple, out);
+        } else {
+            build_tuple.concatenate_into(probe_tuple, out);
         }
     }
 
@@ -677,7 +731,7 @@ impl PhysicalOperator for HashJoinOperator {
             if self.match_pos < self.current_matches.len() {
                 let build_tuple = &self.current_matches[self.match_pos];
                 self.match_pos += 1;
-                let joined = build_tuple.concatenate(&self.probe_tuples[self.probe_pos - 1]);
+                let joined = self.combine_tuples(build_tuple, &self.probe_tuples[self.probe_pos - 1]);
                 return Ok(Some(joined));
             }
 
@@ -697,7 +751,7 @@ impl PhysicalOperator for HashJoinOperator {
                     self.current_matches.clear();
                     for build_tuple in build_matches {
                         if let Some(ref remaining) = self.remaining_predicate {
-                            let joined = build_tuple.concatenate(probe_tuple);
+                            let joined = self.combine_tuples(build_tuple, probe_tuple);
                             if let Some(true) = evaluate_predicate(remaining, &joined, &self.output_schema)? { self.current_matches.push(build_tuple.clone()) }
                         } else {
                             self.current_matches.push(build_tuple.clone());
@@ -707,7 +761,7 @@ impl PhysicalOperator for HashJoinOperator {
                     if !self.current_matches.is_empty() {
                         self.match_pos = 1;
                         let build_tuple = &self.current_matches[0];
-                        let joined = build_tuple.concatenate(probe_tuple);
+                        let joined = self.combine_tuples(build_tuple, probe_tuple);
                         return Ok(Some(joined));
                     }
                 }
@@ -754,7 +808,7 @@ impl PhysicalOperator for HashJoinOperator {
                 let build_tuple = &self.current_matches[self.match_pos];
                 self.match_pos += 1;
                 let mut joined = Tuple::empty();
-                build_tuple.concatenate_into(&self.probe_tuples[self.probe_pos - 1], &mut joined);
+                self.combine_tuples_into(build_tuple, &self.probe_tuples[self.probe_pos - 1], &mut joined);
                 batch.push(joined);
                 if batch.len() >= target_len {
                     return Ok(batch.len() - initial_len);
@@ -779,7 +833,7 @@ impl PhysicalOperator for HashJoinOperator {
                     self.current_matches.clear();
                     for build_tuple in build_matches {
                         if let Some(ref remaining) = self.remaining_predicate {
-                            build_tuple.concatenate_into(probe_tuple, &mut scratch_joined);
+                            self.combine_tuples_into(build_tuple, probe_tuple, &mut scratch_joined);
                             if let Some(true) = evaluate_predicate(remaining, &scratch_joined, &self.output_schema)? {
                                 self.current_matches.push(build_tuple.clone());
                             }
@@ -844,6 +898,12 @@ impl PhysicalOperator for HashJoinOperator {
 
     fn name(&self) -> &'static str {
         "HashJoin"
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        let b = self.build.estimate_cardinality();
+        let p = self.probe.estimate_cardinality();
+        b.max(p)
     }
 }
 

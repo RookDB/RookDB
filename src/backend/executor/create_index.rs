@@ -308,6 +308,11 @@ pub fn create_index(
     let mut btree = BTree::create_composite(idx_path.clone(), key_types.clone())
         .map_err(|e| format!("Failed to create index file: {}", e))?;
 
+    let mut stat_collectors: Vec<crate::backend::statistics::column_stats::ColumnStatisticsCollector> = indexed_cols
+        .iter()
+        .map(|c| crate::backend::statistics::column_stats::ColumnStatisticsCollector::new(table_name.to_string(), c.name.clone()))
+        .collect();
+
     // 7. Scan all tuples and insert into the B+ Tree
     let mut inserted_count = 0usize;
     let scan_iter = heap_manager.scan();
@@ -320,6 +325,12 @@ pub fn create_index(
         // Deserialize the tuple
         let values = crate::types::deserialize_nullable_row(&schema_types, &raw_bytes)
             .map_err(|e| format!("Failed to deserialize tuple: {}", e))?;
+
+        // Feed column statistics for each indexed column
+        for (i, &ci) in indexed_idxs.iter().enumerate() {
+            let val = values.get(ci).and_then(|opt| opt.as_ref());
+            stat_collectors[i].add(val);
+        }
 
         // Assemble the key from every indexed column; skip rows where ANY
         // component is NULL (NULLs are not indexed).
@@ -385,6 +396,12 @@ pub fn create_index(
             "[CreateIndex] Failed to save index metadata to sys_indexes: {}",
             e
         );
+    }
+
+    // 11. Persist column statistics for the indexed column(s) into sys_statistics
+    let col_stats: Vec<_> = stat_collectors.into_iter().map(|c| c.finalize()).collect();
+    if let Err(e) = crate::backend::system_table::save_column_statistics(db_name, table_name, &col_stats) {
+        log::warn!("[CreateIndex] Failed to save column statistics to sys_statistics: {}", e);
     }
 
     // DDL landed: forget memoised metadata/discovery for this table and any

@@ -433,7 +433,39 @@ pub fn invalidate_metadata() {
     lock(meta_cache()).clear();
     lock(ref_fk_cache()).clear();
     lock(stats_cache()).clear();
+    lock(col_stats_cache()).clear();
     crate::backend::planner::plan_cache::invalidate_plan_cache();
+}
+
+// ── column statistics cache ──────────────────────────────────────────────────
+
+type ColStatsMap = HashMap<String, crate::backend::statistics::ColumnStatistics>;
+type ColStatsCacheMap = HashMap<(String, String), std::sync::Arc<ColStatsMap>>;
+
+fn col_stats_cache() -> &'static Mutex<ColStatsCacheMap> {
+    static CACHE: OnceLock<Mutex<ColStatsCacheMap>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Memoised column statistics for `(db, table)` loaded from `sys_statistics`.
+pub fn column_statistics(
+    db_name: &str,
+    table_name: &str,
+) -> std::sync::Arc<ColStatsMap> {
+    let key = (db_name.to_string(), table_name.to_string());
+    if let Some(hit) = lock(col_stats_cache()).get(&key) {
+        return std::sync::Arc::clone(hit);
+    }
+
+    let loaded = crate::backend::system_table::load_column_statistics(db_name, table_name)
+        .unwrap_or_default();
+    let mut map = HashMap::new();
+    for s in loaded {
+        map.insert(s.column_name.to_ascii_lowercase(), s);
+    }
+    let arc = std::sync::Arc::new(map);
+    lock(col_stats_cache()).insert(key, std::sync::Arc::clone(&arc));
+    arc
 }
 
 // ── table statistics cache ───────────────────────────────────────────────────

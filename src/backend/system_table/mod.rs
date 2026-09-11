@@ -24,10 +24,12 @@ use save::{populate_system_tables, strip_check_wrapper};
 mod metadata;
 mod save;
 mod info_schema;
+mod statistics;
 
 pub use metadata::*;
 pub use save::*;
 pub use info_schema::*;
+pub use statistics::*;
 
 pub(crate) const SYS_DIR: &str = crate::layout::SYSTEM_DIR;
 pub(crate) fn sys_path(table: &str) -> PathBuf {
@@ -87,6 +89,20 @@ pub const SYS_VIEWS_SCHEMA: &[DataType] = &[
     DataType::Varchar(255),
     DataType::Varchar(8192),
 ];
+/// Schema for `sys_statistics`: stat_id:INT, table_id:INT, column_name:VARCHAR(255),
+/// total_count:BIGINT, null_count:BIGINT, distinct_count:BIGINT,
+/// min_val:VARCHAR(255), max_val:VARCHAR(255), histogram_json:VARCHAR(8192)
+pub const SYS_STATISTICS_SCHEMA: &[DataType] = &[
+    DataType::Int,
+    DataType::Int,
+    DataType::Varchar(255),
+    DataType::BigInt,
+    DataType::BigInt,
+    DataType::BigInt,
+    DataType::Varchar(255),
+    DataType::Varchar(255),
+    DataType::Varchar(8192),
+];
 
 // ── String helpers ────────────────────────────────────────────────────────────
 /// Convert a `DataValue` to its string representation for storage in system
@@ -143,7 +159,7 @@ pub fn bootstrap_system_catalog() -> bool {
     create_system_table_files();
 
     // Populate system tables from the in-memory catalog.
-    populate_system_tables(&catalog, Vec::new());
+    populate_system_tables(&catalog, Vec::new(), Vec::new());
 
     // Rename catalog.json so we don't migrate again.
     let migrated_str = format!("{}.migrated", crate::layout::CATALOG_FILE);
@@ -487,6 +503,7 @@ pub fn resolve_table_id(db_name: &str, table_name: &str) -> std::io::Result<(i32
 
     Ok((table_id, db_id))
 }
+
 /// Check if the system tables exist and are accessible.
 pub fn system_tables_exist() -> bool {
     let sys_dir = std::path::Path::new(SYS_DIR);
@@ -497,6 +514,7 @@ pub fn system_tables_exist() -> bool {
         && sys_path("constraints").exists()
         && sys_path("indexes").exists()
         && sys_path("views").exists()
+        && sys_path("statistics").exists()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -504,7 +522,7 @@ pub fn system_tables_exist() -> bool {
 fn create_system_table_files() {
     let _ = std::fs::create_dir_all(SYS_DIR);
 
-    for name in &["databases", "tables", "columns", "constraints", "indexes", "views"] {
+    for name in &["databases", "tables", "columns", "constraints", "indexes", "views", "statistics"] {
         let path = sys_path(name);
         if !path.exists() {
             match crate::backend::heap::HeapManager::create(path.clone()) {
@@ -522,12 +540,12 @@ fn create_system_table_files() {
 }
 /// Public wrapper: ensure all system table files exist, creating any that are
 /// missing. Called during startup to support incremental schema additions
-/// (e.g. adding `sys_views` to an existing system catalog).
+/// (e.g. adding `sys_views` or `sys_statistics` to an existing system catalog).
 pub fn ensure_system_tables() {
     create_system_table_files();
 }
 /// Scan all rows from a system table and return decoded values.
-fn scan_system_table(name: &str, schema: &[DataType]) -> Result<Vec<Vec<Option<crate::types::DataValue>>>, String> {
+pub(crate) fn scan_system_table(name: &str, schema: &[DataType]) -> Result<Vec<Vec<Option<crate::types::DataValue>>>, String> {
     let path = sys_path(name);
     if !path.exists() {
         return Ok(Vec::new());
@@ -554,7 +572,7 @@ fn scan_system_table(name: &str, schema: &[DataType]) -> Result<Vec<Vec<Option<c
 /// Insert multiple rows into a system table in a single batch.
 ///
 /// Opens the HeapManager once, inserts all rows, and closes.
-fn insert_system_rows(
+pub(crate) fn insert_system_rows(
     name: &str,
     schema: &[DataType],
     rows: &[Vec<Option<String>>],
@@ -595,6 +613,7 @@ pub fn system_table_schema(name: &str) -> &'static [DataType] {
         "constraints" => SYS_CONSTRAINTS_SCHEMA,
         "indexes" => SYS_INDEXES_SCHEMA,
         "views" => SYS_VIEWS_SCHEMA,
+        "statistics" => SYS_STATISTICS_SCHEMA,
         // Fallback: treat all columns as VARCHAR(255)
         _ => &[DataType::Varchar(255)],
     }
