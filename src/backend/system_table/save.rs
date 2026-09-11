@@ -482,18 +482,54 @@ fn populate_indexes_from_meta(table_name_to_id: &std::collections::HashMap<Strin
                 Err(_) => continue,
             };
 
-            // Parse IndexMeta from the metadata file
+            // Parse IndexMeta from the metadata file.
+            //
+            // The flags (`is_unique` / `is_primary`) and the full composite
+            // `column_names` list are optional: older .idx.meta files predate
+            // them. Missing flags default to `false` — a plain index must NOT
+            // enforce uniqueness, so defaulting to `true` (the old behaviour)
+            // wrongly made every rebuilt index a UNIQUE constraint.
             #[derive(serde::Deserialize)]
             #[allow(dead_code)]
             struct IndexMeta {
                 column_name: String,
+                #[serde(default)]
                 column_idx: usize,
+                #[serde(default)]
                 key_type: String,
+                #[serde(default)]
+                column_names: Vec<String>,
+                #[serde(default)]
+                is_unique: bool,
+                #[serde(default)]
+                is_primary: bool,
             }
 
             let meta: IndexMeta = match serde_json::from_str(&meta_content) {
                 Ok(m) => m,
                 Err(_) => continue,
+            };
+
+            // Full key layout, normalising legacy single-column files.
+            let mut columns = if meta.column_names.is_empty() {
+                vec![meta.column_name.clone()]
+            } else {
+                meta.column_names.clone()
+            };
+            // sys_indexes.columns is VARCHAR(255): truncate instead of failing
+            // the whole save if a very wide composite key does not fit.
+            let columns_field = {
+                let joined = columns.join(",");
+                if joined.len() > 255 {
+                    log::warn!(
+                        "[SystemCatalog] Index column list {:?} exceeds 255 bytes; truncating",
+                        joined
+                    );
+                    columns.truncate(1);
+                    columns[0].clone()
+                } else {
+                    joined
+                }
             };
 
             // Compute the index name: use parsed name if available, otherwise generate from column
@@ -509,9 +545,9 @@ fn populate_indexes_from_meta(table_name_to_id: &std::collections::HashMap<Strin
                 Some(next_idx_id.to_string()),           // index_id
                 Some(table_id.to_string()),              // table_id
                 Some(idx_name),                          // name
-                Some("true".to_string()),               // is_unique (assumed true for legacy compat)
-                Some("false".to_string()),              // is_primary
-                Some(meta.column_name.clone()),          // columns (indexed column)
+                Some(meta.is_unique.to_string()),        // is_unique (persisted in .idx.meta)
+                Some(meta.is_primary.to_string()),       // is_primary
+                Some(columns_field),                     // columns (full composite list)
             ]);
             next_idx_id += 1;
         }

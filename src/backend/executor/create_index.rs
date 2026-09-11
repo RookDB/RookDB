@@ -79,6 +79,19 @@ struct IndexMeta {
     /// Key type per segment, aligned with `column_names`.
     #[serde(default)]
     key_types: Vec<String>,
+    /// Whether this index enforces uniqueness (feeds `sys_indexes.is_unique`,
+    /// which in turn feeds the UNIQUE checker's index fast path).
+    ///
+    /// Defaults to `false` when absent (older `.idx.meta` files): a missing
+    /// flag degrades UNIQUE enforcement to the heap-scan fallback — correct,
+    /// just slower. Defaulting to `true` instead would wrongly let plain
+    /// indexes reject duplicate values after a catalog rebuild.
+    #[serde(default)]
+    is_unique: bool,
+    /// Whether this index was created for a PRIMARY KEY (informational;
+    /// surfaced through `information_schema.indexes`).
+    #[serde(default)]
+    is_primary: bool,
 }
 
 impl IndexMeta {
@@ -255,9 +268,32 @@ pub fn create_index(
     index_name: &str,
     column_names: &[String],
 ) -> crate::backend::error::RookResult<usize> {
+    create_index_with_flags(catalog, db_name, table_name, index_name, column_names, false, false)
+}
+
+/// Build a B+ Tree index with explicit constraint flags.
+///
+/// Identical to [`create_index`] except that the index is registered as
+/// unique and/or primary in both `.idx.meta` and `sys_indexes`. The unique
+/// flag is what lets the UNIQUE checker (`constraint::validation`) use the
+/// index as its fast path instead of falling back to an O(n) heap scan per
+/// row.
+///
+/// # Arguments
+/// * `is_unique` — enforce uniqueness through this index.
+/// * `is_primary` — the index backs a PRIMARY KEY constraint.
+pub fn create_index_with_flags(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+    column_names: &[String],
+    is_unique: bool,
+    is_primary: bool,
+) -> crate::backend::error::RookResult<usize> {
     log::info!(
-        "[CreateIndex] Creating index '{}.{}.{}' on columns {:?}",
-        db_name, table_name, index_name, column_names
+        "[CreateIndex] Creating index '{}.{}.{}' on columns {:?} (unique={}, primary={})",
+        db_name, table_name, index_name, column_names, is_unique, is_primary
     );
 
     if column_names.is_empty() {
@@ -376,6 +412,8 @@ pub fn create_index(
         column_names: indexed_cols.iter().map(|c| c.name.clone()).collect(),
         column_idxs: indexed_idxs.clone(),
         key_types: key_types.iter().map(|t| format!("{}", t)).collect(),
+        is_unique,
+        is_primary,
     };
     let meta_json = serde_json::to_string_pretty(&meta)
         .map_err(|e| format!("Failed to serialize index metadata: {}", e))?;
@@ -389,8 +427,8 @@ pub fn create_index(
         table_name,
         &resolved_name,
         &indexed_cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(","),
-        false, // is_unique (not tracked from CREATE INDEX yet)
-        false, // is_primary (not tracked from CREATE INDEX yet)
+        is_unique,
+        is_primary,
     ) {
         log::warn!(
             "[CreateIndex] Failed to save index metadata to sys_indexes: {}",
@@ -416,6 +454,144 @@ pub fn create_index(
     );
 
     Ok(inserted_count)
+}
+
+// ── Auto-indexing for constraint targets ─────────────────────────────────────
+
+/// True when some index on `(db, table)` has `column` as its FIRST key
+/// column — the only position usable by single-key equality probes
+/// (FK existence checks, per-column UNIQUE checks).
+fn column_is_indexed(db_name: &str, table_name: &str, column: &str) -> bool {
+    load_table_indexes_multi(db_name, table_name)
+        .unwrap_or_default()
+        .iter()
+        .any(|(_name, cols, _u)| {
+            cols.first()
+                .map(|c| c.eq_ignore_ascii_case(column))
+                .unwrap_or(false)
+        })
+}
+
+/// Create an index on a parent-side FK target column if it does not already
+/// have one.
+///
+/// FK enforcement checks child inserts against the PARENT table
+/// (`value_exists_in_table`). Without an index on the referenced column,
+/// every child insert pays a full parent-table heap scan — O(n) per row.
+/// The CLI calls this (a) when a child table declares `REFERENCES t(c)` and
+/// (b) after creating a table, so forward references (child created before
+/// parent) are covered too.
+///
+/// The created index is named `fkp_{table}_{column}` and is marked unique
+/// only when the column itself declares UNIQUE/PK (otherwise a plain index:
+/// accelerating the probe must never change what the table accepts).
+///
+/// Returns `true` if an index was created.
+pub fn ensure_parent_column_index(
+    catalog: &Catalog,
+    db_name: &str,
+    parent_table: &str,
+    parent_col: &str,
+) -> bool {
+    // The parent must exist in the catalog with the referenced column.
+    let Some(col) = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(parent_table))
+        .and_then(|t| {
+            t.columns
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(parent_col))
+        })
+    else {
+        // Parent table/column not present (forward reference) — the
+        // deferred pass (`ensure_fk_parent_indexes`) covers it later.
+        log::info!(
+            "[AutoIndex] FK parent '{}.{}' not found yet; deferring parent-side index",
+            db_name,
+            parent_table
+        );
+        return false;
+    };
+
+    if column_is_indexed(db_name, parent_table, parent_col) {
+        return false; // PK/UNIQUE/user index already covers the probe
+    }
+
+    let heap_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, parent_table));
+    if !heap_path.exists() {
+        log::warn!(
+            "[AutoIndex] FK parent heap missing: {:?}; skipping parent-side index",
+            heap_path
+        );
+        return false;
+    }
+
+    let index_name = format!("fkp_{}_{}", parent_table, col.name);
+    let is_unique = col.constraints.unique;
+    match create_index_with_flags(
+        catalog,
+        db_name,
+        parent_table,
+        &index_name,
+        std::slice::from_ref(&col.name),
+        is_unique,
+        false,
+    ) {
+        Ok(count) => {
+            log::info!(
+                "[AutoIndex] Created parent-side FK index '{}.{}' ({} entries)",
+                parent_table,
+                col.name,
+                count
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "[AutoIndex] Parent-side FK index on '{}.{}' failed: {} (FK checks fall back to heap scan)",
+                parent_table,
+                col.name,
+                e
+            );
+            false
+        }
+    }
+}
+
+/// Index every column of `table_name` that other tables' FOREIGN KEYs
+/// reference.
+///
+/// Called after CREATE TABLE so that a parent created AFTER its children
+/// (`CREATE TABLE orders ... REFERENCES staff(id)` before `staff` exists)
+/// still ends up with indexed FK targets — the deferred half of
+/// [`ensure_parent_column_index`]. Safe to call any time: columns that
+/// already have a leading index are skipped.
+///
+/// Returns the number of indexes created.
+pub fn ensure_fk_parent_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> usize {
+    let referencing =
+        match crate::backend::constraint::loaders::load_referencing_foreign_keys(db_name, table_name) {
+            Ok(fks) => fks,
+            Err(e) => {
+                log::warn!(
+                    "[AutoIndex] Could not load referencing FKs for '{}.{}': {}",
+                    db_name,
+                    table_name,
+                    e
+                );
+                return 0;
+            }
+        };
+
+    let mut created = 0usize;
+    // ReferencingFk = (child_table, child_col, parent_col, parent_table, action)
+    for (_child_table, _child_col, parent_col, parent_table, _action) in &referencing {
+        if ensure_parent_column_index(catalog, db_name, parent_table, parent_col) {
+            created += 1;
+        }
+    }
+    created
 }
 
 // ── DML Index Update Helpers ──────────────────────────────────────────────────
