@@ -493,6 +493,7 @@ impl FSM {
     pub fn sync(&mut self) -> io::Result<()> {
         log::trace!("[FSM::sync] Syncing FSM fork file");
         self.fsm_file.sync_all()?;
+        self.dirty = false;
         Ok(())
     }
 
