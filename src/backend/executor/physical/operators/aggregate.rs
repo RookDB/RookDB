@@ -305,17 +305,20 @@ impl AggregateOperator {
 
         if is_simple_count_star {
             let mut total = 0usize;
-            while self.child.next_batch(&mut batch)? > 0 {
-                total += batch.len();
+            loop {
+                let n = self.child.next_batch(&mut batch)?;
+                if n == 0 {
+                    break;
+                }
+                total += n;
+                batch.clear();
             }
-            if total > 0 {
-                let mut state = PerGroupState::new();
-                state.row_count = total as u64;
-                self.groups.push(GroupEntry {
-                    key_values: Vec::new(),
-                    agg_states: vec![state],
-                });
-            }
+            let mut state = PerGroupState::new();
+            state.row_count = total as u64;
+            self.groups.push(GroupEntry {
+                key_values: Vec::new(),
+                agg_states: vec![state],
+            });
         } else {
             while self.child.next_batch(&mut batch)? > 0 {
                 for tuple in batch.drain(..) {
