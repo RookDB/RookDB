@@ -59,7 +59,7 @@ fn canonical_memo() -> &'static Mutex<CanonicalMemo> {
     MEMO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn canonical(path: &Path) -> PathBuf {
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     let cwd = if path.is_absolute() {
         PathBuf::new()
     } else {

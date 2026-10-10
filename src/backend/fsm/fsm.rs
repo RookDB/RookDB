@@ -595,202 +595,175 @@ impl FSM {
         Ok(())
     }
 
-    /// Search the 3-level FSM tree to find a heap page with sufficient free space.
+    /// Run `f` on the cached page at `(level, page_no)`, loading it first.
     ///
-    /// # Arguments
-    /// * `min_category` - Minimum required free-space category (0-255)
-    ///
-    /// # Returns
-    /// Some(heap_page_id) if found, None if root < min_category (no page has space)
-    ///
-    /// # Algorithm
-    /// 1. Read root FSM page (Level 2)
-    /// 2. If root value < min_category: return None
-    /// 3. Traverse Level 2 → Level 1 → Level 0
-    /// 4. Compute heap page ID from (fsm_page_no, slot)
-    /// 5. Return Some(heap_page_id)
-    pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, FSMPage)>> {
+    /// `f` returns `(changed, result)`; a changed page is marked dirty. The
+    /// page is edited where it lives in the cache: FSM pages are ~8 KB, and
+    /// passing copies around was most of the cost of a heap insert.
+    fn with_cached_page<R>(
+        &mut self,
+        level: u32,
+        page_no: u32,
+        f: impl FnOnce(&mut FSMPage) -> (bool, R),
+    ) -> io::Result<R> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
-            .fsm_search_avail_calls
+            .fsm_read_page_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        log::trace!(
-            "[FSM::fsm_search_avail] Searching for page with category >= {}",
-            min_category
-        );
+        let block = self.logical_to_physical(level, page_no);
+        let block_offset = block * FSM_PAGE_SIZE as u64;
+        let mut cache = lock_cache(&self.cache);
 
+        if !cache.pages.contains_key(&block) {
+            let mut page = FSMPage::new();
+            if block_offset + FSM_PAGE_SIZE as u64 <= cache.file_len {
+                self.fsm_file.seek(SeekFrom::Start(block_offset))?;
+                match self.fsm_file.read_exact(&mut page.tree) {
+                    Ok(()) => {}
+                    // Past the physical end of file: an empty page.
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => page = FSMPage::new(),
+                    Err(e) => return Err(e),
+                }
+            }
+            cache.pages.insert(block, page);
+        }
+
+        let page = cache.pages.get_mut(&block).expect("just loaded");
+        let (changed, result) = f(page);
+        if changed {
+            FSM_METRICS
+                .fsm_write_page_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            cache.dirty.insert(block);
+            cache.file_len = cache.file_len.max(block_offset + FSM_PAGE_SIZE as u64);
+            drop(cache);
+            self.dirty = true;
+        }
+        Ok(result)
+    }
+
+    /// Walk one FSM page's max-tree towards a leaf holding at least
+    /// `min_category`. Returns the leaf's index among the page's slots.
+    fn descend(page: &FSMPage, min_category: u8) -> Option<usize> {
+        // Check if even the root has space
+        if page.tree[0] < min_category {
+            return None;
+        }
+        let mut idx = 0; // root of this FSM page
+        while idx < FSM_NON_LEAF_NODES {
+            let left = 2 * idx + 1;
+            let right = 2 * idx + 2;
+            if left < FSM_NODES_PER_PAGE && page.tree[left] >= min_category {
+                idx = left;
+            } else if right < FSM_NODES_PER_PAGE && page.tree[right] >= min_category {
+                idx = right;
+            } else {
+                break;
+            }
+        }
+        (idx >= FSM_NON_LEAF_NODES).then(|| idx - FSM_NON_LEAF_NODES)
+    }
+
+    /// Set one slot of an FSM page and restore the max-tree above it.
+    /// Returns `false` when the slot already held `value`.
+    fn set_slot(page: &mut FSMPage, slot: usize, value: u8) -> bool {
+        let leaf_index = FSM_NON_LEAF_NODES + slot;
+        if page.tree[leaf_index] == value {
+            return false;
+        }
+        page.tree[leaf_index] = value;
+
+        // Binary max-tree in array form: node i has children 2i+1 and 2i+2,
+        // and each internal node stores the max of its children.
+        let mut idx = leaf_index;
+        while idx > 0 {
+            let parent_idx = (idx - 1) / 2;
+            let left_child = 2 * parent_idx + 1;
+            let right_child = 2 * parent_idx + 2;
+            let new_value = if right_child < FSM_NODES_PER_PAGE {
+                page.tree[left_child].max(page.tree[right_child])
+            } else if left_child < FSM_NODES_PER_PAGE {
+                page.tree[left_child]
+            } else {
+                0
+            };
+            if page.tree[parent_idx] != new_value {
+                page.tree[parent_idx] = new_value;
+                idx = parent_idx;
+            } else {
+                break; // No change, no need to bubble further
+            }
+        }
+        true
+    }
+
+    /// Highest FSM level in use for the current heap size (0 = leaves only).
+    fn root_level(&self) -> u32 {
         let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
-        let root_level = if self.heap_page_count <= FSM_SLOTS_PER_PAGE {
+        if self.heap_page_count <= FSM_SLOTS_PER_PAGE {
             0
         } else if self.heap_page_count <= threshold_l2 {
             1
         } else {
             2
-        };
-
-        // Traverse tree from root to find a leaf with sufficient free space
-        // The search function will read the root page natively avoiding redundant IO
-        let result = self.search_tree_for_available_page(root_level, 0, min_category)?;
-
-        if let Some((page_id, fsm_page)) = result {
-            log::trace!(
-                "[FSM::fsm_search_avail] Found page with sufficient space: page_id={}",
-                page_id
-            );
-            Ok(Some((page_id, fsm_page)))
-        } else {
-            log::trace!("[FSM::fsm_search_avail] No page found with sufficient space");
-            Ok(None)
         }
     }
 
-    /// search FSM tree for a page with free space >= min_category
-    /// Returns Ok(Option<(u32, FSMPage)>) where u32 is the page_id, or None if not found
-    fn search_tree_for_available_page(
-        &mut self,
-        level: u32,
-        page_no: u32,
-        min_category: u8,
-    ) -> io::Result<Option<(u32, FSMPage)>> {
+    /// Find a heap page whose free-space category is at least `min_category`.
+    ///
+    /// Descends from the root FSM page to a leaf; returns `None` when the
+    /// root is below `min_category` (no page has that much space) or when
+    /// the descent lands on heap page 0, which is the header page.
+    pub fn search_page(&mut self, min_category: u8) -> io::Result<Option<u32>> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
-            .fsm_search_tree_calls
+            .fsm_search_avail_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if level == 0 {
-            // Leaf level: this FSM page's tree array contains heap page categories
-            let fsm_page = self.read_fsm_page(0, page_no, 0)?;
-
-            // Get the starting heap page ID for this FSM page
-            // Logic derived from: start_heap_page = (L2_slot * 4000 * 4000) + (L1_slot * 4000) + L0_slot
-            let start_heap_page = page_no * FSM_SLOTS_PER_PAGE;
-
-            log::trace!(
-                "[FSM::search_tree] Level 0 (page_no={}): Searching tree of {} leaves starting from heap_page={}",
-                page_no,
-                FSM_SLOTS_PER_PAGE,
-                start_heap_page
-            );
-
-            // Check if even the root has space
-            if fsm_page.tree[0] < min_category {
-                log::trace!(
-                    "[FSM::search_tree] Root has value {} < min_category {}, returning None",
-                    fsm_page.tree[0],
-                    min_category
-                );
+        let mut level = self.root_level();
+        let mut page_no = 0u32;
+        loop {
+            FSM_METRICS
+                .fsm_search_tree_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let hit = self.with_cached_page(level, page_no, |page| {
+                (false, Self::descend(page, min_category))
+            })?;
+            let Some(leaf_offset) = hit else {
                 return Ok(None);
+            };
+            // A leaf of a level-L page names a level-(L-1) page; at level 0
+            // it names a heap page.
+            let next = page_no * FSM_SLOTS_PER_PAGE + leaf_offset as u32;
+            if level == 0 {
+                // Heap page 0 is the header page, never a data page.
+                return Ok((next != 0).then_some(next));
             }
+            level -= 1;
+            page_no = next;
+        }
+    }
 
-            let mut idx = 0; // root of this FSM page
-
-            while idx < FSM_NON_LEAF_NODES {
-                let left = 2 * idx + 1;
-                let right = 2 * idx + 2;
-
-                if left < FSM_NODES_PER_PAGE && fsm_page.tree[left] >= min_category {
-                    idx = left;
-                } else if right < FSM_NODES_PER_PAGE && fsm_page.tree[right] >= min_category {
-                    idx = right;
-                } else {
-                    break;
-                }
+    /// Like [`FSM::search_page`], also returning a copy of the level-0 FSM
+    /// page that covers the result.
+    pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, FSMPage)>> {
+        match self.search_page(min_category)? {
+            Some(heap_page_id) => {
+                let page = self.read_fsm_page(0, heap_page_id / FSM_SLOTS_PER_PAGE, 0)?;
+                Ok(Some((heap_page_id, page)))
             }
-
-            if idx >= FSM_NON_LEAF_NODES {
-                let leaf_offset = idx - FSM_NON_LEAF_NODES;
-                let heap_page_id = start_heap_page + leaf_offset as u32;
-
-                // IMPORTANT: Skip heap page 0 - it's the header page, not a data page!
-                if heap_page_id == 0 {
-                    // Try to find another slot because page 0 is invalid
-                    log::trace!(
-                        "[FSM::search_tree] Level 0 hit heap_page 0 (header), ignoring and returning None this branch"
-                    );
-                    // In a real optimized system, we would backtrack and keep searching but for now we just return None to let caller retry or allocate
-                    return Ok(None);
-                }
-
-                log::trace!(
-                    "[FSM::search_tree] Found heap page {} with category {} >= {}",
-                    heap_page_id,
-                    fsm_page.tree[idx],
-                    min_category
-                );
-                return Ok(Some((heap_page_id, fsm_page)));
-            }
-
-            log::trace!(
-                "[FSM::search_tree] No suitable leaf found in Level 0 page_no={}",
-                page_no
-            );
-            Ok(None)
-        } else {
-            // Internal level: traverse child FSM pages
-            let fsm_page = self.read_fsm_page(level, page_no, 0)?;
-
-            log::trace!(
-                "[FSM::search_tree] Level {} (page_no={}): Searching internal nodes",
-                level,
-                page_no
-            );
-
-            let mut idx = 0; // root of this FSM page
-
-            // Check if even the root has space
-            if fsm_page.tree[0] < min_category {
-                log::trace!(
-                    "[FSM::search_tree] Root has value {} < min_category {}, returning None",
-                    fsm_page.tree[0],
-                    min_category
-                );
-                return Ok(None);
-            }
-
-            while idx < FSM_NON_LEAF_NODES {
-                let left = 2 * idx + 1;
-                let right = 2 * idx + 2;
-
-                if left < FSM_NODES_PER_PAGE && fsm_page.tree[left] >= min_category {
-                    idx = left;
-                } else if right < FSM_NODES_PER_PAGE && fsm_page.tree[right] >= min_category {
-                    idx = right;
-                } else {
-                    break;
-                }
-            }
-
-            if idx >= FSM_NON_LEAF_NODES {
-                let leaf_offset = idx - FSM_NON_LEAF_NODES;
-                // leaf_offset is the index among the leaves (0 to 3999)
-                // for level L, its leaves refer to Level L-1 pages.
-                // Each Level L page spans FSM_SLOTS_PER_PAGE Level L-1 pages
-                let next_page_no = page_no * FSM_SLOTS_PER_PAGE + leaf_offset as u32;
-
-                if let Some(result) =
-                    self.search_tree_for_available_page(level - 1, next_page_no, min_category)?
-                {
-                    return Ok(Some(result));
-                }
-            }
-
-            log::trace!(
-                "[FSM::search_tree] No suitable child found in Level {} page_no={}",
-                level,
-                page_no
-            );
-            Ok(None)
+            None => Ok(None),
         }
     }
 
     /// Update FSM to reflect new available space for a heap page
     ///
-    /// Properly implements the full tree update:
-    /// 1. Locate Level 0 FSM page containing this heap page
-    /// 2. Update the leaf node with new category
-    /// 3. Bubble-up changes within Level 0 FSM page
-    /// 4. Propagate up to Level 1 and Level 2 if roots changed
+    /// 1. Locate the Level 0 FSM page containing this heap page
+    /// 2. Update the leaf with the new category and bubble up within the page
+    /// 3. Propagate the page's root to Level 1 and Level 2 while it changes
+    ///
+    /// `cached_page`, when given, is refreshed with the updated Level 0 page.
     pub fn fsm_set_avail(
         &mut self,
         heap_page_id: u32,
@@ -802,149 +775,28 @@ impl FSM {
             .fsm_set_avail_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        log::trace!(
-            "[FSM::fsm_set_avail] Updating heap_page_id={} with {} free bytes",
-            heap_page_id,
-            new_free_bytes
-        );
-
-        // Compute category from free bytes
-        let category = Self::bytes_to_category(new_free_bytes);
-        log::trace!("[FSM::fsm_set_avail] Computed category: {}", category);
-
-        // Find which Level 0 FSM page contains this heap_page_id
-        // Each Level 0 FSM page tracks FSM_SLOTS_PER_PAGE heap pages
         let fsm_page_no = heap_page_id / FSM_SLOTS_PER_PAGE;
-        let slot_within_page = (heap_page_id % FSM_SLOTS_PER_PAGE) as usize;
+        let max_level = self.root_level();
 
-        log::trace!(
-            "[FSM::fsm_set_avail] Heap page {} → FSM Level 0 page {}, slot {}",
-            heap_page_id,
-            fsm_page_no,
-            slot_within_page
-        );
-
-        // Step 1: Update the leaf in Level 0 FSM page
-        let mut owned_leaf;
-        let leaf_page = if let Some(page) = cached_page {
-            page
-        } else {
-            owned_leaf = self.read_fsm_page(0, fsm_page_no, 0)?;
-            &mut owned_leaf
-        };
-
-        let leaf_index = FSM_NON_LEAF_NODES + slot_within_page;
-
-        if leaf_page.tree[leaf_index] == category {
-            log::trace!(
-                "[FSM::fsm_set_avail] Category unchanged ({}), skipping update",
-                category
-            );
-            return Ok(());
-        }
-
-        log::trace!(
-            "[FSM::fsm_set_avail] Updating leaf at index {} from {} to {}",
-            leaf_index,
-            leaf_page.tree[leaf_index],
-            category
-        );
-
-        leaf_page.tree[leaf_index] = category;
-
-        // Step 2: Update internal nodes within the Level 0 page (bubble-up)
-        // Binary tree max-tree: internal nodes store max of their children
-        // In a standard binary heap with array storage:
-        // - Node at index i has children at 2*i+1 and 2*i+2
-        // - Parent of node i is at (i-1)/2
-
-        // Start from the parent of the just-updated leaf
-        let mut idx = leaf_index;
-        while idx > 0 {
-            let parent_idx = (idx - 1) / 2;
-            let left_child = 2 * parent_idx + 1;
-            let right_child = 2 * parent_idx + 2;
-
-            let new_value = if right_child < FSM_NODES_PER_PAGE {
-                leaf_page.tree[left_child].max(leaf_page.tree[right_child])
-            } else if left_child < FSM_NODES_PER_PAGE {
-                leaf_page.tree[left_child]
-            } else {
-                0
-            };
-
-            if leaf_page.tree[parent_idx] != new_value {
-                leaf_page.tree[parent_idx] = new_value;
-                idx = parent_idx;
-            } else {
-                break; // No change, no need to bubble further
-            }
-        }
-
-        // Write updated Level 0 page
-        self.write_fsm_page(0, fsm_page_no, 0, leaf_page)?;
-
-        let new_level0_root = leaf_page.root_value();
-        log::trace!(
-            "[FSM::fsm_set_avail] Level 0 page root is now: {}",
-            new_level0_root
-        );
-
-        // Step 3: Propagate changes up to necessary upper levels
-        let mut curr_val = new_level0_root;
-        let mut curr_page_no = fsm_page_no;
-
-        let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
-        let max_level = if self.heap_page_count <= FSM_SLOTS_PER_PAGE {
-            0
-        } else if self.heap_page_count <= threshold_l2 {
-            1
-        } else {
-            2
-        };
-
-        for level in 1..=max_level {
-            let parent_page_no = curr_page_no / FSM_SLOTS_PER_PAGE;
-            let slot = (curr_page_no % FSM_SLOTS_PER_PAGE) as usize;
-
-            let mut page = self.read_fsm_page(level, parent_page_no, 0)?;
-            let leaf_idx = FSM_NON_LEAF_NODES + slot;
-
-            if page.tree[leaf_idx] != curr_val {
-                page.tree[leaf_idx] = curr_val;
-
-                let mut idx = leaf_idx;
-                while idx > 0 {
-                    let p_idx = (idx - 1) / 2;
-                    let l_idx = 2 * p_idx + 1;
-                    let r_idx = 2 * p_idx + 2;
-
-                    let new_val = if r_idx < FSM_NODES_PER_PAGE {
-                        page.tree[l_idx].max(page.tree[r_idx])
-                    } else if l_idx < FSM_NODES_PER_PAGE {
-                        page.tree[l_idx]
-                    } else {
-                        0
-                    };
-
-                    if page.tree[p_idx] != new_val {
-                        page.tree[p_idx] = new_val;
-                        idx = p_idx;
-                    } else {
-                        break;
-                    }
-                }
-
-                self.write_fsm_page(level, parent_page_no, 0, &page)?;
-                curr_val = page.root_value();
-                curr_page_no = parent_page_no;
-            } else {
+        let mut value = Self::bytes_to_category(new_free_bytes);
+        let mut page_no = fsm_page_no;
+        let mut slot = (heap_page_id % FSM_SLOTS_PER_PAGE) as usize;
+        for level in 0..=max_level {
+            let (changed, root) = self.with_cached_page(level, page_no, |page| {
+                let changed = Self::set_slot(page, slot, value);
+                (changed, (changed, page.root_value()))
+            })?;
+            if !changed {
                 break;
             }
+            value = root;
+            slot = (page_no % FSM_SLOTS_PER_PAGE) as usize;
+            page_no /= FSM_SLOTS_PER_PAGE;
         }
 
-        log::trace!("[FSM::fsm_set_avail] Update complete");
-
+        if let Some(page) = cached_page {
+            *page = self.read_fsm_page(0, fsm_page_no, 0)?;
+        }
         Ok(())
     }
 

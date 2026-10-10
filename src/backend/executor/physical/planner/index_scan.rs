@@ -14,7 +14,6 @@ use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::HeapManager;
-use crate::backend::index::BTree;
 use crate::types::Comparable;
 use crate::types::{DataType, DataValue};
 
@@ -178,24 +177,22 @@ impl PhysicalPlanner {
             );
 
             crate::backend::cache::checkpoint();
-            let mut btree = BTree::open(idx_path.clone()).map_err(|e| {
-                RookError::Io(e).with_context(format!(
-                    "opening index {} for table '{}'",
-                    idx_path.display(),
-                    ts.table
-                ))
-            })?;
-            // Set key type(s) from the INDEXED column(s) (NOT the first table column)
-            if !best_key_types.is_empty() {
-                btree.set_key_types(best_key_types.clone());
+            // Key type(s) come from the INDEXED column(s) (NOT the first table
+            // column). The index itself is not opened here: the scan looks keys
+            // up through the cached handle, which keeps the file open and its
+            // pages cached across queries.
+            let key_types: Vec<DataType> = if !best_key_types.is_empty() {
+                best_key_types.clone()
             } else if let Some(idx_col) = table_schema
                 .iter()
                 .find(|c| c.name.eq_ignore_ascii_case(col_name.as_str()))
             {
-                btree.set_key_type(idx_col.data_type.clone());
+                vec![idx_col.data_type.clone()]
             } else if let Some(first_col) = table_schema.first() {
-                btree.set_key_type(first_col.data_type.clone());
-            }
+                vec![first_col.data_type.clone()]
+            } else {
+                vec![DataType::Int]
+            };
 
             let heap_manager = HeapManager::open(heap_path.clone()).map_err(|e| {
                 RookError::Io(e).with_context(format!(
@@ -214,8 +211,9 @@ impl PhysicalPlanner {
                 })
                 .collect();
 
-            return Ok(Some(Box::new(IndexScanOperator::new(
-                btree,
+            return Ok(Some(Box::new(IndexScanOperator::with_cached_index(
+                idx_path,
+                key_types,
                 heap_manager,
                 mode,
                 column_info,

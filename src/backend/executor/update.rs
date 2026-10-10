@@ -713,11 +713,18 @@ pub fn update_by_pointers(
     let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
     let mut pending_updates: Vec<PendingUpdate> = Vec::new();
 
+    // Consecutive pointers usually share a heap page; nothing in this pass
+    // writes to the heap, so a page is read once for all of its rows.
+    let mut page = Page::new();
+    let mut loaded_page: Option<u32> = None;
+
     for &(page_num, slot_idx) in pointers {
         let slot_index = slot_idx as u16;
 
-        let mut page = Page::new();
-        crate::disk::read_page(&mut file, &mut page, page_num)?;
+        if loaded_page != Some(page_num) {
+            crate::disk::read_page(&mut file, &mut page, page_num)?;
+            loaded_page = Some(page_num);
+        }
 
         let base = (PAGE_HEADER_SIZE + slot_index as u32 * ITEM_ID_SIZE) as usize;
         let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
@@ -921,34 +928,49 @@ pub fn update_by_pointers(
     let mut in_place = vec![false; pending_updates.len()];
     if !pending_updates.is_empty() {
         let mut moved = 0u32;
-        for (i, update) in pending_updates.iter().enumerate() {
-            let _page_lock = PageWriteLock::acquire(file_identity, update.pointer.page_id);
-            let mut page = Page::new();
-            crate::disk::read_page(&mut file, &mut page, update.pointer.page_id)?;
-            let base =
-                (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
-            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
-            let length =
-                u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as usize;
-            if update.new_bytes.len() == update.old_tuple_data.len()
-                && length == update.new_bytes.len()
-                && offset + length <= page.data.len()
-            {
-                page.data[offset..offset + length].copy_from_slice(&update.new_bytes);
-                crate::disk::write_page(&mut file, &mut page, update.pointer.page_id)?;
-                in_place[i] = true;
-                continue;
+        // Each run of updates on one page is applied to a single page image:
+        // one read, one write and one lock per run rather than per row.
+        let mut start = 0;
+        while start < pending_updates.len() {
+            let page_id = pending_updates[start].pointer.page_id;
+            let mut end = start + 1;
+            while end < pending_updates.len() && pending_updates[end].pointer.page_id == page_id {
+                end += 1;
             }
-            let mut flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-            flags |= SLOT_FLAG_DELETED;
-            page.data[base + 6..base + 8].copy_from_slice(&flags.to_le_bytes());
-            crate::disk::write_page(&mut file, &mut page, update.pointer.page_id)?;
-            let _ = crate::backend::visibility_map::vm_clear_page(
-                db_name,
-                table_name,
-                update.pointer.page_id,
-            );
-            moved += 1;
+
+            let _page_lock = PageWriteLock::acquire(file_identity, page_id);
+            let mut page = Page::new();
+            crate::disk::read_page(&mut file, &mut page, page_id)?;
+            let mut moved_on_page = false;
+
+            for (i, update) in pending_updates.iter().enumerate().take(end).skip(start) {
+                let base =
+                    (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
+                let offset =
+                    u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+                let length =
+                    u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as usize;
+                if update.new_bytes.len() == update.old_tuple_data.len()
+                    && length == update.new_bytes.len()
+                    && offset + length <= page.data.len()
+                {
+                    page.data[offset..offset + length].copy_from_slice(&update.new_bytes);
+                    in_place[i] = true;
+                    continue;
+                }
+                let mut flags =
+                    u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+                flags |= SLOT_FLAG_DELETED;
+                page.data[base + 6..base + 8].copy_from_slice(&flags.to_le_bytes());
+                moved_on_page = true;
+                moved += 1;
+            }
+
+            crate::disk::write_page(&mut file, &mut page, page_id)?;
+            if moved_on_page {
+                let _ = crate::backend::visibility_map::vm_clear_page(db_name, table_name, page_id);
+            }
+            start = end;
         }
         if moved > 0 {
             crate::table::increment_dead_tuple_count(&mut file, moved)?;

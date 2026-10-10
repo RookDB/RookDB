@@ -1,3 +1,6 @@
+use std::io;
+use std::path::PathBuf;
+
 use crate::backend::heap::heap_manager::{HeapManager, HeapScanIterator};
 use crate::backend::index::btree::BTree;
 
@@ -214,8 +217,10 @@ pub enum IndexScanMode {
 /// In both modes, the operator materializes all matching tuples on the
 /// first `next()` call, then yields them one at a time.
 pub struct IndexScanOperator {
-    /// B+ Tree index for key lookups.
-    btree: BTree,
+    /// B+ Tree index for key lookups, when this scan owns its handle.
+    btree: Option<BTree>,
+    /// Index file and key types, when lookups go through the cached handle.
+    cached_index: Option<(PathBuf, Vec<DataType>)>,
     /// Heap manager for fetching actual tuple data from (page_id, slot_id).
     heap_manager: HeapManager,
     /// The scan mode (point lookup or range scan).
@@ -251,7 +256,8 @@ impl IndexScanOperator {
     ) -> Self {
         let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
         Self {
-            btree,
+            btree: Some(btree),
+            cached_index: None,
             heap_manager,
             mode,
             column_info,
@@ -263,46 +269,104 @@ impl IndexScanOperator {
         }
     }
 
+    /// Create an index scan that looks keys up through the process-wide
+    /// cached handle for `idx_path` (see `cache::with_btree`) instead of
+    /// opening the index file for this one scan.
+    ///
+    /// The cached handle is the one DML maintains, so the scan reads the same
+    /// pages DML writes and reuses pages already cached by earlier queries.
+    pub fn with_cached_index(
+        idx_path: PathBuf,
+        key_types: Vec<DataType>,
+        heap_manager: HeapManager,
+        mode: IndexScanMode,
+        column_info: Vec<ColumnInfo>,
+        indexed_cols: Vec<usize>,
+    ) -> Self {
+        let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
+        Self {
+            btree: None,
+            cached_index: Some((idx_path, key_types)),
+            heap_manager,
+            mode,
+            column_info,
+            schema_types,
+            indexed_cols,
+            results: Vec::new(),
+            pos: 0,
+            loaded: false,
+        }
+    }
+
+    /// Run this scan's lookup against `btree`.
+    fn lookup(mode: &IndexScanMode, btree: &mut BTree) -> io::Result<Vec<(u32, u32)>> {
+        match mode {
+            // search_range with the same key for both bounds retrieves ALL
+            // matching entries, not just the first one found by search().
+            // This handles non-unique indexes where multiple rows share the
+            // same key value (e.g., multiple employees in the same department).
+            IndexScanMode::PointLookup(key) => btree.search_range(key, key),
+            IndexScanMode::CompositePointLookup(keys) => btree.search_range_keys(keys, keys),
+            IndexScanMode::RangeLookup(low, high) => btree.search_range(low, high),
+            IndexScanMode::FullScan => btree.scan_all(),
+        }
+    }
+
+    /// Look the keys up in the owned tree, or in the cached handle.
+    fn search_index(&mut self) -> io::Result<Vec<(u32, u32)>> {
+        if self.btree.is_none()
+            && let Some((path, key_types)) = &self.cached_index
+        {
+            let open = || -> io::Result<BTree> {
+                let mut btree = BTree::open(path.clone())?;
+                btree.set_key_types(key_types.clone());
+                Ok(btree)
+            };
+            let mode = &self.mode;
+            let hit = crate::backend::cache::with_btree(path, open, |btree| {
+                // A handle cached with other key types would compare keys
+                // differently; leave it alone and use a private one.
+                if btree.key_types() != key_types.as_slice() {
+                    return Ok(None);
+                }
+                Self::lookup(mode, btree).map(Some)
+            })?;
+            if let Some(tids) = hit {
+                return Ok(tids);
+            }
+            self.btree = Some(open()?);
+        }
+        let btree = self
+            .btree
+            .as_mut()
+            .ok_or_else(|| io::Error::other("index scan has no index handle"))?;
+        Self::lookup(&self.mode, btree)
+    }
+
     /// Query the B+ Tree and materialize the matching heap tuple locations.
     fn load_results(&mut self) -> RookResult<()> {
-        match &self.mode {
-            IndexScanMode::PointLookup(key) => {
-                // Use search_range with the same key for both bounds to retrieve
-                // ALL matching entries, not just the first one found by search().
-                // This handles non-unique indexes where multiple rows share the
-                // same key value (e.g., multiple employees in the same department).
-                let tids = self.btree.search_range(key, key).map_err(|e| {
-                    RookError::Internal(format!("Index scan point lookup error: {}", e))
-                })?;
-                self.results = tids;
-            }
-            IndexScanMode::CompositePointLookup(keys) => {
-                let tids = self.btree.search_range_keys(keys, keys).map_err(|e| {
-                    RookError::Internal(format!("Index scan composite point lookup error: {}", e))
-                })?;
-                self.results = tids;
-            }
-            IndexScanMode::RangeLookup(low, high) => {
-                let tids = self.btree.search_range(low, high).map_err(|e| {
-                    RookError::Internal(format!("Index scan range lookup error: {}", e))
-                })?;
-                self.results = tids;
-            }
-            IndexScanMode::FullScan => {
-                let tids = self.btree.scan_all().map_err(|e| {
-                    RookError::Internal(format!("Index scan full scan error: {}", e))
-                })?;
-                let mut tid_set: std::collections::HashSet<(u32, u32)> =
-                    tids.iter().cloned().collect();
-                let mut all_results = tids;
-                for (page_id, slot_id, _) in self.heap_manager.scan().flatten() {
-                    if !tid_set.contains(&(page_id, slot_id)) {
-                        all_results.push((page_id, slot_id));
-                        tid_set.insert((page_id, slot_id));
-                    }
+        let what = match &self.mode {
+            IndexScanMode::PointLookup(_) => "point lookup",
+            IndexScanMode::CompositePointLookup(_) => "composite point lookup",
+            IndexScanMode::RangeLookup(..) => "range lookup",
+            IndexScanMode::FullScan => "full scan",
+        };
+        let tids = self
+            .search_index()
+            .map_err(|e| RookError::Internal(format!("Index scan {} error: {}", what, e)))?;
+
+        if matches!(self.mode, IndexScanMode::FullScan) {
+            let mut tid_set: std::collections::HashSet<(u32, u32)> = tids.iter().cloned().collect();
+            let mut all_results = tids;
+            for (page_id, slot_id, _) in self.heap_manager.scan().flatten() {
+                if !tid_set.contains(&(page_id, slot_id)) {
+                    all_results.push((page_id, slot_id));
+                    tid_set.insert((page_id, slot_id));
                 }
-                self.results = all_results;
             }
+            self.results = all_results;
+        } else {
+            self.results = tids;
         }
         self.loaded = true;
         Ok(())

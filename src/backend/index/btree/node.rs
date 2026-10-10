@@ -120,6 +120,46 @@ impl<'a> NodeView<'a> {
         }
     }
 
+    /// Whether every key on the page is exactly `width` bytes long.
+    ///
+    /// When it is, key `i` sits at a computable offset and the node can be
+    /// binary-searched; see [`NodeView::int_key`]. The check reads only the
+    /// length prefixes, so it is cheap next to decoding the keys.
+    pub(crate) fn has_uniform_keys(&self, width: usize) -> bool {
+        let entry = KEY_LEN_SIZE + width;
+        let start = self.keys_start();
+        if start + self.num_keys * entry > self.buf.len() {
+            return false;
+        }
+        (0..self.num_keys).all(|i| {
+            let off = start + i * entry;
+            u16::from_le_bytes([self.buf[off], self.buf[off + 1]]) as usize == width
+        })
+    }
+
+    /// Key `i` as a sign-extended integer. Only valid on a page for which
+    /// [`NodeView::has_uniform_keys`] returned true for `width` (2, 4 or 8).
+    pub(crate) fn int_key(&self, i: usize, width: usize) -> i64 {
+        let off = self.keys_start() + i * (KEY_LEN_SIZE + width) + KEY_LEN_SIZE;
+        int_from_le(&self.buf[off..off + width])
+    }
+
+    /// Number of leading keys for which `pred` holds, by binary search.
+    /// Same preconditions as [`NodeView::int_key`]; `pred` must be true for
+    /// a prefix of the (sorted) keys and false for the rest.
+    pub(crate) fn int_partition_point(&self, width: usize, pred: impl Fn(i64) -> bool) -> usize {
+        let (mut lo, mut hi) = (0, self.num_keys);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if pred(self.int_key(mid, width)) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
     /// Offset one past the last key, i.e. the bytes this node occupies.
     pub(crate) fn used_bytes(&self) -> io::Result<usize> {
         let mut end = self.keys_start();
@@ -134,6 +174,19 @@ impl<'a> NodeView<'a> {
     pub(crate) fn has_space_for(&self, encoded_key_size: usize) -> io::Result<bool> {
         let pointer = if self.is_leaf { VALUE_SIZE } else { CHILD_SIZE };
         Ok(self.used_bytes()? + pointer + encoded_key_size <= BTREE_PAGE_SIZE)
+    }
+}
+
+/// Decode a little-endian two's-complement integer of 2, 4 or 8 bytes.
+pub(crate) fn int_from_le(bytes: &[u8]) -> i64 {
+    match bytes.len() {
+        2 => i16::from_le_bytes([bytes[0], bytes[1]]) as i64,
+        4 => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64,
+        _ => {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(&bytes[..8]);
+            i64::from_le_bytes(raw)
+        }
     }
 }
 

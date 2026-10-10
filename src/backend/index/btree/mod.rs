@@ -45,7 +45,7 @@ pub(crate) use codec::{
 };
 use codec::{LEAF_HEADER, VALUE_SIZE};
 pub use node::BTreeNode;
-use node::NodeView;
+use node::{NodeView, int_from_le};
 
 use crate::backend::buffer_manager::buffer_pool::BufferPool;
 use crate::backend::page::page_lock::PageWriteLock;
@@ -379,10 +379,46 @@ impl BTree {
         }
     }
 
+    /// Key width in bytes when this is a single-column integer index.
+    fn int_key_width(&self) -> Option<usize> {
+        match self.key_types.as_slice() {
+            [DataType::SmallInt] => Some(2),
+            [DataType::Int] => Some(4),
+            [DataType::BigInt] => Some(8),
+            _ => None,
+        }
+    }
+
+    /// Key width when `view` can be binary-searched as plain integers: a
+    /// single-column integer index whose keys on this page all have the
+    /// declared width. Comparing them as `i64` matches `DataValue::compare`,
+    /// which widens SMALLINT/INT/BIGINT before comparing.
+    fn int_layout(&self, view: &NodeView<'_>) -> Option<usize> {
+        let width = self.int_key_width()?;
+        view.has_uniform_keys(width).then_some(width)
+    }
+
+    /// [`BTree::int_layout`] plus the integer held by `encoded_key`, when the
+    /// encoded key has exactly the declared width.
+    fn int_fast_path(&self, view: &NodeView<'_>, encoded_key: &[u8]) -> Option<(usize, i64)> {
+        let width = self.int_layout(view)?;
+        if encoded_key.len() != KEY_LEN_SIZE + width
+            || u16::from_le_bytes([encoded_key[0], encoded_key[1]]) as usize != width
+        {
+            return None;
+        }
+        Some((width, int_from_le(&encoded_key[KEY_LEN_SIZE..])))
+    }
+
     /// Pick the child of an internal node to descend into for `encoded_key`:
     /// the child left of the first separator greater than the key, or the
     /// last child when no separator is greater. Returns `(index, page_id)`.
     fn pick_child(&self, view: &NodeView<'_>, encoded_key: &[u8]) -> io::Result<(usize, u32)> {
+        if let Some((width, target)) = self.int_fast_path(view, encoded_key) {
+            let child_idx = view.int_partition_point(width, |k| k <= target);
+            return Ok((child_idx, view.child(child_idx)));
+        }
+
         let mut child_idx = view.num_keys();
         for (i, entry) in view.keys().enumerate() {
             let (_, key) = entry?;
@@ -475,6 +511,26 @@ impl BTree {
             if !view.is_leaf() {
                 unreachable!("Expected leaf node in range scan");
             }
+            if let (Some(width), [low_value], [high_value]) = (self.int_layout(&view), low, high)
+                && let (Some(low_int), Some(high_int)) =
+                    (int_value(low_value), int_value(high_value))
+            {
+                let first = view.int_partition_point(width, |k| k < low_int);
+                for i in first..view.num_keys() {
+                    if view.int_key(i, width) > high_int {
+                        // Keys are sorted — we've passed the range
+                        return Ok(results);
+                    }
+                    results.push(view.value(i));
+                }
+                let next_leaf = view.next_leaf();
+                if next_leaf == 0 {
+                    break;
+                }
+                current_leaf = next_leaf;
+                continue;
+            }
+
             for (i, entry) in view.keys().enumerate() {
                 let (_, key) = entry?;
                 let cmp_low = self.cmp_encoded_vs_values(key, low)?;
@@ -534,6 +590,16 @@ impl BTree {
         let view = NodeView::parse(&buf)?;
 
         let mut results = Vec::new();
+        if let Some((width, target)) = self.int_fast_path(&view, encoded_key) {
+            let first = view.int_partition_point(width, |k| k < target);
+            for i in first..view.num_keys() {
+                if view.int_key(i, width) != target {
+                    break;
+                }
+                results.push(view.value(i));
+            }
+            return Ok(results);
+        }
         for (i, entry) in view.keys().enumerate() {
             let (_, key) = entry?;
             let cmp = self.cmp_encoded_keys(key, encoded_key)?;
@@ -593,7 +659,25 @@ impl BTree {
             let mut found: Option<(usize, usize, usize)> = None; // (index, offset, len)
             let mut past_key = false;
             let mut used = view.keys_start();
+            let fast = self.int_fast_path(&view, encoded_key);
+            if let Some((width, target)) = fast {
+                let entry = KEY_LEN_SIZE + width;
+                used = view.keys_start() + view.num_keys() * entry;
+                let first = view.int_partition_point(width, |k| k < target);
+                for i in first..view.num_keys() {
+                    if view.int_key(i, width) != target {
+                        break;
+                    }
+                    if view.value(i) == (value_page_id, value_slot_id) {
+                        found = Some((i, view.keys_start() + i * entry, entry));
+                        break;
+                    }
+                }
+            }
             for (i, entry) in view.keys().enumerate() {
+                if fast.is_some() {
+                    break;
+                }
                 let (off, key) = entry?;
                 used = off + key.len();
                 if found.is_some() || past_key {
@@ -696,6 +780,12 @@ impl BTree {
         let leaf_id = self.find_leaf(page_id, encoded_key)?;
         let buf = self.pool.read_page_bytes(leaf_id)?;
         let view = NodeView::parse(&buf)?;
+
+        if let Some((width, target)) = self.int_fast_path(&view, encoded_key) {
+            let first = view.int_partition_point(width, |k| k < target);
+            let hit = first < view.num_keys() && view.int_key(first, width) == target;
+            return Ok(hit.then(|| view.value(first)));
+        }
 
         for (i, entry) in view.keys().enumerate() {
             let (_, key) = entry?;
@@ -807,7 +897,19 @@ impl BTree {
             }
             let mut insert_at: Option<(usize, usize)> = None; // (index, offset)
             let mut used = view.keys_start();
+            let fast = self.int_fast_path(&view, encoded_key);
+            if let Some((width, target)) = fast {
+                let entry = KEY_LEN_SIZE + width;
+                used = view.keys_start() + view.num_keys() * entry;
+                let pos = view.int_partition_point(width, |k| k <= target);
+                if pos < view.num_keys() {
+                    insert_at = Some((pos, view.keys_start() + pos * entry));
+                }
+            }
             for (i, entry) in view.keys().enumerate() {
+                if fast.is_some() {
+                    break;
+                }
                 let (off, key) = entry?;
                 used = off + key.len();
                 if insert_at.is_none()
@@ -1118,6 +1220,16 @@ impl Drop for BTree {
         if let Err(e) = self.sync() {
             log::error!("[BTree::drop] Error syncing on drop: {}", e);
         }
+    }
+}
+
+/// The value as an `i64` if it is one of the integer types.
+fn int_value(value: &DataValue) -> Option<i64> {
+    match value {
+        DataValue::SmallInt(v) => Some(*v as i64),
+        DataValue::Int(v) => Some(*v as i64),
+        DataValue::BigInt(v) => Some(*v),
+        _ => None,
     }
 }
 
@@ -1583,6 +1695,26 @@ mod tests {
         for (n, key, rid) in model.iter().step_by(37) {
             assert_eq!(btree.search(key).unwrap(), Some(*rid), "key {}", n);
             assert_eq!(btree.search_range(key, key).unwrap(), vec![*rid]);
+            assert_eq!(btree.search_all(key).unwrap(), vec![*rid]);
+        }
+        // Keys that were deleted are no longer found.
+        for &n in order
+            .iter()
+            .filter(|n| **n % 3 != 0 && **n % 7 != 0)
+            .step_by(41)
+        {
+            assert_eq!(btree.search(&make_key(n)).unwrap(), None, "key {}", n);
+        }
+        // Ranges spanning several leaves, including bounds that are absent.
+        for (lo, hi) in [(0usize, model.len() - 1), (10, 700), (333, 334), (900, 900)] {
+            let expected: Vec<(u32, u32)> = model[lo..=hi].iter().map(|(_, _, r)| *r).collect();
+            assert_eq!(
+                btree.search_range(&model[lo].1, &model[hi].1).unwrap(),
+                expected,
+                "range {}..={}",
+                lo,
+                hi
+            );
         }
         cleanup(&path);
     }
@@ -1590,6 +1722,44 @@ mod tests {
     #[test]
     fn test_raw_leaf_edits_fixed_width_keys() {
         run_random_inserts_and_deletes(DataType::Int, |n| DataValue::Int(n as i32 - 1500));
+    }
+
+    #[test]
+    fn test_raw_leaf_edits_smallint_and_bigint_keys() {
+        run_random_inserts_and_deletes(DataType::SmallInt, |n| {
+            DataValue::SmallInt(n as i16 - 1500)
+        });
+        run_random_inserts_and_deletes(DataType::BigInt, |n| {
+            DataValue::BigInt((n as i64 - 1500) * 5_000_000_000)
+        });
+    }
+
+    #[test]
+    fn test_integer_range_bounds_of_another_integer_type() {
+        let (path, mut btree) = setup_btree();
+        for i in -50i32..50 {
+            btree
+                .insert(&DataValue::Int(i), 1, (i + 50) as u32)
+                .unwrap();
+        }
+        // Bounds are widened before comparing, as DataValue::compare does.
+        let hits = btree
+            .search_range(&DataValue::SmallInt(-3), &DataValue::BigInt(2))
+            .unwrap();
+        assert_eq!(hits, (47u32..=52).map(|slot| (1, slot)).collect::<Vec<_>>());
+        // A bound outside the key type's range is still handled.
+        let all = btree
+            .search_range(&DataValue::BigInt(i64::MIN), &DataValue::BigInt(i64::MAX))
+            .unwrap();
+        assert_eq!(all.len(), 100);
+        // An inverted range is empty.
+        assert!(
+            btree
+                .search_range(&DataValue::Int(10), &DataValue::Int(-10))
+                .unwrap()
+                .is_empty()
+        );
+        cleanup(&path);
     }
 
     #[test]

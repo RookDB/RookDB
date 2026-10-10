@@ -54,15 +54,7 @@ fn registry() -> &'static Mutex<Registry> {
 /// Relative paths are resolved against the current directory so that
 /// `"database/base/t.dat"` and `"./database/base/t.dat"` map to one pool.
 fn canonical_key(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    })
+    crate::backend::cache::canonical(path)
 }
 
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {

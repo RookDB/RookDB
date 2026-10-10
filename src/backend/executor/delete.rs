@@ -241,6 +241,30 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
 //   "(c1 = 1 AND c2 = 2) AND (c3 = 3 OR c4 = 4)"
 //
 // Grammar (AND binds tighter than OR, same as SQL):
+/// A heap page kept locked in memory while consecutive rows on it are deleted.
+struct HeldPage {
+    page_num: u32,
+    page: Page,
+    dirty: bool,
+    _lock: PageWriteLock,
+}
+
+/// Write the held page back if any slot on it was deleted, then release it.
+fn flush_held_page(
+    file: &mut std::fs::File,
+    held: &mut Option<HeldPage>,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<()> {
+    if let Some(mut h) = held.take()
+        && h.dirty
+    {
+        write_page(file, &mut h.page, h.page_num)?;
+        let _ = vm_clear_page(db_name, table_name, h.page_num);
+    }
+    Ok(())
+}
+
 /// Delete rows identified by explicit heap pointers (page_id, slot_id).
 ///
 /// This is the Volcano-aware DELETE path: instead of scanning the heap and
@@ -281,14 +305,32 @@ pub fn delete_by_pointers(
     let mut deleted_count = 0usize;
     let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
 
+    // Consecutive pointers usually share a heap page. When no table
+    // references this one, deleting a row cannot cascade back into this
+    // file, so the page is held across those rows and written once instead
+    // of being read and rewritten for every row.
+    let hold_pages = crate::backend::cache::referencing_fks(db_name, table_name).is_empty();
+    let mut held: Option<HeldPage> = None;
+
     for &(page_num, slot_idx) in pointers {
         let slot_index = slot_idx as u16;
 
-        // Acquire exclusive write lock on this page
-        let _page_lock = PageWriteLock::acquire(file_identity, page_num);
+        if !hold_pages || held.as_ref().map(|h| h.page_num) != Some(page_num) {
+            flush_held_page(&mut file, &mut held, db_name, table_name)?;
 
-        let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num)?;
+            // Acquire exclusive write lock on this page
+            let lock = PageWriteLock::acquire(file_identity, page_num);
+            let mut page = Page::new();
+            read_page(&mut file, &mut page, page_num)?;
+            held = Some(HeldPage {
+                page_num,
+                page,
+                dirty: false,
+                _lock: lock,
+            });
+        }
+        let held_page = held.as_mut().expect("page loaded above");
+        let page = &mut held_page.page;
 
         let base = (PAGE_HEADER_SIZE + slot_index as u32 * ITEM_ID_SIZE) as usize;
         let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
@@ -314,7 +356,7 @@ pub fn delete_by_pointers(
         }
 
         // Re-read the page in case validate_row_delete triggered CASCADE
-        if let Err(e) = read_page(&mut file, &mut page, page_num) {
+        if !hold_pages && let Err(e) = read_page(&mut file, page, page_num) {
             log::error!("Failed to re-read page after validation: {}", e);
         }
 
@@ -334,9 +376,7 @@ pub fn delete_by_pointers(
         let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
         let new_flags = flags | SLOT_FLAG_DELETED;
         page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
-
-        write_page(&mut file, &mut page, page_num)?;
-        let _ = vm_clear_page(db_name, table_name, page_num);
+        held_page.dirty = true;
 
         log::info!(
             "[Delete] Soft-deleted slot (page={}, slot={}), updated index and cleared VM",
@@ -360,6 +400,8 @@ pub fn delete_by_pointers(
 
         deleted_count += 1;
     }
+
+    flush_held_page(&mut file, &mut held, db_name, table_name)?;
 
     if deleted_count > 0 {
         increment_dead_tuple_count(&mut file, deleted_count as u32)?;
