@@ -100,6 +100,18 @@ impl<'a> Drop for FrameGuard<'a> {
     }
 }
 
+/// `(device, inode)` of an open file, where the platform exposes one.
+#[cfg(unix)]
+fn file_ident(file: &File) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_ident(_file: &File) -> Option<(u64, u64)> {
+    None
+}
+
 /// A single frame in the buffer pool.
 struct Frame {
     /// The page number this frame holds (`u32::MAX` if empty/free).
@@ -120,7 +132,12 @@ impl Frame {
     fn new() -> Self {
         Self {
             page_id: u32::MAX,
-            page: Page::new(),
+            // No buffer until the frame is first filled: every load path
+            // (`fetch_page`, `new_page`, `allocate_raw_page`) moves a complete
+            // page in, and a `FrameId` is only handed out for a filled frame.
+            // Allocating `PAGE_SIZE` per frame up front made opening a pool
+            // cost ~2 ms per 256 frames, paid on every index scan.
+            page: Page { data: Vec::new() },
             is_dirty: false,
             pin_count: 0,
             clock_bit: false,
@@ -146,6 +163,8 @@ pub struct BufferPool {
     file_path: Option<std::path::PathBuf>,
     /// Cached file handle for I/O.
     pub(crate) file: Option<File>,
+    /// `(device, inode)` of `file`, read once when the handle is attached.
+    file_ident: Option<(u64, u64)>,
     /// Total number of pages in the managed file (from header).
     total_pages: u32,
 }
@@ -168,6 +187,7 @@ impl BufferPool {
             capacity,
             file_path: None,
             file: None,
+            file_ident: None,
             total_pages: 0,
         }
     }
@@ -189,6 +209,7 @@ impl BufferPool {
         }
 
         pool.file_path = Some(file_path);
+        pool.file_ident = file_ident(&file);
         pool.file = Some(file);
         log::info!(
             "BufferPool created with capacity={}, file has {} pages",
@@ -209,6 +230,7 @@ impl BufferPool {
     ) -> Self {
         let mut pool = Self::new(capacity);
         pool.file_path = Some(file_path);
+        pool.file_ident = file_ident(&file);
         pool.file = Some(file);
         pool.total_pages = total_pages;
         pool
@@ -239,6 +261,7 @@ impl BufferPool {
         }
 
         self.file_path = Some(path.to_path_buf());
+        self.file_ident = file_ident(&file);
         self.file = Some(file);
         log::info!(
             "BufferPool opened with capacity={}, file has {} pages",
@@ -261,11 +284,11 @@ impl BufferPool {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                if let (Ok(open_meta), Ok(disk_meta)) =
-                    (open_file.metadata(), std::fs::metadata(path))
-                {
-                    return open_meta.ino() != disk_meta.ino()
-                        || open_meta.dev() != disk_meta.dev();
+                // The open handle's identity never changes, so it is read
+                // once when the file is attached; only the path is re-checked.
+                let ident = self.file_ident.or_else(|| file_ident(open_file));
+                if let (Some((dev, ino)), Ok(disk_meta)) = (ident, std::fs::metadata(path)) {
+                    return ino != disk_meta.ino() || dev != disk_meta.dev();
                 }
             }
             #[cfg(windows)]

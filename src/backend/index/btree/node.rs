@@ -10,6 +10,170 @@ use super::codec::{
     PAGE_TYPE_LEAF, VALUE_SIZE, total_keys_size,
 };
 
+// ─── NodeView ────────────────────────────────────────────────────────────────
+
+/// Borrowed, allocation-free view over a serialized node page.
+///
+/// [`BTreeNode::deserialize`] copies every key into its own `Vec`, which made
+/// allocation the dominant cost of a lookup. Searches and descents only need
+/// to walk the keys once, so they read the page through this view instead;
+/// the owned `BTreeNode` is still used wherever a node is restructured.
+pub(crate) struct NodeView<'a> {
+    buf: &'a [u8],
+    num_keys: usize,
+    is_leaf: bool,
+}
+
+impl<'a> NodeView<'a> {
+    /// Validate the header and the fixed-width (children / values) area.
+    pub(crate) fn parse(buf: &'a [u8]) -> io::Result<Self> {
+        if buf.len() < PAGE_HEADER {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Page too short for header",
+            ));
+        }
+        let page_type = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let num_keys = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+        let is_leaf = match page_type {
+            PAGE_TYPE_INTERNAL => {
+                if PAGE_HEADER + (num_keys + 1) * CHILD_SIZE > buf.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Truncated children",
+                    ));
+                }
+                false
+            }
+            PAGE_TYPE_LEAF => {
+                if LEAF_HEADER + num_keys * VALUE_SIZE > buf.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Truncated values",
+                    ));
+                }
+                true
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Unknown page type: {}", page_type),
+                ));
+            }
+        };
+        Ok(Self {
+            buf,
+            num_keys,
+            is_leaf,
+        })
+    }
+
+    pub(crate) fn is_leaf(&self) -> bool {
+        self.is_leaf
+    }
+
+    pub(crate) fn num_keys(&self) -> usize {
+        self.num_keys
+    }
+
+    /// Child page id `i` of an internal node (`i <= num_keys`).
+    pub(crate) fn child(&self, i: usize) -> u32 {
+        let off = PAGE_HEADER + i * CHILD_SIZE;
+        u32::from_le_bytes([
+            self.buf[off],
+            self.buf[off + 1],
+            self.buf[off + 2],
+            self.buf[off + 3],
+        ])
+    }
+
+    /// Heap location `i` of a leaf node (`i < num_keys`).
+    pub(crate) fn value(&self, i: usize) -> (u32, u32) {
+        let off = LEAF_HEADER + i * VALUE_SIZE;
+        let b = self.buf;
+        (
+            u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]),
+            u32::from_le_bytes([b[off + 4], b[off + 5], b[off + 6], b[off + 7]]),
+        )
+    }
+
+    /// Next leaf in the chain (0 = none).
+    pub(crate) fn next_leaf(&self) -> u32 {
+        u32::from_le_bytes([self.buf[8], self.buf[9], self.buf[10], self.buf[11]])
+    }
+
+    /// Byte offset of the first key.
+    pub(crate) fn keys_start(&self) -> usize {
+        if self.is_leaf {
+            LEAF_HEADER + self.num_keys * VALUE_SIZE
+        } else {
+            PAGE_HEADER + (self.num_keys + 1) * CHILD_SIZE
+        }
+    }
+
+    /// Walk the keys in order as `(offset, [u16 len][bytes])`.
+    pub(crate) fn keys(&self) -> KeyIter<'a> {
+        KeyIter {
+            buf: self.buf,
+            off: self.keys_start(),
+            remaining: self.num_keys,
+        }
+    }
+
+    /// Offset one past the last key, i.e. the bytes this node occupies.
+    pub(crate) fn used_bytes(&self) -> io::Result<usize> {
+        let mut end = self.keys_start();
+        for entry in self.keys() {
+            let (off, key) = entry?;
+            end = off + key.len();
+        }
+        Ok(end)
+    }
+
+    /// Same capacity rule as [`BTreeNode::has_space_for`].
+    pub(crate) fn has_space_for(&self, encoded_key_size: usize) -> io::Result<bool> {
+        let pointer = if self.is_leaf { VALUE_SIZE } else { CHILD_SIZE };
+        Ok(self.used_bytes()? + pointer + encoded_key_size <= BTREE_PAGE_SIZE)
+    }
+}
+
+/// Iterator over the length-prefixed keys of a [`NodeView`].
+pub(crate) struct KeyIter<'a> {
+    buf: &'a [u8],
+    off: usize,
+    remaining: usize,
+}
+
+impl<'a> Iterator for KeyIter<'a> {
+    type Item = io::Result<(usize, &'a [u8])>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        let off = self.off;
+        if off + KEY_LEN_SIZE > self.buf.len() {
+            self.remaining = 0;
+            return Some(Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Truncated key length",
+            )));
+        }
+        let key_len = u16::from_le_bytes([self.buf[off], self.buf[off + 1]]) as usize;
+        let end = off + KEY_LEN_SIZE + key_len;
+        if end > self.buf.len() {
+            self.remaining = 0;
+            return Some(Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Truncated key data",
+            )));
+        }
+        self.off = end;
+        Some(Ok((off, &self.buf[off..end])))
+    }
+}
+
 // ─── BTreeNode ───────────────────────────────────────────────────────────────
 
 /// In-memory representation of a B+ Tree node.

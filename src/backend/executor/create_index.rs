@@ -955,6 +955,12 @@ pub fn update_index_on_update(
         let old_key = build_key_from_decoded(meta, &old_decoded);
         let new_key = build_key_from_decoded(meta, &new_decoded);
 
+        // An in-place update leaves the row where it was; an index whose key
+        // is also unchanged already holds the right entry.
+        if old_page_id == new_page_id && old_slot_id == new_slot_id && old_key == new_key {
+            continue;
+        }
+
         // If both keys are None (NULL / partial), skip this index
         if old_key.is_none() && new_key.is_none() {
             log::trace!(

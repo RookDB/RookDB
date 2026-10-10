@@ -912,14 +912,33 @@ pub fn update_by_pointers(
         });
     }
 
-    // Phase 2: apply delete+insert for all pending updates
+    // Phase 2: apply every pending update.
+    //
+    // A new row image of the same length is written over the old one: the row
+    // keeps its (page, slot), no dead tuple is left behind, and indexes whose
+    // key did not change need no maintenance. Any other row is replaced by
+    // delete+insert as before.
+    let mut in_place = vec![false; pending_updates.len()];
     if !pending_updates.is_empty() {
-        for update in &pending_updates {
+        let mut moved = 0u32;
+        for (i, update) in pending_updates.iter().enumerate() {
             let _page_lock = PageWriteLock::acquire(file_identity, update.pointer.page_id);
             let mut page = Page::new();
             crate::disk::read_page(&mut file, &mut page, update.pointer.page_id)?;
             let base =
                 (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
+            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
+            let length =
+                u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as usize;
+            if update.new_bytes.len() == update.old_tuple_data.len()
+                && length == update.new_bytes.len()
+                && offset + length <= page.data.len()
+            {
+                page.data[offset..offset + length].copy_from_slice(&update.new_bytes);
+                crate::disk::write_page(&mut file, &mut page, update.pointer.page_id)?;
+                in_place[i] = true;
+                continue;
+            }
             let mut flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
             flags |= SLOT_FLAG_DELETED;
             page.data[base + 6..base + 8].copy_from_slice(&flags.to_le_bytes());
@@ -929,21 +948,27 @@ pub fn update_by_pointers(
                 table_name,
                 update.pointer.page_id,
             );
+            moved += 1;
         }
-        crate::table::increment_dead_tuple_count(&mut file, pending_updates.len() as u32)?;
+        if moved > 0 {
+            crate::table::increment_dead_tuple_count(&mut file, moved)?;
+        }
     }
 
     if !pending_updates.is_empty() {
-        for update in &pending_updates {
-            let (new_page_id, new_slot_id) =
+        for (i, update) in pending_updates.iter().enumerate() {
+            let (new_page_id, new_slot_id) = if in_place[i] {
+                (update.pointer.page_id, update.pointer.slot_index as u32)
+            } else {
                 crate::backend::executor::compaction_api::insert_raw_tuple(
                     db_name,
                     table_name,
                     &update.new_bytes,
-                )?;
+                )?
+            };
 
             log::info!(
-                "[Update] Marked old slot (page={}, slot={}) as deleted, appended new version at (page={}, slot={})",
+                "[Update] Row at (page={}, slot={}) now at (page={}, slot={})",
                 update.pointer.page_id,
                 update.pointer.slot_index,
                 new_page_id,

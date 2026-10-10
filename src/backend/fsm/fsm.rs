@@ -12,9 +12,11 @@
 //! - FSM_SLOTS_PER_PAGE: 4000 usable leaf slots
 //! - FSM_LEVELS: 3 (Level 0=leaves, Level 2=root, constant height)
 
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 // ─────────────────────────────────────────────────────────────────────────
 // FSM Constants
@@ -126,6 +128,70 @@ impl Default for FSMPage {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// FSM page cache
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Write-behind image of one FSM fork file.
+///
+/// Every heap insert used to `statx`, read and rewrite an 8 KB FSM page,
+/// which was most of the cost of the insert. Pages are now held here, keyed
+/// by block number, and written out by [`FSM::sync`] or when a handle drops.
+/// `file_len` is the fork's logical length: the on-disk length plus any
+/// blocks that have been written here but not flushed yet.
+#[derive(Default)]
+struct FsmCache {
+    pages: HashMap<u64, FSMPage>,
+    dirty: BTreeSet<u64>,
+    file_len: u64,
+}
+
+type SharedFsmCache = Arc<Mutex<FsmCache>>;
+
+fn lock_cache(cache: &SharedFsmCache) -> MutexGuard<'_, FsmCache> {
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The cache for `file`, shared by every handle open on the same inode so
+/// two `HeapManager`s on one table keep seeing each other's FSM updates.
+#[cfg(unix)]
+fn shared_cache(file: &File) -> io::Result<SharedFsmCache> {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{OnceLock, Weak};
+
+    type Registry = HashMap<(u64, u64), Weak<Mutex<FsmCache>>>;
+    static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
+
+    let meta = file.metadata()?;
+    let key = (meta.dev(), meta.ino());
+    let mut registry = REGISTRY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // A live entry implies an open handle, so its inode cannot have been reused.
+    registry.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(existing) = registry.get(&key).and_then(Weak::upgrade) {
+        return Ok(existing);
+    }
+    let cache = Arc::new(Mutex::new(FsmCache {
+        file_len: meta.len(),
+        ..FsmCache::default()
+    }));
+    registry.insert(key, Arc::downgrade(&cache));
+    Ok(cache)
+}
+
+/// Without a stable file identity each handle keeps a private cache.
+#[cfg(not(unix))]
+fn shared_cache(file: &File) -> io::Result<SharedFsmCache> {
+    Ok(Arc::new(Mutex::new(FsmCache {
+        file_len: file.metadata()?.len(),
+        ..FsmCache::default()
+    })))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // FSM Struct
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -139,6 +205,8 @@ pub struct FSM {
     /// Set when in-memory changes were written to the OS but not yet
     /// `sync()`ed. Lets callers skip fsync cycles when the FSM is clean.
     dirty: bool,
+    /// Cached pages of this fork, shared with other handles on the same file.
+    cache: SharedFsmCache,
 }
 
 impl FSM {
@@ -157,11 +225,14 @@ impl FSM {
             .truncate(false)
             .open(&fsm_path)?;
 
+        let cache = shared_cache(&fsm_file)?;
+
         Ok(Self {
             fsm_path,
             fsm_file,
             heap_page_count,
             dirty: false,
+            cache,
         })
     }
 
@@ -308,6 +379,12 @@ impl FSM {
         // Create FSM handle and reset file contents
         let mut fsm = FSM::open(fsm_path.clone(), page_count)?;
         fsm.fsm_file.set_len(0)?; // Truncate to ensure clean build
+        {
+            let mut cache = lock_cache(&fsm.cache);
+            cache.pages.clear();
+            cache.dirty.clear();
+            cache.file_len = 0;
+        }
 
         log::trace!("[FSM::build_from_heap] Writing FSM pages to disk...");
 
@@ -412,10 +489,16 @@ impl FSM {
             slot
         );
 
-        let block_offset = self.logical_to_physical(level, page_no) * FSM_PAGE_SIZE as u64;
+        let block = self.logical_to_physical(level, page_no);
+        let block_offset = block * FSM_PAGE_SIZE as u64;
+
+        let mut cache = lock_cache(&self.cache);
+        if let Some(page) = cache.pages.get(&block) {
+            return Ok(page.clone());
+        }
 
         // Check if file is large enough
-        let file_size = self.fsm_file.metadata()?.len();
+        let file_size = cache.file_len;
 
         if block_offset + FSM_PAGE_SIZE as u64 > file_size {
             log::trace!(
@@ -430,7 +513,11 @@ impl FSM {
 
         let mut page_bytes = vec![0u8; FSM_PAGE_SIZE];
         match self.fsm_file.read_exact(&mut page_bytes) {
-            Ok(_) => FSMPage::deserialize(&page_bytes),
+            Ok(_) => {
+                let page = FSMPage::deserialize(&page_bytes)?;
+                cache.pages.insert(block, page.clone());
+                Ok(page)
+            }
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 log::trace!("[FSM::read_fsm_page] Unexpected EOF, returning empty page");
                 Ok(FSMPage::new())
@@ -439,7 +526,7 @@ impl FSM {
         }
     }
 
-    /// Write FSM page at logical position to disk.
+    /// Write FSM page at logical position (buffered until `sync` or drop).
     pub fn write_fsm_page(
         &mut self,
         level: u32,
@@ -459,30 +546,14 @@ impl FSM {
             slot
         );
 
-        let block_offset = self.logical_to_physical(level, page_no) * FSM_PAGE_SIZE as u64;
-
-        // Get current file size
-        let current_size = self.fsm_file.metadata()?.len();
-
-        // If file is too small, pad it with empty pages
-        if block_offset + FSM_PAGE_SIZE as u64 > current_size {
-            self.fsm_file.seek(SeekFrom::End(0))?;
-
-            // Avoid calling serialize() on an empty FSMPage to prevent double-serialization logs
-            let empty_bytes = vec![0u8; FSM_PAGE_SIZE];
-
-            let mut pages_to_write =
-                (block_offset + FSM_PAGE_SIZE as u64 - current_size) / FSM_PAGE_SIZE as u64;
-            while pages_to_write > 0 {
-                self.fsm_file.write_all(&empty_bytes)?;
-                pages_to_write -= 1;
-            }
-        }
-
-        self.fsm_file.seek(SeekFrom::Start(block_offset))?;
-
-        let page_bytes = page.serialize();
-        self.fsm_file.write_all(&page_bytes)?;
+        // Held in the cache until `sync` or drop; the fork grows logically
+        // now and physically when the block is flushed.
+        let block = self.logical_to_physical(level, page_no);
+        let mut cache = lock_cache(&self.cache);
+        cache.pages.insert(block, page.clone());
+        cache.dirty.insert(block);
+        cache.file_len = cache.file_len.max((block + 1) * FSM_PAGE_SIZE as u64);
+        drop(cache);
         self.dirty = true;
 
         Ok(())
@@ -490,12 +561,35 @@ impl FSM {
 
     /// Whether unsynced FSM writes exist.
     pub fn has_pending(&self) -> bool {
-        self.dirty
+        self.dirty || !lock_cache(&self.cache).dirty.is_empty()
+    }
+
+    /// Write every cached dirty page to the fork file (no fsync).
+    ///
+    /// Blocks go out in ascending order; a block past the current end of
+    /// file leaves a zero-filled gap, which reads back as an empty FSM page.
+    fn flush_pages(&mut self) -> io::Result<()> {
+        let mut cache = lock_cache(&self.cache);
+        while let Some(&block) = cache.dirty.iter().next() {
+            let bytes = match cache.pages.get(&block) {
+                Some(page) => page.serialize(),
+                None => {
+                    cache.dirty.remove(&block);
+                    continue;
+                }
+            };
+            self.fsm_file
+                .seek(SeekFrom::Start(block * FSM_PAGE_SIZE as u64))?;
+            self.fsm_file.write_all(&bytes)?;
+            cache.dirty.remove(&block);
+        }
+        Ok(())
     }
 
     /// Sync all changes to disk.
     pub fn sync(&mut self) -> io::Result<()> {
         log::trace!("[FSM::sync] Syncing FSM fork file");
+        self.flush_pages()?;
         self.fsm_file.sync_all()?;
         self.dirty = false;
         Ok(())
@@ -882,6 +976,14 @@ impl FSM {
     }
 }
 
+impl Drop for FSM {
+    fn drop(&mut self) {
+        if let Err(e) = self.flush_pages() {
+            log::error!("[FSM::drop] Error flushing cached pages: {}", e);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,6 +1045,89 @@ mod tests {
         let file_size = fs::metadata(&path).unwrap().len();
         assert_eq!(file_size, FSM_PAGE_SIZE as u64);
 
+        fs::remove_file(path).unwrap();
+    }
+
+    fn temp_fsm_path(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "rookdb_fsm_{tag}_{}_{nanos}.fsm",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn test_writes_are_buffered_until_sync_and_survive_reopen() {
+        let path = temp_fsm_path("buffered");
+        {
+            let mut fsm = FSM::open(path.clone(), 15).unwrap();
+            fsm.fsm_set_avail(3, 4096, None).unwrap();
+            assert!(fsm.has_pending());
+            assert_eq!(fs::metadata(&path).unwrap().len(), 0, "not written yet");
+
+            fsm.sync().unwrap();
+            assert!(!fsm.has_pending());
+            assert_eq!(fs::metadata(&path).unwrap().len(), FSM_PAGE_SIZE as u64);
+        }
+
+        let mut reopened = FSM::open(path.clone(), 15).unwrap();
+        let (page_id, _) = reopened.fsm_search_avail(100).unwrap().expect("page 3");
+        assert_eq!(page_id, 3);
+        drop(reopened);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_drop_flushes_unsynced_pages() {
+        let path = temp_fsm_path("drop");
+        {
+            let mut fsm = FSM::open(path.clone(), 15).unwrap();
+            fsm.fsm_set_avail(5, 8000, None).unwrap();
+        }
+        let mut reopened = FSM::open(path.clone(), 15).unwrap();
+        let (page_id, _) = reopened.fsm_search_avail(200).unwrap().expect("page 5");
+        assert_eq!(page_id, 5);
+        drop(reopened);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_two_handles_on_one_file_share_unsynced_updates() {
+        let path = temp_fsm_path("shared");
+        let mut a = FSM::open(path.clone(), 15).unwrap();
+        let mut b = FSM::open(path.clone(), 15).unwrap();
+
+        a.fsm_set_avail(4, 6400, None).unwrap();
+        let (page_id, _) = b.fsm_search_avail(150).unwrap().expect("seen through b");
+        assert_eq!(page_id, 4);
+
+        // b marks the page full; a must stop offering it.
+        b.fsm_set_avail(4, 0, None).unwrap();
+        assert!(a.fsm_search_avail(150).unwrap().is_none());
+
+        drop(a);
+        drop(b);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_pages_past_the_first_are_written_at_their_block() {
+        let path = temp_fsm_path("blocks");
+        let heap_pages = FSM_SLOTS_PER_PAGE * 2 + 10; // two-level tree
+        {
+            let mut fsm = FSM::open(path.clone(), heap_pages).unwrap();
+            fsm.fsm_set_avail(FSM_SLOTS_PER_PAGE * 2 + 5, 3200, None)
+                .unwrap();
+            fsm.sync().unwrap();
+        }
+        let mut reopened = FSM::open(path.clone(), heap_pages).unwrap();
+        let (page_id, _) = reopened.fsm_search_avail(100).unwrap().expect("found");
+        assert_eq!(page_id, FSM_SLOTS_PER_PAGE * 2 + 5);
+        drop(reopened);
         fs::remove_file(path).unwrap();
     }
 }

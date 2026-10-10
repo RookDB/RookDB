@@ -44,16 +44,51 @@ const HEAP_FLUSH_INTERVAL: u32 = 10_000;
 /// fsync a cached B+ Tree after this many unflushed key mutations.
 const BTREE_SYNC_INTERVAL: u32 = 4_096;
 
+/// Resolved paths remembered per `(cwd, path)`.
+///
+/// `canonicalize()` issues one `readlink` per path component; calling it for
+/// every row made it ~30% of a plain insert. Only successful resolutions are
+/// remembered, so a path that does not exist yet is re-resolved once it does.
+/// The working directory is part of the key because relative paths are
+/// resolved against it (tests switch workspaces with `set_current_dir`).
+type CanonicalMemo = HashMap<(PathBuf, PathBuf), PathBuf>;
+const CANONICAL_MEMO_LIMIT: usize = 4_096;
+
+fn canonical_memo() -> &'static Mutex<CanonicalMemo> {
+    static MEMO: OnceLock<Mutex<CanonicalMemo>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
+    let cwd = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir().unwrap_or_default()
+    };
+    let memo_key = (cwd, path.to_path_buf());
+    if let Some(hit) = lock(canonical_memo()).get(&memo_key) {
+        return hit.clone();
+    }
+
+    match path.canonicalize() {
+        Ok(resolved) => {
+            let mut memo = lock(canonical_memo());
+            if memo.len() >= CANONICAL_MEMO_LIMIT {
+                memo.clear();
+            }
+            memo.insert(memo_key, resolved.clone());
+            resolved
         }
-    })
+        Err(_) => {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(path))
+                    .unwrap_or_else(|_| path.to_path_buf())
+            }
+        }
+    }
 }
 
 // ── heap manager cache ───────────────────────────────────────────────────────
