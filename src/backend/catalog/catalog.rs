@@ -1,11 +1,9 @@
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::Path;
 
 use crate::catalog::types::*;
-
-#[allow(deprecated)]
-use crate::heap::init_table;
+use crate::heap::HeapManager;
 use crate::layout::*;
 
 pub fn init_catalog() {
@@ -308,23 +306,9 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     let table_path = Path::new(&table_file_path);
 
     if !table_path.exists() {
-        match OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .truncate(true)
-            .open(&table_file_path)
-        {
-            Ok(mut file) => {
+        match HeapManager::create(table_path.to_path_buf()) {
+            Ok(_) => {
                 log::info!("Table data file created at '{}'.", table_file_path);
-
-                if let Err(e) = init_table(&mut file) {
-                    log::error!("Failed to initialize table '{}': {}", table_name, e);
-
-                    println!("Failed to initialize table '{}': {}", table_name, e);
-                } else {
-                    log::info!("Table '{}' initialized successfully.", table_name);
-                }
             }
 
             Err(e) => {

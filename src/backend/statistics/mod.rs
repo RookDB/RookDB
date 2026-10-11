@@ -1,9 +1,8 @@
-use std::fs::File;
 use std::io::{self};
+use std::path::Path;
 
-use crate::disk::read_page;
+use crate::backend::heap::HeapFile;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, page_free_space};
-use crate::table::page_count;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageStatistics {
@@ -82,28 +81,14 @@ impl TableStatistics {
 
 pub fn collect_table_statistics(db_name: &str, table_name: &str) -> io::Result<TableStatistics> {
     let table_path = format!("database/base/{}/{}.dat", db_name, table_name);
-    let file = crate::backend::heap::HeapFile::open(std::path::Path::new(&table_path))?;
+    collect_heap_statistics(Path::new(&table_path))
+}
+
+/// Statistics for the heap file at `path`, read through its buffer pool.
+pub fn collect_heap_statistics(path: &Path) -> io::Result<TableStatistics> {
+    let file = HeapFile::open(path)?;
     let total_pages = file.page_count();
-    collect_statistics(
-        total_pages,
-        total_pages as u64 * crate::page::PAGE_SIZE as u64,
-        |page, page_num| file.read_page(page, page_num),
-    )
-}
-
-pub fn collect_table_statistics_from_file(file: &mut File) -> io::Result<TableStatistics> {
-    let file_size_bytes = file.metadata()?.len();
-    let total_pages = page_count(file)?;
-    collect_statistics(total_pages, file_size_bytes, |page, page_num| {
-        read_page(file, page, page_num)
-    })
-}
-
-fn collect_statistics(
-    total_pages: u32,
-    file_size_bytes: u64,
-    mut read: impl FnMut(&mut Page, u32) -> io::Result<()>,
-) -> io::Result<TableStatistics> {
+    let file_size_bytes = total_pages as u64 * PAGE_SIZE as u64;
     let data_pages = total_pages.saturating_sub(1);
 
     let mut stats = TableStatistics {
@@ -125,7 +110,7 @@ fn collect_statistics(
 
     for page_num in 1..total_pages {
         let mut page = Page::new();
-        read(&mut page, page_num)?;
+        file.read_page(&mut page, page_num)?;
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let tuple_count_on_page = lower.saturating_sub(PAGE_HEADER_SIZE) / ITEM_ID_SIZE;

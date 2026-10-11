@@ -1,27 +1,15 @@
 use std::env;
-use std::fs::OpenOptions;
-use std::io::Seek;
 
-#[allow(deprecated)]
-use storage_manager::heap::{init_table, insert_tuple};
-use storage_manager::statistics::collect_table_statistics_from_file;
+use storage_manager::heap::HeapManager;
+use storage_manager::statistics::collect_heap_statistics;
 use storage_manager::types::{DataType, serialize_nullable_row};
 
 #[test]
-#[allow(deprecated)]
 fn test_collect_table_statistics_counts_pages_and_tuples() {
     let mut temp_path = env::temp_dir();
     temp_path.push("rookdb_table_statistics_test.tbl");
 
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temp_path)
-        .expect("Failed to create temp table file");
-
-    init_table(&mut file).expect("Failed to initialize table");
+    let mut heap = HeapManager::create(temp_path.clone()).expect("Failed to create table");
 
     let schema = vec![DataType::Int, DataType::Varchar(16)];
     let rows = [
@@ -34,11 +22,12 @@ fn test_collect_table_statistics_counts_pages_and_tuples() {
     for row in rows {
         let tuple = serialize_nullable_row(&schema, &row).expect("Failed to serialize row");
         expected_tuple_bytes += tuple.len() as u64;
-        insert_tuple(&mut file, &tuple).expect("Failed to insert tuple");
+        heap.insert_tuple(&tuple).expect("Failed to insert tuple");
     }
+    heap.flush().expect("Failed to flush table");
+    drop(heap);
 
-    file.rewind().expect("Failed to rewind file");
-    let stats = collect_table_statistics_from_file(&mut file).expect("Failed to collect stats");
+    let stats = collect_heap_statistics(&temp_path).expect("Failed to collect stats");
 
     assert_eq!(stats.total_pages, 2);
     assert_eq!(stats.data_pages, 1);
@@ -56,5 +45,7 @@ fn test_collect_table_statistics_counts_pages_and_tuples() {
     assert_eq!(page.slot_bytes, 3 * 8);
     assert_eq!(page.header_bytes, 8);
 
+    storage_manager::backend::cache::evict_heap(&temp_path).expect("Failed to evict table");
     std::fs::remove_file(&temp_path).expect("Failed to remove temp table file");
+    let _ = std::fs::remove_file(format!("{}.fsm", temp_path.display()));
 }
