@@ -238,6 +238,48 @@ pub struct ProjectionOperator {
     output_schema: Vec<ColumnInfo>,
     child_buffer: Vec<Tuple>,
     buffer_pos: usize,
+    /// When every output is a plain child column: its position, and whether
+    /// this is the column's last use (its value is then moved, not cloned).
+    columns: Option<Vec<(usize, bool)>>,
+}
+
+/// `(position, last use)` for each of `positions`.
+fn bind_columns(positions: &[usize]) -> Vec<(usize, bool)> {
+    positions
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| (p, !positions[i + 1..].contains(&p)))
+        .collect()
+}
+
+/// Build one output row from `child`, moving values out of it where the
+/// projection allows.
+fn project_row(
+    columns: &Option<Vec<(usize, bool)>>,
+    projections: &[(Expr, String, DataType)],
+    schema: &[ColumnInfo],
+    child: &mut Tuple,
+) -> RookResult<Tuple> {
+    let values = match columns {
+        Some(cols) => cols
+            .iter()
+            .map(|&(i, last)| {
+                if last {
+                    std::mem::take(&mut child.values[i])
+                } else {
+                    child.values[i].clone()
+                }
+            })
+            .collect(),
+        None => {
+            let mut values = Vec::with_capacity(projections.len());
+            for (expr, _, _) in projections {
+                values.push(expr.evaluate(child, schema)?);
+            }
+            values
+        }
+    };
+    Ok(Tuple::new(values).with_location_from(child))
 }
 
 impl ProjectionOperator {
@@ -254,6 +296,20 @@ impl ProjectionOperator {
                 table: None,
             })
             .collect();
+        // Plain column references are resolved once, here, not per row.
+        let positions: Option<Vec<usize>> = projections
+            .iter()
+            .map(|(expr, _, _)| match expr {
+                Expr::Column { table, column } => {
+                    crate::backend::executor::physical::expr::column_position(
+                        &child_schema,
+                        table.as_deref(),
+                        column,
+                    )
+                }
+                _ => None,
+            })
+            .collect();
         Self {
             child,
             projections,
@@ -261,6 +317,7 @@ impl ProjectionOperator {
             output_schema,
             child_buffer: Vec::new(),
             buffer_pos: 0,
+            columns: positions.as_deref().map(bind_columns),
         }
     }
 
@@ -291,7 +348,11 @@ impl ProjectionOperator {
                 dt,
             ));
         }
-        Ok(Self::new(child, projections))
+        // Bind to the given positions: a name could match an earlier column
+        // of the same name (after a join).
+        let mut op = Self::new(child, projections);
+        op.columns = Some(bind_columns(indices));
+        Ok(op)
     }
 
     pub fn from_indices(
@@ -318,6 +379,7 @@ impl ProjectionOperator {
             })
             .collect();
         let output_schema = child_schema.clone();
+        let all: Vec<usize> = (0..child_schema.len()).collect();
         Self {
             child,
             projections,
@@ -325,6 +387,7 @@ impl ProjectionOperator {
             output_schema,
             child_buffer: Vec::new(),
             buffer_pos: 0,
+            columns: Some(bind_columns(&all)),
         }
     }
 }
@@ -341,14 +404,14 @@ impl PhysicalOperator for ProjectionOperator {
             }
         }
 
-        let child_tuple = &self.child_buffer[self.buffer_pos];
+        let child_tuple = &mut self.child_buffer[self.buffer_pos];
         self.buffer_pos += 1;
-        let mut values = Vec::with_capacity(self.projections.len());
-        for (expr, _, _) in &self.projections {
-            let val = expr.evaluate(child_tuple, child_schema)?;
-            values.push(val);
-        }
-        Ok(Some(Tuple::new(values).with_location_from(child_tuple)))
+        Ok(Some(project_row(
+            &self.columns,
+            &self.projections,
+            child_schema,
+            child_tuple,
+        )?))
     }
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
@@ -359,14 +422,14 @@ impl PhysicalOperator for ProjectionOperator {
         while self.buffer_pos < self.child_buffer.len()
             && batch.len() < super::trait_::DEFAULT_BATCH_SIZE
         {
-            let child_tuple = &self.child_buffer[self.buffer_pos];
+            let child_tuple = &mut self.child_buffer[self.buffer_pos];
             self.buffer_pos += 1;
-            let mut values = Vec::with_capacity(self.projections.len());
-            for (expr, _, _) in &self.projections {
-                let val = expr.evaluate(child_tuple, child_schema)?;
-                values.push(val);
-            }
-            batch.push(Tuple::new(values).with_location_from(child_tuple));
+            batch.push(project_row(
+                &self.columns,
+                &self.projections,
+                child_schema,
+                child_tuple,
+            )?);
         }
 
         if batch.len() >= super::trait_::DEFAULT_BATCH_SIZE {
@@ -384,14 +447,14 @@ impl PhysicalOperator for ProjectionOperator {
         while self.buffer_pos < self.child_buffer.len()
             && batch.len() < super::trait_::DEFAULT_BATCH_SIZE
         {
-            let child_tuple = &self.child_buffer[self.buffer_pos];
+            let child_tuple = &mut self.child_buffer[self.buffer_pos];
             self.buffer_pos += 1;
-            let mut values = Vec::with_capacity(self.projections.len());
-            for (expr, _, _) in &self.projections {
-                let val = expr.evaluate(child_tuple, child_schema)?;
-                values.push(val);
-            }
-            batch.push(Tuple::new(values).with_location_from(child_tuple));
+            batch.push(project_row(
+                &self.columns,
+                &self.projections,
+                child_schema,
+                child_tuple,
+            )?);
         }
 
         Ok(batch.len())

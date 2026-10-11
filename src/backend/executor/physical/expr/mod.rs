@@ -183,37 +183,7 @@ impl Expr {
                 //    This correctly disambiguates `t1.id` from `t2.id` in join schemas.
                 // 2. If Expr has no table qualifier (e.g. `id`):
                 //    Match the FIRST column with the given name, regardless of table.
-                let idx = match table {
-                    Some(t) => {
-                        // Table-qualified: match both table and column name
-                        schema
-                            .iter()
-                            .position(|ci| {
-                                ci.name.eq_ignore_ascii_case(column)
-                                    && ci
-                                        .table
-                                        .as_ref()
-                                        .map(|ct| ct.eq_ignore_ascii_case(t))
-                                        .unwrap_or(false)
-                            })
-                            .or_else(|| {
-                                // Fallback for columns whose origin an
-                                // intermediate operator dropped. A column that
-                                // belongs to a *different* table is not a match:
-                                // `zz.id` must not read `a.id`.
-                                schema.iter().position(|ci| {
-                                    ci.name.eq_ignore_ascii_case(column) && ci.table.is_none()
-                                })
-                            })
-                    }
-                    None => {
-                        // Unqualified: match first column by name only
-                        schema
-                            .iter()
-                            .position(|ci| ci.name.eq_ignore_ascii_case(column))
-                    }
-                }
-                .ok_or_else(|| {
+                let idx = column_position(schema, table.as_deref(), column).ok_or_else(|| {
                     let wanted = match table {
                         Some(t) => format!("{}.{}", t, column),
                         None => column.clone(),
@@ -1329,5 +1299,37 @@ where
             "Arithmetic not supported between {:?} and {:?}",
             l, r
         )),
+    }
+}
+
+/// Position in `schema` of the column `column`, qualified by `table` when
+/// given; `None` when there is none.
+///
+/// A qualified name matches a column of that table, or else a column whose
+/// table an operator dropped (but never a column of another table). An
+/// unqualified name matches the first column with that name.
+pub(crate) fn column_position(
+    schema: &[ColumnInfo],
+    table: Option<&str>,
+    column: &str,
+) -> Option<usize> {
+    match table {
+        Some(t) => schema
+            .iter()
+            .position(|ci| {
+                ci.name.eq_ignore_ascii_case(column)
+                    && ci
+                        .table
+                        .as_ref()
+                        .is_some_and(|ct| ct.eq_ignore_ascii_case(t))
+            })
+            .or_else(|| {
+                schema
+                    .iter()
+                    .position(|ci| ci.name.eq_ignore_ascii_case(column) && ci.table.is_none())
+            }),
+        None => schema
+            .iter()
+            .position(|ci| ci.name.eq_ignore_ascii_case(column)),
     }
 }
