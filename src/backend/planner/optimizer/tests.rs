@@ -84,6 +84,9 @@ fn make_test_catalog() -> Catalog {
 fn column(name: &str) -> ExprNode {
     ExprNode::Column(name.to_string())
 }
+fn qcol(table: &str, name: &str) -> ExprNode {
+    ExprNode::Compound(vec![table.to_string(), name.to_string()])
+}
 fn constant_int(value: i64) -> ExprNode {
     ExprNode::Constant(ConstantValue::Int(value))
 }
@@ -837,7 +840,7 @@ fn test_join_ordering_smaller_on_left() {
         left: Box::new(make_table_scan("users", &["id"])),
         right: Box::new(make_table_scan("orders", &["id"])),
         join_type: rook_ast::JoinType::Inner,
-        condition: Some(eq_pred(column("id"), column("id"))),
+        condition: Some(eq_pred(qcol("users", "id"), qcol("orders", "id"))),
     });
     let optimizer = Optimizer::with_statistics(stats);
     let optimized = optimizer.join_ordering(plan);
@@ -1039,7 +1042,7 @@ fn test_join_ordering_reorders_inner_join() {
         left: Box::new(make_table_scan("users", &["id"])),
         right: Box::new(make_table_scan("orders", &["id"])),
         join_type: rook_ast::JoinType::Inner,
-        condition: Some(eq_pred(column("id"), column("id"))),
+        condition: Some(eq_pred(qcol("users", "id"), qcol("orders", "id"))),
     });
     let optimizer = Optimizer::with_statistics(stats);
     let optimized = optimizer.join_ordering(plan);
@@ -1055,6 +1058,238 @@ fn test_join_ordering_reorders_inner_join() {
     } else {
         panic!("Expected Join root");
     }
+}
+
+// ─── Join Chain Reordering (F4) ──────────────────────────────────────────────
+
+/// Statistics giving each table its row count.
+fn row_counts(tables: &[(&str, u64)]) -> HashMap<String, crate::statistics::TableStatistics> {
+    tables
+        .iter()
+        .map(|(name, rows)| {
+            (
+                name.to_string(),
+                crate::statistics::TableStatistics {
+                    total_tuple_count: *rows,
+                    total_pages: 1,
+                    data_pages: 1,
+                    file_size_bytes: 8192,
+                    total_tuple_bytes: 0,
+                    total_slot_bytes: 0,
+                    total_header_bytes: 0,
+                    total_free_bytes: 0,
+                    pages_with_tuples: 1,
+                    min_page_free_bytes: 0,
+                    max_page_free_bytes: 0,
+                    min_tuple_bytes: 0,
+                    max_tuple_bytes: 0,
+                    page_breakdown: vec![],
+                },
+            )
+        })
+        .collect()
+}
+
+fn inner_join(left: LogicalPlan, right: LogicalPlan, condition: PredicateNode) -> LogicalPlan {
+    LogicalPlan::Join(LogicalJoin {
+        left: Box::new(left),
+        right: Box::new(right),
+        join_type: rook_ast::JoinType::Inner,
+        condition: Some(condition),
+    })
+}
+
+/// The tables a plan scans, left to right.
+fn scanned_tables(plan: &LogicalPlan) -> Vec<String> {
+    match plan {
+        LogicalPlan::TableScan(t) => vec![t.table.clone()],
+        LogicalPlan::Filter(f) => scanned_tables(&f.child),
+        LogicalPlan::Project(p) => scanned_tables(&p.child),
+        LogicalPlan::Join(j) => {
+            let mut tables = scanned_tables(&j.left);
+            tables.extend(scanned_tables(&j.right));
+            tables
+        }
+        _ => vec![],
+    }
+}
+
+/// Every join of a plan, top down: (type, tables of its left input, tables
+/// of its right input).
+type JoinShape = (rook_ast::JoinType, Vec<String>, Vec<String>);
+
+fn joins_of(plan: &LogicalPlan, out: &mut Vec<JoinShape>) {
+    match plan {
+        LogicalPlan::Join(j) => {
+            out.push((
+                j.join_type,
+                scanned_tables(&j.left),
+                scanned_tables(&j.right),
+            ));
+            joins_of(&j.left, out);
+            joins_of(&j.right, out);
+        }
+        LogicalPlan::Filter(f) => joins_of(&f.child, out),
+        LogicalPlan::Project(p) => joins_of(&p.child, out),
+        _ => {}
+    }
+}
+
+#[test]
+fn test_join_ordering_three_table_chain_starts_from_filtered_small_table() {
+    // FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id
+    // WHERE small.x = 1
+    let stats = row_counts(&[("big", 100_000), ("mid", 10_000), ("small", 100)]);
+    let small = LogicalPlan::Filter(LogicalFilter {
+        predicate: eq_pred(qcol("small", "x"), constant_int(1)),
+        child: Box::new(make_table_scan("small", &["id", "x"])),
+    });
+    let plan = inner_join(
+        inner_join(
+            make_table_scan("big", &["mid_id", "v"]),
+            make_table_scan("mid", &["id", "small_id"]),
+            eq_pred(qcol("big", "mid_id"), qcol("mid", "id")),
+        ),
+        small,
+        eq_pred(qcol("mid", "small_id"), qcol("small", "id")),
+    );
+    let optimized = Optimizer::with_statistics(stats).join_ordering(plan);
+
+    // small and mid join first, then big; each join keeps its own condition.
+    let LogicalPlan::Join(top) = &optimized else {
+        panic!("Expected Join root, got {:?}", optimized);
+    };
+    assert_eq!(scanned_tables(&top.left), vec!["small", "mid"]);
+    assert_eq!(scanned_tables(&top.right), vec!["big"]);
+    assert_eq!(
+        top.condition,
+        Some(eq_pred(qcol("big", "mid_id"), qcol("mid", "id")))
+    );
+    let LogicalPlan::Join(bottom) = &*top.left else {
+        panic!("Expected the first join on the left");
+    };
+    assert_eq!(
+        bottom.condition,
+        Some(eq_pred(qcol("mid", "small_id"), qcol("small", "id")))
+    );
+    assert!(matches!(&*bottom.left, LogicalPlan::Filter(_)));
+}
+
+#[test]
+fn test_join_ordering_four_table_chain_follows_conditions() {
+    // FROM b JOIN c ON b.id = c.b_id JOIN d ON c.id = d.c_id JOIN a ON a.id = d.a_id
+    // d is smallest; a and c connect to it, a is smaller; then c, then b.
+    // b is smaller than c, but joining it before c would be a cross product.
+    let stats = row_counts(&[("a", 1_000), ("b", 20_000), ("c", 50_000), ("d", 10)]);
+    let plan = inner_join(
+        inner_join(
+            inner_join(
+                make_table_scan("b", &["id"]),
+                make_table_scan("c", &["id", "b_id"]),
+                eq_pred(qcol("b", "id"), qcol("c", "b_id")),
+            ),
+            make_table_scan("d", &["c_id", "a_id"]),
+            eq_pred(qcol("c", "id"), qcol("d", "c_id")),
+        ),
+        make_table_scan("a", &["id"]),
+        eq_pred(qcol("a", "id"), qcol("d", "a_id")),
+    );
+    let optimized = Optimizer::with_statistics(stats).join_ordering(plan);
+
+    let mut joins = Vec::new();
+    joins_of(&optimized, &mut joins);
+    assert_eq!(joins.len(), 3);
+    // Top down: b joins last (on the left, as it is smaller than the
+    // estimate of the rest), c before it, d and a first.
+    assert_eq!(joins[0].1, vec!["b"]);
+    assert_eq!(joins[1].2, vec!["c"]);
+    assert_eq!(joins[2].1, vec!["d"]);
+    assert_eq!(joins[2].2, vec!["a"]);
+    assert!(
+        joins.iter().all(|j| j.0 == rook_ast::JoinType::Inner),
+        "no cross products: {:?}",
+        joins
+    );
+}
+
+#[test]
+fn test_join_ordering_stops_at_outer_join() {
+    // (big JOIN mid) LEFT JOIN small: the inner pair is reordered, the LEFT
+    // join keeps small on its right.
+    let stats = row_counts(&[("big", 100_000), ("mid", 10_000), ("small", 100)]);
+    let plan = LogicalPlan::Join(LogicalJoin {
+        left: Box::new(inner_join(
+            make_table_scan("big", &["mid_id"]),
+            make_table_scan("mid", &["id"]),
+            eq_pred(qcol("big", "mid_id"), qcol("mid", "id")),
+        )),
+        right: Box::new(make_table_scan("small", &["mid_id"])),
+        join_type: rook_ast::JoinType::Left,
+        condition: Some(eq_pred(qcol("mid", "id"), qcol("small", "mid_id"))),
+    });
+    let optimized = Optimizer::with_statistics(stats).join_ordering(plan);
+    let LogicalPlan::Join(top) = &optimized else {
+        panic!("Expected Join root");
+    };
+    assert_eq!(top.join_type, rook_ast::JoinType::Left);
+    assert_eq!(scanned_tables(&top.left), vec!["mid", "big"]);
+    assert_eq!(scanned_tables(&top.right), vec!["small"]);
+}
+
+#[test]
+fn test_join_ordering_keeps_chain_with_ambiguous_unqualified_name() {
+    // `SELECT id ...` reads whichever `id` comes first: reordering big and
+    // small would change the answer.
+    let stats = row_counts(&[("big", 100_000), ("small", 100)]);
+    let plan = LogicalPlan::Project(LogicalProject {
+        expressions: vec![NamedExpr {
+            name: "id".to_string(),
+            expr: column("id"),
+        }],
+        child: Box::new(inner_join(
+            make_table_scan("big", &["id", "k"]),
+            make_table_scan("small", &["id", "k"]),
+            eq_pred(qcol("big", "k"), qcol("small", "k")),
+        )),
+    });
+    let optimized = Optimizer::with_statistics(stats.clone()).join_ordering(plan.clone());
+    assert_eq!(scanned_tables(&optimized), vec!["big", "small"]);
+
+    // The same join read through qualified names is reordered.
+    let LogicalPlan::Project(mut p) = plan else {
+        unreachable!()
+    };
+    p.expressions[0].expr = qcol("big", "id");
+    let optimized = Optimizer::with_statistics(stats).join_ordering(LogicalPlan::Project(p));
+    assert_eq!(scanned_tables(&optimized), vec!["small", "big"]);
+}
+
+#[test]
+fn test_join_ordering_moves_single_table_conjunct_into_filter() {
+    // big JOIN small ON big.k = small.k AND small.x = 1: the second conjunct
+    // filters small before the join.
+    let stats = row_counts(&[("big", 100_000), ("small", 100)]);
+    let plan = inner_join(
+        make_table_scan("big", &["k"]),
+        make_table_scan("small", &["k", "x"]),
+        PredicateNode::BinaryOp {
+            left: Box::new(eq_pred(qcol("big", "k"), qcol("small", "k"))),
+            op: BinaryOp::And,
+            right: Box::new(eq_pred(qcol("small", "x"), constant_int(1))),
+        },
+    );
+    let optimized = Optimizer::with_statistics(stats).join_ordering(plan);
+    let LogicalPlan::Join(j) = &optimized else {
+        panic!("Expected Join root");
+    };
+    assert_eq!(
+        j.condition,
+        Some(eq_pred(qcol("big", "k"), qcol("small", "k")))
+    );
+    let LogicalPlan::Filter(f) = &*j.left else {
+        panic!("Expected filtered small on the left, got {:?}", j.left);
+    };
+    assert_eq!(f.predicate, eq_pred(qcol("small", "x"), constant_int(1)));
 }
 
 // ─── Predicate Pushdown Into Join Conditions (M3) ──────────────────────────

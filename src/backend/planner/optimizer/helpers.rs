@@ -507,6 +507,13 @@ pub fn extract_column_refs(pred: &PredicateNode) -> Vec<(Option<String>, String)
     result
 }
 
+/// [`extract_column_refs`] for an expression.
+pub fn extract_expr_column_refs(expr: &ExprNode) -> Vec<(Option<String>, String)> {
+    let mut result = Vec::new();
+    extract_column_names_from_expr(expr, &mut result);
+    result
+}
+
 fn extract_column_names_recursive(pred: &PredicateNode, names: &mut Vec<(Option<String>, String)>) {
     match pred {
         PredicateNode::BinaryOp { left, right, .. } => {

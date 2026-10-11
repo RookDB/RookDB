@@ -13,11 +13,13 @@
 //!    survive the projection.
 //! 5. **Limit pushdown** — Push `LogicalLimit` through `LogicalSort` so the
 //!    sort operator can use a bounded heap.
-//! 6. **Join order heuristics** — Reorder joins so the smallest estimated table
-//!    is on the left (build side of hash join). Requires statistics; skipped
-//!    otherwise.
+//! 6. **Join ordering** — Rebuild each chain of inner joins greedily, from
+//!    the smallest estimated relation outwards, with the smaller input of
+//!    each join on the left (build side of hash join). See `join_order.rs`.
+//!    Requires statistics; skipped otherwise.
 
 pub mod helpers;
+mod join_order;
 #[cfg(test)]
 pub mod tests;
 
@@ -39,18 +41,22 @@ use self::helpers::*;
 pub struct Optimizer {
     /// Map of table name → statistics, used by join-ordering heuristics.
     pub table_stats: Option<HashMap<String, TableStatistics>>,
+    /// Leave every join in the order the query wrote it, even with
+    /// statistics. For checking that join ordering changes no result.
+    pub skip_join_ordering: bool,
 }
 
 impl Optimizer {
     /// Create a new optimizer with no statistics.
     pub fn new() -> Self {
-        Self { table_stats: None }
+        Self::default()
     }
 
     /// Create an optimizer with table statistics (needed for join ordering).
     pub fn with_statistics(stats: HashMap<String, TableStatistics>) -> Self {
         Self {
             table_stats: Some(stats),
+            ..Self::default()
         }
     }
 
@@ -62,14 +68,14 @@ impl Optimizer {
     /// 3. Projection pruning
     /// 4. Sort hoisting
     /// 5. Limit pushdown
-    /// 6. Join ordering (only when statistics are available)
+    /// 6. Join ordering (only when statistics are available, and not skipped)
     pub fn optimize(&self, plan: LogicalPlan) -> LogicalPlan {
         let plan = self.constant_folding(plan);
         let plan = self.predicate_pushdown(plan);
         let plan = self.projection_pruning(plan);
         let plan = self.hoist_sort_below_project(plan);
         let plan = self.limit_pushdown(plan);
-        if self.table_stats.is_some() {
+        if self.table_stats.is_some() && !self.skip_join_ordering {
             self.join_ordering(plan)
         } else {
             plan
@@ -674,137 +680,6 @@ impl Optimizer {
         }
     }
 
-    // ─── Pass 4: Join Order Heuristics ────────────────────────────────────
-
-    /// Reorder joins so the smallest estimated table is on the left.
-    ///
-    /// Only commutative join types (Inner, Cross, Natural) are reordered.
-    /// Outer joins (Left, Right, Full) are preserved because they are not
-    /// commutative — swapping them would change SQL semantics.
-    fn join_ordering(&self, plan: LogicalPlan) -> LogicalPlan {
-        match plan {
-            LogicalPlan::Join(j) => {
-                let left = self.join_ordering(*j.left);
-                let right = self.join_ordering(*j.right);
-
-                // Only reorder commutative join types (Inner, Cross, Natural).
-                // Left, Right, and Full outer joins are NOT commutative.
-                let can_reorder = matches!(
-                    j.join_type,
-                    JoinType::Inner | JoinType::Cross | JoinType::Natural
-                );
-
-                if can_reorder {
-                    let (left_size, right_size) = (
-                        self.estimate_cardinality(&left),
-                        self.estimate_cardinality(&right),
-                    );
-                    if right_size < left_size {
-                        return LogicalPlan::Join(LogicalJoin {
-                            left: Box::new(right),
-                            right: Box::new(left),
-                            join_type: j.join_type,
-                            condition: j.condition,
-                        });
-                    }
-                }
-
-                LogicalPlan::Join(LogicalJoin {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    join_type: j.join_type,
-                    condition: j.condition,
-                })
-            }
-            LogicalPlan::Filter(f) => {
-                let child = self.join_ordering(*f.child);
-                LogicalPlan::Filter(LogicalFilter {
-                    predicate: f.predicate,
-                    child: Box::new(child),
-                })
-            }
-            LogicalPlan::Project(p) => {
-                let child = self.join_ordering(*p.child);
-                LogicalPlan::Project(LogicalProject {
-                    expressions: p.expressions,
-                    child: Box::new(child),
-                })
-            }
-            LogicalPlan::Sort(s) => {
-                let child = self.join_ordering(*s.child);
-                LogicalPlan::Sort(LogicalSort {
-                    order_by: s.order_by,
-                    child: Box::new(child),
-                    limit: s.limit,
-                })
-            }
-            LogicalPlan::Distinct(d) => {
-                let child = self.join_ordering(*d.child);
-                LogicalPlan::Distinct(LogicalDistinct {
-                    child: Box::new(child),
-                })
-            }
-            LogicalPlan::Limit(l) => {
-                let child = self.join_ordering(*l.child);
-                LogicalPlan::Limit(LogicalLimit {
-                    limit: l.limit,
-                    offset: l.offset,
-                    child: Box::new(child),
-                })
-            }
-            LogicalPlan::Aggregate(a) => {
-                let child = self.join_ordering(*a.child);
-                LogicalPlan::Aggregate(LogicalAggregate {
-                    group_by: a.group_by,
-                    aggregates: a.aggregates,
-                    having: a.having,
-                    child: Box::new(child),
-                })
-            }
-            LogicalPlan::SetOp(s) => {
-                let left = self.join_ordering(*s.left);
-                let right = self.join_ordering(*s.right);
-                LogicalPlan::SetOp(LogicalSetOp {
-                    op: s.op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    all: s.all,
-                })
-            }
-            LogicalPlan::Subquery(sq) => {
-                let subquery = self.join_ordering(*sq.subquery);
-                LogicalPlan::Subquery(LogicalSubquery {
-                    subquery: Box::new(subquery),
-                    alias: sq.alias,
-                })
-            }
-            LogicalPlan::Cte(c) => {
-                let inner = self.join_ordering(*c.inner);
-                let outer = self.join_ordering(*c.outer);
-                LogicalPlan::Cte(LogicalCte {
-                    name: c.name,
-                    inner: Box::new(inner),
-                    outer: Box::new(outer),
-                })
-            }
-            LogicalPlan::RecursiveCte(rc) => {
-                let non_recursive = self.join_ordering(*rc.non_recursive);
-                let recursive = self.join_ordering(*rc.recursive);
-                let outer = self.join_ordering(*rc.outer);
-                LogicalPlan::RecursiveCte(LogicalRecursiveCte {
-                    name: rc.name,
-                    non_recursive: Box::new(non_recursive),
-                    recursive: Box::new(recursive),
-                    union_all: rc.union_all,
-                    schema: rc.schema,
-                    outer: Box::new(outer),
-                })
-            }
-            LogicalPlan::CteScan(_) => plan,
-            other => other,
-        }
-    }
-
     /// Estimate the number of rows a plan node will produce.
     fn estimate_cardinality(&self, plan: &LogicalPlan) -> f64 {
         match plan {
@@ -820,7 +695,10 @@ impl Optimizer {
             }
             LogicalPlan::Filter(_) => self.estimate_child_cardinality(plan) * 0.1,
             LogicalPlan::Project(p) => self.estimate_cardinality(&p.child),
-            LogicalPlan::Join(_) => self.estimate_child_cardinality(plan) * 0.2,
+            LogicalPlan::Join(j) => join_cardinality(
+                self.estimate_cardinality(&j.left),
+                self.estimate_cardinality(&j.right),
+            ),
             LogicalPlan::Aggregate(_) => self.estimate_child_cardinality(plan) * 0.5,
             LogicalPlan::Distinct(d) => self.estimate_cardinality(&d.child) * 0.8,
             LogicalPlan::Sort(s) => self.estimate_cardinality(&s.child),
@@ -852,11 +730,6 @@ impl Optimizer {
     fn estimate_child_cardinality(&self, plan: &LogicalPlan) -> f64 {
         match plan {
             LogicalPlan::Filter(f) => self.estimate_cardinality(&f.child),
-            LogicalPlan::Join(j) => {
-                let left = self.estimate_cardinality(&j.left);
-                let right = self.estimate_cardinality(&j.right);
-                left * right
-            }
             LogicalPlan::Aggregate(a) => self.estimate_cardinality(&a.child),
             LogicalPlan::Cte(c) => self.estimate_cardinality(&c.outer),
             LogicalPlan::RecursiveCte(rc) => self.estimate_cardinality(&rc.outer),
@@ -1191,6 +1064,11 @@ fn widen_sort_hint(plan: LogicalPlan, needed: u64) -> LogicalPlan {
         LogicalPlan::Distinct(d) => LogicalPlan::Distinct(d),
         other => other,
     }
+}
+
+/// Estimated rows of a join of inputs of `left` and `right` estimated rows.
+fn join_cardinality(left: f64, right: f64) -> f64 {
+    left * right * 0.2
 }
 
 /// Flatten a predicate into its top-level AND-ed conjuncts.
