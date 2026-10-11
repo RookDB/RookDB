@@ -101,7 +101,7 @@ impl PhysicalOperator for SeqScanOperator {
         match self.scan_iter.next_ref() {
             Some(Ok((page_id, slot_id, raw_bytes))) => {
                 // Deserialise the raw tuple bytes using PHYSICAL column schema
-                let phys_values = self.decoder.decode(&raw_bytes).map_err(|e| {
+                let phys_values = self.decoder.decode(raw_bytes).map_err(|e| {
                     RookError::Internal(format!("Failed to deserialise tuple: {}", e))
                 })?;
 
@@ -149,7 +149,7 @@ impl PhysicalOperator for SeqScanOperator {
         while batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
             match self.scan_iter.next_ref() {
                 Some(Ok((page_id, slot_id, raw_bytes))) => {
-                    let phys_values = self.decoder.decode(&raw_bytes).map_err(|e| {
+                    let phys_values = self.decoder.decode(raw_bytes).map_err(|e| {
                         RookError::Internal(format!("Failed to deserialise tuple: {}", e))
                     })?;
 
