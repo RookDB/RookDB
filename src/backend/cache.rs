@@ -44,6 +44,11 @@ const HEAP_FLUSH_INTERVAL: u32 = 10_000;
 /// fsync a cached B+ Tree after this many unflushed key mutations.
 const BTREE_SYNC_INTERVAL: u32 = 4_096;
 
+/// Longest a statement's writes stay un-fsynced while statements keep coming.
+/// A power loss can cost at most this window; a process crash costs nothing,
+/// because every statement boundary writes its pages to the OS.
+const SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Resolved paths remembered per `(cwd, path)`.
 ///
 /// `canonicalize()` issues one `readlink` per path component; calling it for
@@ -261,10 +266,14 @@ pub fn evict_btree(path: &Path) {
 
 // ── checkpoints ──────────────────────────────────────────────────────────────
 
-/// Make all prior writes visible to direct-I/O readers and durable to the OS.
+/// Make all prior writes visible to direct-I/O readers, and durable at most
+/// [`SYNC_INTERVAL`] later.
 ///
-/// * flushes every cached heap manager (buffer pool + FSM + header)
-/// * fsyncs every cached B+ Tree with pending mutations
+/// * writes every cached heap manager (buffer pool + FSM + header) and every
+///   cached B+ Tree through to its file
+/// * fsyncs them only if the last fsync is older than [`SYNC_INTERVAL`], so
+///   a burst of statements shares one fsync while a statement typed at a
+///   prompt is still synced before the next prompt
 ///
 /// Handles are KEPT — this is a flush, not an eviction — so repeated
 /// checkpoints during read-heavy workloads stay free when nothing is dirty
@@ -273,10 +282,38 @@ pub fn evict_btree(path: &Path) {
 /// and process exit. Use [`flush_and_clear_heaps`] /
 /// [`sync_and_clear_btrees`] to actually release resources.
 pub fn checkpoint() {
+    let due = {
+        let mut last = lock(last_sync());
+        let due = last.is_none_or(|t| t.elapsed() >= SYNC_INTERVAL);
+        if due {
+            *last = Some(std::time::Instant::now());
+        }
+        due
+    };
+    flush_caches(due);
+}
+
+/// [`checkpoint`] with an unconditional fsync. Call before the process exits.
+pub fn checkpoint_durable() {
+    *lock(last_sync()) = Some(std::time::Instant::now());
+    flush_caches(true);
+}
+
+fn last_sync() -> &'static Mutex<Option<std::time::Instant>> {
+    static LAST: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+fn flush_caches(durable: bool) {
     {
         let mut cache = lock(heap_cache());
         for entry in cache.values_mut() {
-            if let Err(e) = entry.manager.flush() {
+            let flushed = if durable {
+                entry.manager.flush()
+            } else {
+                entry.manager.write_through()
+            };
+            if let Err(e) = flushed {
                 log::warn!("[cache] heap checkpoint flush failed: {}", e);
             }
             entry.ops_since_flush = 0;
@@ -285,10 +322,15 @@ pub fn checkpoint() {
     {
         let mut cache = lock(btree_cache());
         for (tree, ops) in cache.values_mut() {
-            if *ops > 0 {
-                if let Err(e) = tree.sync() {
-                    log::warn!("[cache] btree checkpoint sync failed: {}", e);
-                }
+            let flushed = if durable {
+                tree.sync()
+            } else {
+                tree.write_through()
+            };
+            if let Err(e) = flushed {
+                log::warn!("[cache] btree checkpoint sync failed: {}", e);
+            }
+            if durable {
                 *ops = 0;
             }
         }

@@ -541,6 +541,11 @@ impl BTree {
         Ok(())
     }
 
+    /// Write dirty pages to the index file without fsync.
+    pub fn write_through(&mut self) -> io::Result<()> {
+        self.pool.write_dirty()
+    }
+
     // ─── Public Search API ─────────────────────────────────────────────────
 
     /// Search for a key in the B+ Tree.

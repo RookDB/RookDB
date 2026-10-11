@@ -871,28 +871,39 @@ impl HeapManager {
     /// - Flushes all dirty pages in the buffer pool
     /// - Syncs FSM fork
     pub fn flush(&mut self) -> io::Result<()> {
+        self.flush_inner(true)
+    }
+
+    /// Write all changes to the files without fsync.
+    ///
+    /// Enough for direct-I/O readers to see them and for a process crash;
+    /// `flush` adds the fsync that covers a power loss.
+    pub fn write_through(&mut self) -> io::Result<()> {
+        self.flush_inner(false)
+    }
+
+    fn flush_inner(&mut self, durable: bool) -> io::Result<()> {
         log::trace!("[HeapManager::flush] Flushing all changes");
 
-        // Fast path: nothing dirty in the header, the pool or the FSM —
-        // skip the whole cycle so repeated checkpoints stay free.
         let mut pool = Self::lock_pool(&self.pool);
-        if !self.header_dirty && !pool.has_dirty() && !self.fsm.has_pending() {
-            return Ok(());
-        }
-
-        {
-            // Write header via buffer pool
+        if self.header_dirty {
             write_header_via_pool(&mut pool, &self.header)?;
             self.header_dirty = false;
-
-            // Flush all dirty pages in the pool
-            pool.flush_all()?;
         }
 
-        // Sync FSM fork
-        self.fsm.sync()?;
-
-        log::trace!("[HeapManager::flush] Flush complete");
+        // Each call is a no-op when its target is clean, so repeated
+        // checkpoints stay free.
+        if durable {
+            pool.flush_all()?;
+            drop(pool);
+            if self.fsm.has_pending() {
+                self.fsm.sync()?;
+            }
+        } else {
+            pool.write_dirty()?;
+            drop(pool);
+            self.fsm.write_through()?;
+        }
 
         Ok(())
     }

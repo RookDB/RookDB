@@ -586,6 +586,15 @@ impl FSM {
         Ok(())
     }
 
+    /// Write cached dirty pages to the fork file without fsync.
+    pub fn write_through(&mut self) -> io::Result<()> {
+        if !lock_cache(&self.cache).dirty.is_empty() {
+            self.flush_pages()?;
+            self.dirty = true;
+        }
+        Ok(())
+    }
+
     /// Sync all changes to disk.
     pub fn sync(&mut self) -> io::Result<()> {
         log::trace!("[FSM::sync] Syncing FSM fork file");

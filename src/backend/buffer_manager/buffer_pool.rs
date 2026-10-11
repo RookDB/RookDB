@@ -167,6 +167,8 @@ pub struct BufferPool {
     file_ident: Option<(u64, u64)>,
     /// Total number of pages in the managed file (from header).
     total_pages: u32,
+    /// Pages were written to the file since the last fsync.
+    unsynced: bool,
 }
 
 impl BufferPool {
@@ -187,6 +189,7 @@ impl BufferPool {
             capacity,
             file_path: None,
             file: None,
+            unsynced: false,
             file_ident: None,
             total_pages: 0,
         }
@@ -501,20 +504,30 @@ impl BufferPool {
         self.frames.iter().any(|f| f.occupied && f.is_dirty)
     }
 
-    /// Flush all dirty pages to disk.
-    pub fn flush_all(&mut self) -> io::Result<()> {
-        // Write all dirty, occupied frames back to disk.
-        let mut wrote_any = false;
+    /// Write all dirty pages to the file without fsync.
+    ///
+    /// The pages become visible to direct-I/O readers and survive a process
+    /// crash; `flush_all` makes them survive a power loss.
+    pub fn write_dirty(&mut self) -> io::Result<()> {
         for i in 0..self.capacity {
             if self.frames[i].occupied && self.frames[i].is_dirty {
                 self.write_page_to_disk(i)?;
-                wrote_any = true;
+                self.unsynced = true;
             }
         }
-        if wrote_any && let Some(ref mut file) = self.file {
+        Ok(())
+    }
+
+    /// Flush all dirty pages to disk and fsync.
+    pub fn flush_all(&mut self) -> io::Result<()> {
+        self.write_dirty()?;
+        if self.unsynced
+            && let Some(ref mut file) = self.file
+        {
             file.flush()?;
             file.sync_all()?;
         }
+        self.unsynced = false;
         Ok(())
     }
 
@@ -821,6 +834,29 @@ mod tests {
 
         pool.flush_all().expect("flush all");
         assert_eq!(pool.dirty_count(), 0);
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_write_dirty_reaches_the_file_without_flush_all() {
+        let path = unique_temp_path();
+        create_test_file(&path, 3).expect("create test file");
+
+        let mut pool = BufferPool::new(16);
+        pool.open(&path).expect("open pool");
+
+        let frame_id = pool.fetch_page(1).expect("fetch page 1");
+        pool.get_page_mut(frame_id).data[100..104].copy_from_slice(&42u32.to_le_bytes());
+        pool.unpin(frame_id, true);
+
+        pool.write_dirty().expect("write dirty");
+        assert_eq!(pool.dirty_count(), 0);
+
+        // A second handle on the file sees the page while the pool is alive.
+        let bytes = fs::read(&path).expect("read file");
+        let offset = PAGE_SIZE + 100;
+        assert_eq!(&bytes[offset..offset + 4], &42u32.to_le_bytes());
 
         fs::remove_file(&path).ok();
     }
