@@ -559,9 +559,27 @@ impl HeapManager {
     ///
     /// Uses the buffer pool for page access.
     pub fn get_tuple(&mut self, page_id: u32, slot_id: u32) -> io::Result<Vec<u8>> {
-        HEAP_METRICS.get_tuple_calls.fetch_add(1, Ordering::Relaxed);
+        let mut row = Vec::new();
+        self.for_tuples_on_page(page_id, &[slot_id], |_, bytes| {
+            row = bytes.to_vec();
+            Ok(())
+        })?;
+        Ok(row)
+    }
 
-        // Validate page_id
+    /// Hand the rows at `slots` of page `page_id` to `f` as `(slot, bytes)`,
+    /// in the order given, fetching the page from the pool once for all of
+    /// them. A slot out of range, or holding no live row, is an error.
+    pub fn for_tuples_on_page(
+        &mut self,
+        page_id: u32,
+        slots: &[u32],
+        mut f: impl FnMut(u32, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        HEAP_METRICS
+            .get_tuple_calls
+            .fetch_add(slots.len(), Ordering::Relaxed);
+
         if page_id >= self.page_count() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -573,17 +591,13 @@ impl HeapManager {
             ));
         }
 
-        // Fetch page via buffer pool
-        let result = {
-            let mut pool = Self::lock_pool(&self.pool);
-            let frame_id = pool.fetch_page(page_id)?;
-
-            // Validate slot_id and extract tuple
-            let extract_res = (|| -> io::Result<Vec<u8>> {
-                let page = pool.get_page(frame_id);
-                let tuple_count = get_tuple_count(page)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
+        let mut pool = Self::lock_pool(&self.pool);
+        let frame_id = pool.fetch_page(page_id)?;
+        let result = (|| -> io::Result<()> {
+            let page = pool.get_page(frame_id);
+            let tuple_count = get_tuple_count(page)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            for &slot_id in slots {
                 if slot_id >= tuple_count {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -593,9 +607,7 @@ impl HeapManager {
                         ),
                     ));
                 }
-
                 let (offset, length) = get_slot_entry(page, slot_id)?;
-
                 if offset == 0 && length == 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
@@ -605,7 +617,6 @@ impl HeapManager {
                         ),
                     ));
                 }
-
                 if offset as usize + length as usize > PAGE_SIZE {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -615,16 +626,16 @@ impl HeapManager {
                         ),
                     ));
                 }
-
-                Ok(page.data[offset as usize..(offset + length) as usize].to_vec())
-            })();
-
-            // Always unpin (not dirty — we only read) before handling error/returning
-            pool.unpin(frame_id, false);
-            extract_res?
-        };
-
-        Ok(result)
+                f(
+                    slot_id,
+                    &page.data[offset as usize..(offset + length) as usize],
+                )?;
+            }
+            Ok(())
+        })();
+        // Unpinned (clean: only read) whatever happened.
+        pool.unpin(frame_id, false);
+        result
     }
 
     /// Delete a tuple by marking it as deleted and updating FSM.

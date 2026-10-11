@@ -239,14 +239,16 @@ pub struct IndexScanOperator {
     mode: IndexScanMode,
     /// Column metadata for the full table schema.
     column_info: Vec<ColumnInfo>,
-    /// Data types for deserialising raw tuple bytes.
-    schema_types: Vec<DataType>,
     /// Column indices in `column_info` that form the index key.
     pub indexed_cols: Vec<usize>,
+    /// Decodes the heap rows, set up once for the scan.
+    decoder: crate::types::RowDecoder,
     /// Materialized list of heap tuple locations from the index.
     results: Vec<(u32, u32)>,
-    /// Current read position in results.
+    /// Position in results of the next location to fetch.
     pos: usize,
+    /// Rows fetched and not yet returned, in index order.
+    ready: std::collections::VecDeque<Tuple>,
     /// Whether the index has been queried and results loaded.
     loaded: bool,
 }
@@ -273,10 +275,11 @@ impl IndexScanOperator {
             heap_manager,
             mode,
             column_info,
-            schema_types,
+            decoder: crate::types::RowDecoder::new(&schema_types),
             indexed_cols,
             results: Vec::new(),
             pos: 0,
+            ready: std::collections::VecDeque::new(),
             loaded: false,
         }
     }
@@ -303,10 +306,11 @@ impl IndexScanOperator {
             heap_manager,
             mode,
             column_info,
-            schema_types,
+            decoder: crate::types::RowDecoder::new(&schema_types),
             indexed_cols,
             results: Vec::new(),
             pos: 0,
+            ready: std::collections::VecDeque::new(),
             loaded: false,
         }
     }
@@ -385,51 +389,78 @@ impl IndexScanOperator {
         Ok(())
     }
 
-    /// Fetch a tuple from the heap by (page_id, slot_id) and deserialize it.
-    /// Propagates the heap location metadata so DML operations (UPDATE/DELETE)
-    /// can identify which physical row to modify.
-    fn fetch_tuple(&mut self, page_id: u32, slot_id: u32) -> RookResult<Tuple> {
-        let raw_bytes = self.heap_manager.get_tuple(page_id, slot_id).map_err(|e| {
-            RookError::Internal(format!(
-                "Failed to fetch heap tuple (page={}, slot={}): {}",
-                page_id, slot_id, e
-            ))
-        })?;
-        let values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
-            .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
-        Ok(Tuple::new_with_location(values, page_id, slot_id))
+    /// Fetch the next batch of index matches into `ready`.
+    ///
+    /// The batch's locations are visited in page order, so each heap page is
+    /// fetched from the pool once however many of its rows match; the rows
+    /// are then returned in index order. Each row carries its heap location
+    /// so DML can tell which physical row to modify.
+    fn fill(&mut self) -> RookResult<()> {
+        let end = (self.pos + super::trait_::DEFAULT_BATCH_SIZE).min(self.results.len());
+        let batch = &self.results[self.pos..end];
+        let mut by_page: Vec<usize> = (0..batch.len()).collect();
+        by_page.sort_unstable_by_key(|&i| batch[i]);
+
+        let mut rows: Vec<Option<Tuple>> = (0..batch.len()).map(|_| None).collect();
+        let mut slots = Vec::new();
+        let mut start = 0;
+        while start < by_page.len() {
+            let page_id = batch[by_page[start]].0;
+            let mut stop = start;
+            slots.clear();
+            while stop < by_page.len() && batch[by_page[stop]].0 == page_id {
+                slots.push(batch[by_page[stop]].1);
+                stop += 1;
+            }
+            let positions = &by_page[start..stop];
+            let decoder = &self.decoder;
+            let mut next = 0;
+            self.heap_manager
+                .for_tuples_on_page(page_id, &slots, |slot_id, bytes| {
+                    let values = decoder
+                        .decode(bytes)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                    rows[positions[next]] =
+                        Some(Tuple::new_with_location(values, page_id, slot_id));
+                    next += 1;
+                    Ok(())
+                })
+                .map_err(|e| {
+                    RookError::Internal(format!(
+                        "Failed to fetch heap tuples on page {}: {}",
+                        page_id, e
+                    ))
+                })?;
+            start = stop;
+        }
+        self.pos = end;
+        self.ready.extend(rows.into_iter().flatten());
+        Ok(())
+    }
+
+    /// Load the index matches on first use, and fetch the next batch of rows
+    /// when the fetched ones are used up.
+    fn ensure_ready(&mut self) -> RookResult<()> {
+        if !self.loaded {
+            self.load_results()?;
+        }
+        if self.ready.is_empty() && self.pos < self.results.len() {
+            self.fill()?;
+        }
+        Ok(())
     }
 }
 
 impl PhysicalOperator for IndexScanOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        if !self.loaded {
-            self.load_results()?;
-        }
-
-        if self.pos < self.results.len() {
-            let (page_id, slot_id) = self.results[self.pos];
-            self.pos += 1;
-            let tuple = self.fetch_tuple(page_id, slot_id)?;
-            Ok(Some(tuple))
-        } else {
-            Ok(None)
-        }
+        self.ensure_ready()?;
+        Ok(self.ready.pop_front())
     }
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
         batch.clear();
-        if !self.loaded {
-            self.load_results()?;
-        }
-
-        while self.pos < self.results.len() && batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
-            let (page_id, slot_id) = self.results[self.pos];
-            self.pos += 1;
-            let tuple = self.fetch_tuple(page_id, slot_id)?;
-            batch.push(tuple);
-        }
-
+        self.ensure_ready()?;
+        batch.extend(self.ready.drain(..));
         Ok(batch.len())
     }
 
@@ -440,6 +471,7 @@ impl PhysicalOperator for IndexScanOperator {
     fn reset(&mut self) -> RookResult<()> {
         self.results.clear();
         self.pos = 0;
+        self.ready.clear();
         self.loaded = false;
         Ok(())
     }
