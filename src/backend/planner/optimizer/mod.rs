@@ -26,7 +26,7 @@ use rook_ast::{ExprNode, JoinType, PredicateNode};
 
 use std::collections::{HashMap, HashSet};
 
-use crate::planner::helpers::{derive_qualified_schema, derive_schema};
+use crate::planner::helpers::derive_qualified_schema;
 use crate::statistics::TableStatistics;
 
 use self::helpers::*;
@@ -877,12 +877,11 @@ impl Optimizer {
         match plan {
             LogicalPlan::Sort(s) => match *s.child {
                 LogicalPlan::Project(p) => {
-                    let input_schema = derive_schema(&p.child);
-                    let all_keys_resolve =
-                        s.order_by.iter().all(|ob| match sort_key_column(&ob.expr) {
-                            Some(col) => input_schema.contains(&col),
-                            None => false,
-                        });
+                    let input_schema = derive_qualified_schema(&p.child);
+                    let all_keys_resolve = s
+                        .order_by
+                        .iter()
+                        .all(|ob| sort_key_reads_input(&ob.expr, &p.expressions, &input_schema));
                     if all_keys_resolve {
                         let inner_sort = LogicalPlan::Sort(LogicalSort {
                             order_by: s.order_by,
@@ -1092,13 +1091,37 @@ impl Optimizer {
     }
 }
 
-/// Return the column name referenced by a sort key, if the key is a plain
-/// column reference (`Column` or a single-part `Compound` identifier).
-fn sort_key_column(expr: &ExprNode) -> Option<String> {
+/// Whether an ORDER BY key names an input column of the projection, so the
+/// sort can run beneath it. A bare name that the projection redefines
+/// (`SELECT -id AS id ... ORDER BY id`) names the output instead, and a
+/// qualified name must match its table in the input.
+fn sort_key_reads_input(
+    expr: &ExprNode,
+    outputs: &[NamedExpr],
+    input: &[(Option<String>, rook_ast::logical::ColumnInfo)],
+) -> bool {
     match expr {
-        ExprNode::Column(name) => Some(name.clone()),
-        ExprNode::Compound(parts) => parts.last().cloned(),
-        _ => None,
+        ExprNode::Column(name) => {
+            let passthrough = |e: &ExprNode| match e {
+                ExprNode::Column(c) => c.eq_ignore_ascii_case(name),
+                ExprNode::Compound(parts) => {
+                    parts.last().is_some_and(|c| c.eq_ignore_ascii_case(name))
+                }
+                _ => false,
+            };
+            let redefined = outputs
+                .iter()
+                .any(|o| o.name.eq_ignore_ascii_case(name) && !passthrough(&o.expr));
+            !redefined && input.iter().any(|(_, c)| c.name.eq_ignore_ascii_case(name))
+        }
+        ExprNode::Compound(parts) if parts.len() >= 2 => {
+            let (table, name) = (&parts[parts.len() - 2], &parts[parts.len() - 1]);
+            input.iter().any(|(t, c)| {
+                c.name.eq_ignore_ascii_case(name)
+                    && t.as_ref().is_none_or(|t| t.eq_ignore_ascii_case(table))
+            })
+        }
+        _ => false,
     }
 }
 

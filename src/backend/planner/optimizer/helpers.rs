@@ -201,10 +201,12 @@ pub fn fold_predicate(pred: &PredicateNode) -> PredicateNode {
             if let (ExprNode::Constant(a), ExprNode::Constant(b)) = (&left, &right)
                 && let Some(result) = fold_comparison(a, *op, b)
             {
+                // A folded comparison is a truth value: write it as
+                // `result = TRUE`, which the evaluator can compare.
                 return PredicateNode::Compare {
                     left: Box::new(ExprNode::Constant(ConstantValue::Boolean(result))),
-                    op: *op,
-                    right: Box::new(ExprNode::Constant(b.clone())),
+                    op: ComparisonOp::Eq,
+                    right: Box::new(ExprNode::Constant(ConstantValue::Boolean(true))),
                 };
             }
             PredicateNode::Compare {

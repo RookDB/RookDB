@@ -437,10 +437,45 @@ fn plan_select_with_ctes(
     if !select.order_by.is_empty() {
         let limit_hint = select.limit.as_ref().map(|l| l.limit);
         let mut order_by = select.order_by.clone();
+        // The sort runs above the projection, so a key that is one of the
+        // SELECT outputs is read from that output column. The name is used
+        // only when it identifies a single output.
+        let output_ref = |idx: usize| {
+            let name = &projections[idx].name;
+            let unique = projections.iter().filter(|p| &p.name == name).count() == 1;
+            if unique {
+                rook_ast::ExprNode::Column(name.clone())
+            } else {
+                projections[idx].expr.clone()
+            }
+        };
+        let select_exprs: Vec<&rook_ast::ExprNode> = select
+            .projections
+            .iter()
+            .filter_map(|p| match p {
+                SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } => Some(e),
+                _ => None,
+            })
+            .collect();
+        // Positions line up only when no wildcard expanded the list.
+        let exprs_align = select_exprs.len() == projections.len();
         for ob in &mut order_by {
+            if exprs_align
+                && !matches!(
+                    ob.expr,
+                    rook_ast::ExprNode::Column(_)
+                        | rook_ast::ExprNode::Compound(_)
+                        | rook_ast::ExprNode::Constant(_)
+                )
+                && let Some(idx) = select_exprs.iter().position(|e| **e == ob.expr)
+            {
+                // `ORDER BY COUNT(*)` / `ORDER BY x + 1` repeating a SELECT item.
+                ob.expr = output_ref(idx);
+                continue;
+            }
             if let rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Int(pos)) = &ob.expr {
                 if *pos >= 1 && (*pos as usize) <= projections.len() {
-                    ob.expr = projections[(*pos as usize) - 1].expr.clone();
+                    ob.expr = output_ref((*pos as usize) - 1);
                 } else {
                     return Err(PlanError {
                         message: format!(

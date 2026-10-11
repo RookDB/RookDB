@@ -10,7 +10,7 @@ use super::super::operators::{
 };
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
-use super::helpers::{ast_expr_to_output_name, infer_expr_type_from_ast};
+use super::helpers::infer_expr_type_from_ast;
 use crate::backend::error::{RookError, RookResult};
 use crate::types::datatype::DataType;
 
@@ -298,7 +298,7 @@ impl PhysicalPlanner {
 
         for expr_node in &a.group_by {
             let expr = expr_from_ast(expr_node, &column_names)?;
-            let name = ast_expr_to_output_name(expr_node);
+            let name = crate::planner::helpers::group_key_name(expr_node);
             let data_type = match expr_node {
                 rook_ast::ExprNode::Column(name) => {
                     let idx = column_names.iter().position(|c| c == name).ok_or_else(|| {
@@ -336,7 +336,10 @@ impl PhysicalPlanner {
                         ))
                     })?
                 }
-                rook_ast::ExprNode::Binary { .. } => DataType::Int,
+                rook_ast::ExprNode::Binary { .. } => {
+                    infer_expr_type_from_ast(expr_node, &child_types, &column_names)
+                        .unwrap_or(DataType::Int)
+                }
                 // Scalar subqueries are not expected in GROUP BY expressions
                 rook_ast::ExprNode::ScalarSubquery(_) => {
                     return Err(RookError::Internal(

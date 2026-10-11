@@ -111,6 +111,37 @@ pub fn expand_projections(
 ) -> Result<Vec<NamedExpr>, PlanError> {
     let qualified_schema = derive_qualified_schema(current_plan);
 
+    // Above an Aggregate, a SELECT expression that repeats a GROUP BY
+    // expression (`SELECT x + 1 ... GROUP BY x + 1`) reads that group key's
+    // output column; its inputs no longer exist at this level.
+    let group_by: &[ExprNode] = match current_plan {
+        LogicalPlan::Aggregate(a) => &a.group_by,
+        _ => &[],
+    };
+    let rewritten: Vec<SelectExpr>;
+    let projections = if group_by.iter().any(is_computed_group_key) {
+        rewritten = projections
+            .iter()
+            .map(|item| match item {
+                SelectExpr::UnnamedExpr(e) if contains_group_expr(e, group_by) => {
+                    // Keep the display name of the expression as written.
+                    SelectExpr::ExprWithAlias {
+                        expr: replace_group_exprs(e, group_by),
+                        alias: expr_to_name(e),
+                    }
+                }
+                SelectExpr::ExprWithAlias { expr, alias } => SelectExpr::ExprWithAlias {
+                    expr: replace_group_exprs(expr, group_by),
+                    alias: alias.clone(),
+                },
+                other => other.clone(),
+            })
+            .collect();
+        &rewritten[..]
+    } else {
+        projections
+    };
+
     let mut result = Vec::new();
     for item in projections {
         match item {
@@ -243,7 +274,7 @@ pub fn derive_schema(plan: &LogicalPlan) -> ColumnSchema {
             let child_schema = derive_schema(&a.child);
             let mut cols = Vec::new();
             for expr in &a.group_by {
-                let name = expr_to_name(expr);
+                let name = group_key_name(expr);
                 cols.push(ColumnInfo {
                     name,
                     data_type: "UNKNOWN".to_string(),
@@ -319,7 +350,7 @@ pub fn derive_qualified_schema(plan: &LogicalPlan) -> Vec<(Option<String>, Colum
         LogicalPlan::Aggregate(a) => {
             let mut cols = Vec::new();
             for expr in &a.group_by {
-                let name = expr_to_name(expr);
+                let name = group_key_name(expr);
                 cols.push((
                     None,
                     ColumnInfo {
@@ -381,6 +412,65 @@ pub fn expr_to_name(expr: &ExprNode) -> String {
         ExprNode::Not(..) => "expr".to_string(),
         ExprNode::IsNull(..) => "expr".to_string(),
         ExprNode::IsNotNull(..) => "expr".to_string(),
+    }
+}
+
+/// A GROUP BY key that is computed rather than a plain column.
+fn is_computed_group_key(expr: &ExprNode) -> bool {
+    matches!(expr, ExprNode::Binary { .. } | ExprNode::Cast { .. })
+}
+
+/// Output-column name of a GROUP BY key. Computed keys get a name unique to
+/// the expression so two of them never share a column.
+pub fn group_key_name(expr: &ExprNode) -> String {
+    if is_computed_group_key(expr) {
+        format!("{:?}", expr)
+    } else {
+        expr_to_name(expr)
+    }
+}
+
+fn contains_group_expr(expr: &ExprNode, group_by: &[ExprNode]) -> bool {
+    replace_group_exprs(expr, group_by) != *expr
+}
+
+/// Replace every occurrence of a computed GROUP BY expression inside `expr`
+/// with a reference to that key's output column.
+fn replace_group_exprs(expr: &ExprNode, group_by: &[ExprNode]) -> ExprNode {
+    if is_computed_group_key(expr) && group_by.contains(expr) {
+        return ExprNode::Column(group_key_name(expr));
+    }
+    match expr {
+        ExprNode::Binary { left, op, right } => ExprNode::Binary {
+            left: Box::new(replace_group_exprs(left, group_by)),
+            op: *op,
+            right: Box::new(replace_group_exprs(right, group_by)),
+        },
+        ExprNode::Cast {
+            expr: inner,
+            data_type,
+        } => ExprNode::Cast {
+            expr: Box::new(replace_group_exprs(inner, group_by)),
+            data_type: data_type.clone(),
+        },
+        ExprNode::Function {
+            name,
+            args,
+            distinct,
+        } if !is_aggregate_function(&name.to_ascii_uppercase()) => ExprNode::Function {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|a| match a {
+                    rook_ast::FunctionArg::Star => rook_ast::FunctionArg::Star,
+                    rook_ast::FunctionArg::Expr(e) => {
+                        rook_ast::FunctionArg::Expr(Box::new(replace_group_exprs(e, group_by)))
+                    }
+                })
+                .collect(),
+            distinct: *distinct,
+        },
+        other => other.clone(),
     }
 }
 

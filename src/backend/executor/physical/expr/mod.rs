@@ -678,6 +678,19 @@ fn evaluate_scalar_function(
             }
         }
 
+        // The `||` operator: NULL if either operand is NULL (SQL), unlike the
+        // CONCAT() function, which skips NULLs.
+        "||" => {
+            let mut res = String::new();
+            for dv in evaluated {
+                match dv {
+                    Some(dv) => res.push_str(&value_to_raw_string(&dv)),
+                    None => return Ok(None),
+                }
+            }
+            Ok(Some(DataValue::Varchar(res)))
+        }
+
         "CONCAT" => {
             let mut res = String::new();
             for dv in evaluated.into_iter().flatten() {
