@@ -91,6 +91,8 @@ const QUERIES: &[&str] = &[
     "SELECT UPPER(name) || '-' || CAST(dept AS VARCHAR(5)) FROM emp ORDER BY 1",
     "SELECT CASE WHEN salary > 50 THEN name ELSE 'low' END FROM emp ORDER BY id",
     "SELECT name FROM emp ORDER BY 1 LIMIT 3",
+    "SELECT id FROM emp ORDER BY UPPER(name) DESC, salary",
+    "SELECT name FROM emp ORDER BY dept * -1, mgr, id LIMIT 4",
     "SELECT name FROM emp ORDER BY salary DESC, id LIMIT 2 OFFSET 1",
     "SELECT * FROM (SELECT name, salary FROM emp WHERE salary > 10) t ORDER BY name",
     "SELECT t.n FROM (SELECT name AS n FROM emp) t ORDER BY t.n",

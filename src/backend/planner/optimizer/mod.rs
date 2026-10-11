@@ -1121,7 +1121,55 @@ fn sort_key_reads_input(
                     && t.as_ref().is_none_or(|t| t.eq_ignore_ascii_case(table))
             })
         }
-        _ => false,
+        ExprNode::Compound(_) => false,
+        // Inside an expression a name is an input column: an output alias
+        // only stands alone as a key, as in PostgreSQL.
+        other => expr_reads_input(other, input),
+    }
+}
+
+/// Whether `expr` can be computed from the projection's input: every column
+/// it names is an input column, and it holds no aggregate call or subquery,
+/// whose values exist only above the projection.
+fn expr_reads_input(
+    expr: &ExprNode,
+    input: &[(Option<String>, rook_ast::logical::ColumnInfo)],
+) -> bool {
+    let all = |exprs: &[&ExprNode]| exprs.iter().all(|e| expr_reads_input(e, input));
+    match expr {
+        ExprNode::Column(name) => input.iter().any(|(_, c)| c.name.eq_ignore_ascii_case(name)),
+        ExprNode::Compound(parts) if parts.len() >= 2 => {
+            let (table, name) = (&parts[parts.len() - 2], &parts[parts.len() - 1]);
+            input.iter().any(|(t, c)| {
+                c.name.eq_ignore_ascii_case(name)
+                    && t.as_ref().is_none_or(|t| t.eq_ignore_ascii_case(table))
+            })
+        }
+        ExprNode::Compound(_) | ExprNode::ScalarSubquery(_) => false,
+        ExprNode::Constant(_) => true,
+        ExprNode::Function { name, args, .. } => {
+            !crate::backend::planner::helpers::is_aggregate_function(&name.to_ascii_uppercase())
+                && args.iter().all(|a| match a {
+                    rook_ast::FunctionArg::Expr(e) => expr_reads_input(e, input),
+                    rook_ast::FunctionArg::Star => false,
+                })
+        }
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. } => all(&[left, right]),
+        ExprNode::Cast { expr: e, .. }
+        | ExprNode::Not(e)
+        | ExprNode::IsNull(e)
+        | ExprNode::IsNotNull(e) => expr_reads_input(e, input),
+        ExprNode::Case {
+            when_then_pairs,
+            else_result,
+        } => {
+            when_then_pairs.iter().all(|(w, t)| all(&[w, t]))
+                && else_result
+                    .as_ref()
+                    .is_none_or(|e| expr_reads_input(e, input))
+        }
     }
 }
 
