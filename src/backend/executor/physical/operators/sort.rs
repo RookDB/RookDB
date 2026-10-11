@@ -32,6 +32,8 @@ pub struct SortOperator {
     external_threshold: usize,
     /// Cached schema (survives child replacement during external init).
     cached_schema: Vec<ColumnInfo>,
+    /// Only the first `limit` rows of the sorted output are needed (top-N).
+    limit: Option<usize>,
 }
 
 /// A physical operator that yields tuples from an in-memory buffer first,
@@ -102,6 +104,7 @@ impl SortOperator {
             pos: 0,
             external_threshold: 0,
             cached_schema,
+            limit: None,
         }
     }
 
@@ -131,7 +134,16 @@ impl SortOperator {
             pos: 0,
             external_threshold: threshold,
             cached_schema,
+            limit: None,
         }
+    }
+
+    /// Only the first `limit` rows of the sorted output will be read. The
+    /// in-memory sort then keeps a bounded set of candidates instead of every
+    /// input row.
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
     }
 
     /// Get or initialise the external sort operator.
@@ -173,6 +185,14 @@ impl SortOperator {
             return Ok(());
         }
 
+        if let Some(limit) = self.limit
+            && self.external_threshold == 0
+        {
+            self.buffer = self.top_n(limit)?;
+            self.loaded = true;
+            return Ok(());
+        }
+
         // Consume tuples from child in batches
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
         while self.child.next_batch(&mut child_batch)? > 0 {
@@ -209,34 +229,73 @@ impl SortOperator {
             );
         } else {
             // Sort in place
-            self.buffer.sort_by(|a, b| {
-                for &(key_idx, descending) in &self.sort_keys {
-                    let av = a.values.get(key_idx).and_then(|v| v.as_ref());
-                    let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
-                    let ordering = match (av, bv) {
-                        (Some(a_val), Some(b_val)) => compare_nullable(Some(a_val), Some(b_val))
-                            .unwrap_or(None)
-                            .unwrap_or(Ordering::Equal),
-                        (None, None) => Ordering::Equal,
-                        (None, Some(_)) => Ordering::Less,
-                        (Some(_), None) => Ordering::Greater,
-                    };
-                    let ordering = if descending {
-                        ordering.reverse()
-                    } else {
-                        ordering
-                    };
-                    if ordering != Ordering::Equal {
-                        return ordering;
-                    }
-                }
-                Ordering::Equal
-            });
+            let keys = &self.sort_keys;
+            self.buffer.sort_by(|a, b| compare_rows(keys, a, b));
         }
 
         self.loaded = true;
         Ok(())
     }
+
+    /// The first `limit` rows of the child in sort order, in the order a full
+    /// stable sort would give them.
+    ///
+    /// Keeps at most `2 * limit` (at least 1,024) candidates: when the set is
+    /// full, the best `limit` are selected and the rest dropped. Ties are
+    /// broken by arrival order, so the result matches the stable sort.
+    fn top_n(&mut self, limit: usize) -> RookResult<Vec<Tuple>> {
+        let keys = self.sort_keys.clone();
+        let cmp = |a: &(u64, Tuple), b: &(u64, Tuple)| {
+            compare_rows(&keys, &a.1, &b.1).then(a.0.cmp(&b.0))
+        };
+        let cap = limit.saturating_mul(2).max(1024);
+        let mut kept: Vec<(u64, Tuple)> = Vec::new();
+        let mut seq = 0u64;
+        let mut batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+        while self.child.next_batch(&mut batch)? > 0 {
+            for tuple in batch.drain(..) {
+                kept.push((seq, tuple));
+                seq += 1;
+                if kept.len() >= cap {
+                    if limit == 0 {
+                        kept.clear();
+                    } else {
+                        kept.select_nth_unstable_by(limit - 1, cmp);
+                        kept.truncate(limit);
+                    }
+                }
+            }
+        }
+        kept.sort_by(cmp);
+        kept.truncate(limit);
+        Ok(kept.into_iter().map(|(_, t)| t).collect())
+    }
+}
+
+/// Order two rows by `keys` (column, descending): NULLs first ascending,
+/// last descending.
+fn compare_rows(keys: &[(usize, bool)], a: &Tuple, b: &Tuple) -> Ordering {
+    for &(key_idx, descending) in keys {
+        let av = a.values.get(key_idx).and_then(|v| v.as_ref());
+        let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
+        let ordering = match (av, bv) {
+            (Some(a_val), Some(b_val)) => compare_nullable(Some(a_val), Some(b_val))
+                .unwrap_or(None)
+                .unwrap_or(Ordering::Equal),
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+        };
+        let ordering = if descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
 }
 
 impl PhysicalOperator for SortOperator {

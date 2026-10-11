@@ -209,7 +209,10 @@ impl PhysicalPlanner {
                     let child_with_extra =
                         Box::new(ProjectionOperator::new(child, all_projections));
 
-                    let sort_op = SortOperator::new(child_with_extra, sort_keys);
+                    let mut sort_op = SortOperator::new(child_with_extra, sort_keys);
+                    if let Some(limit) = s.limit {
+                        sort_op = sort_op.with_limit(limit as usize);
+                    }
 
                     // Strip the extra sort columns
                     let result_schema: Vec<String> =
@@ -261,7 +264,10 @@ impl PhysicalPlanner {
                             Ok(child)
                         }
                     } else {
-                        let sort_op = SortOperator::new(child, sort_keys);
+                        let mut sort_op = SortOperator::new(child, sort_keys);
+                        if let Some(limit) = s.limit {
+                            sort_op = sort_op.with_limit(limit as usize);
+                        }
 
                         if let Some(limit) = s.limit {
                             log::info!(
