@@ -494,39 +494,65 @@ impl HeapManager {
         // Track pages that failed insertion to avoid retrying them
         let mut failed_pages = Vec::new();
 
-        // Try up to 3 times to find or allocate a suitable page
-        for attempt in 0..3 {
-            log::trace!("[HeapManager::insert_tuple] Attempt {}/3", attempt + 1);
+        // Three FSM-guided attempts, then a fresh page: stale FSM entries must
+        // never make an insert fail while the file can still grow.
+        for attempt in 0..4 {
+            log::trace!("[HeapManager::insert_tuple] Attempt {}/4", attempt + 1);
 
             // Get a page to try
-            let page_id = match self.fsm.search_page(min_category)? {
-                Some(pid) => {
-                    // Harden against phantom FSM hits: a stale/garbage FSM
-                    // leaf can advertise a page beyond the heap's real page
-                    // count (observed on freshly created tables under stress).
-                    // Treat such hits as a miss so the normal retry logic
-                    // allocates a genuine new page instead of erroring out.
-                    if pid >= self.header.page_count {
-                        log::warn!(
-                            "[HeapManager::insert_tuple] FSM returned phantom page {} (page_count={}); treating as miss",
-                            pid,
-                            self.header.page_count
-                        );
-                        failed_pages.push(pid);
-                        if attempt < 2 {
-                            continue;
+            let page_id = if attempt == 3 {
+                self.allocate_new_page()?
+            } else {
+                match self.fsm.search_page(min_category)? {
+                    Some(pid) => {
+                        // Harden against phantom FSM hits: a stale/garbage FSM
+                        // leaf can advertise a page beyond the heap's real page
+                        // count (observed on freshly created tables under stress).
+                        // Treat such hits as a miss so the normal retry logic
+                        // allocates a genuine new page instead of erroring out.
+                        if pid >= self.header.page_count {
+                            log::warn!(
+                                "[HeapManager::insert_tuple] FSM returned phantom page {} (page_count={}); treating as miss",
+                                pid,
+                                self.header.page_count
+                            );
+                            failed_pages.push(pid);
+                            if attempt < 2 {
+                                continue;
+                            } else {
+                                self.allocate_new_page()?
+                            }
+                        }
+                        // Check if this page failed before
+                        else if failed_pages.contains(&pid) {
+                            log::trace!(
+                                "[HeapManager::insert_tuple] Page {} previously failed for this insert, allocating new",
+                                pid
+                            );
+                            if attempt < 2 {
+                                log::trace!(
+                                    "[HeapManager::insert_tuple] Retrying with fresh search"
+                                );
+                                continue;
+                            } else {
+                                log::trace!(
+                                    "[HeapManager::insert_tuple] Final attempt: allocating new page"
+                                );
+                                self.allocate_new_page()?
+                            }
                         } else {
-                            self.allocate_new_page()?
+                            log::trace!(
+                                "[HeapManager::insert_tuple] FSM search returned page: {}",
+                                pid
+                            );
+                            pid
                         }
                     }
-                    // Check if this page failed before
-                    else if failed_pages.contains(&pid) {
-                        log::trace!(
-                            "[HeapManager::insert_tuple] Page {} previously failed for this insert, allocating new",
-                            pid
-                        );
+                    None => {
                         if attempt < 2 {
-                            log::trace!("[HeapManager::insert_tuple] Retrying with fresh search");
+                            log::trace!(
+                                "[HeapManager::insert_tuple] FSM returned None, will retry"
+                            );
                             continue;
                         } else {
                             log::trace!(
@@ -534,23 +560,6 @@ impl HeapManager {
                             );
                             self.allocate_new_page()?
                         }
-                    } else {
-                        log::trace!(
-                            "[HeapManager::insert_tuple] FSM search returned page: {}",
-                            pid
-                        );
-                        pid
-                    }
-                }
-                None => {
-                    if attempt < 2 {
-                        log::trace!("[HeapManager::insert_tuple] FSM returned None, will retry");
-                        continue;
-                    } else {
-                        log::trace!(
-                            "[HeapManager::insert_tuple] Final attempt: allocating new page"
-                        );
-                        self.allocate_new_page()?
                     }
                 }
             };
@@ -644,7 +653,7 @@ impl HeapManager {
         }
 
         Err(io::Error::other(
-            "Could not find or allocate page with sufficient space after 3 attempts",
+            "Could not find or allocate page with sufficient space",
         ))
     }
 

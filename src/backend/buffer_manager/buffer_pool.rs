@@ -635,7 +635,19 @@ impl BufferPool {
         let file_size = file.metadata()?.len();
 
         if offset >= file_size {
-            // Page doesn't exist yet — return an empty initialized page
+            // An allocated page that has not reached disk yet reads as an
+            // empty page. A page id that was never allocated is a stale
+            // pointer (from the FSM or an index): fail instead of inventing
+            // a blank page that could later be written past end of file.
+            if page_id >= self.total_pages {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "page {} does not exist (file has {} pages)",
+                        page_id, self.total_pages
+                    ),
+                ));
+            }
             init_page(page);
             return Ok(());
         }
