@@ -112,8 +112,8 @@ pub fn collect_heap_statistics(path: &Path) -> io::Result<TableStatistics> {
         let mut page = Page::new();
         file.read_page(&mut page, page_num)?;
 
-        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let tuple_count_on_page = lower.saturating_sub(PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
+        let slot_count = page.slot_count();
+        let tuple_count_on_page = page.tuples().count() as u32;
         if tuple_count_on_page > 0 {
             stats.pages_with_tuples += 1;
         }
@@ -128,11 +128,10 @@ pub fn collect_heap_statistics(path: &Path) -> io::Result<TableStatistics> {
         stats.max_page_free_bytes = stats.max_page_free_bytes.max(page_free_bytes);
 
         stats.total_tuple_count += tuple_count_on_page as u64;
-        stats.total_slot_bytes += tuple_count_on_page as u64 * ITEM_ID_SIZE as u64;
+        stats.total_slot_bytes += slot_count as u64 * ITEM_ID_SIZE as u64;
 
-        for item_index in 0..tuple_count_on_page {
-            let base = (PAGE_HEADER_SIZE + item_index * ITEM_ID_SIZE) as usize;
-            let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
+        for (_, tuple) in page.tuples() {
+            let length = tuple.len() as u32;
             stats.total_tuple_bytes += length as u64;
             stats.min_tuple_bytes = stats.min_tuple_bytes.min(length);
             stats.max_tuple_bytes = stats.max_tuple_bytes.max(length);
@@ -147,7 +146,7 @@ pub fn collect_heap_statistics(path: &Path) -> io::Result<TableStatistics> {
         }
 
         let used_bytes = PAGE_SIZE as u64 - page_free_bytes as u64;
-        let page_slot_bytes = tuple_count_on_page as u64 * ITEM_ID_SIZE as u64;
+        let page_slot_bytes = slot_count as u64 * ITEM_ID_SIZE as u64;
 
         stats.page_breakdown.push(PageStatistics {
             page_id: page_num,

@@ -14,7 +14,7 @@ use crate::backend::log::operation_log::{current_timestamp_iso, log_compaction, 
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::backend::visibility_map::{vm_clear_page, vm_is_visible, vm_set_page};
 use crate::catalog::types::Catalog;
-use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, SLOT_FLAG_DELETED};
+use crate::page::{Page, SLOT_FLAG_DELETED};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -92,57 +92,6 @@ fn compaction_log_details(pages_compacted: Option<usize>, error: Option<&str>) -
     })
 }
 
-/// Physically compact a page: remove all slots whose DELETED flag is set.
-/// Called only by `compaction_table()`.
-///
-/// Slot layout: [offset: u32][length: u16][flags: u16]
-fn compact_page(page: &mut Page, num_items: usize) {
-    // Collect surviving tuple data (live slots only)
-    let mut surviving: Vec<Vec<u8>> = Vec::new();
-
-    for i in 0..num_items {
-        let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
-        let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-        let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap());
-        let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-
-        // Skip empty or soft-deleted slots
-        if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
-            continue;
-        }
-
-        surviving.push(page.data[offset as usize..(offset as usize + length as usize)].to_vec());
-    }
-
-    // Zero out the entire page
-    page.data.iter_mut().for_each(|b| *b = 0);
-
-    // Re-initialise header pointers
-    let mut lower = PAGE_HEADER_SIZE;
-    let mut upper = PAGE_SIZE as u32;
-
-    // Re-insert surviving tuples with fresh (unflagged) slots
-    for tuple in &surviving {
-        let start = upper - tuple.len() as u32;
-
-        // Write tuple data
-        page.data[start as usize..upper as usize].copy_from_slice(tuple);
-        upper = start;
-
-        // Write slot entry: [offset: u32][length: u16][flags: u16 = 0]
-        page.data[lower as usize..lower as usize + 4].copy_from_slice(&start.to_le_bytes());
-        page.data[lower as usize + 4..lower as usize + 6]
-            .copy_from_slice(&(tuple.len() as u16).to_le_bytes());
-        page.data[lower as usize + 6..lower as usize + 8].copy_from_slice(&0u16.to_le_bytes()); // flags = 0 (live)
-
-        lower += ITEM_ID_SIZE;
-    }
-
-    // Persist updated lower and upper pointers
-    page.data[0..4].copy_from_slice(&lower.to_le_bytes());
-    page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -180,17 +129,13 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
             let mut page = Page::new();
             file.read_page(&mut page, page_num)?;
 
-            let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-            let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
-
-            let has_deleted = (0..num_items).any(|i| {
-                let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
-                let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-                flags & SLOT_FLAG_DELETED != 0
+            let has_deleted = (0..page.slot_count()).any(|i| {
+                page.slot(i)
+                    .is_some_and(|s| s.flags & SLOT_FLAG_DELETED != 0)
             });
 
             if has_deleted {
-                compact_page(&mut page, num_items);
+                page.compact();
 
                 file.write_page(&page, page_num)?;
                 pages_compacted += 1;
@@ -316,15 +261,9 @@ pub fn delete_by_pointers(
                 file.read_page(&mut page, page_num)?;
                 loaded = Some(page_num);
             }
-            let base = (PAGE_HEADER_SIZE + slot_idx * ITEM_ID_SIZE) as usize;
-            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-            let length =
-                u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
-            let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-            if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
+            let Some(tuple_data) = page.tuple(slot_idx) else {
                 continue;
-            }
-            let tuple_data = &page.data[offset as usize..(offset + length) as usize];
+            };
             let decoded = decode_tuple(tuple_data, columns);
             crate::backend::constraint::check_row_delete_restrictions(
                 catalog, db_name, table_name, &decoded,
@@ -334,8 +273,6 @@ pub fn delete_by_pointers(
     }
 
     for &(page_num, slot_idx) in pointers {
-        let slot_index = slot_idx as u16;
-
         if !hold_pages || held.as_ref().map(|h| h.page_num) != Some(page_num) {
             flush_held_page(&file, &mut held, db_name, table_name)?;
 
@@ -353,16 +290,9 @@ pub fn delete_by_pointers(
         let held_page = held.as_mut().expect("page loaded above");
         let page = &mut held_page.page;
 
-        let base = (PAGE_HEADER_SIZE + slot_index as u32 * ITEM_ID_SIZE) as usize;
-        let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-        let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
-        let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-
-        if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
+        let Some(tuple_data) = page.tuple(slot_idx).map(<[u8]>::to_vec) else {
             continue;
-        }
-
-        let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
+        };
         let decoded = decode_tuple(&tuple_data, columns);
 
         // FOREIGN KEY constraint check
@@ -393,10 +323,7 @@ pub fn delete_by_pointers(
             log::warn!("Failed to update index for deleted tuple: {}", e);
         }
 
-        // Soft-delete the slot
-        let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-        let new_flags = flags | SLOT_FLAG_DELETED;
-        page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
+        page.mark_deleted(slot_idx);
         held_page.dirty = true;
 
         log::info!(

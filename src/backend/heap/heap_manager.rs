@@ -21,8 +21,8 @@ use crate::backend::buffer_manager::shared_pool::{self, SharedPool};
 use crate::backend::fsm::FSM;
 use crate::backend::instrumentation::HEAP_METRICS;
 use crate::backend::page::{
-    ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, SLOT_FLAG_DELETED, get_slot_entry,
-    get_tuple_count, init_page, page_free_space,
+    ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, Slot, get_slot_entry, get_tuple_count,
+    init_page, page_free_space,
 };
 use crate::heap::types::HeaderMetadata;
 use std::sync::atomic::Ordering;
@@ -592,10 +592,7 @@ impl HeapManager {
                 }
 
                 // Insert tuple into slotted page (via buffer pool)
-                let slot_id = {
-                    let page = pool.get_page_mut(frame_id);
-                    Self::insert_into_page(page, tuple_data)?
-                };
+                let slot_id = pool.get_page_mut(frame_id).insert(tuple_data)?;
 
                 // Unpin page (dirty — modifications need to be written back)
                 pool.unpin(frame_id, true);
@@ -764,10 +761,14 @@ impl HeapManager {
 
                 // Update the slot directory entry to mark as deleted
                 let slot_offset = PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE;
-                page.data[slot_offset as usize..slot_offset as usize + 4]
-                    .copy_from_slice(&0u32.to_le_bytes()); // offset = 0
-                page.data[slot_offset as usize + 4..slot_offset as usize + 8]
-                    .copy_from_slice(&0u32.to_le_bytes()); // length = 0
+                page.set_slot(
+                    slot_id,
+                    Slot {
+                        offset: 0,
+                        length: 0,
+                        flags: 0,
+                    },
+                );
 
                 // Optimization: Roll back pointers if this is the last tuple
                 let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
@@ -937,103 +938,6 @@ impl HeapManager {
         );
 
         Ok(new_page_id)
-    }
-
-    /// Insert a tuple into a specific page and return the slot_id.
-    fn insert_into_page(page: &mut Page, data: &[u8]) -> io::Result<u32> {
-        log::trace!(
-            "[HeapManager::insert_into_page] Inserting {} bytes into page",
-            data.len()
-        );
-
-        // Get current lower and upper pointers
-        let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-
-        // Step 1: Look for a dead slot in the slot directory to reuse
-        let tuple_count = match get_tuple_count(page) {
-            Ok(c) => c,
-            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
-        };
-
-        let mut reused_slot_id = None;
-        for i in 0..tuple_count {
-            let base = PAGE_HEADER_SIZE as usize + i as usize * ITEM_ID_SIZE as usize;
-            let slot_offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-            let slot_flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-
-            // A slot is reusable if it is soft-deleted (SLOT_FLAG_DELETED set)
-            // or is the legacy dead-slot marker (offset == 0).
-            if slot_flags & SLOT_FLAG_DELETED != 0 || slot_offset == 0 {
-                reused_slot_id = Some(i);
-                break;
-            }
-        }
-
-        // Verify space is available
-        let required = if reused_slot_id.is_some() {
-            data.len() as u32 // Reusing slot, only need data space
-        } else {
-            data.len() as u32 + ITEM_ID_SIZE // Expanding lower, need data + slot space
-        };
-
-        if upper - lower < required {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Insufficient free space in page: {} < {}",
-                    upper - lower,
-                    required
-                ),
-            ));
-        }
-
-        // Write tuple data at the upper end (moving backward)
-        let data_start = upper - data.len() as u32;
-        page.data[data_start as usize..upper as usize].copy_from_slice(data);
-
-        // Update upper pointer
-        upper = data_start;
-        page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-
-        // Write slot entry
-        let (slot_id, slot_offset_offset) = match reused_slot_id {
-            Some(id) => {
-                log::trace!(
-                    "[HeapManager::insert_into_page] Reusing dead slot_id={}",
-                    id
-                );
-                (
-                    id,
-                    PAGE_HEADER_SIZE as usize + id as usize * ITEM_ID_SIZE as usize,
-                )
-            }
-            None => {
-                let current_lower = lower as usize;
-
-                // Update lower pointer (moved past the new slot)
-                lower += ITEM_ID_SIZE;
-                page.data[0..4].copy_from_slice(&lower.to_le_bytes());
-
-                let id = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE - 1;
-                (id, current_lower)
-            }
-        };
-
-        // Canonical slot format: [offset: u32 (4B)][length: u16 (2B)][flags: u16 (2B)]
-        page.data[slot_offset_offset..slot_offset_offset + 4]
-            .copy_from_slice(&data_start.to_le_bytes());
-        page.data[slot_offset_offset + 4..slot_offset_offset + 6]
-            .copy_from_slice(&(data.len() as u16).to_le_bytes());
-        page.data[slot_offset_offset + 6..slot_offset_offset + 8]
-            .copy_from_slice(&0u16.to_le_bytes()); // flags = 0 (live slot)
-
-        log::trace!(
-            "[HeapManager::insert_into_page] Inserted at slot_id={}",
-            slot_id
-        );
-
-        Ok(slot_id)
     }
 
     /// Convert free bytes to free-space category (0-255).

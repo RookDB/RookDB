@@ -49,3 +49,44 @@ fn test_collect_table_statistics_counts_pages_and_tuples() {
     std::fs::remove_file(&temp_path).expect("Failed to remove temp table file");
     let _ = std::fs::remove_file(format!("{}.fsm", temp_path.display()));
 }
+
+#[test]
+fn test_collect_table_statistics_skips_soft_deleted_rows() {
+    use storage_manager::backend::heap::HeapFile;
+    use storage_manager::page::Page;
+
+    let mut temp_path = env::temp_dir();
+    temp_path.push("rookdb_table_statistics_deleted_test.tbl");
+
+    let mut heap = HeapManager::create(temp_path.clone()).expect("Failed to create table");
+    let schema = vec![DataType::Int, DataType::Varchar(16)];
+    let mut sizes = Vec::new();
+    for row in [[Some("1"), Some("alpha")], [Some("2"), Some("beta")]] {
+        let tuple = serialize_nullable_row(&schema, &row).expect("Failed to serialize row");
+        sizes.push(tuple.len() as u64);
+        heap.insert_tuple(&tuple).expect("Failed to insert tuple");
+    }
+    heap.flush().expect("Failed to flush table");
+    drop(heap);
+
+    // Soft-delete the first row the way SQL DELETE does.
+    let file = HeapFile::open(&temp_path).expect("Failed to open table");
+    let mut page = Page::new();
+    file.read_page(&mut page, 1).expect("Failed to read page");
+    assert!(page.mark_deleted(0));
+    file.write_page(&page, 1).expect("Failed to write page");
+    drop(file);
+
+    let stats = collect_heap_statistics(&temp_path).expect("Failed to collect stats");
+
+    // The deleted row's slot still takes space but the row is not counted.
+    assert_eq!(stats.total_tuple_count, 1);
+    assert_eq!(stats.total_tuple_bytes, sizes[1]);
+    assert_eq!(stats.min_tuple_bytes, sizes[1] as u32);
+    assert_eq!(stats.max_tuple_bytes, sizes[1] as u32);
+    assert_eq!(stats.total_slot_bytes, 2 * 8);
+
+    storage_manager::backend::cache::evict_heap(&temp_path).expect("Failed to evict table");
+    std::fs::remove_file(&temp_path).expect("Failed to remove temp table file");
+    let _ = std::fs::remove_file(format!("{}.fsm", temp_path.display()));
+}

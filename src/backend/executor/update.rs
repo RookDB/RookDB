@@ -16,7 +16,7 @@ use std::io;
 use crate::backend::log::operation_log::current_timestamp_iso;
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::catalog::types::Catalog;
-use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, SLOT_FLAG_DELETED};
+use crate::page::Page;
 use crate::types::datatype::DataType;
 use crate::types::row::deserialize_nullable_row;
 use crate::types::row::serialize_nullable_typed_row;
@@ -713,16 +713,9 @@ pub fn update_by_pointers(
             loaded_page = Some(page_num);
         }
 
-        let base = (PAGE_HEADER_SIZE + slot_index as u32 * ITEM_ID_SIZE) as usize;
-        let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-        let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
-        let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-
-        if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
+        let Some(tuple_data) = page.tuple(slot_idx).map(<[u8]>::to_vec) else {
             continue;
-        }
-
-        let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
+        };
         let schema: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
         let decoded = match deserialize_nullable_row(&schema, &tuple_data) {
             Ok(v) => v,
@@ -954,24 +947,17 @@ pub fn update_by_pointers(
             let mut moved_on_page = false;
 
             for (i, update) in pending_updates.iter().enumerate().take(end).skip(start) {
-                let base =
-                    (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
-                let offset =
-                    u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap()) as usize;
-                let length =
-                    u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as usize;
+                let slot = update.pointer.slot_index as u32;
                 if update.new_bytes.len() == update.old_tuple_data.len()
-                    && length == update.new_bytes.len()
-                    && offset + length <= page.data.len()
+                    && page
+                        .tuple(slot)
+                        .is_some_and(|t| t.len() == update.new_bytes.len())
+                    && page.overwrite(slot, &update.new_bytes)
                 {
-                    page.data[offset..offset + length].copy_from_slice(&update.new_bytes);
                     in_place[i] = true;
                     continue;
                 }
-                let mut flags =
-                    u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-                flags |= SLOT_FLAG_DELETED;
-                page.data[base + 6..base + 8].copy_from_slice(&flags.to_le_bytes());
+                page.mark_deleted(slot);
                 moved_on_page = true;
                 moved += 1;
             }
