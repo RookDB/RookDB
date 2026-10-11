@@ -39,7 +39,7 @@ pub mod tuple;
 
 pub use engine::{execute_plan, execute_plan_collect};
 pub use expr::{ComparisonOp, Expr, Predicate, evaluate_predicate};
-pub use external_sort::{ExternalSortConfig, ExternalSortOperator};
+pub use external_sort::SortSpill;
 pub use operators::{
     AggregateFunction, AggregateInfo, AggregateOperator, CteScanOperator, DistinctOperator,
     FilterOperator, HashJoinOperator, IndexNestedLoopJoinOperator, IndexScanMode,
@@ -49,7 +49,4 @@ pub use operators::{
     infer_aggregate_output_type,
 };
 pub use planner::PhysicalPlanner;
-pub use tuple::{
-    ColumnInfo, Tuple, deserialize_tuple_from_bytes, display_tuples, format_tuple,
-    serialize_tuple_to_bytes,
-};
+pub use tuple::{ColumnInfo, Tuple, display_tuples, format_tuple};

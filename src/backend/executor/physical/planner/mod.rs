@@ -219,7 +219,8 @@ impl PhysicalPlanner {
                     let child_with_extra =
                         Box::new(ProjectionOperator::new(child, all_projections));
 
-                    let mut sort_op = SortOperator::new(child_with_extra, sort_keys);
+                    let mut sort_op = SortOperator::new(child_with_extra, sort_keys)
+                        .with_spill(self.catalog.engine().sort_spill());
                     if let Some(limit) = s.limit {
                         sort_op = sort_op.with_limit(limit as usize);
                     }
@@ -274,7 +275,8 @@ impl PhysicalPlanner {
                             Ok(child)
                         }
                     } else {
-                        let mut sort_op = SortOperator::new(child, sort_keys);
+                        let mut sort_op = SortOperator::new(child, sort_keys)
+                            .with_spill(self.catalog.engine().sort_spill());
                         if let Some(limit) = s.limit {
                             sort_op = sort_op.with_limit(limit as usize);
                         }

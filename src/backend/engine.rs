@@ -55,6 +55,10 @@ pub struct Engine {
     /// Scans decode every column, not only the ones a query reads. For
     /// checking that the read-column analysis changes no result.
     decode_all_columns: std::sync::atomic::AtomicBool,
+    /// Bytes of rows an `ORDER BY` holds in memory before it sorts on disk.
+    sort_memory_budget: std::sync::atomic::AtomicUsize,
+    /// Most sorted runs an `ORDER BY` on disk merges at a time.
+    sort_merge_fan_in: std::sync::atomic::AtomicUsize,
 }
 
 impl Engine {
@@ -77,6 +81,12 @@ impl Engine {
             heaps: Mutex::default(),
             btrees: Mutex::default(),
             decode_all_columns: std::sync::atomic::AtomicBool::new(false),
+            sort_memory_budget: std::sync::atomic::AtomicUsize::new(
+                crate::backend::executor::physical::external_sort::DEFAULT_SORT_MEMORY_BYTES,
+            ),
+            sort_merge_fan_in: std::sync::atomic::AtomicUsize::new(
+                crate::backend::executor::physical::external_sort::DEFAULT_MERGE_FAN_IN,
+            ),
             visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
@@ -105,6 +115,35 @@ impl Engine {
     pub(crate) fn decodes_all_columns(&self) -> bool {
         self.decode_all_columns
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Let an `ORDER BY` hold `bytes` of rows in memory; a larger input is
+    /// sorted on disk, in run files under this directory's temp area.
+    pub fn set_sort_memory_budget(&self, bytes: usize) {
+        self.sort_memory_budget
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Let a sort on disk merge up to `runs` sorted runs at a time (at least
+    /// 2). More runs than that are merged in several passes.
+    pub fn set_sort_merge_fan_in(&self, runs: usize) {
+        self.sort_merge_fan_in
+            .store(runs.max(2), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// When and where this engine's sorts spill to disk.
+    pub(crate) fn sort_spill(
+        &self,
+    ) -> crate::backend::executor::physical::external_sort::SortSpill {
+        crate::backend::executor::physical::external_sort::SortSpill {
+            memory_budget: self
+                .sort_memory_budget
+                .load(std::sync::atomic::Ordering::Relaxed),
+            merge_fan_in: self
+                .sort_merge_fan_in
+                .load(std::sync::atomic::Ordering::Relaxed),
+            temp_dir: self.paths.temp_dir(),
+        }
     }
 
     /// The data directory this engine manages.

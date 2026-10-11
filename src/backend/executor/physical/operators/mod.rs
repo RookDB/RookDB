@@ -47,5 +47,6 @@ pub use filter_project::{
 };
 pub use set_op::{SetOpOperator, SetOpType};
 pub use sort::SortOperator;
+pub(crate) use sort::compare_rows;
 pub use subquery::{SubqueryExecOperator, SubqueryType};
 pub use utils::normalise_value_for_key;

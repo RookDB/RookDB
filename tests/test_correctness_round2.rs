@@ -10,9 +10,8 @@
 //!   B. `SortOperator::next_batch` never clears the batch, violating the
 //!      documented `PhysicalOperator::next_batch` contract ("Clears `batch`
 //!      before populating"). Contract-abiding callers see duplicated rows.
-//!   C. `SortOperator::new_adaptive` discards ALL buffered rows when the
-//!      actual row count crosses the threshold after loading (output is
-//!      empty). Latent: the planner currently uses `SortOperator::new`.
+//!   C. A sort that switches to disk part-way through its input discarded
+//!      ALL rows buffered so far (output was empty).
 //!   D. `parse_set_clause` runs the arithmetic-expression matcher on quoted
 //!      string literals: `SET tag = 'n-5'` is parsed as `tag = column n - 5`,
 //!      which NULLs the column when no column `n` exists.
@@ -30,6 +29,7 @@ use rook_ast::QueryPlan;
 
 use rook_parser::parse_set_clause;
 use storage_manager::backend::error::RookResult;
+use storage_manager::backend::executor::physical::SortSpill;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::operators::{PhysicalOperator, SortOperator};
 use storage_manager::backend::executor::physical::tuple::{ColumnInfo, Tuple};
@@ -308,17 +308,16 @@ fn sort_next_batch_clears_batch_per_contract() {
 
 // ── Finding C: adaptive sort discards data past the threshold ───────────────
 //
-// `new_adaptive` picks external sort up-front only from the child's
-// `estimate_cardinality`. When the estimate is unknown/low but the ACTUAL row
-// count crosses the threshold during `load_if_needed`, the operator flips
-// `use_external = true` and returns — leaving the loaded rows stranded in
-// `self.buffer` — and then builds the external sort around a fresh
-// NullOperator. Every subsequent next()/next_batch() returns NOTHING.
+// The sort used to decide between memory and disk from the child's
+// `estimate_cardinality`. When the estimate was unknown/low but the ACTUAL
+// row count crossed the threshold while loading, the rows loaded so far were
+// stranded and every subsequent next()/next_batch() returned NOTHING. The
+// sort now spills by the bytes it actually holds.
 
 #[test]
 fn adaptive_sort_threshold_crossing_keeps_rows() {
     let (tuples, schema) = int_tuples(true, 50);
-    // estimate 0 ("unknown") but 50 actual rows > threshold 10 → bug path
+    // estimate 0 ("unknown") but 50 actual rows outgrow the budget
     let src = MockSource {
         tuples,
         schema,
@@ -326,47 +325,13 @@ fn adaptive_sort_threshold_crossing_keeps_rows() {
         estimate: 0,
     };
 
-    let mut sort = SortOperator::new_adaptive(Box::new(src), vec![(0, false)], 10);
-
-    let mut batch = Vec::new();
-    let mut out: Vec<Tuple> = Vec::new();
-    loop {
-        let n = sort.next_batch(&mut batch).expect("next_batch");
-        if n == 0 {
-            break;
-        }
-        out.append(&mut batch);
-    }
-
-    assert_eq!(
-        out.len(),
-        50,
-        "BUG C CONFIRMED: adaptive sort that crosses the threshold after load returned {} rows instead of 50",
-        out.len()
-    );
-    for (i, t) in out.iter().enumerate() {
-        assert_eq!(
-            t.values[0],
-            Some(DataValue::Int(i as i32)),
-            "row {} must be sorted",
-            i
-        );
-    }
-}
-
-/// Control: when the estimate exceeds the threshold, external mode is chosen
-/// up-front and works correctly.
-#[test]
-fn adaptive_sort_predeclared_external_works() {
-    let (tuples, schema) = int_tuples(true, 50);
-    let src = MockSource {
-        tuples,
-        schema,
-        pos: 0,
-        estimate: 100,
+    let temp = TestWorkspace::new("adaptive_sort");
+    let spill = SortSpill {
+        memory_budget: 1024,
+        merge_fan_in: 2,
+        temp_dir: temp.0.path().join("sort_runs"),
     };
-
-    let mut sort = SortOperator::new_adaptive(Box::new(src), vec![(0, false)], 10);
+    let mut sort = SortOperator::new(Box::new(src), vec![(0, false)]).with_spill(spill);
 
     let mut batch = Vec::new();
     let mut out: Vec<Tuple> = Vec::new();
@@ -381,7 +346,8 @@ fn adaptive_sort_predeclared_external_works() {
     assert_eq!(
         out.len(),
         50,
-        "external mode chosen up-front must return all rows"
+        "BUG C CONFIRMED: sort that outgrows its memory budget returned {} rows instead of 50",
+        out.len()
     );
     for (i, t) in out.iter().enumerate() {
         assert_eq!(

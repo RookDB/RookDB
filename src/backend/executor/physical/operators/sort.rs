@@ -1,8 +1,7 @@
 use std::cmp::Ordering;
 
-use super::super::external_sort::{ExternalSortConfig, ExternalSortOperator};
+use super::super::external_sort::{ExternalSorter, Merge, SortSpill, tuple_bytes};
 use super::super::tuple::{ColumnInfo, Tuple};
-use super::filter_project::NullOperator;
 use super::trait_::PhysicalOperator;
 use crate::backend::error::RookResult;
 
@@ -12,82 +11,28 @@ use crate::types::comparison::compare_nullable;
 
 /// Sorts all tuples from the child by the specified columns.
 ///
-/// Uses in-memory sort for small datasets and transparently switches to
-/// external merge sort (spilling to temp files) for larger datasets.
+/// Sorts in memory. Given a [`SortSpill`] it holds no more rows than the
+/// memory budget allows: beyond that they go to disk as sorted runs, which
+/// are merged to produce the output (see `external_sort`). Both ways give
+/// the same rows in the same order.
 pub struct SortOperator {
     child: Box<dyn PhysicalOperator>,
     /// Sort columns: (column_index, descending).
     sort_keys: Vec<(usize, bool)>,
-    /// Whether to use external merge sort.
-    use_external: bool,
-    /// External sort operator (lazily initialised).
-    external: Option<ExternalSortOperator>,
-    /// Whether the child has been fully consumed (in-memory mode only).
+    /// When and where to spill; `None` sorts in memory whatever the size.
+    spill: Option<SortSpill>,
+    /// Whether the child has been fully consumed.
     loaded: bool,
-    /// Sorted buffer of tuples (in-memory mode).
+    /// Sorted buffer of tuples (when the input stayed in memory).
     buffer: Vec<Tuple>,
     /// Current position in buffer.
     pos: usize,
-    /// Threshold for switching to external sort (0 = always in-memory).
-    external_threshold: usize,
-    /// Cached schema (survives child replacement during external init).
+    /// Merge of the sorted runs (when the input was spilled).
+    merge: Option<Merge>,
+    /// Cached schema.
     cached_schema: Vec<ColumnInfo>,
     /// Only the first `limit` rows of the sorted output are needed (top-N).
     limit: Option<usize>,
-}
-
-/// A physical operator that yields tuples from an in-memory buffer first,
-/// then continues draining from an underlying child operator.
-struct BufferedChildOperator {
-    buffer: Vec<Tuple>,
-    pos: usize,
-    child: Box<dyn PhysicalOperator>,
-    schema: Vec<ColumnInfo>,
-}
-
-impl PhysicalOperator for BufferedChildOperator {
-    fn next(&mut self) -> RookResult<Option<Tuple>> {
-        if self.pos < self.buffer.len() {
-            let tuple = self.buffer[self.pos].clone();
-            self.pos += 1;
-            Ok(Some(tuple))
-        } else {
-            self.child.next()
-        }
-    }
-
-    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
-        batch.clear();
-        let available = self.buffer.len().saturating_sub(self.pos);
-        if available > 0 {
-            let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
-            batch.reserve(take);
-            for i in 0..take {
-                batch.push(self.buffer[self.pos + i].clone());
-            }
-            self.pos += take;
-            Ok(take)
-        } else {
-            self.child.next_batch(batch)
-        }
-    }
-
-    fn schema(&self) -> &[ColumnInfo] {
-        &self.schema
-    }
-
-    fn reset(&mut self) -> RookResult<()> {
-        self.pos = 0;
-        self.child.reset()
-    }
-
-    fn estimate_cardinality(&self) -> usize {
-        self.buffer.len() + self.child.estimate_cardinality()
-    }
-
-    fn name(&self) -> &'static str {
-        "BufferedChild"
-    }
 }
 
 impl SortOperator {
@@ -97,117 +42,85 @@ impl SortOperator {
         Self {
             child,
             sort_keys,
-            use_external: false,
-            external: None,
+            spill: None,
             loaded: false,
             buffer: Vec::new(),
             pos: 0,
-            external_threshold: 0,
+            merge: None,
             cached_schema,
             limit: None,
         }
     }
 
-    /// Create an adaptive sort operator that switches to external merge sort
-    /// when the estimated cardinality exceeds `threshold`.
-    pub fn new_adaptive(
-        child: Box<dyn PhysicalOperator>,
-        sort_keys: Vec<(usize, bool)>,
-        threshold: usize,
-    ) -> Self {
-        let cached_schema = child.schema().to_vec();
-        let estimated = child.estimate_cardinality();
-        let use_external = threshold > 0 && estimated > threshold;
-        log::info!(
-            "[Sort] Adaptive mode: estimated={}, threshold={}, use_external={}",
-            estimated,
-            threshold,
-            use_external
-        );
-        Self {
-            child,
-            sort_keys,
-            use_external,
-            external: None,
-            loaded: false,
-            buffer: Vec::new(),
-            pos: 0,
-            external_threshold: threshold,
-            cached_schema,
-            limit: None,
-        }
+    /// Spill to sorted runs on disk when the input outgrows
+    /// `spill.memory_budget`. A sort with a limit keeps only the rows it
+    /// needs and does not spill.
+    pub fn with_spill(mut self, spill: SortSpill) -> Self {
+        self.spill = Some(spill);
+        self
     }
 
     /// Only the first `limit` rows of the sorted output will be read. The
-    /// in-memory sort then keeps a bounded set of candidates instead of every
-    /// input row.
+    /// sort then keeps a bounded set of candidates instead of every input
+    /// row.
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
     }
 
-    /// Get or initialise the external sort operator.
-    fn init_external(&mut self) -> RookResult<&mut ExternalSortOperator> {
-        if self.external.is_none() {
-            log::info!("[Sort] Switching to external merge sort");
-            let config = ExternalSortConfig {
-                max_tuples_per_run: if self.external_threshold > 0 {
-                    self.external_threshold
-                } else {
-                    100
-                },
-                ..Default::default()
-            };
-            let child = std::mem::replace(&mut self.child, Box::new(NullOperator::new(Vec::new())));
-            let source: Box<dyn PhysicalOperator> = if self.buffer.is_empty() {
-                child
-            } else {
-                let buffer = std::mem::take(&mut self.buffer);
-                Box::new(BufferedChildOperator {
-                    buffer,
-                    pos: 0,
-                    child,
-                    schema: self.cached_schema.clone(),
-                })
-            };
-            self.external = Some(ExternalSortOperator::new(
-                source,
-                self.sort_keys.clone(),
-                config,
-            ));
-        }
-        Ok(self.external.as_mut().unwrap())
-    }
-
-    /// Ensure the child has been consumed and sorted in memory (or flagged for external).
+    /// Ensure the child has been consumed and sorted, in memory or into runs.
     fn load_if_needed(&mut self) -> RookResult<()> {
         if self.loaded {
             return Ok(());
         }
 
-        if let Some(limit) = self.limit
-            && self.external_threshold == 0
-        {
+        if let Some(limit) = self.limit {
             self.buffer = self.top_n(limit)?;
             self.loaded = true;
             return Ok(());
         }
 
-        // Consume tuples from child in batches
+        // Consume tuples from child in batches, writing the buffer out as a
+        // sorted run each time it outgrows the memory budget.
+        let mut sorter: Option<ExternalSorter> = None;
+        let mut buffered_bytes = 0usize;
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
         while self.child.next_batch(&mut child_batch)? > 0 {
-            self.buffer.append(&mut child_batch);
-
-            // Check if we should switch to external sort
-            if self.external_threshold > 0 && self.buffer.len() > self.external_threshold {
-                log::info!(
-                    "[Sort] In-memory sort exceeded threshold ({} > {}), switching to external",
-                    self.buffer.len(),
-                    self.external_threshold
-                );
-                self.use_external = true;
-                return Ok(());
+            let Some(spill) = &self.spill else {
+                self.buffer.append(&mut child_batch);
+                continue;
+            };
+            for tuple in child_batch.drain(..) {
+                buffered_bytes += tuple_bytes(&tuple);
+                self.buffer.push(tuple);
+                if buffered_bytes > spill.memory_budget {
+                    if sorter.is_none() {
+                        log::info!(
+                            "[Sort] Input exceeds {} bytes, sorting on disk",
+                            spill.memory_budget
+                        );
+                        sorter = Some(ExternalSorter::new(self.sort_keys.clone(), spill)?);
+                    }
+                    let keys = &self.sort_keys;
+                    self.buffer.sort_by(|a, b| compare_rows(keys, a, b));
+                    if let Some(sorter) = &mut sorter {
+                        sorter.spill(&mut self.buffer)?;
+                    }
+                    buffered_bytes = 0;
+                }
             }
+        }
+
+        if let Some(mut sorter) = sorter {
+            if !self.buffer.is_empty() {
+                let keys = &self.sort_keys;
+                self.buffer.sort_by(|a, b| compare_rows(keys, a, b));
+                sorter.spill(&mut self.buffer)?;
+            }
+            self.buffer = Vec::new();
+            self.merge = Some(sorter.finish()?);
+            self.loaded = true;
+            return Ok(());
         }
 
         // Check if child already satisfies ordering
@@ -274,7 +187,7 @@ impl SortOperator {
 
 /// Order two rows by `keys` (column, descending): NULLs first ascending,
 /// last descending.
-fn compare_rows(keys: &[(usize, bool)], a: &Tuple, b: &Tuple) -> Ordering {
+pub(crate) fn compare_rows(keys: &[(usize, bool)], a: &Tuple, b: &Tuple) -> Ordering {
     for &(key_idx, descending) in keys {
         let av = a.values.get(key_idx).and_then(|v| v.as_ref());
         let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
@@ -300,18 +213,15 @@ fn compare_rows(keys: &[(usize, bool)], a: &Tuple, b: &Tuple) -> Ordering {
 
 impl PhysicalOperator for SortOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        if self.use_external {
-            let external = self.init_external()?;
-            return external.next();
-        }
+        self.load_if_needed()?;
 
-        // ── In-memory path ──
-        if !self.loaded {
-            self.load_if_needed()?;
-            if self.use_external {
-                let external = self.init_external()?;
-                return external.next();
+        if let Some(merge) = &mut self.merge {
+            let tuple = merge.next()?;
+            if tuple.is_none() {
+                // Done with the run files.
+                self.merge = None;
             }
+            return Ok(tuple);
         }
 
         if self.pos < self.buffer.len() {
@@ -324,20 +234,19 @@ impl PhysicalOperator for SortOperator {
     }
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
-        if self.use_external {
-            let external = self.init_external()?;
-            return external.next_batch(batch);
-        }
-
-        if !self.loaded {
-            self.load_if_needed()?;
-            if self.use_external {
-                let external = self.init_external()?;
-                return external.next_batch(batch);
-            }
-        }
+        self.load_if_needed()?;
 
         batch.clear();
+        if self.merge.is_some() {
+            while batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+                match self.next()? {
+                    Some(tuple) => batch.push(tuple),
+                    None => break,
+                }
+            }
+            return Ok(batch.len());
+        }
+
         let available = self.buffer.len().saturating_sub(self.pos);
         if available == 0 {
             return Ok(0);
@@ -356,15 +265,11 @@ impl PhysicalOperator for SortOperator {
     }
 
     fn reset(&mut self) -> RookResult<()> {
-        if self.use_external
-            && let Some(ref mut ext) = self.external
-        {
-            return ext.reset();
-        }
         self.child.reset()?;
         self.loaded = false;
         self.buffer.clear();
         self.pos = 0;
+        self.merge = None;
         Ok(())
     }
 

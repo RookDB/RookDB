@@ -66,6 +66,12 @@ impl Paths {
         self.system_dir().join(format!("{}.dat", name))
     }
 
+    /// Directory for files that live no longer than one query, such as the
+    /// sorted runs of an `ORDER BY` too large for memory.
+    pub fn temp_dir(&self) -> PathBuf {
+        self.data_dir().join("tmp")
+    }
+
     /// Directory holding one table's operation log.
     pub fn log_dir(&self, db: &str, table: &str) -> PathBuf {
         self.data_dir().join("logs").join(db).join(table)

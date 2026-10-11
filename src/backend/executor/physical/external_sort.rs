@@ -1,549 +1,545 @@
-//! External Merge Sort — sorts datasets larger than available memory.
+//! External merge sort: the part of `ORDER BY` that lives on disk.
 //!
-//! # Algorithm (two-phase)
+//! [`SortOperator`](super::operators::SortOperator) collects rows until they
+//! exceed its memory budget, sorts them and hands them to an
+//! [`ExternalSorter`], which writes them out as one sorted run. When the
+//! input ends, [`ExternalSorter::finish`] merges the runs: at most
+//! `merge_fan_in` of them are open at a time, so more runs than that are
+//! first merged group by group into longer runs, pass after pass, until one
+//! merge can read them all. That last merge is the operator's output.
 //!
-//! **Phase 1 (Run Generation):** Read tuples from the child operator in
-//! fixed-size chunks (`max_tuples_per_run`). Sort each chunk entirely in
-//! memory and write it to a temporary file as a "sorted run".
+//! Ties keep their arrival order, as in the in-memory stable sort: runs are
+//! numbered in the order their rows arrived, a merge prefers the lower
+//! numbered run, and a pass merges neighbouring runs only.
 //!
-//! **Phase 2 (Merge):** Open all sorted-run files simultaneously and perform
-//! a k-way merge using a min-heap (`std::collections::BinaryHeap`). The
-//! smallest tuple among all runs is yielded first, maintaining global sort
-//! order.
-//!
-//! # Temp file format
-//!
-//! Each sorted run is stored in a temporary file with this binary layout:
+//! # Run file format
 //!
 //! ```text
-//! [4 bytes]  — tuple count (u32 LE)
-//! [N tuples] — each prefixed with a 4-byte length (u32 LE) followed by
-//!              the serialized row bytes from serialize_tuple_to_bytes()
+//! [u32 length][row bytes]   one per row, in sort order
+//! [u32 0xFFFFFFFF][u64 n]   end marker and the number of rows before it
 //! ```
 //!
-//! # Transparency
+//! All integers are little-endian. A row is encoded with its values' own
+//! types (see `encode_tuple`), not the operator's schema, so whatever the
+//! child produced comes back unchanged. A run that ends before its end
+//! marker, or does not decode, is an error.
 //!
-//! The `ExternalSortOperator` implements `PhysicalOperator` and is used by
-//! `SortOperator` when the estimated cardinality exceeds the configured
-//! threshold. Downstream operators see no difference.
+//! Run files are deleted as soon as they have been merged, when the query
+//! finishes, and when it fails.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-use super::operators::PhysicalOperator;
-use super::tuple::{ColumnInfo, Tuple, deserialize_tuple_from_bytes, serialize_tuple_to_bytes};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+
+use super::operators::compare_rows;
+use super::tuple::Tuple;
 use crate::backend::error::{RookError, RookResult};
-use crate::types::comparison::compare_nullable;
+use crate::types::value::{DataValue, NumericValue, OrderedF32, OrderedF64};
 
-// ── Global temp-file counter ──────────────────────────────────────────────────
+/// Memory a sort may use before it spills, unless the engine says otherwise.
+pub const DEFAULT_SORT_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 
-/// Process-wide monotone counter so every `TempFileManager` instance gets a
-/// globally unique `instance_id`, preventing collisions when multiple
-/// `ExternalSortOperator`s run concurrently in the same process (e.g. tests).
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Runs one merge reads at a time, unless the engine says otherwise.
+pub const DEFAULT_MERGE_FAN_IN: usize = 64;
 
-// ── Configuration ────────────────────────────────────────────────────────────
+/// Buffer of each open run file.
+const RUN_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Tuning parameters for the external merge sort.
+/// Length prefix that ends a run.
+const END_OF_RUN: u32 = u32::MAX;
+
+/// Gives every sorter of this process its own file names.
+static SORTER_ID: AtomicU64 = AtomicU64::new(0);
+
+/// When and where a sort spills.
 #[derive(Debug, Clone)]
-pub struct ExternalSortConfig {
-    /// Maximum number of tuples per sorted run (written as one temp file).
-    /// Larger values reduce the number of runs (and thus the merge depth)
-    /// but consume more memory per run.
-    pub max_tuples_per_run: usize,
-
-    /// Directory for temporary sort files.
-    /// Files are named `rook_sort_<pid>_<instance_id>_<seq>.tmp` and cleaned up on drop.
+pub struct SortSpill {
+    /// Bytes of rows held in memory before they are written out as a run.
+    pub memory_budget: usize,
+    /// Most runs one merge reads at a time (at least 2).
+    pub merge_fan_in: usize,
+    /// Directory for run files, created on first use.
     pub temp_dir: PathBuf,
 }
 
-impl Default for ExternalSortConfig {
-    fn default() -> Self {
-        Self {
-            // ~80 KB per run for simple (4 col) int tuples at ~20 bytes each
-            max_tuples_per_run: 10_000,
-            temp_dir: PathBuf::from("/tmp/rookdb_sort"),
+/// Roughly the memory `tuple` occupies, for the sort's memory budget.
+pub(crate) fn tuple_bytes(tuple: &Tuple) -> usize {
+    let heap: usize = tuple
+        .values
+        .iter()
+        .map(|v| match v {
+            Some(DataValue::Char(s)) | Some(DataValue::Varchar(s)) | Some(DataValue::Bit(s)) => {
+                s.capacity()
+            }
+            _ => 0,
+        })
+        .sum();
+    size_of::<Tuple>() + tuple.values.capacity() * size_of::<Option<DataValue>>() + heap
+}
+
+fn corrupt(path: &std::path::Path, what: impl std::fmt::Display) -> RookError {
+    RookError::Io(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("sort run {}: {}", path.display(), what),
+    ))
+}
+
+// ── Row encoding ─────────────────────────────────────────────────────────────
+
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn put_date(out: &mut Vec<u8>, d: &NaiveDate) {
+    out.extend_from_slice(&d.num_days_from_ce().to_le_bytes());
+}
+
+fn put_time(out: &mut Vec<u8>, t: &NaiveTime) {
+    out.extend_from_slice(&t.num_seconds_from_midnight().to_le_bytes());
+    out.extend_from_slice(&t.nanosecond().to_le_bytes());
+}
+
+/// Append `tuple` to `out`: heap location, column count, then each value as
+/// a tag byte (0 = NULL) and its payload.
+fn encode_tuple(tuple: &Tuple, out: &mut Vec<u8>) {
+    out.push(tuple.page_id.is_some() as u8 | (tuple.slot_id.is_some() as u8) << 1);
+    for id in [tuple.page_id, tuple.slot_id].into_iter().flatten() {
+        out.extend_from_slice(&id.to_le_bytes());
+    }
+    out.extend_from_slice(&(tuple.values.len() as u32).to_le_bytes());
+    for value in &tuple.values {
+        match value {
+            None => out.push(0),
+            Some(DataValue::SmallInt(v)) => {
+                out.push(1);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            Some(DataValue::Int(v)) => {
+                out.push(2);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            Some(DataValue::BigInt(v)) => {
+                out.push(3);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            Some(DataValue::Real(v)) => {
+                out.push(4);
+                out.extend_from_slice(&v.0.to_bits().to_le_bytes());
+            }
+            Some(DataValue::DoublePrecision(v)) => {
+                out.push(5);
+                out.extend_from_slice(&v.0.to_bits().to_le_bytes());
+            }
+            Some(DataValue::Numeric(v)) => {
+                out.push(6);
+                out.extend_from_slice(&v.unscaled.to_le_bytes());
+                out.push(v.scale);
+            }
+            Some(DataValue::Bool(v)) => {
+                out.push(7);
+                out.push(*v as u8);
+            }
+            Some(DataValue::Char(s)) => {
+                out.push(8);
+                put_str(out, s);
+            }
+            Some(DataValue::Varchar(s)) => {
+                out.push(9);
+                put_str(out, s);
+            }
+            Some(DataValue::Date(d)) => {
+                out.push(10);
+                put_date(out, d);
+            }
+            Some(DataValue::Time(t)) => {
+                out.push(11);
+                put_time(out, t);
+            }
+            Some(DataValue::Bit(s)) => {
+                out.push(12);
+                put_str(out, s);
+            }
+            Some(DataValue::Timestamp(ts)) => {
+                out.push(13);
+                put_date(out, &ts.date());
+                put_time(out, &ts.time());
+            }
         }
     }
 }
 
-impl ExternalSortConfig {
-    /// Create a config with a custom memory budget (approximate).
-    ///
-    /// `memory_budget_bytes` is used to derive `max_tuples_per_run` assuming
-    /// an average tuple size of 64 bytes.
-    pub fn with_memory_budget(memory_budget_bytes: usize, temp_dir: PathBuf) -> Self {
-        let avg_tuple_size = 64usize; // conservative average
-        let max_tuples_per_run = (memory_budget_bytes / avg_tuple_size).max(100);
-        Self {
-            max_tuples_per_run,
-            temp_dir,
+/// Reads the fields of one encoded row.
+struct RowBytes<'a>(&'a [u8]);
+
+impl<'a> RowBytes<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        if self.0.len() < n {
+            return Err("row is shorter than its fields".to_string());
         }
+        let (head, tail) = self.0.split_at(n);
+        self.0 = tail;
+        Ok(head)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], String> {
+        Ok(self.take(N)?.try_into().expect("take returns N bytes"))
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        let len = self.u32()? as usize;
+        String::from_utf8(self.take(len)?.to_vec()).map_err(|_| "text is not UTF-8".to_string())
+    }
+
+    fn date(&mut self) -> Result<NaiveDate, String> {
+        NaiveDate::from_num_days_from_ce_opt(i32::from_le_bytes(self.array()?))
+            .ok_or_else(|| "date out of range".to_string())
+    }
+
+    fn time(&mut self) -> Result<NaiveTime, String> {
+        let (secs, nanos) = (self.u32()?, self.u32()?);
+        NaiveTime::from_num_seconds_from_midnight_opt(secs, nanos)
+            .ok_or_else(|| "time out of range".to_string())
     }
 }
 
-// ── Temp file management ─────────────────────────────────────────────────────
-
-/// Manages temporary files created during external sort.
-///
-/// All files are deleted when this struct is dropped.
-///
-/// File names include a globally unique `instance_id` drawn from
-/// `TEMP_FILE_COUNTER`, ensuring no two `TempFileManager` instances in the
-/// same process can produce colliding paths — even when tests run in parallel.
-struct TempFileManager {
-    files: Vec<PathBuf>,
-    /// Monotone counter local to this manager instance.
-    seq: u64,
-    /// Globally unique ID assigned at construction time.
-    instance_id: u64,
-    temp_dir: PathBuf,
-}
-
-impl TempFileManager {
-    fn new(temp_dir: PathBuf) -> Self {
-        let _ = fs::create_dir_all(&temp_dir);
-        let instance_id = TEMP_FILE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        Self {
-            files: Vec::new(),
-            seq: 0,
-            instance_id,
-            temp_dir,
-        }
+/// The inverse of [`encode_tuple`].
+fn decode_tuple(bytes: &[u8]) -> Result<Tuple, String> {
+    let mut row = RowBytes(bytes);
+    let flags = row.array::<1>()?[0];
+    let page_id = if flags & 1 != 0 {
+        Some(row.u32()?)
+    } else {
+        None
+    };
+    let slot_id = if flags & 2 != 0 {
+        Some(row.u32()?)
+    } else {
+        None
+    };
+    let columns = row.u32()? as usize;
+    // Every value takes at least its tag byte.
+    if columns > row.0.len() {
+        return Err("row is shorter than its fields".to_string());
     }
-
-    /// Create a new unique temp file path and track it for cleanup.
-    ///
-    /// The path is `<temp_dir>/rook_sort_<pid>_<instance_id>_<seq>.tmp`.
-    /// `instance_id` is globally unique per process, so parallel operator
-    /// instances cannot collide.
-    fn create_file(&mut self) -> std::io::Result<PathBuf> {
-        let seq = self.seq;
-        self.seq += 1;
-        let path = self.temp_dir.join(format!(
-            "rook_sort_{}_{}_{}.tmp",
-            std::process::id(),
-            self.instance_id,
-            seq,
-        ));
-        self.files.push(path.clone());
-
-        // Create (or truncate) the file
-        File::create(&path)?;
-
-        Ok(path)
-    }
-}
-
-impl Drop for TempFileManager {
-    fn drop(&mut self) {
-        for path in &self.files {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
-// ── Helper: compare two tuples by sort keys ─────────────────────────────────
-
-/// Compare two tuples using the same logic as `SortOperator::sort_by` closure.
-///
-/// Returns `Ordering::Less` if `a` should sort before `b` according to the
-/// sort key specifications.
-fn compare_tuples_by_keys(a: &Tuple, b: &Tuple, sort_keys: &[(usize, bool)]) -> Ordering {
-    for &(key_idx, descending) in sort_keys {
-        let av = a.values.get(key_idx).and_then(|v| v.as_ref());
-        let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
-        let ordering = match (av, bv) {
-            (Some(a_val), Some(b_val)) => compare_nullable(Some(a_val), Some(b_val))
-                .unwrap_or(None)
-                .unwrap_or(Ordering::Equal),
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less, // NULLs first
-            (Some(_), None) => Ordering::Greater,
+    let mut values = Vec::with_capacity(columns);
+    for _ in 0..columns {
+        let value = match row.array::<1>()?[0] {
+            0 => None,
+            1 => Some(DataValue::SmallInt(i16::from_le_bytes(row.array()?))),
+            2 => Some(DataValue::Int(i32::from_le_bytes(row.array()?))),
+            3 => Some(DataValue::BigInt(i64::from_le_bytes(row.array()?))),
+            4 => Some(DataValue::Real(OrderedF32(f32::from_bits(row.u32()?)))),
+            5 => Some(DataValue::DoublePrecision(OrderedF64(f64::from_bits(
+                u64::from_le_bytes(row.array()?),
+            )))),
+            6 => Some(DataValue::Numeric(NumericValue {
+                unscaled: i128::from_le_bytes(row.array()?),
+                scale: row.array::<1>()?[0],
+            })),
+            7 => Some(DataValue::Bool(row.array::<1>()?[0] != 0)),
+            8 => Some(DataValue::Char(row.string()?)),
+            9 => Some(DataValue::Varchar(row.string()?)),
+            10 => Some(DataValue::Date(row.date()?)),
+            11 => Some(DataValue::Time(row.time()?)),
+            12 => Some(DataValue::Bit(row.string()?)),
+            13 => Some(DataValue::Timestamp(NaiveDateTime::new(
+                row.date()?,
+                row.time()?,
+            ))),
+            tag => return Err(format!("unknown value tag {}", tag)),
         };
-        let ordering = if descending {
-            ordering.reverse()
-        } else {
-            ordering
-        };
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
+        values.push(value);
     }
-    Ordering::Equal
+    if !row.0.is_empty() {
+        return Err("row is longer than its fields".to_string());
+    }
+    Ok(Tuple {
+        values,
+        page_id,
+        slot_id,
+    })
 }
 
-// ── Sorted run file I/O ───────────────────────────────────────────────────────
+// ── Run files ────────────────────────────────────────────────────────────────
 
-/// Writes a batch of sorted tuples to a temp file as a single sorted run.
-#[allow(dead_code)]
-struct SortedRunWriter {
-    file: File,
+/// One sorted run on disk. Dropping it deletes the file.
+struct RunFile {
     path: PathBuf,
-    tuple_count: u32,
-    schema: Vec<ColumnInfo>,
 }
 
-impl SortedRunWriter {
-    /// Create a new writer for a sorted run.
-    fn new(path: PathBuf, schema: Vec<ColumnInfo>) -> std::io::Result<Self> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)?;
+impl Drop for RunFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
-        // Reserve space for tuple count (will be written on close)
-        file.write_all(&0u32.to_le_bytes())?;
+/// Writes rows, already in sort order, to a new run file.
+struct RunWriter {
+    run: RunFile,
+    file: BufWriter<File>,
+    rows: u64,
+    /// The row being encoded, reused between rows.
+    scratch: Vec<u8>,
+}
 
+impl RunWriter {
+    fn create(path: PathBuf) -> RookResult<Self> {
+        let file = File::create(&path)?;
         Ok(Self {
-            file,
-            path,
-            tuple_count: 0,
-            schema,
+            run: RunFile { path },
+            file: BufWriter::with_capacity(RUN_BUFFER_BYTES, file),
+            rows: 0,
+            scratch: Vec::new(),
         })
     }
 
-    /// Append one tuple to the sorted run.
-    fn write_tuple(&mut self, tuple: &Tuple) -> RookResult<()> {
-        let bytes = serialize_tuple_to_bytes(tuple, &self.schema).map_err(RookError::Internal)?;
-        let len = bytes.len() as u32;
-
-        self.file
-            .write_all(&len.to_le_bytes())
-            .map_err(RookError::Io)?;
-        self.file.write_all(&bytes).map_err(RookError::Io)?;
-
-        self.tuple_count += 1;
+    fn write(&mut self, tuple: &Tuple) -> RookResult<()> {
+        self.scratch.clear();
+        encode_tuple(tuple, &mut self.scratch);
+        let len = u32::try_from(self.scratch.len())
+            .ok()
+            .filter(|&len| len != END_OF_RUN)
+            .ok_or_else(|| RookError::Internal("row too large to sort on disk".to_string()))?;
+        self.file.write_all(&len.to_le_bytes())?;
+        self.file.write_all(&self.scratch)?;
+        self.rows += 1;
         Ok(())
     }
 
-    /// Finalize the run by writing the tuple count at the start of the file.
-    fn finalize(&mut self) -> RookResult<()> {
-        self.file.seek(SeekFrom::Start(0)).map_err(RookError::Io)?;
-        self.file
-            .write_all(&self.tuple_count.to_le_bytes())
-            .map_err(RookError::Io)?;
-        self.file.flush().map_err(RookError::Io)?;
-        Ok(())
-    }
-
-    /// Number of tuples written to this run.
-    #[allow(dead_code)]
-    fn len(&self) -> u32 {
-        self.tuple_count
+    /// Write the end marker and hand over the finished run.
+    fn finish(mut self) -> RookResult<RunFile> {
+        self.file.write_all(&END_OF_RUN.to_le_bytes())?;
+        self.file.write_all(&self.rows.to_le_bytes())?;
+        self.file.flush()?;
+        Ok(self.run)
     }
 }
 
-/// Reads and yields tuples from a single sorted run file.
-struct SortedRunReader {
-    file: File,
-    /// Total tuples in this run.
-    tuple_count: u32,
-    /// Tuples read so far.
-    tuples_read: u32,
-    /// Schema for deserialization.
-    schema: Vec<ColumnInfo>,
-    /// Whether the file has been exhausted.
-    exhausted: bool,
-    /// Run index (for stable ordering during merge).
-    #[allow(dead_code)]
-    run_index: usize,
+/// Reads a run file back, row by row.
+struct RunReader {
+    run: RunFile,
+    file: BufReader<File>,
+    rows: u64,
+    done: bool,
+    scratch: Vec<u8>,
 }
 
-impl SortedRunReader {
-    /// Open a sorted run file for reading.
-    fn open(path: &Path, schema: Vec<ColumnInfo>, run_index: usize) -> RookResult<Self> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .open(path)
-            .map_err(RookError::Io)?;
-
-        // Read tuple count
-        let mut count_buf = [0u8; 4];
-        file.read_exact(&mut count_buf).map_err(RookError::Io)?;
-        let tuple_count = u32::from_le_bytes(count_buf);
-        log::info!(
-            "[ExternalSort] Opened run {} with {} tuples",
-            run_index,
-            tuple_count
-        );
-
+impl RunReader {
+    fn open(run: RunFile) -> RookResult<Self> {
+        let file = File::open(&run.path)?;
         Ok(Self {
-            file,
-            tuple_count,
-            tuples_read: 0,
-            schema,
-            exhausted: false,
-            run_index,
+            run,
+            file: BufReader::with_capacity(RUN_BUFFER_BYTES, file),
+            rows: 0,
+            done: false,
+            scratch: Vec::new(),
         })
     }
 
-    /// Read and return the next tuple, advancing the reader.
-    fn next_tuple(&mut self) -> RookResult<Option<Tuple>> {
-        if self.exhausted || self.tuples_read >= self.tuple_count {
-            self.exhausted = true;
+    fn read_exact(&mut self, buf: &mut [u8]) -> RookResult<()> {
+        self.file.read_exact(buf).map_err(|e| match e.kind() {
+            io::ErrorKind::UnexpectedEof => corrupt(&self.run.path, "file is truncated"),
+            _ => RookError::Io(e),
+        })
+    }
+
+    /// The next row, or `None` after the last one.
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
+        if self.done {
             return Ok(None);
         }
-
-        // Read length prefix
-        let mut len_buf = [0u8; 4];
-        if self.file.read_exact(&mut len_buf).is_err() {
-            self.exhausted = true;
+        let mut len = [0u8; 4];
+        self.read_exact(&mut len)?;
+        let len = u32::from_le_bytes(len);
+        if len == END_OF_RUN {
+            let mut rows = [0u8; 8];
+            self.read_exact(&mut rows)?;
+            let rows = u64::from_le_bytes(rows);
+            if rows != self.rows {
+                return Err(corrupt(
+                    &self.run.path,
+                    format!("holds {} rows, its end marker says {}", self.rows, rows),
+                ));
+            }
+            self.done = true;
             return Ok(None);
         }
-        let data_len = u32::from_le_bytes(len_buf) as usize;
-
-        // Read tuple data
-        let mut data_buf = vec![0u8; data_len];
-        self.file.read_exact(&mut data_buf).map_err(RookError::Io)?;
-
-        self.tuples_read += 1;
-        if self.tuples_read >= self.tuple_count {
-            self.exhausted = true;
+        // Read through `take` so a damaged length cannot ask for more memory
+        // than the file has bytes.
+        self.scratch.clear();
+        let read = (&mut self.file)
+            .take(len as u64)
+            .read_to_end(&mut self.scratch)?;
+        if read < len as usize {
+            return Err(corrupt(&self.run.path, "file is truncated"));
         }
+        self.rows += 1;
+        decode_tuple(&self.scratch)
+            .map(Some)
+            .map_err(|e| corrupt(&self.run.path, e))
+    }
+}
 
-        let tuple = deserialize_tuple_from_bytes(&data_buf, &self.schema)?;
+// ── Merge ────────────────────────────────────────────────────────────────────
+
+/// Merges sorted runs into one sorted stream.
+///
+/// A binary min-heap holds the next row of each run that still has one,
+/// ordered by the sort keys and then by run number.
+pub(crate) struct Merge {
+    sort_keys: Vec<(usize, bool)>,
+    readers: Vec<RunReader>,
+    /// (next row of a run, index of the run in `readers`).
+    heap: Vec<(Tuple, usize)>,
+}
+
+impl Merge {
+    fn open(runs: Vec<RunFile>, sort_keys: &[(usize, bool)]) -> RookResult<Self> {
+        let mut merge = Self {
+            sort_keys: sort_keys.to_vec(),
+            readers: Vec::with_capacity(runs.len()),
+            heap: Vec::with_capacity(runs.len()),
+        };
+        for (idx, run) in runs.into_iter().enumerate() {
+            let mut reader = RunReader::open(run)?;
+            if let Some(tuple) = reader.next()? {
+                merge.heap.push((tuple, idx));
+            }
+            merge.readers.push(reader);
+        }
+        for i in (0..merge.heap.len() / 2).rev() {
+            merge.sift_down(i);
+        }
+        Ok(merge)
+    }
+
+    /// Whether heap entry `a` comes out before entry `b`.
+    fn before(&self, a: usize, b: usize) -> bool {
+        let (a, b) = (&self.heap[a], &self.heap[b]);
+        compare_rows(&self.sort_keys, &a.0, &b.0).then(a.1.cmp(&b.1)) == Ordering::Less
+    }
+
+    fn sift_down(&mut self, mut i: usize) {
+        loop {
+            let mut first = i;
+            for child in [2 * i + 1, 2 * i + 2] {
+                if child < self.heap.len() && self.before(child, first) {
+                    first = child;
+                }
+            }
+            if first == i {
+                return;
+            }
+            self.heap.swap(i, first);
+            i = first;
+        }
+    }
+
+    /// The next row in sort order, or `None` when every run is used up.
+    pub(crate) fn next(&mut self) -> RookResult<Option<Tuple>> {
+        if self.heap.is_empty() {
+            return Ok(None);
+        }
+        let run = self.heap[0].1;
+        let tuple = match self.readers[run].next()? {
+            Some(next) => std::mem::replace(&mut self.heap[0].0, next),
+            None => self.heap.swap_remove(0).0,
+        };
+        self.sift_down(0);
         Ok(Some(tuple))
     }
 }
 
-// ── Merge heap entry ──────────────────────────────────────────────────────────
+// ── Sorter ───────────────────────────────────────────────────────────────────
 
-/// An entry in the merge heap representing the smallest tuple from one run.
-///
-/// `Ord` is implemented to make `BinaryHeap` behave as a min-heap over the
-/// sort-key order, with run_index as tiebreaker for stability.
-struct HeapEntry {
-    tuple: Tuple,
-    /// Index of the run this tuple came from.
-    run_index: usize,
+/// Collects sorted runs and merges them. See the module documentation.
+pub(crate) struct ExternalSorter {
     sort_keys: Vec<(usize, bool)>,
+    temp_dir: PathBuf,
+    merge_fan_in: usize,
+    id: u64,
+    /// Run files created so far, for their names.
+    created: u64,
+    /// The runs, in the order their rows arrived.
+    runs: Vec<RunFile>,
 }
 
-impl HeapEntry {
-    fn new(tuple: Tuple, run_index: usize, sort_keys: Vec<(usize, bool)>) -> Self {
-        Self {
-            tuple,
-            run_index,
+impl ExternalSorter {
+    pub(crate) fn new(sort_keys: Vec<(usize, bool)>, spill: &SortSpill) -> RookResult<Self> {
+        fs::create_dir_all(&spill.temp_dir)?;
+        Ok(Self {
             sort_keys,
+            temp_dir: spill.temp_dir.clone(),
+            merge_fan_in: spill.merge_fan_in.max(2),
+            id: SORTER_ID.fetch_add(1, AtomicOrdering::Relaxed),
+            created: 0,
+            runs: Vec::new(),
+        })
+    }
+
+    fn writer(&mut self) -> RookResult<RunWriter> {
+        let path = self.temp_dir.join(format!(
+            "sort_{}_{}_{}.run",
+            std::process::id(),
+            self.id,
+            self.created
+        ));
+        self.created += 1;
+        RunWriter::create(path)
+    }
+
+    /// Write `rows`, which must be in sort order, as the next run, leaving
+    /// `rows` empty.
+    pub(crate) fn spill(&mut self, rows: &mut Vec<Tuple>) -> RookResult<()> {
+        let mut writer = self.writer()?;
+        for tuple in rows.drain(..) {
+            writer.write(&tuple)?;
         }
-    }
-}
-
-impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.run_index == other.run_index
-            && compare_tuples_by_keys(&self.tuple, &other.tuple, &self.sort_keys) == Ordering::Equal
-    }
-}
-
-impl Eq for HeapEntry {}
-
-impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for HeapEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max-heap; we reverse to get ascending (min-heap)
-        // behavior for the sort key.
-        let key_ordering = compare_tuples_by_keys(&self.tuple, &other.tuple, &self.sort_keys);
-        // Reverse: smaller tuple should be popped FIRST from max-heap
-        key_ordering
-            .reverse()
-            .then_with(|| other.run_index.cmp(&self.run_index))
-    }
-}
-
-// ── ExternalSortOperator ─────────────────────────────────────────────────────
-
-/// A `PhysicalOperator` that performs an external merge sort on its child's
-/// output, spilling intermediate sorted runs to temporary files when the
-/// dataset exceeds the in-memory threshold.
-///
-/// # Usage
-///
-/// This operator is created by `SortOperator::new_external()` or by the
-/// `PhysicalPlanner` when the estimated cardinality exceeds the threshold.
-pub struct ExternalSortOperator {
-    child: Box<dyn PhysicalOperator>,
-    sort_keys: Vec<(usize, bool)>,
-    config: ExternalSortConfig,
-
-    // ── Runtime state (Phase 1: run generation) ──
-    temp_files: TempFileManager,
-    sorted_runs: Vec<PathBuf>,
-    run_schema: Vec<ColumnInfo>,
-    phase1_done: bool,
-
-    // ── Runtime state (Phase 2: merge) ──
-    readers: Vec<SortedRunReader>,
-    heap: BinaryHeap<HeapEntry>,
-    merge_exhausted: bool,
-}
-
-impl ExternalSortOperator {
-    /// Create a new external sort operator.
-    pub fn new(
-        child: Box<dyn PhysicalOperator>,
-        sort_keys: Vec<(usize, bool)>,
-        config: ExternalSortConfig,
-    ) -> Self {
-        let run_schema = child.schema().to_vec();
-        let temp_dir = config.temp_dir.clone();
-        Self {
-            child,
-            sort_keys,
-            config,
-            temp_files: TempFileManager::new(temp_dir),
-            sorted_runs: Vec::new(),
-            run_schema,
-            phase1_done: false,
-            readers: Vec::new(),
-            heap: BinaryHeap::new(),
-            merge_exhausted: false,
-        }
+        self.runs.push(writer.finish()?);
+        Ok(())
     }
 
-    /// Phase 1: Consume all tuples from child, sort in chunks, write sorted runs.
-    fn generate_runs(&mut self) -> RookResult<()> {
-        log::info!("[ExternalSort] Phase 1: Generating sorted runs");
-
-        let mut buffer: Vec<Tuple> = Vec::with_capacity(self.config.max_tuples_per_run);
-
-        while let Some(tuple) = self.child.next()? {
-            buffer.push(tuple);
-
-            if buffer.len() >= self.config.max_tuples_per_run {
-                self.flush_run(&mut buffer)?;
+    /// Merge the runs down to at most `merge_fan_in` and return the merge of
+    /// those.
+    pub(crate) fn finish(mut self) -> RookResult<Merge> {
+        let mut passes = 0;
+        while self.runs.len() > self.merge_fan_in {
+            let mut runs = std::mem::take(&mut self.runs).into_iter();
+            let mut merged = Vec::new();
+            loop {
+                let mut group: Vec<RunFile> = runs.by_ref().take(self.merge_fan_in).collect();
+                match group.len() {
+                    0 => break,
+                    1 => merged.extend(group.pop()),
+                    _ => {
+                        let mut merge = Merge::open(group, &self.sort_keys)?;
+                        let mut writer = self.writer()?;
+                        while let Some(tuple) = merge.next()? {
+                            writer.write(&tuple)?;
+                        }
+                        merged.push(writer.finish()?);
+                    }
+                }
             }
+            self.runs = merged;
+            passes += 1;
         }
-
-        // Flush remaining tuples
-        if !buffer.is_empty() {
-            self.flush_run(&mut buffer)?;
-        }
-
-        log::info!(
-            "[ExternalSort] Phase 1 complete: {} sorted runs generated",
-            self.sorted_runs.len()
+        log::debug!(
+            "[Sort] {} run files written, {} intermediate merge passes, final merge of {}",
+            self.created,
+            passes,
+            self.runs.len()
         );
-
-        self.phase1_done = true;
-        Ok(())
-    }
-
-    /// Sort the buffer and write it as a sorted run to a temp file.
-    fn flush_run(&mut self, buffer: &mut Vec<Tuple>) -> RookResult<()> {
-        // Sort the batch
-        let sort_keys = self.sort_keys.clone();
-        buffer.sort_by(|a, b| compare_tuples_by_keys(a, b, &sort_keys));
-
-        // Write to temp file
-        let path = self.temp_files.create_file().map_err(RookError::Io)?;
-
-        let mut writer =
-            SortedRunWriter::new(path.clone(), self.run_schema.clone()).map_err(RookError::Io)?;
-
-        for tuple in buffer.drain(..) {
-            writer.write_tuple(&tuple)?;
-        }
-
-        writer.finalize()?;
-
-        self.sorted_runs.push(path);
-        Ok(())
-    }
-
-    /// Phase 2: Open all sorted runs and initialize the merge heap.
-    fn init_merge(&mut self) -> RookResult<()> {
-        log::info!(
-            "[ExternalSort] Phase 2: Merging {} sorted runs",
-            self.sorted_runs.len()
-        );
-
-        if self.sorted_runs.is_empty() {
-            self.merge_exhausted = true;
-            return Ok(());
-        }
-
-        let sort_keys = self.sort_keys.clone();
-        let schema = self.run_schema.clone();
-
-        for (idx, path) in self.sorted_runs.iter().enumerate() {
-            let mut reader = SortedRunReader::open(path, schema.clone(), idx)?;
-            if let Some(tuple) = reader.next_tuple()? {
-                self.heap
-                    .push(HeapEntry::new(tuple, idx, sort_keys.clone()));
-            }
-            self.readers.push(reader);
-        }
-
-        log::info!(
-            "[ExternalSort] Merge heap initialized with {} entries",
-            self.heap.len()
-        );
-
-        Ok(())
-    }
-
-    /// Yield the next tuple from the merge phase.
-    fn merge_next(&mut self) -> RookResult<Option<Tuple>> {
-        if self.merge_exhausted || self.heap.is_empty() {
-            return Ok(None);
-        }
-
-        // Pop the smallest tuple from the heap
-        let entry = self.heap.pop().unwrap();
-
-        // Read the next tuple from the same run and push it to the heap
-        if let Some(next_tuple) = self.readers[entry.run_index].next_tuple()? {
-            let sort_keys = self.sort_keys.clone();
-            self.heap
-                .push(HeapEntry::new(next_tuple, entry.run_index, sort_keys));
-        }
-
-        Ok(Some(entry.tuple))
-    }
-}
-
-impl PhysicalOperator for ExternalSortOperator {
-    fn next(&mut self) -> RookResult<Option<Tuple>> {
-        // Phase 1: generate sorted runs
-        if !self.phase1_done {
-            self.generate_runs()?;
-            self.init_merge()?;
-        }
-
-        // Phase 2: merge
-        self.merge_next()
-    }
-
-    fn schema(&self) -> &[ColumnInfo] {
-        &self.run_schema
-    }
-
-    fn reset(&mut self) -> RookResult<()> {
-        // Re-initialize state
-        self.sorted_runs.clear();
-        self.readers.clear();
-        self.heap.clear();
-        self.phase1_done = false;
-        self.merge_exhausted = false;
-        self.child.reset()?;
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "ExternalSort"
+        Merge::open(std::mem::take(&mut self.runs), &self.sort_keys)
     }
 }
 
@@ -552,347 +548,148 @@ impl PhysicalOperator for ExternalSortOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::executor::physical::operators::PhysicalOperator;
-    use crate::backend::executor::physical::tuple::Tuple;
-    use crate::types::datatype::DataType;
-    use crate::types::value::DataValue;
 
-    /// A mock operator that yields a fixed set of tuples (local to test module).
-    struct MockOperator {
-        tuples: Vec<Tuple>,
-        pos: usize,
-        schema: Vec<ColumnInfo>,
-    }
+    struct TempDir(PathBuf);
 
-    impl MockOperator {
-        fn new(tuples: Vec<Tuple>, schema: Vec<ColumnInfo>) -> Self {
-            Self {
-                tuples,
-                pos: 0,
-                schema,
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("rookdb_extsort_{}_{}", std::process::id(), tag));
+            let _ = fs::remove_dir_all(&dir);
+            TempDir(dir)
+        }
+
+        fn files(&self) -> usize {
+            fs::read_dir(&self.0).map(|d| d.count()).unwrap_or(0)
+        }
+
+        fn spill(&self, merge_fan_in: usize) -> SortSpill {
+            SortSpill {
+                memory_budget: 0,
+                merge_fan_in,
+                temp_dir: self.0.clone(),
             }
         }
     }
 
-    impl PhysicalOperator for MockOperator {
-        fn next(&mut self) -> RookResult<Option<Tuple>> {
-            if self.pos < self.tuples.len() {
-                let t = self.tuples[self.pos].clone();
-                self.pos += 1;
-                Ok(Some(t))
-            } else {
-                Ok(None)
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn row(key: i32, tag: i32) -> Tuple {
+        Tuple::new(vec![Some(DataValue::Int(key)), Some(DataValue::Int(tag))])
+    }
+
+    fn drain(mut merge: Merge) -> RookResult<Vec<Tuple>> {
+        let mut out = Vec::new();
+        while let Some(tuple) = merge.next()? {
+            out.push(tuple);
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn every_value_type_round_trips() {
+        let date = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        let time = NaiveTime::from_hms_micro_opt(23, 59, 58, 123_456).unwrap();
+        let tuple = Tuple::new_with_location(
+            vec![
+                None,
+                Some(DataValue::SmallInt(-7)),
+                Some(DataValue::Int(i32::MIN)),
+                Some(DataValue::BigInt(i64::MAX)),
+                Some(DataValue::Real(OrderedF32(f32::NAN))),
+                Some(DataValue::DoublePrecision(OrderedF64(-0.0))),
+                Some(DataValue::Numeric(NumericValue {
+                    unscaled: -12_345_678_901_234_567_890_123,
+                    scale: 4,
+                })),
+                Some(DataValue::Bool(true)),
+                Some(DataValue::Char("ab ".to_string())),
+                Some(DataValue::Varchar("héllo".to_string())),
+                Some(DataValue::Date(date)),
+                Some(DataValue::Time(time)),
+                Some(DataValue::Bit("0101".to_string())),
+                Some(DataValue::Timestamp(NaiveDateTime::new(date, time))),
+            ],
+            9,
+            3,
+        );
+        for tuple in [tuple, Tuple::empty(), row(1, 2)] {
+            let mut bytes = Vec::new();
+            encode_tuple(&tuple, &mut bytes);
+            assert_eq!(decode_tuple(&bytes).unwrap(), tuple);
+        }
+    }
+
+    /// More runs than the fan-in: several passes, ties in arrival order,
+    /// never more files than runs, none left behind.
+    #[test]
+    fn multi_pass_merge_is_stable_and_cleans_up() {
+        let dir = TempDir::new("multipass");
+        let keys = vec![(0, false)];
+        let mut sorter = ExternalSorter::new(keys, &dir.spill(3)).unwrap();
+        // 40 runs of 5 rows; keys repeat across runs, tags record arrival.
+        let mut expected = Vec::new();
+        for run in 0..40 {
+            let mut rows: Vec<Tuple> = (0..5).map(|k| row(k, run)).collect();
+            expected.extend(rows.iter().cloned());
+            sorter.spill(&mut rows).unwrap();
+        }
+        assert_eq!(dir.files(), 40);
+        expected.sort_by(|a, b| compare_rows(&[(0, false)], a, b));
+
+        let merge = sorter.finish().unwrap();
+        assert!(merge.readers.len() <= 3);
+        assert!(dir.files() <= 3, "merged runs are deleted");
+        assert_eq!(drain(merge).unwrap(), expected);
+        assert_eq!(dir.files(), 0);
+    }
+
+    #[test]
+    fn truncated_run_is_an_error() {
+        for cut in [1, 9, 13, 30] {
+            let dir = TempDir::new(&format!("truncated{}", cut));
+            let mut sorter = ExternalSorter::new(vec![(0, false)], &dir.spill(4)).unwrap();
+            for run in 0..2 {
+                sorter
+                    .spill(&mut (0..50).map(|k| row(k, run)).collect())
+                    .unwrap();
             }
+            let path = sorter.runs[1].path.clone();
+            let len = fs::metadata(&path).unwrap().len();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(len - cut)
+                .unwrap();
+
+            let err = sorter
+                .finish()
+                .and_then(drain)
+                .expect_err("a truncated run must not read as a short one");
+            assert!(err.to_string().contains("truncated"), "{}", err);
+            assert_eq!(dir.files(), 0, "run files are removed on error");
         }
-
-        fn schema(&self) -> &[ColumnInfo] {
-            &self.schema
-        }
-
-        fn reset(&mut self) -> RookResult<()> {
-            self.pos = 0;
-            Ok(())
-        }
-
-        fn name(&self) -> &'static str {
-            "Mock"
-        }
-    }
-
-    /// Helper to create a test schema and tuples.
-    fn int_schema() -> Vec<ColumnInfo> {
-        vec![
-            ColumnInfo {
-                name: "a".into(),
-                data_type: DataType::Int,
-                table: None,
-            },
-            ColumnInfo {
-                name: "b".into(),
-                data_type: DataType::Int,
-                table: None,
-            },
-        ]
-    }
-
-    fn int_tuples(data: Vec<(Option<i32>, Option<i32>)>) -> (Vec<Tuple>, Vec<ColumnInfo>) {
-        let schema = int_schema();
-        let tuples = data
-            .into_iter()
-            .map(|(a, b)| Tuple::new(vec![a.map(DataValue::Int), b.map(DataValue::Int)]))
-            .collect();
-        (tuples, schema)
     }
 
     #[test]
-    fn test_compare_tuples_by_keys_asc() {
-        let a = Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]);
-        let b = Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(20))]);
-
-        let keys = vec![(0, false)]; // sort by col 0 ascending
-        assert_eq!(compare_tuples_by_keys(&a, &b, &keys), Ordering::Less);
-        assert_eq!(compare_tuples_by_keys(&b, &a, &keys), Ordering::Greater);
-        assert_eq!(compare_tuples_by_keys(&a, &a, &keys), Ordering::Equal);
-    }
-
-    #[test]
-    fn test_compare_tuples_by_keys_desc() {
-        let a = Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]);
-        let b = Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(20))]);
-
-        let keys = vec![(0, true)]; // sort by col 0 descending
-        assert_eq!(
-            compare_tuples_by_keys(&a, &b, &keys),
-            Ordering::Greater // 1 > 2 in descending order
-        );
-    }
-
-    #[test]
-    fn test_compare_tuples_by_keys_nulls_first() {
-        let a = Tuple::new(vec![None, Some(DataValue::Int(10))]);
-        let b = Tuple::new(vec![Some(DataValue::Int(5)), Some(DataValue::Int(20))]);
-
-        let keys = vec![(0, false)]; // NULLs first
-        assert_eq!(compare_tuples_by_keys(&a, &b, &keys), Ordering::Less);
-    }
-
-    #[test]
-    fn test_external_sort_small_dataset() {
-        // Small dataset that fits in a single run
-        let (tuples, schema) = int_tuples(vec![
-            (Some(3), Some(30)),
-            (Some(1), Some(10)),
-            (Some(2), Some(20)),
-        ]);
-
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig {
-            max_tuples_per_run: 100, // large enough for all tuples
-            ..Default::default()
-        };
-
-        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
-
-        let t1 = sorter.next().unwrap().unwrap();
-        assert_eq!(t1.values[0], Some(DataValue::Int(1)));
-        let t2 = sorter.next().unwrap().unwrap();
-        assert_eq!(t2.values[0], Some(DataValue::Int(2)));
-        let t3 = sorter.next().unwrap().unwrap();
-        assert_eq!(t3.values[0], Some(DataValue::Int(3)));
-        assert!(sorter.next().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_external_sort_multiple_runs() {
-        // Force multiple runs by setting max_tuples_per_run to 2
-        let (tuples, schema) = int_tuples(vec![
-            (Some(10), Some(100)),
-            (Some(3), Some(30)),
-            (Some(7), Some(70)),
-            (Some(1), Some(10)),
-            (Some(5), Some(50)),
-        ]);
-
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig {
-            max_tuples_per_run: 2, // forces 3 runs
-            ..Default::default()
-        };
-
-        let mut sorter = ExternalSortOperator::new(
-            Box::new(child),
-            vec![(0, false)], // sort by col 0 ascending
-            config,
-        );
-
-        let results: Vec<Tuple> = std::iter::from_fn(|| sorter.next().transpose())
-            .collect::<Result<Vec<_>, _>>()
+    fn corrupt_run_is_an_error() {
+        let dir = TempDir::new("corrupt");
+        let mut sorter = ExternalSorter::new(vec![(0, false)], &dir.spill(4)).unwrap();
+        sorter
+            .spill(&mut (0..50).map(|k| row(k, 0)).collect())
             .unwrap();
+        let path = sorter.runs[0].path.clone();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[4 + 5] = 99; // first row's first value tag
+        fs::write(&path, bytes).unwrap();
 
-        assert_eq!(results.len(), 5);
-        assert_eq!(results[0].values[0], Some(DataValue::Int(1)));
-        assert_eq!(results[1].values[0], Some(DataValue::Int(3)));
-        assert_eq!(results[2].values[0], Some(DataValue::Int(5)));
-        assert_eq!(results[3].values[0], Some(DataValue::Int(7)));
-        assert_eq!(results[4].values[0], Some(DataValue::Int(10)));
-    }
-
-    #[test]
-    fn test_external_sort_descending() {
-        let (tuples, schema) = int_tuples(vec![
-            (Some(1), Some(10)),
-            (Some(3), Some(30)),
-            (Some(2), Some(20)),
-        ]);
-
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig {
-            max_tuples_per_run: 2,
-            ..Default::default()
-        };
-
-        let mut sorter = ExternalSortOperator::new(
-            Box::new(child),
-            vec![(0, true)], // sort by col 0 descending
-            config,
-        );
-
-        let t1 = sorter.next().unwrap().unwrap();
-        assert_eq!(t1.values[0], Some(DataValue::Int(3)));
-        let t2 = sorter.next().unwrap().unwrap();
-        assert_eq!(t2.values[0], Some(DataValue::Int(2)));
-        let t3 = sorter.next().unwrap().unwrap();
-        assert_eq!(t3.values[0], Some(DataValue::Int(1)));
-        assert!(sorter.next().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_external_sort_empty_child() {
-        let (tuples, schema) = int_tuples(vec![]);
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig::default();
-        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
-        assert!(sorter.next().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_external_sort_single_tuple() {
-        let (tuples, schema) = int_tuples(vec![(Some(42), Some(100))]);
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig::default();
-        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
-        let t = sorter.next().unwrap().unwrap();
-        assert_eq!(t.values[0], Some(DataValue::Int(42)));
-        assert!(sorter.next().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_external_sort_multi_key() {
-        let schema = vec![
-            ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int,
-                table: None,
-            },
-            ColumnInfo {
-                name: "y".into(),
-                data_type: DataType::Int,
-                table: None,
-            },
-        ];
-        let tuples = vec![
-            Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(20))]),
-            Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]),
-            Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(5))]),
-        ];
-
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig {
-            max_tuples_per_run: 2,
-            ..Default::default()
-        };
-        let mut sorter = ExternalSortOperator::new(
-            Box::new(child),
-            vec![(0, false), (1, false)], // sort by x ASC, then y ASC
-            config,
-        );
-
-        let t1 = sorter.next().unwrap().unwrap();
-        assert_eq!(
-            t1.values,
-            vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]
-        );
-        let t2 = sorter.next().unwrap().unwrap();
-        assert_eq!(
-            t2.values,
-            vec![Some(DataValue::Int(1)), Some(DataValue::Int(20))]
-        );
-        let t3 = sorter.next().unwrap().unwrap();
-        assert_eq!(
-            t3.values,
-            vec![Some(DataValue::Int(2)), Some(DataValue::Int(5))]
-        );
-        assert!(sorter.next().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_external_sort_reset() {
-        let (tuples, schema) = int_tuples(vec![(Some(2), Some(20)), (Some(1), Some(10))]);
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig {
-            max_tuples_per_run: 1, // force separate runs
-            ..Default::default()
-        };
-        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
-
-        // First pass
-        let t1 = sorter.next().unwrap().unwrap();
-        assert_eq!(t1.values[0], Some(DataValue::Int(1)));
-        let t2 = sorter.next().unwrap().unwrap();
-        assert_eq!(t2.values[0], Some(DataValue::Int(2)));
-        assert!(sorter.next().unwrap().is_none());
-
-        // Reset and re-read
-        sorter.reset().unwrap();
-        let r1 = sorter.next().unwrap().unwrap();
-        assert_eq!(r1.values[0], Some(DataValue::Int(1)));
-        let r2 = sorter.next().unwrap().unwrap();
-        assert_eq!(r2.values[0], Some(DataValue::Int(2)));
-        assert!(sorter.next().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_external_sort_duplicates() {
-        let (tuples, schema) = int_tuples(vec![
-            (Some(2), Some(20)),
-            (Some(2), Some(20)), // duplicate
-            (Some(1), Some(10)),
-            (Some(1), Some(10)), // duplicate
-        ]);
-
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig {
-            max_tuples_per_run: 2,
-            ..Default::default()
-        };
-        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
-
-        let results: Vec<Tuple> = std::iter::from_fn(|| sorter.next().transpose())
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(results.len(), 4);
-        assert_eq!(results[0].values[0], Some(DataValue::Int(1)));
-        assert_eq!(results[1].values[0], Some(DataValue::Int(1)));
-        assert_eq!(results[2].values[0], Some(DataValue::Int(2)));
-        assert_eq!(results[3].values[0], Some(DataValue::Int(2)));
-    }
-
-    #[test]
-    fn test_external_sort_with_nulls() {
-        let (tuples, schema) = int_tuples(vec![
-            (None, Some(30)),
-            (Some(2), Some(20)),
-            (None, Some(10)),
-            (Some(1), Some(5)),
-        ]);
-
-        let child = MockOperator::new(tuples, schema);
-        let config = ExternalSortConfig {
-            max_tuples_per_run: 2,
-            ..Default::default()
-        };
-        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
-
-        let results: Vec<Tuple> = std::iter::from_fn(|| sorter.next().transpose())
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        // NULLs should come first, then sorted values
-        assert_eq!(results.len(), 4);
-        assert_eq!(results[0].values[0], None); // NULL
-        assert_eq!(results[1].values[0], None); // NULL
-        assert_eq!(results[2].values[0], Some(DataValue::Int(1)));
-        assert_eq!(results[3].values[0], Some(DataValue::Int(2)));
+        let err = sorter.finish().and_then(drain).expect_err("corrupt run");
+        assert!(err.to_string().contains("unknown value tag"), "{}", err);
+        assert_eq!(dir.files(), 0);
     }
 }

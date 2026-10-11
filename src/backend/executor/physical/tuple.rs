@@ -1,6 +1,5 @@
 use crate::types::datatype::DataType;
 use crate::types::value::DataValue;
-use crate::types::{deserialize_nullable_row, serialize_nullable_typed_row};
 
 /// Metadata describing one column in a query result set.
 #[derive(Debug, Clone)]
@@ -271,27 +270,4 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
     println!("{}", bot_border);
     println!("({} rows)\n", tuples.len());
     tuples.len()
-}
-
-// ── Tuple serialization for external sort / temp files ───────────────────────
-
-/// Serialize a Tuple to binary bytes using the existing row serialization.
-///
-/// The returned bytes can be written to a temp file and later deserialized
-/// back into a Tuple using `deserialize_tuple_from_bytes` with the same schema.
-pub fn serialize_tuple_to_bytes(tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Vec<u8>, String> {
-    let schema_types: Vec<DataType> = schema.iter().map(|c| c.data_type.clone()).collect();
-    serialize_nullable_typed_row(&schema_types, &tuple.values)
-}
-
-/// Deserialize a Tuple from binary bytes produced by `serialize_tuple_to_bytes`.
-///
-/// The `schema_types` and `column_info` must match those of the original tuple.
-pub fn deserialize_tuple_from_bytes(
-    bytes: &[u8],
-    column_info: &[ColumnInfo],
-) -> Result<Tuple, String> {
-    let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
-    let values = deserialize_nullable_row(&schema_types, bytes)?;
-    Ok(Tuple::new(values))
 }
