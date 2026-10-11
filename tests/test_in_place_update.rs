@@ -234,3 +234,16 @@ fn set_keeps_text_exactly_as_given() {
         vec![vec!["7".to_string()]]
     );
 }
+
+#[test]
+fn fractional_result_is_rounded_into_an_int_column() {
+    let _ws = common::TestWorkspace::new("inplace", "round");
+    let catalog = setup();
+
+    // 1005 * 1.1 = 1105.5, which rounds half away from zero.
+    assert_eq!(update(&catalog, "id = 5", "salary = salary * 1.1"), 1);
+    assert_eq!(
+        query(&catalog, "SELECT salary FROM staff WHERE id = 5"),
+        vec![vec!["1106".to_string()]]
+    );
+}

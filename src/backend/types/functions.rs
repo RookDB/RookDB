@@ -801,12 +801,22 @@ pub fn cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionE
 ///
 /// Text going into a text column is kept exactly, only checked against the
 /// column's length (and space-padded for CHAR). [`cast`] would trim it and
-/// strip enclosing quotes, since it re-reads the value as a literal. Every
-/// other conversion is a [`cast`].
+/// strip enclosing quotes, since it re-reads the value as a literal. A
+/// fractional number stored in an integer column is rounded half away from
+/// zero, as PostgreSQL does; an explicit [`cast`] truncates. Every other
+/// conversion is a [`cast`].
 pub fn assign_cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionError> {
     let text = match value {
         DataValue::Varchar(s) => s.as_str(),
         DataValue::Char(s) => s.trim_end_matches(' '),
+        DataValue::Real(_) | DataValue::DoublePrecision(_) | DataValue::Numeric(_)
+            if matches!(
+                target,
+                DataType::SmallInt | DataType::Int | DataType::BigInt
+            ) =>
+        {
+            return cast(&round(value, 0)?, target);
+        }
         _ => return cast(value, target),
     };
     let too_long = |ty: String, max: u16| {

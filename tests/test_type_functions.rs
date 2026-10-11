@@ -82,3 +82,51 @@ fn cast_and_null_semantics_work() {
         Some(DataValue::Int(7))
     );
 }
+
+#[test]
+fn assignment_rounds_fractions_into_integer_columns() {
+    use storage_manager::types::functions::{assign_cast, cast};
+    use storage_manager::types::value::{OrderedF32, OrderedF64};
+
+    let double = |v: f64| DataValue::DoublePrecision(OrderedF64(v));
+    // Halves round away from zero, as in PostgreSQL.
+    assert_eq!(
+        assign_cast(&double(1.7), &DataType::Int).unwrap(),
+        DataValue::Int(2)
+    );
+    assert_eq!(
+        assign_cast(&double(2.5), &DataType::Int).unwrap(),
+        DataValue::Int(3)
+    );
+    assert_eq!(
+        assign_cast(&double(-2.5), &DataType::BigInt).unwrap(),
+        DataValue::BigInt(-3)
+    );
+    assert_eq!(
+        assign_cast(&double(1.4), &DataType::SmallInt).unwrap(),
+        DataValue::SmallInt(1)
+    );
+    assert_eq!(
+        assign_cast(&DataValue::Real(OrderedF32(9.5)), &DataType::Int).unwrap(),
+        DataValue::Int(10)
+    );
+    let numeric = cast(
+        &DataValue::Varchar("4.50".to_string()),
+        &DataType::Numeric {
+            precision: 5,
+            scale: 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        assign_cast(&numeric, &DataType::Int).unwrap(),
+        DataValue::Int(5)
+    );
+    // Out of range after rounding is still an error.
+    assert!(assign_cast(&double(3e9), &DataType::Int).is_err());
+    // An explicit CAST keeps truncating.
+    assert_eq!(
+        cast(&double(1.7), &DataType::Int).unwrap(),
+        DataValue::Int(1)
+    );
+}
