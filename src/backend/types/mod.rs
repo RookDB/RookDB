@@ -19,7 +19,7 @@ pub use functions::{
 };
 pub use null_bitmap::NullBitmap;
 pub use row::{
-    Row, deserialize_nullable_row, serialize_nullable_row, serialize_nullable_typed_row,
+    Row, RowDecoder, deserialize_nullable_row, serialize_nullable_row, serialize_nullable_typed_row,
 };
 pub use row_layout::{PhysicalSchema, RowLayout};
 pub use validation::{

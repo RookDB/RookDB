@@ -232,3 +232,45 @@ fn test_varlen_resizing_shifts_offsets() {
     );
     assert_eq!(row.get_value(3).unwrap(), None);
 }
+
+#[test]
+fn row_decoder_reads_only_the_columns_asked_for() {
+    use storage_manager::types::{RowDecoder, serialize_nullable_typed_row};
+
+    let schema = vec![
+        DataType::Int,
+        DataType::Varchar(10),
+        DataType::Varchar(10),
+        DataType::BigInt,
+        DataType::Varchar(10),
+    ];
+    // A NULL between two var-len values: the first one's payload must end
+    // where the next non-NULL payload starts.
+    let row = vec![
+        Some(DataValue::Int(7)),
+        Some(DataValue::Varchar("ab".into())),
+        None,
+        Some(DataValue::BigInt(-3)),
+        Some(DataValue::Varchar("xyz".into())),
+    ];
+    let bytes = serialize_nullable_typed_row(&schema, &row).unwrap();
+
+    assert_eq!(RowDecoder::new(&schema).decode(&bytes).unwrap(), row);
+    assert_eq!(
+        RowDecoder::new(&schema)
+            .only([1, 3])
+            .decode(&bytes)
+            .unwrap(),
+        vec![
+            None,
+            Some(DataValue::Varchar("ab".into())),
+            None,
+            Some(DataValue::BigInt(-3)),
+            None
+        ]
+    );
+    assert_eq!(
+        RowDecoder::new(&schema).only([]).decode(&bytes).unwrap(),
+        vec![None; 5]
+    );
+}

@@ -24,6 +24,8 @@ pub struct SeqScanOperator {
     column_info: Vec<ColumnInfo>,
     /// Data types in PHYSICAL column order (used for correct deserialisation).
     schema_types: Vec<DataType>,
+    /// Decoder for rows of `schema_types`, built once for the scan.
+    decoder: crate::types::RowDecoder,
     /// Optional mapping from view column position to physical column position.
     /// When non-empty, deserialised values are reordered from physical order
     /// to view column order before being yielded.
@@ -46,6 +48,7 @@ impl SeqScanOperator {
             heap_manager,
             scan_iter,
             column_info,
+            decoder: crate::types::RowDecoder::new(&schema_types),
             schema_types,
             column_mapping: identity,
             exhausted: false,
@@ -72,10 +75,18 @@ impl SeqScanOperator {
             heap_manager,
             scan_iter,
             column_info,
+            decoder: crate::types::RowDecoder::new(&schema_types),
             schema_types,
             column_mapping,
             exhausted: false,
         }
+    }
+
+    /// Decode only the columns at these PHYSICAL positions; the others are
+    /// produced as NULL. For a query that reads only some of the columns.
+    pub fn read_only(mut self, physical_columns: impl IntoIterator<Item = usize>) -> Self {
+        self.decoder = self.decoder.only(physical_columns);
+        self
     }
 }
 
@@ -90,11 +101,9 @@ impl PhysicalOperator for SeqScanOperator {
         match self.scan_iter.next() {
             Some(Ok((page_id, slot_id, raw_bytes))) => {
                 // Deserialise the raw tuple bytes using PHYSICAL column schema
-                let phys_values =
-                    crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
-                        .map_err(|e| {
-                            RookError::Internal(format!("Failed to deserialise tuple: {}", e))
-                        })?;
+                let phys_values = self.decoder.decode(&raw_bytes).map_err(|e| {
+                    RookError::Internal(format!("Failed to deserialise tuple: {}", e))
+                })?;
 
                 // Reorder values from physical order to view column order
                 let values: Vec<Option<DataValue>> = if self.column_mapping.len()
@@ -140,11 +149,9 @@ impl PhysicalOperator for SeqScanOperator {
         while batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
             match self.scan_iter.next() {
                 Some(Ok((page_id, slot_id, raw_bytes))) => {
-                    let phys_values =
-                        crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
-                            .map_err(|e| {
-                                RookError::Internal(format!("Failed to deserialise tuple: {}", e))
-                            })?;
+                    let phys_values = self.decoder.decode(&raw_bytes).map_err(|e| {
+                        RookError::Internal(format!("Failed to deserialise tuple: {}", e))
+                    })?;
 
                     let values = if is_identity {
                         phys_values

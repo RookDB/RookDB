@@ -195,123 +195,159 @@ fn serialize_encoded(
     Ok(buf)
 }
 
-/// Decode a serialized row back into typed values (logical order).
-/// `total_row_size` must be the byte length of `row_bytes` (available from
-/// the slot directory); it is used to derive the last var-len payload length.
+/// Deserialize a row encoded by [`serialize_nullable_row`] /
+/// [`serialize_nullable_typed_row`] into one value per column (`None` for
+/// NULL).
+///
+/// Callers decoding many rows of one schema should build a [`RowDecoder`]
+/// once instead; this computes the row layout on every call.
 pub fn deserialize_nullable_row(
     schema: &[DataType],
     row_bytes: &[u8],
 ) -> Result<Vec<Option<DataValue>>, String> {
-    let total_row_size = row_bytes.len();
+    RowDecoder::new(schema).decode(row_bytes)
+}
 
-    if total_row_size < 4 {
-        return Err("Row too short to contain header".to_string());
-    }
+/// Where one logical column's bytes are in a row.
+#[derive(Debug, Clone, Copy)]
+enum ColumnSlot {
+    /// A fixed-length column: its byte range relative to the row start.
+    Fixed { start: usize, size: usize },
+    /// A variable-length column: its rank in the var-len offset table.
+    Varlen { rank: usize },
+}
 
-    // ── Header ────────────────────────────────────────────────────────────────
-    let num_cols_stored = u16::from_le_bytes([row_bytes[0], row_bytes[1]]) as usize;
-    let num_varlen_stored = u16::from_le_bytes([row_bytes[2], row_bytes[3]]) as usize;
+/// Decodes rows of one schema.
+///
+/// The row layout is computed once, when the decoder is built; decoding a
+/// row allocates only the values it returns. [`RowDecoder::only`] restricts
+/// decoding to the columns a query reads: the others come back as `None`
+/// without being looked at.
+#[derive(Debug, Clone)]
+pub struct RowDecoder {
+    schema: Vec<DataType>,
+    slots: Vec<ColumnSlot>,
+    /// Columns to decode, by logical position.
+    wanted: Vec<bool>,
+    num_varlen: usize,
+    varlen_table_start: usize,
+    min_row_size: usize,
+}
 
-    if num_cols_stored != schema.len() {
-        return Err(format!(
-            "Header column count {} does not match schema length {}",
-            num_cols_stored,
-            schema.len()
-        ));
-    }
-
-    let physical = PhysicalSchema::from_logical(schema);
-    let layout = RowLayout::compute(&physical);
-
-    if num_varlen_stored != physical.num_varlen() {
-        return Err(format!(
-            "Header var-len count {} does not match schema var-len count {}",
-            num_varlen_stored,
-            physical.num_varlen()
-        ));
-    }
-
-    if total_row_size < layout.min_row_size() {
-        return Err(format!(
-            "Row ({} bytes) shorter than minimum layout size ({} bytes)",
-            total_row_size,
-            layout.min_row_size()
-        ));
-    }
-
-    // ── Null bitmap ───────────────────────────────────────────────────────────
-    let bm_start = RowLayout::bitmap_offset();
-    let bitmap = NullBitmap::from_bytes(
-        schema.len(),
-        &row_bytes[bm_start..bm_start + layout.null_bitmap_size],
-    )?;
-
-    // ── Var-len offset table ───────────────────────────────────────────────────
-    let vt_start = layout.varlen_table_offset();
-    let mut varlen_offsets: Vec<Option<usize>> = Vec::with_capacity(physical.num_varlen());
-
-    for vl_rank in 0..physical.num_varlen() {
-        let slot = vt_start + vl_rank * 2;
-        let raw = u16::from_le_bytes([row_bytes[slot], row_bytes[slot + 1]]) as usize;
-        // 0x0000 = NULL sentinel; bitmap is authoritative but we read the table anyway
-        varlen_offsets.push(if raw == 0 { None } else { Some(raw) });
-    }
-
-    // Build a lookup: varlen physical-group rank → row-byte range
-    // length[k] = offset[k+1] - offset[k];  length[last] = total_row_size - offset[last]
-    let mut varlen_ranges: Vec<Option<(usize, usize)>> = vec![None; physical.num_varlen()];
-
-    // Collect non-null offsets with their ranks for range computation
-    let non_null_slots: Vec<(usize, usize)> = varlen_offsets
-        .iter()
-        .enumerate()
-        .filter_map(|(rank, opt)| opt.map(|off| (rank, off)))
-        .collect();
-
-    for (i, &(rank, start)) in non_null_slots.iter().enumerate() {
-        let end = if i + 1 < non_null_slots.len() {
-            non_null_slots[i + 1].1 // start of next non-null var-len col
-        } else {
-            total_row_size // last payload extends to end of row
-        };
-        varlen_ranges[rank] = Some((start, end));
-    }
-
-    // ── Decode columns in logical order ───────────────────────────────────────
-    let mut out: Vec<Option<DataValue>> = vec![None; schema.len()];
-
-    for log_idx in 0..schema.len() {
-        if bitmap.is_null(log_idx) {
-            out[log_idx] = None;
-            continue;
+impl RowDecoder {
+    pub fn new(schema: &[DataType]) -> Self {
+        let physical = PhysicalSchema::from_logical(schema);
+        let layout = RowLayout::compute(&physical);
+        let slots = (0..schema.len())
+            .map(|log_idx| {
+                let phys_idx = physical.logical_to_physical[log_idx];
+                match schema[log_idx].fixed_size() {
+                    Some(size) if schema[log_idx].is_fixed_length() => ColumnSlot::Fixed {
+                        start: layout.fixed_data_start + layout.fixed_col_offsets[phys_idx],
+                        size: size as usize,
+                    },
+                    _ => ColumnSlot::Varlen {
+                        rank: phys_idx - physical.num_fixed(),
+                    },
+                }
+            })
+            .collect();
+        RowDecoder {
+            schema: schema.to_vec(),
+            slots,
+            wanted: vec![true; schema.len()],
+            num_varlen: physical.num_varlen(),
+            varlen_table_start: layout.varlen_table_offset(),
+            min_row_size: layout.min_row_size(),
         }
+    }
 
-        let ty = &schema[log_idx];
-        let phys_idx = physical.logical_to_physical[log_idx];
-
-        if ty.is_fixed_length() {
-            // rank within the fixed group = phys_idx (fixed cols occupy 0..n_fixed)
-            let rank = phys_idx;
-            let col_start = layout.fixed_data_start + layout.fixed_col_offsets[rank];
-            let col_size =
-                ty.fixed_size()
-                    .expect("fixed-length type must have fixed_size") as usize;
-            let value = DataValue::from_bytes(ty, &row_bytes[col_start..col_start + col_size])?;
-            out[log_idx] = Some(value);
-        } else {
-            // var-len column — rank within the var-len group
-            let vl_rank = phys_idx - physical.num_fixed();
-            if let Some((start, end)) = varlen_ranges[vl_rank] {
-                // Pass exact payload bytes to the decoder
-                let payload = &row_bytes[start..end];
-                let value = DataValue::from_bytes(ty, payload)?;
-                out[log_idx] = Some(value);
+    /// Decode only the columns at the given logical positions.
+    pub fn only(mut self, columns: impl IntoIterator<Item = usize>) -> Self {
+        self.wanted = vec![false; self.schema.len()];
+        for c in columns {
+            if let Some(w) = self.wanted.get_mut(c) {
+                *w = true;
             }
-            // else: offset was 0x0000 but bitmap said non-null — treat as null
         }
+        self
     }
 
-    Ok(out)
+    /// Decode one row into a new vector.
+    pub fn decode(&self, row: &[u8]) -> Result<Vec<Option<DataValue>>, String> {
+        let mut out = Vec::with_capacity(self.schema.len());
+        self.decode_into(row, &mut out)?;
+        Ok(out)
+    }
+
+    /// Decode one row into `out`, replacing its contents.
+    pub fn decode_into(&self, row: &[u8], out: &mut Vec<Option<DataValue>>) -> Result<(), String> {
+        if row.len() < 4 {
+            return Err("Row too short to contain header".to_string());
+        }
+        let num_cols_stored = u16::from_le_bytes([row[0], row[1]]) as usize;
+        let num_varlen_stored = u16::from_le_bytes([row[2], row[3]]) as usize;
+        if num_cols_stored != self.schema.len() {
+            return Err(format!(
+                "Header column count {} does not match schema length {}",
+                num_cols_stored,
+                self.schema.len()
+            ));
+        }
+        if num_varlen_stored != self.num_varlen {
+            return Err(format!(
+                "Header var-len count {} does not match schema var-len count {}",
+                num_varlen_stored, self.num_varlen
+            ));
+        }
+        if row.len() < self.min_row_size {
+            return Err(format!(
+                "Row ({} bytes) shorter than minimum layout size ({} bytes)",
+                row.len(),
+                self.min_row_size
+            ));
+        }
+
+        out.clear();
+        for (log_idx, slot) in self.slots.iter().enumerate() {
+            let is_null = row[4 + log_idx / 8] & (1 << (log_idx % 8)) != 0;
+            if is_null || !self.wanted[log_idx] {
+                out.push(None);
+                continue;
+            }
+            let ty = &self.schema[log_idx];
+            let value = match *slot {
+                ColumnSlot::Fixed { start, size } => {
+                    Some(DataValue::from_bytes(ty, &row[start..start + size])?)
+                }
+                ColumnSlot::Varlen { rank } => match self.varlen_range(row, rank) {
+                    Some((start, end)) => Some(DataValue::from_bytes(ty, &row[start..end])?),
+                    // Offset 0 with the bitmap saying non-NULL: treated as NULL.
+                    None => None,
+                },
+            };
+            out.push(value);
+        }
+        Ok(())
+    }
+
+    /// Byte range of the var-len payload of rank `rank`: from its offset to
+    /// the next non-NULL payload's offset, or the end of the row.
+    fn varlen_range(&self, row: &[u8], rank: usize) -> Option<(usize, usize)> {
+        let offset_at = |r: usize| {
+            let slot = self.varlen_table_start + r * 2;
+            u16::from_le_bytes([row[slot], row[slot + 1]]) as usize
+        };
+        let start = offset_at(rank);
+        if start == 0 {
+            return None;
+        }
+        let end = (rank + 1..self.num_varlen)
+            .map(offset_at)
+            .find(|&o| o != 0)
+            .unwrap_or(row.len());
+        Some((start, end))
+    }
 }
 
 // ── Row struct ────────────────────────────────────────────────────────────────
