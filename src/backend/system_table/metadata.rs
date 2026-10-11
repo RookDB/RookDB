@@ -626,6 +626,67 @@ pub fn rename_column_in_constraints(
     Ok(count)
 }
 
+/// Point every FOREIGN KEY row of `child_tables` that references `old_name`
+/// at `new_name`. Called after a table rename so its children keep finding
+/// their parent. Returns the number of rows rewritten.
+pub fn rename_referenced_table_in_constraints(
+    db_name: &str,
+    child_tables: &[String],
+    old_name: &str,
+    new_name: &str,
+) -> std::io::Result<usize> {
+    let constr_path = sys_path("constraints");
+    if !constr_path.exists() {
+        return Ok(0);
+    }
+    let child_ids: Vec<i32> = child_tables
+        .iter()
+        .filter_map(|t| resolve_table_id(db_name, t).ok().map(|(id, _)| id))
+        .collect();
+
+    let mut heap = crate::backend::heap::HeapManager::open(constr_path.clone())?;
+    let mut updates: Vec<(u32, u32, Vec<Option<String>>)> = Vec::new();
+
+    for result in heap.scan() {
+        let (page_id, slot_id, raw_bytes) = result?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if decoded.len() < 6 {
+            continue;
+        }
+        let owned_by_child = matches!(
+            &decoded[1],
+            Some(crate::types::DataValue::Int(id)) if child_ids.contains(id)
+        );
+        let references_old = matches!(
+            &decoded[4],
+            Some(crate::types::DataValue::Varchar(t)) | Some(crate::types::DataValue::Char(t))
+                if t.trim().eq_ignore_ascii_case(old_name)
+        );
+        if !owned_by_child || !references_old {
+            continue;
+        }
+        let mut row: Vec<Option<String>> = decoded
+            .iter()
+            .map(|v| v.as_ref().map(value_to_string))
+            .collect();
+        row[4] = Some(new_name.to_string());
+        updates.push((page_id, slot_id, row));
+    }
+
+    for (page_id, slot_id, _) in &updates {
+        heap.delete_tuple(*page_id, *slot_id)?;
+    }
+    for (_, _, row) in &updates {
+        let str_refs: Vec<Option<&str>> = row.iter().map(|opt| opt.as_deref()).collect();
+        let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        heap.insert_tuple(&tuple_bytes)?;
+    }
+    heap.flush()?;
+    Ok(updates.len())
+}
+
 /// Delete all system table metadata for an entire database.
 ///
 /// Deletes the database entry from `sys_databases`, all its tables from
