@@ -64,6 +64,15 @@ pub const INDEX_POOL_CAPACITY: usize = 256;
 /// node keeps at least two keys.
 pub const MAX_ENCODED_KEY_SIZE: usize = (BTREE_PAGE_SIZE - LEAF_HEADER) / 3 - VALUE_SIZE;
 
+/// Encoded size of an index key, for callers that must reject an oversized
+/// key before changing anything.
+pub fn encoded_key_len(keys: &[DataValue]) -> io::Result<usize> {
+    match keys {
+        [single] => Ok(encode_key(single).len()),
+        _ => encode_key_multi(keys).map(|k| k.len()),
+    }
+}
+
 /// Index at which to split `keys` so both halves hold about the same number
 /// of bytes. `pointer_size` is the per-entry value or child pointer. Always
 /// leaves at least one key on each side.

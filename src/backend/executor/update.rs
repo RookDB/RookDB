@@ -897,6 +897,45 @@ pub fn update_by_pointers(
         ));
     }
 
+    // An index rejects keys above its size limit. Check before Phase 2: once
+    // rows are rewritten, a failed index update would leave them invisible
+    // to index scans.
+    if let Some(ref m) = meta {
+        for (idx_name, idx_cols, _) in &m.named_indexes {
+            let col_indices: Vec<usize> = idx_cols
+                .iter()
+                .filter_map(|c| {
+                    columns
+                        .iter()
+                        .position(|col| col.name.eq_ignore_ascii_case(c))
+                })
+                .collect();
+            if col_indices.len() != idx_cols.len() {
+                continue;
+            }
+            for pu in &pending_updates {
+                let key: Option<Vec<DataValue>> = col_indices
+                    .iter()
+                    .map(|&i| pu.updated_values.get(i).cloned().flatten())
+                    .collect();
+                // A NULL in the key is not indexed.
+                let Some(key) = key else { continue };
+                let len = crate::backend::index::btree::encoded_key_len(&key)?;
+                if len > crate::backend::index::btree::MAX_ENCODED_KEY_SIZE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "index key of {} bytes for index '{}' exceeds the maximum of {} bytes",
+                            len,
+                            idx_name,
+                            crate::backend::index::btree::MAX_ENCODED_KEY_SIZE
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     // Phase 2: apply every pending update.
     //
     // A new row image of the same length is written over the old one: the row
