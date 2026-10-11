@@ -35,6 +35,9 @@ mod tests;
 // Re-export everything from submodules
 pub use insert::{InsertOperator, ValuesOperator};
 pub use joins::{HashJoinOperator, IndexNestedLoopJoinOperator, JoinType, NestedLoopJoinOperator};
+pub use joins::{
+    SPILL_BUDGET_BYTES as HASH_JOIN_SPILL_BUDGET_BYTES, SPILL_COUNT as HASH_JOIN_SPILL_COUNT,
+};
 pub use scans::{IndexScanMode, IndexScanOperator, SeqScanOperator};
 pub use trait_::{DEFAULT_BATCH_SIZE, PhysicalOperator};
 

@@ -309,10 +309,20 @@ impl PhysicalOperator for NestedLoopJoinOperator {
 
 /// A hash join operator for equality joins.
 ///
-/// Builds a hash table on the left (build) side, then probes with the
-/// right (probe) side. Only supports INNER joins with equality conditions.
+/// Builds a hash table on one input (the build side) and streams the other
+/// (the probe side) past it, so rows come out as soon as the build side has
+/// been read. Supports INNER, LEFT, RIGHT and FULL joins: a probe row without
+/// a partner is NULL-extended as it passes, a build row without one after the
+/// probe side ends.
 ///
-/// For non-equality conditions or outer joins, use NestedLoopJoinOperator.
+/// The build side is held in memory up to a byte budget (see
+/// [`SPILL_BUDGET_BYTES`]). Past it both inputs are hash-partitioned to temp
+/// files and joined one partition at a time. A partition that is itself over
+/// budget is split again with a different hash seed; one that cannot be split
+/// (a single hot key) is joined in budget-sized blocks of build rows, each
+/// block against the whole probe partition.
+///
+/// For non-equality conditions use NestedLoopJoinOperator.
 pub struct HashJoinOperator {
     build: Box<dyn PhysicalOperator>,
     probe: Box<dyn PhysicalOperator>,
@@ -322,79 +332,259 @@ pub struct HashJoinOperator {
     probe_keys: Vec<Expr>,
     /// Any remaining predicate (non-equality conditions that must also be satisfied).
     remaining_predicate: Option<Predicate>,
-    /// Output schema.
+    /// Output schema (left columns + right columns).
     output_schema: Vec<ColumnInfo>,
+    /// Child schemas, copied once so no call clones them again.
+    build_schema: Vec<ColumnInfo>,
+    probe_schema: Vec<ColumnInfo>,
+    /// True when the build side is the left input; decides the column order
+    /// of the joined row.
+    build_is_left: bool,
+    /// Unmatched build rows are emitted NULL-extended.
+    preserve_build: bool,
+    /// Unmatched probe rows are emitted NULL-extended.
+    preserve_probe: bool,
+    /// Per-operator budget; `None` uses [`SPILL_BUDGET_BYTES`].
+    budget_override: Option<usize>,
+    /// Budget in force for the current run (bytes).
+    budget: usize,
 
     // ── Runtime state ──
-    /// Hash table: key values → list of build tuples.
-    hash_table: HashMap<Vec<DataValue>, Vec<Tuple>>,
-    /// All probe tuples (for replay during reset).
-    probe_tuples: Vec<Tuple>,
-    /// Current position in probe_tuples.
-    probe_pos: usize,
-    /// Current batch of matching build tuples for the current probe tuple.
-    current_matches: Vec<Tuple>,
-    /// Current position within current_matches.
+    phase: HashJoinPhase,
+    /// Build rows currently in memory: the whole build side, one spilled
+    /// partition, or one block of a partition too large to load.
+    build_rows: Vec<Tuple>,
+    /// Hash table: key values → positions in `build_rows`.
+    hash_table: HashMap<Vec<DataValue>, Vec<u32>>,
+    /// Which `build_rows` found a partner (only kept when `preserve_build`).
+    build_matched: Vec<bool>,
+    /// Estimated size of `build_rows` and their hash entries.
+    build_bytes: usize,
+    /// Largest `build_bytes` seen (diagnostics/tests).
+    peak_build_bytes: usize,
+    /// Probe rows fetched from the child and not yet joined (reversed, so
+    /// the next row is popped from the end).
+    probe_buf: Vec<Tuple>,
+    /// The probe row being joined.
+    cur_probe: Option<Tuple>,
+    /// `build_rows` positions sharing the current probe row's key.
+    cur_matches: Vec<u32>,
+    /// Current position within `cur_matches`.
     match_pos: usize,
-    /// Whether build phase is complete.
-    build_done: bool,
-    /// Whether all output has been consumed.
-    exhausted: bool,
+    /// Whether the current probe row has produced a joined row.
+    cur_matched: bool,
+    /// Scratch buffer for the probe row's key.
+    key_buf: Vec<DataValue>,
+    /// Next `build_rows` position to check for an unmatched build row.
+    unmatched_pos: usize,
 
     // ── Spill state (grace hash join) ──
-    /// Build tuples buffered before the memory budget is exceeded.
-    build_buffer: Vec<Tuple>,
-    /// Total build tuples currently held in `hash_table`.
-    build_count: usize,
-    /// `Some` once the build side spilled: both sides are hash-partitioned
-    /// to temp files and joined partition-by-partition.
+    /// `Some` once the build side spilled.
     spill: Option<SpillState>,
     /// True once this join has taken the spill path (stays set after the
     /// temp files are cleaned up — useful for tests and diagnostics).
     did_spill: bool,
+    /// The partition being joined.
+    cur_part: Option<SpillPartition>,
+    /// Build rows of `cur_part` not yet loaded.
+    build_reader: Option<SpillReader>,
+    /// A build row read past the end of the current block.
+    pending_build: Option<Tuple>,
+    /// Probe rows of `cur_part`; `None` while probing straight from the child.
+    probe_reader: Option<SpillReader>,
+    /// First / last block of `cur_part`. Both are true when the partition's
+    /// build side fits in memory, and when the join never spilled.
+    block_first: bool,
+    block_last: bool,
+    /// For a partition joined in several blocks: which probe rows matched in
+    /// any block so far, by position in the probe file.
+    probe_matched: Vec<bool>,
+    /// Position of the current probe row in the probe file.
+    probe_ord: usize,
+    /// NULL-keyed rows of a preserved side being emitted, with their side.
+    null_reader: Option<(SpillReader, usize)>,
 }
 
-/// Tunable in-memory budget for the hash-join build side (tuples).
-/// 0 means "unset" → [`DEFAULT_SPILL_BUDGET`]. Tests shrink it to force the
-/// spill path; operators can raise it via `ROOK_HASH_JOIN_BUDGET`.
-pub static SPILL_BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-const DEFAULT_SPILL_BUDGET: usize = 100_000;
-/// Hash partitions created when spilling. Memory is then bounded by the
-/// largest partition rather than the whole build side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashJoinPhase {
+    /// Nothing read yet.
+    Build,
+    /// Joining probe rows against `build_rows`.
+    Probe,
+    /// Emitting the unmatched rows of `build_rows`.
+    BuildUnmatched,
+    /// Picking the next spilled partition.
+    NextPartition,
+    /// Emitting the NULL-keyed rows set aside while spilling.
+    NullKeys,
+    Done,
+}
+
+/// In-memory budget for the hash-join build side, in bytes. 0 means "unset":
+/// the `ROOK_HASH_JOIN_BUDGET_BYTES` environment variable if present, else
+/// [`DEFAULT_SPILL_BUDGET_BYTES`]. Tests shrink it to force the spill path.
+pub static SPILL_BUDGET_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+const DEFAULT_SPILL_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+/// Hash joins that have spilled in this process (diagnostics/tests).
+pub static SPILL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Hash partitions created when the build side first spills.
 const SPILL_PARTITIONS: usize = 64;
+/// Sub-partitions created when a spilled partition is itself over budget.
+const REPARTITION_FANOUT: usize = 16;
+/// How many times a partition may be split again before it is joined in
+/// blocks instead.
+const MAX_SPILL_DEPTH: u32 = 3;
+/// Share of the hash table charged to each build row (key vector, bucket
+/// and position list).
+const HASH_ENTRY_OVERHEAD: usize = 96;
+
+/// Indexes into [`SpillState::null_rows`].
+const BUILD_SIDE: usize = 0;
+const PROBE_SIDE: usize = 1;
 
 fn spill_budget() -> usize {
-    let configured = SPILL_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    let configured = SPILL_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
     if configured > 0 {
         return configured;
     }
     static ENV: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *ENV.get_or_init(|| {
-        std::env::var("ROOK_HASH_JOIN_BUDGET")
+        std::env::var("ROOK_HASH_JOIN_BUDGET_BYTES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n >= 16)
-            .unwrap_or(DEFAULT_SPILL_BUDGET)
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_SPILL_BUDGET_BYTES)
     })
 }
 
-/// Temp files for one spilled hash join: both sides partitioned by
-/// `hash(key) % SPILL_PARTITIONS`.
+/// Estimated memory held by one build row: the tuple, its string payloads
+/// and its share of the hash table.
+fn estimate_tuple_bytes(tuple: &Tuple) -> usize {
+    let mut bytes = std::mem::size_of::<Tuple>()
+        + HASH_ENTRY_OVERHEAD
+        + tuple.values.len() * std::mem::size_of::<Option<DataValue>>();
+    for value in tuple.values.iter().flatten() {
+        if let DataValue::Char(s) | DataValue::Varchar(s) | DataValue::Bit(s) = value {
+            bytes += s.len();
+        }
+    }
+    bytes
+}
+
+fn spill_error(e: std::io::Error) -> RookError {
+    RookError::Io(e).with_context("hash join spill")
+}
+
+/// One spilled run of tuples.
+struct SpillFile {
+    path: PathBuf,
+    rows: usize,
+    /// Sum of [`estimate_tuple_bytes`] over the rows: what loading the file
+    /// as a build side would cost.
+    bytes: usize,
+}
+
+impl SpillFile {
+    fn remove(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+struct SpillWriter {
+    file: SpillFile,
+    out: std::io::BufWriter<std::fs::File>,
+    buf: Vec<u8>,
+}
+
+impl SpillWriter {
+    fn create(path: PathBuf) -> RookResult<Self> {
+        let out = std::io::BufWriter::new(std::fs::File::create(&path).map_err(spill_error)?);
+        Ok(Self {
+            file: SpillFile {
+                path,
+                rows: 0,
+                bytes: 0,
+            },
+            out,
+            buf: Vec::with_capacity(128),
+        })
+    }
+
+    fn write(&mut self, tuple: &Tuple) -> RookResult<()> {
+        use std::io::Write;
+        self.buf.clear();
+        encode_tuple(tuple, &mut self.buf);
+        self.out.write_all(&self.buf).map_err(spill_error)?;
+        self.file.rows += 1;
+        self.file.bytes += estimate_tuple_bytes(tuple);
+        Ok(())
+    }
+
+    fn finish(self) -> RookResult<SpillFile> {
+        self.out
+            .into_inner()
+            .map_err(|e| spill_error(e.into_error()))?;
+        Ok(self.file)
+    }
+}
+
+struct SpillReader {
+    input: std::io::BufReader<std::fs::File>,
+    remaining: usize,
+}
+
+impl SpillReader {
+    fn open(file: &SpillFile) -> RookResult<Self> {
+        let input = std::fs::File::open(&file.path).map_err(spill_error)?;
+        Ok(Self {
+            input: std::io::BufReader::new(input),
+            remaining: file.rows,
+        })
+    }
+
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        self.remaining -= 1;
+        decode_tuple(&mut self.input).map(Some).map_err(spill_error)
+    }
+}
+
+/// Both sides of one hash partition.
+struct SpillPartition {
+    build: SpillFile,
+    probe: SpillFile,
+    /// How many times these rows have been partitioned; also the hash seed
+    /// that produced this partition.
+    depth: u32,
+    /// False when splitting the parent left the whole build side in this
+    /// one partition, so another split would not shrink it.
+    splittable: bool,
+}
+
+impl SpillPartition {
+    fn remove(&self) {
+        self.build.remove();
+        self.probe.remove();
+    }
+}
+
+/// Temp files of one spilled hash join.
 struct SpillState {
     dir: PathBuf,
-    /// Partition currently being joined (0-based); `>= SPILL_PARTITIONS`
-    /// means all partitions are done.
-    part: usize,
-    build_paths: Vec<PathBuf>,
-    probe_paths: Vec<PathBuf>,
-    /// Open writers for the build side (taken/flushed when the build
-    /// stream ends) and probe side (flushed when the probe stream ends).
-    build_writers: Vec<std::io::BufWriter<std::fs::File>>,
-    probe_writers: Vec<std::io::BufWriter<std::fs::File>>,
+    next_file: usize,
+    /// Partitions still to join.
+    pending: Vec<SpillPartition>,
+    /// NULL-keyed rows of a preserved side ([`BUILD_SIDE`] / [`PROBE_SIDE`]).
+    /// They match nothing, so they skip partitioning and are emitted
+    /// NULL-extended at the end.
+    null_rows: [Option<SpillWriter>; 2],
 }
 
 impl SpillState {
-    fn create(build_types: Vec<DataType>, probe_types: Vec<DataType>) -> std::io::Result<Self> {
+    fn create() -> RookResult<Self> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -402,29 +592,68 @@ impl SpillState {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&dir)?;
-
-        let mut build_paths = Vec::with_capacity(SPILL_PARTITIONS);
-        let mut probe_paths = Vec::with_capacity(SPILL_PARTITIONS);
-        let mut build_writers = Vec::with_capacity(SPILL_PARTITIONS);
-        let mut probe_writers = Vec::with_capacity(SPILL_PARTITIONS);
-        for p in 0..SPILL_PARTITIONS {
-            let bp = dir.join(format!("build_{p}.bin"));
-            let pp = dir.join(format!("probe_{p}.bin"));
-            build_writers.push(std::io::BufWriter::new(std::fs::File::create(&bp)?));
-            probe_writers.push(std::io::BufWriter::new(std::fs::File::create(&pp)?));
-            build_paths.push(bp);
-            probe_paths.push(pp);
-        }
-        let _ = (build_types, probe_types);
+        std::fs::create_dir_all(&dir).map_err(spill_error)?;
         Ok(Self {
             dir,
-            part: 0,
-            build_paths,
-            probe_paths,
-            build_writers,
-            probe_writers,
+            next_file: 0,
+            pending: Vec::new(),
+            null_rows: [None, None],
         })
+    }
+
+    fn writer(&mut self) -> RookResult<SpillWriter> {
+        let path = self.dir.join(format!("run_{}.bin", self.next_file));
+        self.next_file += 1;
+        SpillWriter::create(path)
+    }
+
+    fn writers(&mut self, count: usize) -> RookResult<Vec<SpillWriter>> {
+        (0..count).map(|_| self.writer()).collect()
+    }
+
+    /// Send a row to the partition of its key. A NULL-keyed row goes to
+    /// `null_side`'s file, or nowhere when that side is not preserved.
+    fn route(
+        &mut self,
+        writers: &mut [SpillWriter],
+        key: Option<&[DataValue]>,
+        tuple: &Tuple,
+        depth: u32,
+        null_side: Option<usize>,
+    ) -> RookResult<()> {
+        match (key, null_side) {
+            (Some(key), _) => writers[partition_of(key, depth, writers.len())].write(tuple),
+            (None, Some(side)) => {
+                if self.null_rows[side].is_none() {
+                    self.null_rows[side] = Some(self.writer()?);
+                }
+                self.null_rows[side]
+                    .as_mut()
+                    .expect("writer just created")
+                    .write(tuple)
+            }
+            (None, None) => Ok(()),
+        }
+    }
+
+    /// Queue the partitions written at `depth`. `splittable` is false when
+    /// the build rows all landed in one of them.
+    fn push_partitions(
+        &mut self,
+        build: Vec<SpillWriter>,
+        probe: Vec<SpillWriter>,
+        depth: u32,
+    ) -> RookResult<()> {
+        let splittable = build.iter().filter(|w| w.file.rows > 0).count() > 1;
+        for (build, probe) in build.into_iter().zip(probe) {
+            self.pending.push(SpillPartition {
+                build: build.finish()?,
+                probe: probe.finish()?,
+                depth,
+                splittable,
+            });
+        }
+        Ok(())
     }
 
     fn remove_dir(&self) {
@@ -440,77 +669,182 @@ impl Drop for HashJoinOperator {
     }
 }
 
-/// Serialise one tuple's values (schema is constant per side and stays in
-/// memory, so only values hit the disk): `[u32 arity][per value: u8 tag +
-/// u32 len + bytes]`.
-fn write_tuple_values(
-    w: &mut std::io::BufWriter<std::fs::File>,
-    tuple: &Tuple,
-    types: &[DataType],
-) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut buf = Vec::with_capacity(64);
+// Spill encoding. Each value carries a tag for its own runtime type, so a
+// row reads back exactly as it was written whatever the column was declared
+// as: `[u32 arity][per value: u8 tag + payload]`.
+const TAG_NULL: u8 = 0;
+const TAG_SMALLINT: u8 = 1;
+const TAG_INT: u8 = 2;
+const TAG_BIGINT: u8 = 3;
+const TAG_REAL: u8 = 4;
+const TAG_DOUBLE: u8 = 5;
+const TAG_NUMERIC: u8 = 6;
+const TAG_BOOL: u8 = 7;
+const TAG_CHAR: u8 = 8;
+const TAG_VARCHAR: u8 = 9;
+const TAG_DATE: u8 = 10;
+const TAG_TIME: u8 = 11;
+const TAG_BIT: u8 = 12;
+const TAG_TIMESTAMP: u8 = 13;
+
+fn encode_tuple(tuple: &Tuple, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&(tuple.values.len() as u32).to_le_bytes());
-    for (i, v) in tuple.values.iter().enumerate() {
-        match v {
-            None => buf.push(0),
-            Some(dv) => {
-                buf.push(1);
-                let bytes = if let Some(ty) = types.get(i) {
-                    dv.to_bytes_for_type(ty).unwrap_or_else(|_| dv.to_bytes())
-                } else {
-                    dv.to_bytes()
-                };
-                buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                buf.extend_from_slice(&bytes);
-            }
+    for value in &tuple.values {
+        match value {
+            None => buf.push(TAG_NULL),
+            Some(dv) => encode_value(dv, buf),
         }
     }
-    w.write_all(&buf)
 }
 
-fn read_tuple_values(
-    r: &mut std::io::BufReader<std::fs::File>,
-    types: &[DataType],
-    _info: &[ColumnInfo],
-) -> std::io::Result<Option<Tuple>> {
-    use std::io::Read;
-    let mut arity_buf = [0u8; 4];
-    if r.read_exact(&mut arity_buf).is_err() {
-        return Ok(None); // clean EOF
+fn encode_value(dv: &DataValue, buf: &mut Vec<u8>) {
+    use chrono::{Datelike, Timelike};
+    fn text(tag: u8, s: &str, buf: &mut Vec<u8>) {
+        buf.push(tag);
+        buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
     }
-    let arity = u32::from_le_bytes(arity_buf) as usize;
-    let mut values = Vec::with_capacity(arity);
-    for i in 0..arity {
-        let mut tag = [0u8; 1];
-        r.read_exact(&mut tag)?;
-        if tag[0] == 0 {
-            values.push(None);
-            continue;
+    fn date(d: &chrono::NaiveDate, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&d.num_days_from_ce().to_le_bytes());
+    }
+    fn time(t: &chrono::NaiveTime, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&t.num_seconds_from_midnight().to_le_bytes());
+        buf.extend_from_slice(&t.nanosecond().to_le_bytes());
+    }
+    match dv {
+        DataValue::SmallInt(v) => {
+            buf.push(TAG_SMALLINT);
+            buf.extend_from_slice(&v.to_le_bytes());
         }
-        let mut len_buf = [0u8; 4];
-        r.read_exact(&mut len_buf)?;
-        let len = u32::from_le_bytes(len_buf) as usize;
+        DataValue::Int(v) => {
+            buf.push(TAG_INT);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        DataValue::BigInt(v) => {
+            buf.push(TAG_BIGINT);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        DataValue::Real(v) => {
+            buf.push(TAG_REAL);
+            buf.extend_from_slice(&v.0.to_le_bytes());
+        }
+        DataValue::DoublePrecision(v) => {
+            buf.push(TAG_DOUBLE);
+            buf.extend_from_slice(&v.0.to_le_bytes());
+        }
+        DataValue::Numeric(v) => {
+            buf.push(TAG_NUMERIC);
+            buf.extend_from_slice(&v.unscaled.to_le_bytes());
+            buf.push(v.scale);
+        }
+        DataValue::Bool(v) => {
+            buf.push(TAG_BOOL);
+            buf.push(u8::from(*v));
+        }
+        DataValue::Char(s) => text(TAG_CHAR, s, buf),
+        DataValue::Varchar(s) => text(TAG_VARCHAR, s, buf),
+        DataValue::Bit(s) => text(TAG_BIT, s, buf),
+        DataValue::Date(d) => {
+            buf.push(TAG_DATE);
+            date(d, buf);
+        }
+        DataValue::Time(t) => {
+            buf.push(TAG_TIME);
+            time(t, buf);
+        }
+        DataValue::Timestamp(ts) => {
+            buf.push(TAG_TIMESTAMP);
+            date(&ts.date(), buf);
+            time(&ts.time(), buf);
+        }
+    }
+}
+
+fn decode_tuple(r: &mut impl std::io::Read) -> std::io::Result<Tuple> {
+    let arity = u32::from_le_bytes(read_array(r)?) as usize;
+    let mut values = Vec::with_capacity(arity);
+    for _ in 0..arity {
+        let [tag] = read_array(r)?;
+        values.push(if tag == TAG_NULL {
+            None
+        } else {
+            Some(decode_value(tag, r)?)
+        });
+    }
+    Ok(Tuple::new(values))
+}
+
+fn read_array<const N: usize>(r: &mut impl std::io::Read) -> std::io::Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    r.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn decode_value(tag: u8, r: &mut impl std::io::Read) -> std::io::Result<DataValue> {
+    use crate::types::value::{NumericValue, OrderedF32, OrderedF64};
+    fn invalid(what: &str) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("corrupt spill file: {}", what),
+        )
+    }
+    fn text(r: &mut impl std::io::Read) -> std::io::Result<String> {
+        let len = u32::from_le_bytes(read_array(r)?) as usize;
         let mut bytes = vec![0u8; len];
         r.read_exact(&mut bytes)?;
-        let ty = types.get(i).cloned().unwrap_or(DataType::Int);
-        let dv = DataValue::from_bytes(&ty, &bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        values.push(Some(dv));
+        String::from_utf8(bytes).map_err(|_| invalid("text is not UTF-8"))
     }
-    Ok(Some(Tuple::new(values)))
+    fn date(r: &mut impl std::io::Read) -> std::io::Result<chrono::NaiveDate> {
+        chrono::NaiveDate::from_num_days_from_ce_opt(i32::from_le_bytes(read_array(r)?))
+            .ok_or_else(|| invalid("date out of range"))
+    }
+    fn time(r: &mut impl std::io::Read) -> std::io::Result<chrono::NaiveTime> {
+        let secs = u32::from_le_bytes(read_array(r)?);
+        let nanos = u32::from_le_bytes(read_array(r)?);
+        chrono::NaiveTime::from_num_seconds_from_midnight_opt(secs, nanos)
+            .ok_or_else(|| invalid("time out of range"))
+    }
+    Ok(match tag {
+        TAG_SMALLINT => DataValue::SmallInt(i16::from_le_bytes(read_array(r)?)),
+        TAG_INT => DataValue::Int(i32::from_le_bytes(read_array(r)?)),
+        TAG_BIGINT => DataValue::BigInt(i64::from_le_bytes(read_array(r)?)),
+        TAG_REAL => DataValue::Real(OrderedF32(f32::from_le_bytes(read_array(r)?))),
+        TAG_DOUBLE => DataValue::DoublePrecision(OrderedF64(f64::from_le_bytes(read_array(r)?))),
+        TAG_NUMERIC => {
+            let unscaled = i128::from_le_bytes(read_array(r)?);
+            let [scale] = read_array(r)?;
+            DataValue::Numeric(NumericValue { unscaled, scale })
+        }
+        TAG_BOOL => {
+            let [v] = read_array(r)?;
+            DataValue::Bool(v != 0)
+        }
+        TAG_CHAR => DataValue::Char(text(r)?),
+        TAG_VARCHAR => DataValue::Varchar(text(r)?),
+        TAG_BIT => DataValue::Bit(text(r)?),
+        TAG_DATE => DataValue::Date(date(r)?),
+        TAG_TIME => DataValue::Time(time(r)?),
+        TAG_TIMESTAMP => {
+            let date = date(r)?;
+            DataValue::Timestamp(date.and_time(time(r)?))
+        }
+        _ => return Err(invalid("unknown value tag")),
+    })
 }
 
 /// Partition index for a hash key (must agree between build and probe).
-fn partition_of(keys: &[DataValue]) -> usize {
+/// `depth` seeds the hash, so each split of a partition spreads its keys
+/// differently from the split that produced it.
+fn partition_of(keys: &[DataValue], depth: u32, fanout: usize) -> usize {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    depth.hash(&mut h);
     keys.hash(&mut h);
-    h.finish() as usize % SPILL_PARTITIONS
+    h.finish() as usize % fanout
 }
 
 impl HashJoinOperator {
-    /// Create a new hash join operator.
+    /// Create a new INNER hash join operator.
     ///
     /// `build` and `probe` are the child operators.
     /// `build_keys` are the expressions evaluated on the build side to form the hash key.
@@ -524,28 +858,93 @@ impl HashJoinOperator {
         probe_keys: Vec<Expr>,
         remaining_predicate: Option<Predicate>,
     ) -> Self {
-        let mut output_schema = build.schema().to_vec();
-        output_schema.extend(probe.schema().iter().cloned());
+        Self::with_join_type(
+            build,
+            probe,
+            build_keys,
+            probe_keys,
+            remaining_predicate,
+            JoinType::Inner,
+        )
+    }
+
+    /// Create a hash join of the given type. The output is always the left
+    /// columns followed by the right columns.
+    ///
+    /// A LEFT join builds on the right input and streams the left one, so
+    /// left rows keep their order and an unmatched one is NULL-extended in
+    /// place. Every other type builds on the left input. `Cross` has no
+    /// keys to hash and is treated as `Inner`.
+    pub fn with_join_type(
+        left: Box<dyn PhysicalOperator>,
+        right: Box<dyn PhysicalOperator>,
+        left_keys: Vec<Expr>,
+        right_keys: Vec<Expr>,
+        remaining_predicate: Option<Predicate>,
+        join_type: JoinType,
+    ) -> Self {
+        let mut output_schema = left.schema().to_vec();
+        output_schema.extend(right.schema().iter().cloned());
+
+        let build_is_left = join_type != JoinType::Left;
+        let (build, probe, build_keys, probe_keys) = if build_is_left {
+            (left, right, left_keys, right_keys)
+        } else {
+            (right, left, right_keys, left_keys)
+        };
+        let (preserve_build, preserve_probe) = match join_type {
+            JoinType::Inner | JoinType::Cross => (false, false),
+            // The preserved side of a LEFT or RIGHT join is the probe side.
+            JoinType::Left | JoinType::Right => (false, true),
+            JoinType::Full => (true, true),
+        };
 
         Self {
+            build_schema: build.schema().to_vec(),
+            probe_schema: probe.schema().to_vec(),
             build,
             probe,
             build_keys,
             probe_keys,
             remaining_predicate,
             output_schema,
+            build_is_left,
+            preserve_build,
+            preserve_probe,
+            budget_override: None,
+            budget: 0,
+            phase: HashJoinPhase::Build,
+            build_rows: Vec::new(),
             hash_table: HashMap::new(),
-            probe_tuples: Vec::new(),
-            probe_pos: 0,
-            current_matches: Vec::new(),
+            build_matched: Vec::new(),
+            build_bytes: 0,
+            peak_build_bytes: 0,
+            probe_buf: Vec::new(),
+            cur_probe: None,
+            cur_matches: Vec::new(),
             match_pos: 0,
-            build_done: false,
-            exhausted: false,
-            build_buffer: Vec::new(),
-            build_count: 0,
+            cur_matched: false,
+            key_buf: Vec::new(),
+            unmatched_pos: 0,
             spill: None,
             did_spill: false,
+            cur_part: None,
+            build_reader: None,
+            pending_build: None,
+            probe_reader: None,
+            block_first: true,
+            block_last: true,
+            probe_matched: Vec::new(),
+            probe_ord: 0,
+            null_reader: None,
         }
+    }
+
+    /// Hold at most `bytes` of build rows in memory for this join, instead
+    /// of the process-wide [`SPILL_BUDGET_BYTES`].
+    pub fn with_memory_budget(mut self, bytes: usize) -> Self {
+        self.budget_override = Some(bytes);
+        self
     }
 
     /// Whether this join spilled to disk (diagnostics/tests).
@@ -553,23 +952,39 @@ impl HashJoinOperator {
         self.did_spill
     }
 
+    /// Largest estimated size the in-memory build rows reached (diagnostics/tests).
+    pub fn peak_build_bytes(&self) -> usize {
+        self.peak_build_bytes
+    }
+
     /// Compute the hash key values from a tuple using a set of key expressions.
-    /// Returns `None` if any key is NULL (meaning this tuple cannot match in an
-    /// INNER hash join, since SQL NULL != NULL).
+    /// Returns `None` if any key is NULL (meaning this tuple cannot match in a
+    /// hash join, since SQL NULL != NULL).
     fn make_hash_key(
         keys: &[Expr],
         tuple: &Tuple,
         schema: &[ColumnInfo],
     ) -> RookResult<Option<Vec<DataValue>>> {
         let mut parts = Vec::with_capacity(keys.len());
+        Ok(Self::fill_hash_key(keys, tuple, schema, &mut parts)?.then_some(parts))
+    }
+
+    /// [`make_hash_key`](Self::make_hash_key) into a reused buffer. Returns
+    /// false if any key is NULL.
+    fn fill_hash_key(
+        keys: &[Expr],
+        tuple: &Tuple,
+        schema: &[ColumnInfo],
+        parts: &mut Vec<DataValue>,
+    ) -> RookResult<bool> {
+        parts.clear();
         for expr in keys {
-            let val = expr.evaluate(tuple, schema)?;
-            match val {
+            match expr.evaluate(tuple, schema)? {
                 Some(dv) => parts.push(Self::canonicalize_hash_key(dv)),
-                None => return Ok(None), // NULL key → can never match (NULL != NULL)
+                None => return Ok(false), // NULL key → can never match (NULL != NULL)
             }
         }
-        Ok(Some(parts))
+        Ok(true)
     }
 
     fn canonicalize_hash_key(dv: DataValue) -> DataValue {
@@ -578,346 +993,445 @@ impl HashJoinOperator {
 }
 
 impl HashJoinOperator {
-    /// Build the hash table from the build side.
-    /// Tuples with NULL join keys are skipped (they can never match in SQL).
-    fn build_hash_table(&mut self) -> RookResult<()> {
-        let budget = spill_budget();
-        let build_schema = self.build.schema().to_vec();
+    /// Read the build side into the hash table. If it outgrows the budget,
+    /// partition it to disk instead, and the probe side after it.
+    fn run_build(&mut self) -> RookResult<()> {
+        self.budget = self.budget_override.unwrap_or_else(spill_budget);
+        let null_side = self.preserve_build.then_some(BUILD_SIDE);
+        let mut writers: Option<Vec<SpillWriter>> = None;
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
         while self.build.next_batch(&mut child_batch)? > 0 {
             for tuple in child_batch.drain(..) {
-                // NULL-keyed tuples are skipped — they can never match (NULL != NULL)
-                let Some(key) = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)?
-                else {
-                    continue;
-                };
-
-                if self.spill.is_some() {
+                let key = Self::make_hash_key(&self.build_keys, &tuple, &self.build_schema)?;
+                if let (Some(writers), Some(spill)) = (&mut writers, &mut self.spill) {
                     // Already spilling: every tuple goes straight to its partition.
-                    let p = partition_of(&key);
-                    let types = self.build_type_cache();
-                    if let Some(spill) = &mut self.spill {
-                        write_tuple_values(&mut spill.build_writers[p], &tuple, &types)
-                            .map_err(|e| format!("hash join spill write failed: {}", e))?;
-                    }
+                    spill.route(writers, key.as_deref(), &tuple, 0, null_side)?;
                     continue;
                 }
-
-                self.hash_table.entry(key).or_default().push(tuple);
-                self.build_count += 1;
-                if self.build_count >= budget {
-                    self.begin_spill()?;
+                // A NULL-keyed tuple can never match (NULL != NULL); it is
+                // only kept when unmatched build rows are part of the result.
+                if key.is_none() && !self.preserve_build {
+                    continue;
+                }
+                self.push_build_row(key, tuple);
+                if self.build_bytes > self.budget {
+                    writers = Some(self.begin_spill()?);
                 }
             }
         }
-        self.build_done = true;
-        if self.spill.is_some() {
-            self.finish_build_spill()?;
+
+        match writers {
+            None => self.start_probe(),
+            Some(build_writers) => {
+                let probe_writers = self.partition_probe()?;
+                if let Some(spill) = &mut self.spill {
+                    spill.push_partitions(build_writers, probe_writers, 0)?;
+                }
+                self.phase = HashJoinPhase::NextPartition;
+            }
         }
         Ok(())
     }
 
-    /// Data types of the build side (cached once for the spill codec).
-    fn build_type_cache(&mut self) -> Vec<DataType> {
-        self.build
-            .schema()
-            .iter()
-            .map(|c| c.data_type.clone())
-            .collect()
-    }
-
-    fn probe_type_cache(&mut self) -> Vec<DataType> {
-        self.probe
-            .schema()
-            .iter()
-            .map(|c| c.data_type.clone())
-            .collect()
-    }
-
-    /// The in-memory build side exceeded the budget: hash-partition
-    /// everything to temp files, then keep streaming into the partitions.
-    fn begin_spill(&mut self) -> RookResult<()> {
-        let build_types = self.build_type_cache();
-        let probe_types = self.probe_type_cache();
-        let mut spill = SpillState::create(build_types, probe_types)
-            .map_err(|e| format!("hash join spill setup failed: {}", e))?;
-
-        // Drain the in-memory hash table into partitions.
-        let build_types = self.build_type_cache();
-        for (key, tuples) in self.hash_table.drain() {
-            let p = partition_of(&key);
-            for t in &tuples {
-                write_tuple_values(&mut spill.build_writers[p], t, &build_types)
-                    .map_err(|e| format!("hash join spill write failed: {}", e))?;
-            }
+    fn push_build_row(&mut self, key: Option<Vec<DataValue>>, tuple: Tuple) {
+        if let Some(key) = key {
+            self.hash_table
+                .entry(key)
+                .or_default()
+                .push(self.build_rows.len() as u32);
         }
-        self.hash_table.clear();
-        self.build_count = 0;
+        self.build_bytes += estimate_tuple_bytes(&tuple);
+        self.peak_build_bytes = self.peak_build_bytes.max(self.build_bytes);
+        self.build_rows.push(tuple);
+    }
+
+    /// The in-memory build side exceeded the budget: hash-partition what
+    /// was read so far to temp files and return the writers, so the rest of
+    /// the build stream can follow.
+    fn begin_spill(&mut self) -> RookResult<Vec<SpillWriter>> {
+        let mut spill = SpillState::create()?;
+        let mut writers = spill.writers(SPILL_PARTITIONS)?;
+        let null_side = self.preserve_build.then_some(BUILD_SIDE);
         log::info!(
-            "[HashJoin] build side exceeded {} tuples — spilling to {} partitions in {:?}",
-            spill_budget(),
+            "[HashJoin] build side exceeded {} bytes — spilling to {} partitions in {:?}",
+            self.budget,
             SPILL_PARTITIONS,
             spill.dir
         );
         self.did_spill = true;
-        self.spill = Some(spill);
-        Ok(())
-    }
-
-    /// Build stream ended while spilling: close build writers.
-    fn finish_build_spill(&mut self) -> RookResult<()> {
-        if let Some(spill) = &mut self.spill {
-            for w in spill.build_writers.drain(..) {
-                w.into_inner()
-                    .map_err(|e| format!("hash join spill flush failed: {}", e))?;
-            }
+        SPILL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.hash_table.clear();
+        self.build_bytes = 0;
+        let rows = std::mem::take(&mut self.build_rows);
+        // Own the directory before writing, so an error still cleans it up.
+        let spill = self.spill.insert(spill);
+        for tuple in &rows {
+            let key = Self::make_hash_key(&self.build_keys, tuple, &self.build_schema)?;
+            spill.route(&mut writers, key.as_deref(), tuple, 0, null_side)?;
         }
-        Ok(())
+        Ok(writers)
     }
 
-    /// Consume the probe side. In spill mode this partitions the probe
-    /// stream to disk instead of buffering it in memory.
-    fn load_probe(&mut self) -> RookResult<()> {
-        let spilling = self.spill.is_some();
-        let probe_schema = self.probe.schema().to_vec();
+    /// Spill mode: partition the whole probe stream to disk.
+    fn partition_probe(&mut self) -> RookResult<Vec<SpillWriter>> {
+        let spill = self.spill.as_mut().expect("spill state");
+        let mut writers = spill.writers(SPILL_PARTITIONS)?;
+        let null_side = self.preserve_probe.then_some(PROBE_SIDE);
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
         while self.probe.next_batch(&mut child_batch)? > 0 {
-            if !spilling {
-                self.probe_tuples.append(&mut child_batch);
-                continue;
-            }
             for tuple in child_batch.drain(..) {
-                // Spill mode: NULL-keyed probe tuples can never match — skip.
-                let Some(key) = Self::make_hash_key(&self.probe_keys, &tuple, &probe_schema)?
-                else {
-                    continue;
-                };
-                let p = partition_of(&key);
-                let types = self.probe_type_cache();
-                if let Some(spill) = &mut self.spill {
-                    write_tuple_values(&mut spill.probe_writers[p], &tuple, &types)
-                        .map_err(|e| format!("hash join spill write failed: {}", e))?;
+                let keyed = Self::fill_hash_key(
+                    &self.probe_keys,
+                    &tuple,
+                    &self.probe_schema,
+                    &mut self.key_buf,
+                )?;
+                let key = keyed.then_some(self.key_buf.as_slice());
+                spill.route(&mut writers, key, &tuple, 0, null_side)?;
+            }
+        }
+        Ok(writers)
+    }
+
+    /// `build_rows` and the hash table are ready: start joining probe rows.
+    fn start_probe(&mut self) {
+        self.build_matched.clear();
+        if self.preserve_build {
+            self.build_matched.resize(self.build_rows.len(), false);
+        }
+        self.cur_probe = None;
+        self.cur_matches.clear();
+        self.match_pos = 0;
+        self.probe_ord = 0;
+        self.unmatched_pos = 0;
+        // With nothing to match and no probe row to preserve, the probe
+        // side need not be read at all.
+        self.phase = if self.build_rows.is_empty() && !self.preserve_probe {
+            HashJoinPhase::BuildUnmatched
+        } else {
+            HashJoinPhase::Probe
+        };
+    }
+
+    /// Next probe row: from the current partition's file, else from the child.
+    fn next_probe(&mut self) -> RookResult<Option<Tuple>> {
+        if let Some(reader) = &mut self.probe_reader {
+            return reader.next();
+        }
+        if self.probe_buf.is_empty() {
+            if self.probe.next_batch(&mut self.probe_buf)? == 0 {
+                return Ok(None);
+            }
+            self.probe_buf.reverse();
+        }
+        Ok(self.probe_buf.pop())
+    }
+
+    /// Joined row in output order (left columns, then right columns).
+    fn join_row(&self, build: &Tuple, probe: &Tuple) -> Tuple {
+        let (left, right) = if self.build_is_left {
+            (build, probe)
+        } else {
+            (probe, build)
+        };
+        let mut values = Vec::with_capacity(left.values.len() + right.values.len());
+        values.extend(left.values.iter().cloned());
+        values.extend(right.values.iter().cloned());
+        Tuple::new(values)
+    }
+
+    /// One side's values with NULLs in place of the other side's columns.
+    fn null_extend(&self, values: Vec<Option<DataValue>>, is_build: bool) -> Tuple {
+        let other_arity = if is_build {
+            self.probe_schema.len()
+        } else {
+            self.build_schema.len()
+        };
+        let nulls = std::iter::repeat_n(None, other_arity);
+        let mut out = Vec::with_capacity(values.len() + other_arity);
+        if is_build == self.build_is_left {
+            out.extend(values);
+            out.extend(nulls);
+        } else {
+            out.extend(nulls);
+            out.extend(values);
+        }
+        Tuple::new(out)
+    }
+
+    /// Join probe rows against `build_rows` until one output row is ready.
+    /// Returns `None` after moving on to the next phase.
+    fn probe_step(&mut self) -> RookResult<Option<Tuple>> {
+        loop {
+            if let Some(probe) = &self.cur_probe {
+                while self.match_pos < self.cur_matches.len() {
+                    let idx = self.cur_matches[self.match_pos] as usize;
+                    self.match_pos += 1;
+                    let joined = self.join_row(&self.build_rows[idx], probe);
+                    if let Some(remaining) = &self.remaining_predicate
+                        && evaluate_predicate(remaining, &joined, &self.output_schema)?
+                            != Some(true)
+                    {
+                        continue;
+                    }
+                    self.cur_matched = true;
+                    if self.preserve_build {
+                        self.build_matched[idx] = true;
+                    }
+                    return Ok(Some(joined));
                 }
             }
-        }
-        if spilling && let Some(spill) = &mut self.spill {
-            for w in spill.probe_writers.drain(..) {
-                w.into_inner()
-                    .map_err(|e| format!("hash join spill flush failed: {}", e))?;
+
+            // The current probe row has met all its candidates.
+            if let Some(probe) = self.cur_probe.take() {
+                let ord = self.probe_ord;
+                self.probe_ord += 1;
+                if self.preserve_probe {
+                    let unmatched = if self.block_first && self.block_last {
+                        !self.cur_matched
+                    } else {
+                        // Joined in several blocks: a probe row is unmatched
+                        // only if no block matched it, known at the last one.
+                        if self.block_first {
+                            self.probe_matched.push(self.cur_matched);
+                        } else if self.cur_matched {
+                            self.probe_matched[ord] = true;
+                        }
+                        self.block_last && !self.probe_matched[ord]
+                    };
+                    if unmatched {
+                        return Ok(Some(self.null_extend(probe.values, false)));
+                    }
+                }
             }
+
+            let Some(probe) = self.next_probe()? else {
+                self.unmatched_pos = 0;
+                self.phase = HashJoinPhase::BuildUnmatched;
+                return Ok(None);
+            };
+            self.cur_matches.clear();
+            self.match_pos = 0;
+            self.cur_matched = false;
+            // A NULL probe key matches nothing (NULL != NULL).
+            if Self::fill_hash_key(
+                &self.probe_keys,
+                &probe,
+                &self.probe_schema,
+                &mut self.key_buf,
+            )? && let Some(matches) = self.hash_table.get(self.key_buf.as_slice())
+            {
+                self.cur_matches.extend_from_slice(matches);
+            }
+            self.cur_probe = Some(probe);
         }
+    }
+
+    /// Every probe row has met `build_rows`: load the next block of the
+    /// current partition, or move on to the next partition.
+    fn finish_block(&mut self) -> RookResult<()> {
+        if self.spill.is_none() {
+            self.finish();
+            return Ok(());
+        }
+        if !self.block_last {
+            self.block_first = false;
+            return self.load_block();
+        }
+        self.build_reader = None;
+        self.probe_reader = None;
+        self.probe_matched.clear();
+        if let Some(part) = self.cur_part.take() {
+            part.remove();
+        }
+        self.phase = HashJoinPhase::NextPartition;
         Ok(())
     }
 
-    /// Load partition `p`: build side into the hash table, probe side into
-    /// `probe_tuples`, resetting the match cursors. Memory is then bounded
-    /// by the largest partition rather than the whole join.
-    fn load_spill_partition(&mut self, p: usize) -> RookResult<()> {
-        self.hash_table.clear();
-        self.probe_tuples.clear();
-        self.probe_pos = 0;
-        self.current_matches.clear();
-        self.match_pos = 0;
-
-        let (build_path, probe_path) = {
-            let spill = self.spill.as_ref().expect("spill state");
-            (spill.build_paths[p].clone(), spill.probe_paths[p].clone())
+    /// Start joining the next spilled partition, splitting it first when
+    /// its build side is over budget.
+    fn next_partition(&mut self) -> RookResult<()> {
+        let Some(part) = self.spill.as_mut().and_then(|s| s.pending.pop()) else {
+            self.phase = HashJoinPhase::NullKeys;
+            return Ok(());
         };
-        let build_types = self.build_type_cache();
-        let probe_types = self.probe_type_cache();
-        let build_info = self.build.schema().to_vec();
-        let probe_info = self.probe.schema().to_vec();
-        let build_schema = self.build.schema().to_vec();
-
-        let mut br = std::io::BufReader::new(
-            std::fs::File::open(&build_path)
-                .map_err(|e| format!("hash join spill read failed: {}", e))?,
-        );
-        while let Some(tuple) = read_tuple_values(&mut br, &build_types, &build_info)
-            .map_err(|e| format!("hash join spill read failed: {}", e))?
+        // A side with no rows only matters if the other side is preserved.
+        if (part.build.rows == 0 && (part.probe.rows == 0 || !self.preserve_probe))
+            || (part.probe.rows == 0 && !self.preserve_build)
         {
-            let key = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)?;
-            if let Some(key) = key {
-                self.hash_table.entry(key).or_default().push(tuple);
+            part.remove();
+            return Ok(());
+        }
+        if part.build.bytes > self.budget
+            && part.probe.rows > 0
+            && part.splittable
+            && part.depth < MAX_SPILL_DEPTH
+        {
+            return self.repartition(part);
+        }
+        // Fits in memory, or cannot usefully be split (one hot key): the
+        // build side is loaded a budget-sized block at a time.
+        self.build_reader = Some(SpillReader::open(&part.build)?);
+        self.pending_build = None;
+        self.cur_part = Some(part);
+        self.block_first = true;
+        self.probe_matched.clear();
+        self.load_block()
+    }
+
+    /// Split an over-budget partition with the next hash seed.
+    fn repartition(&mut self, part: SpillPartition) -> RookResult<()> {
+        let depth = part.depth + 1;
+        log::info!(
+            "[HashJoin] partition of {} build bytes is over budget — splitting (depth {})",
+            part.build.bytes,
+            depth
+        );
+        let spill = self.spill.as_mut().expect("spill state");
+        let mut sides = Vec::with_capacity(2);
+        for (file, keys, schema) in [
+            (&part.build, &self.build_keys, &self.build_schema),
+            (&part.probe, &self.probe_keys, &self.probe_schema),
+        ] {
+            let mut writers = spill.writers(REPARTITION_FANOUT)?;
+            let mut reader = SpillReader::open(file)?;
+            while let Some(tuple) = reader.next()? {
+                // NULL-keyed rows were set aside before the first partitioning.
+                if Self::fill_hash_key(keys, &tuple, schema, &mut self.key_buf)? {
+                    let p = partition_of(&self.key_buf, depth, REPARTITION_FANOUT);
+                    writers[p].write(&tuple)?;
+                }
             }
+            sides.push(writers);
         }
+        part.remove();
+        let probe_writers = sides.pop().expect("probe side");
+        let build_writers = sides.pop().expect("build side");
+        spill.push_partitions(build_writers, probe_writers, depth)
+    }
 
-        let mut pr = std::io::BufReader::new(
-            std::fs::File::open(&probe_path)
-                .map_err(|e| format!("hash join spill read failed: {}", e))?,
-        );
-        while let Some(tuple) = read_tuple_values(&mut pr, &probe_types, &probe_info)
-            .map_err(|e| format!("hash join spill read failed: {}", e))?
-        {
-            self.probe_tuples.push(tuple);
+    /// Load the next block of the current partition's build side — as many
+    /// rows as the budget allows, at least one — and rewind its probe side.
+    fn load_block(&mut self) -> RookResult<()> {
+        self.hash_table.clear();
+        self.build_rows.clear();
+        self.build_bytes = 0;
+
+        let mut reader = self.build_reader.take().expect("build reader");
+        loop {
+            let tuple = match self.pending_build.take() {
+                Some(tuple) => tuple,
+                None => match reader.next()? {
+                    Some(tuple) => tuple,
+                    None => break,
+                },
+            };
+            if !self.build_rows.is_empty()
+                && self.build_bytes + estimate_tuple_bytes(&tuple) > self.budget
+            {
+                self.pending_build = Some(tuple);
+                break;
+            }
+            let key = Self::make_hash_key(&self.build_keys, &tuple, &self.build_schema)?;
+            self.push_build_row(key, tuple);
         }
+        self.block_last = self.pending_build.is_none();
+        self.build_reader = Some(reader);
+
+        let part = self.cur_part.as_ref().expect("current partition");
+        self.probe_reader = Some(SpillReader::open(&part.probe)?);
+        self.start_probe();
         Ok(())
+    }
+
+    /// Emit the NULL-keyed rows set aside while spilling. Returns `None`
+    /// once they are all out and the join is finished.
+    fn null_key_step(&mut self) -> RookResult<Option<Tuple>> {
+        loop {
+            if let Some((reader, side)) = &mut self.null_reader {
+                let is_build = *side == BUILD_SIDE;
+                if let Some(tuple) = reader.next()? {
+                    return Ok(Some(self.null_extend(tuple.values, is_build)));
+                }
+                self.null_reader = None;
+            }
+            let next = self.spill.as_mut().and_then(|spill| {
+                [BUILD_SIDE, PROBE_SIDE]
+                    .into_iter()
+                    .find_map(|side| Some((spill.null_rows[side].take()?, side)))
+            });
+            let Some((writer, side)) = next else {
+                self.finish();
+                return Ok(None);
+            };
+            self.null_reader = Some((SpillReader::open(&writer.finish()?)?, side));
+        }
+    }
+
+    /// All output produced: release memory and temp files.
+    fn finish(&mut self) {
+        self.clear_run_state();
+        self.phase = HashJoinPhase::Done;
+    }
+
+    fn clear_run_state(&mut self) {
+        self.build_rows = Vec::new();
+        self.hash_table = HashMap::new();
+        self.build_matched = Vec::new();
+        self.build_bytes = 0;
+        self.probe_buf.clear();
+        self.cur_probe = None;
+        self.cur_matches.clear();
+        self.match_pos = 0;
+        self.cur_matched = false;
+        self.unmatched_pos = 0;
+        self.cur_part = None;
+        self.build_reader = None;
+        self.pending_build = None;
+        self.probe_reader = None;
+        self.block_first = true;
+        self.block_last = true;
+        self.probe_matched = Vec::new();
+        self.probe_ord = 0;
+        self.null_reader = None;
+        if let Some(spill) = self.spill.take() {
+            spill.remove_dir();
+        }
     }
 }
 
 impl PhysicalOperator for HashJoinOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        // Build phase
-        if !self.build_done {
-            self.build_hash_table()?;
-            self.load_probe()?;
-        }
-
         loop {
-            if self.exhausted {
-                return Ok(None);
-            }
-
-            // Try to yield from current batch of matches
-            if self.match_pos < self.current_matches.len() {
-                let build_tuple = &self.current_matches[self.match_pos];
-                self.match_pos += 1;
-                let joined = build_tuple.concatenate(&self.probe_tuples[self.probe_pos - 1]);
-                return Ok(Some(joined));
-            }
-
-            // Find the next probe tuple that has matches
-            let probe_schema = self.probe.schema().to_vec();
-            while self.probe_pos < self.probe_tuples.len() {
-                let probe_tuple = &self.probe_tuples[self.probe_pos];
-                self.probe_pos += 1;
-
-                let key = match Self::make_hash_key(&self.probe_keys, probe_tuple, &probe_schema)? {
-                    Some(k) => k,
-                    None => continue, // NULL probe key → skip (NULL != NULL)
-                };
-
-                if let Some(build_matches) = self.hash_table.get(&key) {
-                    // Check remaining predicate for each match
-                    self.current_matches.clear();
-                    for build_tuple in build_matches {
-                        if let Some(ref remaining) = self.remaining_predicate {
-                            let joined = build_tuple.concatenate(probe_tuple);
-                            if let Some(true) =
-                                evaluate_predicate(remaining, &joined, &self.output_schema)?
-                            {
-                                self.current_matches.push(build_tuple.clone())
-                            }
-                        } else {
-                            self.current_matches.push(build_tuple.clone());
-                        }
-                    }
-
-                    if !self.current_matches.is_empty() {
-                        self.match_pos = 1;
-                        let build_tuple = &self.current_matches[0];
-                        let joined = build_tuple.concatenate(probe_tuple);
+            match self.phase {
+                HashJoinPhase::Build => self.run_build()?,
+                HashJoinPhase::Probe => {
+                    if let Some(joined) = self.probe_step()? {
                         return Ok(Some(joined));
                     }
                 }
-                // No matches — skip this probe tuple (INNER JOIN semantics)
-            }
-
-            // In spill mode the current partition is exhausted: advance to
-            // the next partition, or finish when all are consumed.
-            if self.spill.is_some() {
-                let next_part = self.spill.as_ref().unwrap().part;
-                if next_part < SPILL_PARTITIONS {
-                    self.load_spill_partition(next_part)?;
-                    self.spill.as_mut().unwrap().part = next_part + 1;
-                    continue;
-                }
-                // All partitions done — clean up temp files.
-                if let Some(spill) = self.spill.take() {
-                    spill.remove_dir();
-                }
-            }
-
-            self.exhausted = true;
-            return Ok(None);
-        }
-    }
-
-    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
-        batch.clear();
-        // Build phase
-        if !self.build_done {
-            self.build_hash_table()?;
-            self.load_probe()?;
-        }
-
-        let target_len = super::trait_::DEFAULT_BATCH_SIZE;
-
-        loop {
-            if self.exhausted {
-                return Ok(batch.len());
-            }
-
-            // Try to yield from current batch of matches
-            while self.match_pos < self.current_matches.len() {
-                let build_tuple = &self.current_matches[self.match_pos];
-                self.match_pos += 1;
-                let mut joined = Tuple::empty();
-                build_tuple.concatenate_into(&self.probe_tuples[self.probe_pos - 1], &mut joined);
-                batch.push(joined);
-                if batch.len() >= target_len {
-                    return Ok(batch.len());
-                }
-            }
-
-            // Find the next probe tuple that has matches
-            let probe_schema = self.probe.schema().to_vec();
-            let mut found_matches = false;
-            let mut scratch_joined = Tuple::empty();
-
-            while self.probe_pos < self.probe_tuples.len() {
-                let probe_tuple = &self.probe_tuples[self.probe_pos];
-                self.probe_pos += 1;
-
-                let key = match Self::make_hash_key(&self.probe_keys, probe_tuple, &probe_schema)? {
-                    Some(k) => k,
-                    None => continue, // NULL probe key -> skip (NULL != NULL)
-                };
-
-                if let Some(build_matches) = self.hash_table.get(&key) {
-                    self.current_matches.clear();
-                    for build_tuple in build_matches {
-                        if let Some(ref remaining) = self.remaining_predicate {
-                            build_tuple.concatenate_into(probe_tuple, &mut scratch_joined);
-                            if let Some(true) =
-                                evaluate_predicate(remaining, &scratch_joined, &self.output_schema)?
-                            {
-                                self.current_matches.push(build_tuple.clone());
+                HashJoinPhase::BuildUnmatched => {
+                    if self.preserve_build {
+                        while self.unmatched_pos < self.build_rows.len() {
+                            let idx = self.unmatched_pos;
+                            self.unmatched_pos += 1;
+                            if !self.build_matched[idx] {
+                                // Each build row is emitted here at most once.
+                                let values = std::mem::take(&mut self.build_rows[idx].values);
+                                return Ok(Some(self.null_extend(values, true)));
                             }
-                        } else {
-                            self.current_matches.push(build_tuple.clone());
                         }
                     }
-
-                    if !self.current_matches.is_empty() {
-                        self.match_pos = 0;
-                        found_matches = true;
-                        break;
+                    self.finish_block()?;
+                }
+                HashJoinPhase::NextPartition => self.next_partition()?,
+                HashJoinPhase::NullKeys => {
+                    if let Some(row) = self.null_key_step()? {
+                        return Ok(Some(row));
                     }
                 }
+                HashJoinPhase::Done => return Ok(None),
             }
-
-            if found_matches {
-                continue;
-            }
-
-            // In spill mode the current partition is exhausted: advance to
-            // the next partition, or finish when all are consumed.
-            if self.spill.is_some() {
-                let next_part = self.spill.as_ref().unwrap().part;
-                if next_part < SPILL_PARTITIONS {
-                    self.load_spill_partition(next_part)?;
-                    self.spill.as_mut().unwrap().part = next_part + 1;
-                    continue;
-                }
-                // All partitions done - clean up temp files.
-                if let Some(spill) = self.spill.take() {
-                    spill.remove_dir();
-                }
-            }
-
-            self.exhausted = true;
-            return Ok(batch.len());
         }
     }
 
@@ -928,18 +1442,8 @@ impl PhysicalOperator for HashJoinOperator {
     fn reset(&mut self) -> RookResult<()> {
         self.build.reset()?;
         self.probe.reset()?;
-        self.hash_table.clear();
-        self.probe_tuples.clear();
-        self.probe_pos = 0;
-        self.current_matches.clear();
-        self.match_pos = 0;
-        self.build_done = false;
-        self.exhausted = false;
-        if let Some(spill) = self.spill.take() {
-            spill.remove_dir();
-        }
-        self.build_buffer.clear();
-        self.build_count = 0;
+        self.clear_run_state();
+        self.phase = HashJoinPhase::Build;
         Ok(())
     }
 
@@ -1156,48 +1660,46 @@ impl PhysicalOperator for IndexNestedLoopJoinOperator {
 mod spill_tests {
     use super::*;
     use crate::types::DataType;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    type Row = Vec<Option<DataValue>>;
 
     struct MockChild {
-        rows: Vec<Vec<Option<DataValue>>>,
+        rows: Vec<Row>,
         pos: usize,
         info: Vec<ColumnInfo>,
+        /// Rows handed out so far, shared with the test.
+        pulled: Rc<Cell<usize>>,
     }
 
     impl MockChild {
-        fn int_rows(count: usize, name: &str) -> Self {
-            let rows = (0..count)
-                .map(|i| vec![Some(DataValue::Int(i as i32))])
-                .collect();
+        /// Rows over columns `names`, all declared INT.
+        fn new(names: &[&str], rows: Vec<Row>) -> Self {
             Self {
                 rows,
                 pos: 0,
-                info: vec![ColumnInfo {
-                    name: name.to_string(),
-                    data_type: DataType::Int,
-                    table: None,
-                }],
+                info: names
+                    .iter()
+                    .map(|name| ColumnInfo {
+                        name: name.to_string(),
+                        data_type: DataType::Int,
+                        table: None,
+                    })
+                    .collect(),
+                pulled: Rc::new(Cell::new(0)),
             }
+        }
+
+        fn int_rows(count: usize, name: &str) -> Self {
+            Self::with_nulls(count, &[], name)
         }
 
         fn with_nulls(count: usize, null_at: &[usize], name: &str) -> Self {
             let rows = (0..count)
-                .map(|i| {
-                    if null_at.contains(&i) {
-                        vec![None]
-                    } else {
-                        vec![Some(DataValue::Int(i as i32))]
-                    }
-                })
+                .map(|i| vec![(!null_at.contains(&i)).then_some(DataValue::Int(i as i32))])
                 .collect();
-            Self {
-                rows,
-                pos: 0,
-                info: vec![ColumnInfo {
-                    name: name.to_string(),
-                    data_type: DataType::Int,
-                    table: None,
-                }],
-            }
+            Self::new(&[name], rows)
         }
     }
 
@@ -1206,6 +1708,7 @@ mod spill_tests {
             if self.pos < self.rows.len() {
                 let row = self.rows[self.pos].clone();
                 self.pos += 1;
+                self.pulled.set(self.pulled.get() + 1);
                 Ok(Some(Tuple::new(row)))
             } else {
                 Ok(None)
@@ -1226,60 +1729,103 @@ mod spill_tests {
         }
     }
 
-    /// Serialises tests that mutate the process-global SPILL_BUDGET —
-    /// cargo runs tests in parallel threads and a budget set by one test
-    /// would leak into another's join.
-    static BUDGET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct BudgetGuard(
-        usize,
-        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
-    );
-    impl BudgetGuard {
-        /// Locks the budget mutex, sets the budget, and returns a guard
-        /// that restores the previous value on drop (lock released after
-        /// the restore since it is the later field).
-        fn set(n: usize) -> Self {
-            let lock = BUDGET_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            let prev = SPILL_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
-            SPILL_BUDGET.store(n, std::sync::atomic::Ordering::Relaxed);
-            BudgetGuard(prev, lock)
-        }
-    }
-    impl Drop for BudgetGuard {
-        fn drop(&mut self) {
-            SPILL_BUDGET.store(self.0, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    fn key_expr() -> Vec<Expr> {
+    fn key_expr(column: &str) -> Vec<Expr> {
         vec![Expr::Column {
             table: None,
-            column: "k".to_string(),
+            column: column.to_string(),
         }]
     }
 
-    fn collect(op: &mut dyn PhysicalOperator) -> Vec<(i32, i32)> {
+    /// `left JOIN right ON lk = rk` over two-column inputs `(lk, lv)` and
+    /// `(rk, rv)`, with an optional build budget in bytes.
+    fn join(
+        left: Vec<Row>,
+        right: Vec<Row>,
+        join_type: JoinType,
+        budget: Option<usize>,
+    ) -> HashJoinOperator {
+        let op = HashJoinOperator::with_join_type(
+            Box::new(MockChild::new(&["lk", "lv"], left)),
+            Box::new(MockChild::new(&["rk", "rv"], right)),
+            key_expr("lk"),
+            key_expr("rk"),
+            None,
+            join_type,
+        );
+        match budget {
+            Some(bytes) => op.with_memory_budget(bytes),
+            None => op,
+        }
+    }
+
+    /// Every output row, in an order that does not depend on the join path.
+    fn drain(op: &mut dyn PhysicalOperator) -> Vec<Row> {
         let mut out = Vec::new();
         while let Some(t) = op.next().unwrap() {
-            let k = match &t.values[0] {
-                Some(DataValue::Int(v)) => *v,
-                other => panic!("unexpected build value {:?}", other),
-            };
-            let p = match &t.values[1] {
-                Some(DataValue::Int(v)) => *v,
-                other => panic!("unexpected probe value {:?}", other),
-            };
-            out.push((k, p));
+            out.push(t.values);
         }
-        out.sort();
+        out.sort_by_cached_key(|row| format!("{:?}", row));
         out
+    }
+
+    fn collect(op: &mut dyn PhysicalOperator) -> Vec<(i32, i32)> {
+        drain(op)
+            .into_iter()
+            .map(|row| match (&row[0], &row[1]) {
+                (Some(DataValue::Int(k)), Some(DataValue::Int(p))) => (*k, *p),
+                other => panic!("unexpected row {:?}", other),
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The join computed pair by pair, as the reference result.
+    fn expected(left: &[Row], right: &[Row], join_type: JoinType) -> Vec<Row> {
+        let mut out = Vec::new();
+        let mut right_matched = vec![false; right.len()];
+        for l in left {
+            let mut matched = false;
+            for (r_idx, r) in right.iter().enumerate() {
+                if l[0].is_some() && l[0] == r[0] {
+                    matched = true;
+                    right_matched[r_idx] = true;
+                    out.push([l.clone(), r.clone()].concat());
+                }
+            }
+            if !matched && matches!(join_type, JoinType::Left | JoinType::Full) {
+                out.push([l.clone(), vec![None; 2]].concat());
+            }
+        }
+        if matches!(join_type, JoinType::Right | JoinType::Full) {
+            for (r, _) in right.iter().zip(&right_matched).filter(|(_, m)| !**m) {
+                out.push([vec![None; 2], r.clone()].concat());
+            }
+        }
+        out.sort_by_cached_key(|row| format!("{:?}", row));
+        out
+    }
+
+    /// `count` rows `(key, tag)`: keys cycle through `distinct` values from
+    /// `first_key`, every `null_every`-th key is NULL.
+    fn keyed_rows(
+        count: usize,
+        first_key: i32,
+        distinct: i32,
+        null_every: usize,
+        tag: i32,
+    ) -> Vec<Row> {
+        (0..count)
+            .map(|i| {
+                let key = (i % null_every != null_every - 1)
+                    .then_some(DataValue::Int(first_key + i as i32 % distinct));
+                vec![key, Some(DataValue::Int(tag + i as i32))]
+            })
+            .collect()
     }
 
     #[test]
     fn spilled_join_matches_in_memory_results() {
-        let _guard = BudgetGuard::set(8); // force spilling after 8 build tuples
-
         // Build: unique keys 0..60. Probe: keys 0..119 — probes 60..119
         // have no build partner, probes 0..59 match exactly once. Spilling
         // scatters both sides across 64 partitions, so this also proves
@@ -1289,10 +1835,11 @@ mod spill_tests {
         let mut hj = HashJoinOperator::new(
             Box::new(build),
             Box::new(probe),
-            key_expr(),
-            key_expr(),
+            key_expr("k"),
+            key_expr("k"),
             None,
-        );
+        )
+        .with_memory_budget(1024); // a handful of build tuples
 
         let out = collect(&mut hj);
         assert!(hj.did_spill(), "join should have taken the spill path");
@@ -1305,22 +1852,22 @@ mod spill_tests {
     #[test]
     fn spill_path_matches_in_memory_path_exactly() {
         // Same join run twice: once in memory, once forced to spill.
-        let run = |force_spill: bool| {
-            let _guard = BudgetGuard::set(if force_spill { 4 } else { 0 });
+        let run = |budget: usize| {
             let build = MockChild::int_rows(30, "k");
             let probe = MockChild::int_rows(45, "k");
             let mut hj = HashJoinOperator::new(
                 Box::new(build),
                 Box::new(probe),
-                key_expr(),
-                key_expr(),
+                key_expr("k"),
+                key_expr("k"),
                 None,
-            );
+            )
+            .with_memory_budget(budget);
             (collect(&mut hj), hj.did_spill())
         };
-        let (in_memory, spilled_a) = run(false);
+        let (in_memory, spilled_a) = run(1 << 20);
         assert!(!spilled_a);
-        let (spilled, spilled_b) = run(true);
+        let (spilled, spilled_b) = run(512);
         assert!(spilled_b);
         assert_eq!(
             in_memory, spilled,
@@ -1330,17 +1877,17 @@ mod spill_tests {
 
     #[test]
     fn spill_skips_null_keys_on_both_sides() {
-        let _guard = BudgetGuard::set(4);
         // Build: 10 rows, NULL at 3 and 7. Probe: 20 rows, NULL at 5 and 15.
         let build = MockChild::with_nulls(10, &[3, 7], "k");
         let probe = MockChild::with_nulls(20, &[5, 15], "k");
         let mut hj = HashJoinOperator::new(
             Box::new(build),
             Box::new(probe),
-            key_expr(),
-            key_expr(),
+            key_expr("k"),
+            key_expr("k"),
             None,
-        );
+        )
+        .with_memory_budget(512);
         let out = collect(&mut hj);
         assert!(hj.did_spill());
         // Probe k matches build k only when both exist and NEITHER key is
@@ -1352,5 +1899,267 @@ mod spill_tests {
             .map(|k| (k, k))
             .collect();
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn every_join_type_agrees_across_memory_budgets() {
+        // Duplicate keys, NULL keys and unmatched rows on both sides.
+        let left = keyed_rows(230, 0, 40, 7, 1000);
+        let right = keyed_rows(190, 25, 45, 5, 5000);
+        for join_type in [
+            JoinType::Inner,
+            JoinType::Left,
+            JoinType::Right,
+            JoinType::Full,
+        ] {
+            let want = expected(&left, &right, join_type);
+            // None: in memory. 4 KiB: spilled, partitions fit. 600 bytes:
+            // partitions split again. 1 byte: one build row per block.
+            for budget in [None, Some(4096), Some(600), Some(1)] {
+                let mut hj = join(left.clone(), right.clone(), join_type, budget);
+                let got = drain(&mut hj);
+                assert_eq!(hj.did_spill(), budget.is_some());
+                assert_eq!(
+                    got.len(),
+                    want.len(),
+                    "{:?} join, budget {:?}: row count",
+                    join_type,
+                    budget
+                );
+                assert_eq!(got, want, "{:?} join, budget {:?}", join_type, budget);
+
+                // A second run after reset() gives the same rows.
+                hj.reset().unwrap();
+                assert_eq!(drain(&mut hj), want, "{:?} join after reset", join_type);
+            }
+        }
+    }
+
+    #[test]
+    fn residual_predicate_decides_outer_matches_when_spilled() {
+        // ON lk = rk AND lv < rv: a key match that fails the residual is
+        // no match, so both rows come out NULL-extended.
+        let left: Vec<Row> = (0..80)
+            .map(|i| vec![Some(DataValue::Int(i % 20)), Some(DataValue::Int(i))])
+            .collect();
+        let right: Vec<Row> = (0..60)
+            .map(|i| vec![Some(DataValue::Int(i % 30)), Some(DataValue::Int(40))])
+            .collect();
+        let residual = Predicate::Compare(
+            Expr::Column {
+                table: None,
+                column: "lv".to_string(),
+            },
+            super::super::super::expr::ComparisonOp::LessThan,
+            Expr::Column {
+                table: None,
+                column: "rv".to_string(),
+            },
+        );
+        let run = |budget: usize| {
+            let mut hj = HashJoinOperator::with_join_type(
+                Box::new(MockChild::new(&["lk", "lv"], left.clone())),
+                Box::new(MockChild::new(&["rk", "rv"], right.clone())),
+                key_expr("lk"),
+                key_expr("rk"),
+                Some(residual.clone()),
+                JoinType::Full,
+            )
+            .with_memory_budget(budget);
+            (drain(&mut hj), hj.did_spill())
+        };
+        let (in_memory, spilled) = run(1 << 20);
+        assert!(!spilled);
+        // 40 left rows (lv 0..39) pass against 2 right rows each; the other
+        // 40 left rows and the 20 right rows with keys 20..29 are unmatched.
+        assert_eq!(in_memory.len(), 40 * 2 + 40 + 20);
+        for budget in [2048, 1] {
+            let (rows, spilled) = run(budget);
+            assert!(spilled);
+            assert_eq!(rows, in_memory, "budget {}", budget);
+        }
+    }
+
+    #[test]
+    fn probe_side_is_streamed_not_buffered() {
+        let build = MockChild::int_rows(10, "k");
+        let probe = MockChild::int_rows(20_000, "k");
+        let pulled = probe.pulled.clone();
+        let mut hj = HashJoinOperator::new(
+            Box::new(build),
+            Box::new(probe),
+            key_expr("k"),
+            key_expr("k"),
+            None,
+        );
+        assert!(hj.next().unwrap().is_some());
+        assert!(
+            pulled.get() <= super::super::trait_::DEFAULT_BATCH_SIZE,
+            "first row needed {} probe rows",
+            pulled.get()
+        );
+        let mut rows = 1;
+        while hj.next().unwrap().is_some() {
+            rows += 1;
+        }
+        assert_eq!(rows, 10);
+        assert_eq!(pulled.get(), 20_000);
+    }
+
+    #[test]
+    fn budget_counts_bytes_not_tuples() {
+        // The same number of rows spills only when the rows are wide.
+        let run = |width: usize| {
+            let rows: Vec<Row> = (0..200)
+                .map(|i| {
+                    vec![
+                        Some(DataValue::Int(i)),
+                        Some(DataValue::Varchar("x".repeat(width))),
+                    ]
+                })
+                .collect();
+            let mut hj = join(rows.clone(), rows, JoinType::Inner, Some(256 * 1024));
+            assert_eq!(drain(&mut hj).len(), 200);
+            hj.did_spill()
+        };
+        assert!(!run(10));
+        assert!(run(4000));
+    }
+
+    #[test]
+    fn one_hot_key_stays_within_the_budget() {
+        // Every build row shares one key, so no partitioning can split
+        // them; they must still not be loaded all at once.
+        let hot = |count: usize, tag: i32| -> Vec<Row> {
+            (0..count)
+                .map(|i| {
+                    vec![
+                        Some(DataValue::Int(7)),
+                        Some(DataValue::Int(tag + i as i32)),
+                    ]
+                })
+                .collect()
+        };
+        let (left, right) = (hot(3000, 0), hot(40, 100_000));
+        let row_bytes = estimate_tuple_bytes(&Tuple::new(left[0].clone()));
+        let budget = 16 * 1024;
+        assert!(3000 * row_bytes > 20 * budget);
+
+        for join_type in [JoinType::Inner, JoinType::Full] {
+            let mut hj = join(left.clone(), right.clone(), join_type, Some(budget));
+            let mut rows = 0;
+            while let Some(t) = hj.next().unwrap() {
+                assert!(t.values.iter().all(|v| v.is_some()));
+                rows += 1;
+            }
+            assert_eq!(rows, 3000 * 40);
+            assert!(hj.did_spill());
+            assert!(
+                hj.peak_build_bytes() <= budget + row_bytes,
+                "{:?}: held {} bytes against a budget of {}",
+                join_type,
+                hj.peak_build_bytes(),
+                budget
+            );
+        }
+    }
+
+    #[test]
+    fn spill_keeps_values_whose_type_differs_from_the_declared_one() {
+        use crate::types::value::NumericValue;
+        // Every column is declared INT; the values are not.
+        let payload = |i: i32| match i % 5 {
+            0 => DataValue::BigInt(i64::MAX - i as i64),
+            1 => DataValue::Varchar(format!("text-{}", i)),
+            2 => DataValue::Numeric(NumericValue {
+                unscaled: 123_456_789_012_345_678_901_234_567 + i as i128,
+                scale: 9,
+            }),
+            3 => DataValue::Char("ab  ".to_string()),
+            _ => DataValue::SmallInt(i as i16),
+        };
+        let left: Vec<Row> = (0..100)
+            .map(|i| vec![Some(DataValue::BigInt(i as i64)), Some(payload(i))])
+            .collect();
+        let right: Vec<Row> = (0..100)
+            .map(|i| vec![Some(DataValue::Int(i)), Some(payload(i + 1))])
+            .collect();
+
+        let mut in_memory = join(left.clone(), right.clone(), JoinType::Full, None);
+        let want = drain(&mut in_memory);
+        assert!(!in_memory.did_spill());
+        assert_eq!(want.len(), 100);
+        assert_eq!(want, expected_by_canonical_key(&left, &right));
+
+        let mut spilled = join(left, right, JoinType::Full, Some(1024));
+        let got = drain(&mut spilled);
+        assert!(spilled.did_spill());
+        assert_eq!(got, want);
+    }
+
+    /// BIGINT and INT keys join on their numeric value.
+    fn expected_by_canonical_key(left: &[Row], right: &[Row]) -> Vec<Row> {
+        let mut out: Vec<Row> = left
+            .iter()
+            .zip(right)
+            .map(|(l, r)| [l.clone(), r.clone()].concat())
+            .collect();
+        out.sort_by_cached_key(|row| format!("{:?}", row));
+        out
+    }
+
+    #[test]
+    fn spill_encoding_round_trips_every_value_type() {
+        use crate::types::value::{NumericValue, OrderedF32, OrderedF64};
+        use chrono::{NaiveDate, NaiveTime};
+        let date = NaiveDate::from_ymd_opt(1969, 7, 20).unwrap();
+        let time = NaiveTime::from_hms_nano_opt(20, 17, 40, 123_456_789).unwrap();
+        let tuple = Tuple::new(vec![
+            Some(DataValue::SmallInt(-7)),
+            Some(DataValue::Int(i32::MIN)),
+            Some(DataValue::BigInt(i64::MAX)),
+            Some(DataValue::Real(OrderedF32(-0.5))),
+            Some(DataValue::DoublePrecision(OrderedF64(f64::MAX))),
+            Some(DataValue::Numeric(NumericValue {
+                unscaled: i128::MIN + 1,
+                scale: 30,
+            })),
+            Some(DataValue::Bool(true)),
+            Some(DataValue::Char("pad  ".to_string())),
+            Some(DataValue::Varchar("naïve ✓".to_string())),
+            Some(DataValue::Varchar(String::new())),
+            Some(DataValue::Date(date)),
+            Some(DataValue::Time(time)),
+            Some(DataValue::Bit("10110".to_string())),
+            Some(DataValue::Timestamp(date.and_time(time))),
+            None,
+        ]);
+        let mut buf = Vec::new();
+        encode_tuple(&tuple, &mut buf);
+        encode_tuple(&Tuple::empty(), &mut buf);
+        let mut input = buf.as_slice();
+        assert_eq!(decode_tuple(&mut input).unwrap(), tuple);
+        assert_eq!(decode_tuple(&mut input).unwrap(), Tuple::empty());
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn spill_files_are_removed() {
+        let rows = keyed_rows(300, 0, 50, 9, 0);
+        // Exhausted: the directory goes as soon as the last row is out.
+        let mut hj = join(rows.clone(), rows.clone(), JoinType::Full, Some(2048));
+        assert!(hj.next().unwrap().is_some());
+        let dir = hj.spill.as_ref().expect("spilling").dir.clone();
+        assert!(dir.exists());
+        while hj.next().unwrap().is_some() {}
+        assert!(!dir.exists());
+
+        // Dropped mid-stream.
+        let mut hj = join(rows.clone(), rows, JoinType::Full, Some(2048));
+        assert!(hj.next().unwrap().is_some());
+        let dir = hj.spill.as_ref().expect("spilling").dir.clone();
+        assert!(dir.exists());
+        drop(hj);
+        assert!(!dir.exists());
     }
 }
