@@ -158,6 +158,7 @@ pub fn compaction_table(
     })();
 
     match &result {
+        _ if !engine.logs_operations() => {}
         Ok(pages_compacted) => {
             let details = compaction_log_details(Some(*pages_compacted), None);
             let _ = log_compaction(engine, db_name, table_name, details, "success");
@@ -380,8 +381,10 @@ fn delete_rows(
         result.deleted_count,
         table_name
     );
-    let details = delete_log_details(Some(result.deleted_count), None);
-    let _ = log_delete(catalog.engine(), db_name, table_name, details, "success");
+    if catalog.engine().logs_operations() {
+        let details = delete_log_details(Some(result.deleted_count), None);
+        let _ = log_delete(catalog.engine(), db_name, table_name, details, "success");
+    }
 
     Ok(result)
 }

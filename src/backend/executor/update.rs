@@ -502,14 +502,16 @@ fn update_rows(
         result.updated_count,
         table_name
     );
-    let details = update_log_details(Some(result.updated_count), None);
-    let _ = crate::backend::log::operation_log::log_update(
-        catalog.engine(),
-        db_name,
-        table_name,
-        details,
-        "success",
-    );
+    if catalog.engine().logs_operations() {
+        let details = update_log_details(Some(result.updated_count), None);
+        let _ = crate::backend::log::operation_log::log_update(
+            catalog.engine(),
+            db_name,
+            table_name,
+            details,
+            "success",
+        );
+    }
 
     Ok(result)
 }

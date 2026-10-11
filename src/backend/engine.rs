@@ -62,6 +62,9 @@ pub struct Engine {
     sort_memory_budget: std::sync::atomic::AtomicUsize,
     /// Most sorted runs an `ORDER BY` on disk merges at a time.
     sort_merge_fan_in: std::sync::atomic::AtomicUsize,
+    /// UPDATE, DELETE and compaction append a JSON line per statement under
+    /// `logs/` (off by default).
+    log_operations: std::sync::atomic::AtomicBool,
 }
 
 impl Engine {
@@ -91,6 +94,7 @@ impl Engine {
             sort_merge_fan_in: std::sync::atomic::AtomicUsize::new(
                 crate::backend::executor::physical::external_sort::DEFAULT_MERGE_FAN_IN,
             ),
+            log_operations: std::sync::atomic::AtomicBool::new(false),
             visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
@@ -149,6 +153,19 @@ impl Engine {
     pub fn set_sort_merge_fan_in(&self, runs: usize) {
         self.sort_merge_fan_in
             .store(runs.max(2), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Make UPDATE, DELETE and compaction append one JSON line per
+    /// statement to `logs/<db>/<table>/` (the operation log). Off by default.
+    pub fn set_log_operations(&self, on: bool) {
+        self.log_operations
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// See [`Engine::set_log_operations`].
+    pub fn logs_operations(&self) -> bool {
+        self.log_operations
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// When and where this engine's sorts spill to disk.
