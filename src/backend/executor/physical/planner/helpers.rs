@@ -56,6 +56,44 @@ pub fn promote_numeric_type(a: &DataType, b: &DataType) -> DataType {
     }
 }
 
+/// Result type of arithmetic between a NUMERIC and another exact number
+/// (NUMERIC or an integer), which the executor computes exactly as a NUMERIC:
+/// `SUM(bigint_col) + 1` is a NUMERIC, not a DOUBLE PRECISION. `None` when
+/// neither side is a NUMERIC or one side is not exact.
+fn exact_numeric_result_type(
+    a: &DataType,
+    op: rook_ast::ArithOp,
+    b: &DataType,
+) -> Option<DataType> {
+    use DataType as DT;
+
+    // Scale of an exact operand; integers have none.
+    let scale = |t: &DataType| -> Option<u8> {
+        match t {
+            DT::SmallInt | DT::Int | DT::BigInt => Some(0),
+            DT::Numeric { scale, .. } | DT::Decimal { scale, .. } => Some(*scale),
+            _ => None,
+        }
+    };
+    let is_decimal = |t: &DataType| matches!(t, DT::Numeric { .. } | DT::Decimal { .. });
+    if !is_decimal(a) && !is_decimal(b) {
+        return None;
+    }
+    let (sa, sb) = (scale(a)?, scale(b)?);
+    // The scales the executor's numeric_add/sub/mul/div produce.
+    let scale = match op {
+        rook_ast::ArithOp::Mul => sa.saturating_add(sb).min(MAX_NUMERIC_PRECISION),
+        _ => sa.max(sb),
+    };
+    Some(DT::Numeric {
+        precision: MAX_NUMERIC_PRECISION,
+        scale,
+    })
+}
+
+/// Widest NUMERIC precision the engine has.
+const MAX_NUMERIC_PRECISION: u8 = 38;
+
 /// Convert a `DataValue` (from the physical engine) to a `ConstantValue` (AST node).
 /// Used only for nested scalar subqueries inside Binary/Cast expressions.
 pub fn data_value_to_constant_value(dv: &DataValue) -> rook_ast::ConstantValue {
@@ -142,12 +180,13 @@ pub fn infer_expr_type_from_ast(
             }
             rook_ast::ConstantValue::Boolean(_) => Ok(crate::types::datatype::DataType::Bool),
         },
-        rook_ast::ExprNode::Binary { left, right, .. } => {
+        rook_ast::ExprNode::Binary { left, op, right } => {
             // Infer the result type by looking at child expression types and
             // applying SQL type promotion (e.g., INT + DOUBLE → DOUBLE).
             let left_type = infer_expr_type_from_ast(left, child_types, column_names)?;
             let right_type = infer_expr_type_from_ast(right, child_types, column_names)?;
-            Ok(promote_numeric_type(&left_type, &right_type))
+            Ok(exact_numeric_result_type(&left_type, *op, &right_type)
+                .unwrap_or_else(|| promote_numeric_type(&left_type, &right_type)))
         }
         rook_ast::ExprNode::Cast { data_type, .. } => data_type
             .parse::<crate::types::datatype::DataType>()

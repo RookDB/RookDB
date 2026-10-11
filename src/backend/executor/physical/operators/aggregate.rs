@@ -8,7 +8,7 @@ use crate::backend::error::{RookError, RookResult};
 
 use crate::types::comparison::compare_nullable;
 use crate::types::datatype::DataType;
-use crate::types::value::{DataValue, NumericValue};
+use crate::types::value::{DataValue, NumericValue, OrderedF32, OrderedF64};
 
 // ── Aggregate Function Enum ────────────────────────────────────────────────────
 
@@ -240,8 +240,11 @@ impl PerGroupState {
     }
 
     /// Produce the final aggregate value for a given function.
-    pub fn finalize(&self, info: &AggregateInfo) -> Option<DataValue> {
-        match info.function {
+    ///
+    /// A SUM comes out in `info.output_type`, the type the column was declared
+    /// with: see [`sum_as_declared`].
+    pub fn finalize(&self, info: &AggregateInfo) -> Result<Option<DataValue>, String> {
+        Ok(match info.function {
             AggregateFunction::Count => {
                 if info.input.is_none() {
                     Some(DataValue::BigInt(self.row_count as i64))
@@ -251,29 +254,20 @@ impl PerGroupState {
             }
             AggregateFunction::Sum => {
                 if !self.has_sum {
-                    return None;
+                    return Ok(None);
                 }
-                if self.sum_is_float {
-                    let total = self.sum_float + (self.sum_int as f64);
-                    Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
-                        total,
-                    )))
+                let sum = if self.sum_is_float {
+                    SumValue::Float(self.sum_float + (self.sum_int as f64))
                 } else if let Some(num) = &self.sum_numeric {
-                    Some(DataValue::Numeric(num.clone()))
+                    SumValue::Numeric(num.clone())
                 } else {
-                    if let Ok(v) = i64::try_from(self.sum_int) {
-                        Some(DataValue::BigInt(v))
-                    } else {
-                        Some(DataValue::Numeric(NumericValue {
-                            unscaled: self.sum_int,
-                            scale: 0,
-                        }))
-                    }
-                }
+                    SumValue::Int(self.sum_int)
+                };
+                Some(sum_as_declared(sum, &info.output_type)?)
             }
             AggregateFunction::Avg => {
                 if self.non_null_count == 0 || !self.has_sum {
-                    return None;
+                    return Ok(None);
                 }
                 let total = if self.sum_is_float {
                     self.sum_float + (self.sum_int as f64)
@@ -282,17 +276,68 @@ impl PerGroupState {
                 } else {
                     self.sum_int as f64
                 };
-                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                Some(DataValue::DoublePrecision(OrderedF64(
                     total / self.non_null_count as f64,
                 )))
             }
             AggregateFunction::Min => self.min.clone(),
             AggregateFunction::Max => self.max.clone(),
-        }
+        })
     }
 }
 
+/// A finished SUM, in the representation it was accumulated in.
+enum SumValue {
+    Int(i128),
+    Float(f64),
+    Numeric(NumericValue),
+}
+
+/// Render a finished SUM as its declared output type, so the column header,
+/// the schema handed to the operators above, and the value all agree.
+///
+/// An integer sum declared BIGINT that no longer fits 64 bits is an error
+/// ("BIGINT out of range", as in PostgreSQL) rather than a NUMERIC value in a
+/// BIGINT column. A sum whose inputs were not of the type the planner inferred
+/// for them (an integer-typed CASE with a fractional branch, say) keeps the
+/// representation it was accumulated in: narrowing it would lose data.
+fn sum_as_declared(sum: SumValue, declared: &DataType) -> Result<DataValue, String> {
+    Ok(match (sum, declared) {
+        (SumValue::Int(v), DataType::Numeric { .. } | DataType::Decimal { .. }) => {
+            DataValue::Numeric(NumericValue {
+                unscaled: v,
+                scale: 0,
+            })
+        }
+        (SumValue::Int(v), DataType::Real) => DataValue::Real(OrderedF32(v as f32)),
+        (SumValue::Int(v), DataType::DoublePrecision) => {
+            DataValue::DoublePrecision(OrderedF64(v as f64))
+        }
+        (SumValue::Int(v), _) => DataValue::BigInt(
+            i64::try_from(v).map_err(|_| "SUM result is out of range for BIGINT".to_string())?,
+        ),
+        (SumValue::Float(v), DataType::Real) => {
+            let narrowed = v as f32;
+            if narrowed.is_infinite() && v.is_finite() {
+                return Err("SUM result is out of range for REAL".to_string());
+            }
+            DataValue::Real(OrderedF32(narrowed))
+        }
+        (SumValue::Float(v), _) => DataValue::DoublePrecision(OrderedF64(v)),
+        (SumValue::Numeric(v), _) => DataValue::Numeric(v),
+    })
+}
+
+/// Widest NUMERIC the engine has; a SUM is declared with it because the total
+/// of a column outgrows the column's own precision.
+const SUM_NUMERIC_PRECISION: u8 = 38;
+
 /// Infer the output DataType for an aggregate function based on input expression type.
+///
+/// SUM follows PostgreSQL: SMALLINT/INT sum to BIGINT, BIGINT to NUMERIC (two
+/// BIGINTs already overflow 64 bits), REAL to REAL, DOUBLE to DOUBLE, and
+/// NUMERIC to NUMERIC at the input's scale. AVG is DOUBLE PRECISION for every
+/// input, which is what [`PerGroupState::finalize`] computes.
 pub fn infer_aggregate_output_type(
     function: AggregateFunction,
     input_type: Option<&DataType>,
@@ -300,17 +345,19 @@ pub fn infer_aggregate_output_type(
     match function {
         AggregateFunction::Count => DataType::BigInt,
         AggregateFunction::Sum => match input_type {
-            Some(DataType::SmallInt) | Some(DataType::Int) | Some(DataType::BigInt) => {
-                DataType::BigInt
-            }
+            Some(DataType::SmallInt) | Some(DataType::Int) => DataType::BigInt,
+            Some(DataType::BigInt) => DataType::Numeric {
+                precision: SUM_NUMERIC_PRECISION,
+                scale: 0,
+            },
             Some(DataType::Real) => DataType::Real,
             Some(DataType::DoublePrecision) => DataType::DoublePrecision,
-            Some(DataType::Numeric { precision, scale }) => DataType::Numeric {
-                precision: *precision,
+            Some(DataType::Numeric { scale, .. }) => DataType::Numeric {
+                precision: SUM_NUMERIC_PRECISION,
                 scale: *scale,
             },
-            Some(DataType::Decimal { precision, scale }) => DataType::Decimal {
-                precision: *precision,
+            Some(DataType::Decimal { scale, .. }) => DataType::Decimal {
+                precision: SUM_NUMERIC_PRECISION,
                 scale: *scale,
             },
             _ => DataType::BigInt,
@@ -407,7 +454,9 @@ impl AggregateOperator {
             values.push(val.clone());
         }
         for (agg_idx, agg) in self.aggregates.iter().enumerate() {
-            let val = entry.agg_states[agg_idx].finalize(agg);
+            let val = entry.agg_states[agg_idx]
+                .finalize(agg)
+                .map_err(|e| RookError::Internal(format!("Aggregate error: {}", e)))?;
             values.push(val);
         }
         Ok(Tuple::new(values))

@@ -402,12 +402,14 @@ fn d_extract_null_returns_null() {
 // to i64::MAX/MIN; mixed groups drop sum_int), :161 (AVG same). The engine's
 // own `arithmetic_op` uses checked_* and returns overflow errors.
 
-fn sum_info() -> AggregateInfo {
+/// A SUM declared `output_type`, as `infer_aggregate_output_type` would
+/// declare it for the inputs each test feeds in.
+fn sum_info(output_type: DataType) -> AggregateInfo {
     AggregateInfo {
         function: AggregateFunction::Sum,
         input: None,
         output_name: "s".into(),
-        output_type: DataType::BigInt,
+        output_type,
         distinct: false,
     }
 }
@@ -423,11 +425,24 @@ fn e_sum_overflow_must_not_silently_saturate() {
     .unwrap();
     st.update(AggregateFunction::Sum, Some(&DataValue::BigInt(10)), false)
         .unwrap();
-    let out = st.finalize(&sum_info());
-    assert_ne!(
-        out,
-        Some(DataValue::BigInt(i64::MAX)),
-        "BUG E CONFIRMED: SUM(9223372036854775800, 10) silently clamped to i64::MAX instead of erroring"
+    // SUM over BIGINT is declared NUMERIC, which holds the exact total.
+    let numeric = DataType::Numeric {
+        precision: 38,
+        scale: 0,
+    };
+    assert_eq!(
+        st.finalize(&sum_info(numeric)),
+        Ok(Some(DataValue::Numeric(NumericValue {
+            unscaled: i64::MAX as i128 + 10,
+            scale: 0
+        }))),
+        "BUG E CONFIRMED: SUM(i64::MAX, 10) is not the exact total"
+    );
+    // Declared BIGINT, the same total is an error: never a clamped value,
+    // and never a NUMERIC in a BIGINT column.
+    assert!(
+        st.finalize(&sum_info(DataType::BigInt)).is_err(),
+        "BUG E CONFIRMED: an out-of-range SUM declared BIGINT must error"
     );
 }
 
@@ -452,7 +467,12 @@ fn e_sum_numeric_stays_exact() {
         false,
     )
     .unwrap();
-    let out = st.finalize(&sum_info());
+    let out = st
+        .finalize(&sum_info(DataType::Numeric {
+            precision: 38,
+            scale: 2,
+        }))
+        .unwrap();
     assert_eq!(
         out,
         Some(DataValue::Numeric(NumericValue {
@@ -475,7 +495,7 @@ fn e_sum_mixed_int_and_float_keeps_both() {
         false,
     )
     .unwrap();
-    let out = st.finalize(&sum_info());
+    let out = st.finalize(&sum_info(DataType::DoublePrecision)).unwrap();
     assert_eq!(
         out,
         Some(DataValue::DoublePrecision(OrderedF64(100.5))),
