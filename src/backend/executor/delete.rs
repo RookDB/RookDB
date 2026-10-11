@@ -97,7 +97,7 @@ fn compaction_log_details(pages_compacted: Option<usize>, error: Option<&str>) -
 /// Returns the number of pages that were actually rewritten.
 pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
     let result = (|| -> io::Result<usize> {
-        let path = format!("database/base/{}/{}.dat", db_name, table_name);
+        let path = crate::backend::paths::heap(db_name, table_name);
         let file = HeapFile::open(std::path::Path::new(&path))?;
         let file_identity = file.identity();
 
@@ -222,7 +222,7 @@ pub fn delete_by_pointers(
     })?;
     let columns = &table.columns;
 
-    let path = format!("database/base/{}/{}.dat", db_name, table_name);
+    let path = crate::backend::paths::heap(db_name, table_name);
     let file = HeapFile::open(std::path::Path::new(&path))
         .map_err(|e| io::Error::other(format!("Failed to open table file: {}", e)))?;
     let file_identity = file.identity();

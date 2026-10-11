@@ -163,7 +163,7 @@ pub(super) fn alter_table(
             let col_idx = find(&updated_table.columns, column)?;
             // Existing rows must have a value; the null bitmap answers that
             // without decoding the row.
-            let dat_path = format!("database/base/{}/{}.dat", db, alter.table);
+            let dat_path = crate::backend::paths::heap(db, &alter.table);
             if Path::new(&dat_path).exists() {
                 let heap = HeapManager::open(PathBuf::from(&dat_path)).map_err(|e| {
                     io::Error::other(format!(
@@ -262,8 +262,8 @@ fn rename_table(
         .iter()
         .map(|fk| fk.0.clone())
         .collect();
-    let old_dat = format!("database/base/{}/{}.dat", db, old_name);
-    let new_dat = format!("database/base/{}/{}.dat", db, new_name);
+    let old_dat = crate::backend::paths::heap(db, old_name);
+    let new_dat = crate::backend::paths::heap(db, new_name);
     let _ = std::fs::rename(&old_dat, &new_dat);
     let _ = std::fs::rename(format!("{}.fsm", old_dat), format!("{}.fsm", new_dat));
     rename_index_files_for_table(db, old_name, new_name);
@@ -331,7 +331,7 @@ fn rewrite_rows(
     new_schema: &[DataType],
     mut change: impl FnMut(Vec<Option<DataValue>>) -> io::Result<Vec<Option<DataValue>>>,
 ) -> io::Result<()> {
-    let dat_path = format!("database/base/{}/{}.dat", db, table);
+    let dat_path = crate::backend::paths::heap(db, table);
     if !Path::new(&dat_path).exists() {
         return Ok(());
     }

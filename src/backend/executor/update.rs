@@ -160,7 +160,7 @@ pub fn update_by_pointers(
         compiled.push((idx, expr));
     }
 
-    let path = format!("database/base/{}/{}.dat", db_name, table_name);
+    let path = crate::backend::paths::heap(db_name, table_name);
     let file = crate::backend::heap::HeapFile::open(std::path::Path::new(&path))
         .map_err(|e| io::Error::other(format!("Failed to open table file: {}", e)))?;
     let file_identity = file.identity();

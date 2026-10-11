@@ -195,7 +195,7 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
             let table_id = next_table_id;
             next_table_id += 1;
 
-            let file_path = format!("database/base/{}/{}.dat", db_name, tbl_name);
+            let file_path = crate::backend::paths::heap(db_name, tbl_name);
 
             tbl_rows.push(vec![
                 Some(table_id.to_string()),

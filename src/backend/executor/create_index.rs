@@ -30,28 +30,28 @@ use crate::types::value::{DataValue, OrderedF32, OrderedF64};
 
 /// Construct the `.idx` file path for a named index.
 pub(crate) fn index_file_path(db_name: &str, table_name: &str, index_name: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "database/base/{}/{}.{}.idx",
-        db_name, table_name, index_name
+    PathBuf::from(crate::backend::paths::index(
+        db_name, table_name, index_name,
     ))
 }
 
 /// Construct the `.idx.meta` file path for a named index.
 fn index_meta_file_path(db_name: &str, table_name: &str, index_name: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "database/base/{}/{}.{}.idx.meta",
-        db_name, table_name, index_name
+    PathBuf::from(crate::backend::paths::index_meta(
+        db_name, table_name, index_name,
     ))
 }
 
 /// Construct the legacy `.idx` file path (single-index fallback).
 fn legacy_index_file_path(db_name: &str, table_name: &str) -> PathBuf {
-    PathBuf::from(format!("database/base/{}/{}.idx", db_name, table_name))
+    PathBuf::from(crate::backend::paths::legacy_index(db_name, table_name))
 }
 
 /// Construct the legacy `.idx.meta` file path (single-index fallback).
 fn legacy_index_meta_file_path(db_name: &str, table_name: &str) -> PathBuf {
-    PathBuf::from(format!("database/base/{}/{}.idx.meta", db_name, table_name))
+    PathBuf::from(crate::backend::paths::legacy_index_meta(
+        db_name, table_name,
+    ))
 }
 
 /// Metadata about an index, stored alongside the `.idx` file.
@@ -354,7 +354,7 @@ pub fn create_index_with_flags(
     };
 
     // 4. Build paths — use index-name-based files
-    let heap_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+    let heap_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
     let idx_path = index_file_path(db_name, table_name, &resolved_name);
     let meta_path = index_meta_file_path(db_name, table_name, &resolved_name);
 
@@ -538,7 +538,7 @@ pub fn ensure_parent_column_index(
         return false; // PK/UNIQUE/user index already covers the probe
     }
 
-    let heap_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, parent_table));
+    let heap_path = PathBuf::from(crate::backend::paths::heap(db_name, parent_table));
     if !heap_path.exists() {
         log::warn!(
             "[AutoIndex] FK parent heap missing: {:?}; skipping parent-side index",

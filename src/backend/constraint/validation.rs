@@ -90,10 +90,8 @@ pub(crate) fn check_unique_insert_meta(
         let mut found_via_index = false;
         let mut checked_index = false;
 
-        let idx_path = std::path::PathBuf::from(format!(
-            "database/base/{}/{}.{}.idx",
-            db_name, table_name, idx_name
-        ));
+        let idx_path =
+            std::path::PathBuf::from(crate::backend::paths::index(db_name, table_name, idx_name));
         if idx_path.exists() {
             let kt1 = key_types.clone();
             let kt2 = key_types.clone();
@@ -151,8 +149,7 @@ pub(crate) fn check_unique_insert_meta(
         }
 
         // Heap-scan fallback for this unique index if no index file exists
-        let heap_path =
-            std::path::PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+        let heap_path = std::path::PathBuf::from(crate::backend::paths::heap(db_name, table_name));
         if heap_path.exists()
             && let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path)
         {
@@ -236,7 +233,7 @@ pub(crate) fn check_unique_insert_meta(
 
         // Legacy single-index file fallback
         let legacy_idx_path =
-            std::path::PathBuf::from(format!("database/base/{}/{}.idx", db_name, table_name));
+            std::path::PathBuf::from(crate::backend::paths::legacy_index(db_name, table_name));
         if legacy_idx_path.exists() {
             match crate::backend::cache::with_btree(
                 &legacy_idx_path,
@@ -285,8 +282,7 @@ pub(crate) fn check_unique_insert_meta(
         }
 
         // Heap-scan fallback for column-level unique
-        let heap_path =
-            std::path::PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+        let heap_path = std::path::PathBuf::from(crate::backend::paths::heap(db_name, table_name));
         if heap_path.exists()
             && let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path)
         {

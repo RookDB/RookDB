@@ -77,7 +77,7 @@ pub(super) fn drop_database(
 
     let mut lines = Vec::new();
     catalog.databases.remove(db_name);
-    let _ = std::fs::remove_dir_all(format!("database/base/{}", db_name));
+    let _ = std::fs::remove_dir_all(crate::backend::paths::database_dir(db_name));
     if let Err(e) = crate::backend::system_table::delete_database_metadata(db_name) {
         lines.push(format!(
             "[DropDatabase] Warning: failed to clean up system table metadata: {}",
@@ -419,7 +419,7 @@ pub(super) fn drop_table(
     if let Some(db_obj) = catalog.databases.get_mut(db) {
         db_obj.tables.remove(table);
     }
-    let dat_path = format!("database/base/{}/{}.dat", db, table);
+    let dat_path = crate::backend::paths::heap(db, table);
     let _ = std::fs::remove_file(&dat_path);
     let _ = std::fs::remove_file(format!("{}.fsm", dat_path));
     remove_index_files_for_table(db, table, None);
@@ -471,7 +471,7 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<S
         ));
     }
 
-    let dat_path = format!("database/base/{}/{}.dat", db, table);
+    let dat_path = crate::backend::paths::heap(db, table);
     let mut hm = crate::heap::HeapManager::create(std::path::PathBuf::from(&dat_path))
         .map_err(|e| io::Error::other(format!("Failed to create table file: {}", e)))?;
     hm.flush()
@@ -673,21 +673,20 @@ pub(super) fn vacuum(catalog: &Catalog, db: &str, table: &str) -> RookResult<Sta
 pub(super) fn remove_index_files_for_table(db: &str, table: &str, index_name: Option<&str>) {
     use crate::backend::cache::evict_btree;
 
-    let base_dir = format!("database/base/{}", db);
+    let base_dir = crate::backend::paths::database_dir(db);
     let base_path = std::path::Path::new(&base_dir);
     if !base_path.exists() {
         return;
     }
-    let legacy_idx = format!("database/base/{}/{}.idx", db, table);
+    let legacy_idx = crate::backend::paths::legacy_index(db, table);
     let prefix = format!("{}.", table);
 
     // Drop any cached B+ Tree handle(s) for the files being removed so a
     // later CREATE INDEX on the same name cannot reuse the stale tree.
     evict_btree(std::path::Path::new(&legacy_idx));
     if let Some(name) = index_name {
-        evict_btree(std::path::Path::new(&format!(
-            "database/base/{}/{}.{}.idx",
-            db, table, name
+        evict_btree(std::path::Path::new(&crate::backend::paths::index(
+            db, table, name,
         )));
     } else if let Ok(entries) = std::fs::read_dir(base_path) {
         for entry in entries.flatten() {
@@ -703,7 +702,7 @@ pub(super) fn remove_index_files_for_table(db: &str, table: &str, index_name: Op
     crate::backend::executor::create_index::invalidate_discovery(db, Some(table));
 
     if let Some(name) = index_name {
-        let idx_path = format!("database/base/{}/{}.{}.idx", db, table, name);
+        let idx_path = crate::backend::paths::index(db, table, name);
         let _ = std::fs::remove_file(&idx_path);
         let _ = std::fs::remove_file(format!("{}.meta", idx_path));
     } else {
@@ -724,14 +723,14 @@ pub(super) fn remove_index_files_for_table(db: &str, table: &str, index_name: Op
 
 /// Rename all index files for a table from `old_name` to `new_name`.
 pub(super) fn rename_index_files_for_table(db: &str, old_name: &str, new_name: &str) {
-    let base_dir = format!("database/base/{}", db);
+    let base_dir = crate::backend::paths::database_dir(db);
     let base_path = std::path::Path::new(&base_dir);
     if !base_path.exists() {
         return;
     }
 
-    let old_legacy = format!("database/base/{}/{}.idx", db, old_name);
-    let new_legacy = format!("database/base/{}/{}.idx", db, new_name);
+    let old_legacy = crate::backend::paths::legacy_index(db, old_name);
+    let new_legacy = crate::backend::paths::legacy_index(db, new_name);
     let _ = std::fs::rename(&old_legacy, &new_legacy);
     let _ = std::fs::rename(
         format!("{}.meta", old_legacy),
@@ -746,7 +745,12 @@ pub(super) fn rename_index_files_for_table(db: &str, old_name: &str, new_name: &
             if let Some(suffix) = fname.strip_prefix(&prefix)
                 && (fname.ends_with(".idx") || fname.ends_with(".idx.meta"))
             {
-                let new_fname = format!("database/base/{}/{}.{}", db, new_name, suffix);
+                let new_fname = format!(
+                    "{}/{}.{}",
+                    crate::backend::paths::database_dir(db),
+                    new_name,
+                    suffix
+                );
                 let _ = std::fs::rename(entry.path(), &new_fname);
             }
         }
@@ -784,8 +788,8 @@ pub(super) fn drop_index(
     };
 
     if !table_name.is_empty() {
-        let named_idx_path = format!("database/base/{}/{}.{}.idx", db, table_name, index_name);
-        let legacy_idx_path = format!("database/base/{}/{}.idx", db, table_name);
+        let named_idx_path = crate::backend::paths::index(db, table_name, index_name);
+        let legacy_idx_path = crate::backend::paths::legacy_index(db, table_name);
         let legacy_meta_path = format!("{}.meta", legacy_idx_path);
 
         if std::path::Path::new(&named_idx_path).exists() {
@@ -818,7 +822,7 @@ pub(super) fn drop_index(
     }
 
     // No table name: find the index file by scanning the database directory.
-    let base_dir = format!("database/base/{}", db);
+    let base_dir = crate::backend::paths::database_dir(db);
     let entries = std::fs::read_dir(&base_dir).map_err(|_| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -835,11 +839,11 @@ pub(super) fn drop_index(
         let (tbl_name, meta_path) = match without_suffix.rfind('.') {
             Some(dot) if without_suffix[dot + 1..].eq_ignore_ascii_case(index_name) => (
                 &without_suffix[..dot],
-                format!("database/base/{}/{}.meta", db, fname),
+                format!("{}/{}.meta", crate::backend::paths::database_dir(db), fname),
             ),
             Some(_) => continue,
             None => {
-                let meta_path = format!("database/base/{}/{}.idx.meta", db, without_suffix);
+                let meta_path = crate::backend::paths::legacy_index_meta(db, without_suffix);
                 if !legacy_index_name(&meta_path, without_suffix)
                     .is_some_and(|n| n.eq_ignore_ascii_case(index_name))
                 {

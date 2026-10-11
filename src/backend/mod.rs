@@ -14,6 +14,7 @@ pub mod layout;
 pub mod log;
 pub mod name_validation;
 pub mod page;
+pub mod paths;
 pub mod planner;
 pub mod session;
 pub mod statistics;

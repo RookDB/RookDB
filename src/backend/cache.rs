@@ -539,7 +539,7 @@ pub fn table_statistics(
     table_name: &str,
 ) -> io::Result<std::sync::Arc<crate::statistics::TableStatistics>> {
     let key = (db_name.to_string(), table_name.to_string());
-    let path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+    let path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
     let file_len = std::fs::metadata(&path)?.len();
 
     if let Some((len, hit)) = lock(stats_cache()).get(&key)

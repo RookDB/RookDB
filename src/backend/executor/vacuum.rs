@@ -56,7 +56,7 @@ pub fn vacuum_table(
         .get(table_name)
         .ok_or_else(|| format!("Table '{}.{}' not found", db_name, table_name))?;
 
-    let heap_path = format!("database/base/{}/{}.dat", db_name, table_name);
+    let heap_path = crate::backend::paths::heap(db_name, table_name);
     if !PathBuf::from(&heap_path).exists() {
         return Err(format!("Heap file not found: {}", heap_path));
     }
@@ -118,7 +118,7 @@ fn rebuild_indexes(db_name: &str, table_name: &str) -> Result<usize, String> {
         .map(|t| t.columns.iter().map(|c| c.data_type.clone()).collect())
         .ok_or_else(|| format!("Table '{}.{}' not found in catalog", db_name, table_name))?;
 
-    let heap_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+    let heap_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
     let heap_manager =
         HeapManager::open(heap_path).map_err(|e| format!("Failed to open heap: {}", e))?;
 

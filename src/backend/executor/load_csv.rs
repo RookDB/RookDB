@@ -84,7 +84,7 @@ pub fn insert_row(
     let schema: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
     let bytes = serialize_nullable_typed_row(&schema, &row).map_err(RookError::TypeMismatch)?;
 
-    let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+    let table_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
     let (page_id, slot_id) =
         crate::backend::cache::with_heap(&table_path, |hm| hm.insert_tuple(&bytes)).map_err(
             |e| match e.kind() {

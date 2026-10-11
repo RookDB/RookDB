@@ -201,7 +201,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
     debug_print_catalog(&format!("Persisted database to catalog: '{}'", db_name));
 
     // Create database directory on disk
-    let db_path_str = TABLE_DIR_TEMPLATE.replace("{database}", db_name);
+    let db_path_str = crate::backend::paths::database_dir(db_name);
     let db_path = Path::new(&db_path_str);
 
     if !db_path.exists() {
@@ -298,9 +298,7 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     }
 
     // Construct table file path
-    let table_file_path = TABLE_FILE_TEMPLATE
-        .replace("{database}", db_name)
-        .replace("{table}", table_name);
+    let table_file_path = crate::backend::paths::heap(db_name, table_name);
 
     // Create and initialize table file
     let table_path = Path::new(&table_file_path);

@@ -96,8 +96,7 @@ fn apply_to_child_rows(
         },
     };
 
-    let heap_path =
-        std::path::PathBuf::from(format!("database/base/{}/{}.dat", db_name, child_table));
+    let heap_path = std::path::PathBuf::from(crate::backend::paths::heap(db_name, child_table));
     if !heap_path.exists() {
         return Ok(Vec::new());
     }

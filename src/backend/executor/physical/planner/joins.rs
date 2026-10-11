@@ -155,13 +155,14 @@ impl PhysicalPlanner {
                 if let Some((idx_name, _, _)) = matched_idx
                     && is_outer_small
                 {
-                    let idx_path = std::path::PathBuf::from(format!(
-                        "database/base/{}/{}.{}.idx",
-                        self.db_name, inner_ts.table, idx_name
+                    let idx_path = std::path::PathBuf::from(crate::backend::paths::index(
+                        &self.db_name,
+                        &inner_ts.table,
+                        idx_name,
                     ));
-                    let heap_path = std::path::PathBuf::from(format!(
-                        "database/base/{}/{}.dat",
-                        self.db_name, inner_ts.table
+                    let heap_path = std::path::PathBuf::from(crate::backend::paths::heap(
+                        &self.db_name,
+                        &inner_ts.table,
                     ));
                     if idx_path.exists()
                         && heap_path.exists()

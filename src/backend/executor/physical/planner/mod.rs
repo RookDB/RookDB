@@ -533,7 +533,7 @@ impl PhysicalPlanner {
             })
             .collect();
 
-        let heap_path = PathBuf::from(format!("database/base/{}/{}.dat", self.db_name, ts.table));
+        let heap_path = PathBuf::from(crate::backend::paths::heap(&self.db_name, &ts.table));
 
         if !heap_path.exists() {
             return Err(RookError::NotFound {
@@ -551,9 +551,10 @@ impl PhysicalPlanner {
         if !named_indexes.is_empty() {
             // Use the first named index for the full scan
             let first_idx_name = &named_indexes[0].0;
-            let index_path = PathBuf::from(format!(
-                "database/base/{}/{}.{}.idx",
-                self.db_name, ts.table, first_idx_name
+            let index_path = PathBuf::from(crate::backend::paths::index(
+                &self.db_name,
+                &ts.table,
+                first_idx_name,
             ));
 
             if index_path.exists() {
@@ -602,8 +603,10 @@ impl PhysicalPlanner {
         }
 
         // Fallback: check for legacy single-index file
-        let legacy_index_path =
-            PathBuf::from(format!("database/base/{}/{}.idx", self.db_name, ts.table));
+        let legacy_index_path = PathBuf::from(crate::backend::paths::legacy_index(
+            &self.db_name,
+            &ts.table,
+        ));
 
         if legacy_index_path.exists() {
             log::info!(

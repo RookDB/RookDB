@@ -36,7 +36,7 @@ use std::sync::{Mutex, OnceLock};
 // ─────────────────────────────────────────────────────────────────────────
 
 fn vm_path(db_name: &str, table_name: &str) -> PathBuf {
-    PathBuf::from(format!("database/base/{}/{}_vm", db_name, table_name))
+    PathBuf::from(crate::backend::paths::visibility_map(db_name, table_name))
 }
 
 /// Byte index and bit mask within that byte for `page_id`.
