@@ -222,6 +222,7 @@ impl PhysicalPlanner {
                 .collect();
 
             return Ok(Some(Box::new(IndexScanOperator::with_cached_index(
+                std::sync::Arc::clone(self.catalog.engine()),
                 idx_path,
                 key_types,
                 heap_manager,

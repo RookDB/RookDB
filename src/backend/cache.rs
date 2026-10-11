@@ -99,17 +99,12 @@ pub(crate) fn canonical(path: &Path) -> PathBuf {
 
 // ── heap manager cache ───────────────────────────────────────────────────────
 
-struct CachedHeap {
+pub(crate) struct CachedHeap {
     manager: HeapManager,
     ops_since_flush: u32,
 }
 
-type HeapCacheMap = HashMap<PathBuf, CachedHeap>;
-
-fn heap_cache() -> &'static Mutex<HeapCacheMap> {
-    static CACHE: OnceLock<Mutex<HeapCacheMap>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
+pub(crate) type HeapCacheMap = HashMap<PathBuf, CachedHeap>;
 
 /// Run `f` against a cached `HeapManager` for `path`.
 ///
@@ -118,6 +113,7 @@ fn heap_cache() -> &'static Mutex<HeapCacheMap> {
 /// stays resident — its pool is NOT flushed on return — which removes the
 /// per-row open/close churn and the flush-on-last-drop write amplification.
 pub fn with_heap<T>(
+    engine: &Engine,
     path: &Path,
     f: impl FnOnce(&mut HeapManager) -> io::Result<T>,
 ) -> io::Result<T> {
@@ -125,7 +121,7 @@ pub fn with_heap<T>(
 
     // Fast path: existing entry.
     {
-        let mut cache = lock(heap_cache());
+        let mut cache = lock(&engine.heaps);
         if let Some(entry) = cache.get(&key)
             && entry.manager.is_file_stale(path)
         {
@@ -145,7 +141,7 @@ pub fn with_heap<T>(
 
     // Miss: open outside the map lock, then insert (double-check).
     let mut manager = HeapManager::open(path.to_path_buf())?;
-    let mut cache = lock(heap_cache());
+    let mut cache = lock(&engine.heaps);
     if let Some(entry) = cache.get(&key)
         && entry.manager.is_file_stale(path)
     {
@@ -174,9 +170,9 @@ pub fn with_heap<T>(
 /// Called when the underlying file is replaced or externally rewritten:
 /// `HeapManager::create` truncates the file and registers a fresh shared
 /// pool, and VACUUM's direct-I/O compaction leaves stale frames behind.
-pub fn evict_heap(path: &Path) -> io::Result<()> {
+pub fn evict_heap(engine: &Engine, path: &Path) -> io::Result<()> {
     let key = canonical(path);
-    let removed = lock(heap_cache()).remove(&key);
+    let removed = lock(&engine.heaps).remove(&key);
     if let Some(mut entry) = removed {
         entry.manager.flush()?;
     }
@@ -184,8 +180,8 @@ pub fn evict_heap(path: &Path) -> io::Result<()> {
 }
 
 /// Flush and drop every cached heap manager.
-pub fn flush_and_clear_heaps() -> io::Result<()> {
-    let mut cache = lock(heap_cache());
+pub fn flush_and_clear_heaps(engine: &Engine) -> io::Result<()> {
+    let mut cache = lock(&engine.heaps);
     for (_, mut entry) in cache.drain() {
         entry.manager.flush()?;
     }
@@ -194,12 +190,7 @@ pub fn flush_and_clear_heaps() -> io::Result<()> {
 
 // ── btree handle cache ───────────────────────────────────────────────────────
 
-type BTreeCacheMap = HashMap<PathBuf, (crate::backend::index::btree::BTree, u32)>;
-
-fn btree_cache() -> &'static Mutex<BTreeCacheMap> {
-    static CACHE: OnceLock<Mutex<BTreeCacheMap>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
+pub(crate) type BTreeCacheMap = HashMap<PathBuf, (crate::backend::index::btree::BTree, u32)>;
 
 /// Run `f` against a cached `BTree` for `path`.
 ///
@@ -209,12 +200,13 @@ fn btree_cache() -> &'static Mutex<BTreeCacheMap> {
 ///
 /// `set_key_types` must be applied by `open` — the cached tree already has it.
 pub fn with_btree<T, E>(
+    engine: &Engine,
     path: &Path,
     open: impl FnOnce() -> Result<crate::backend::index::btree::BTree, E>,
     f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> Result<T, E>,
 ) -> Result<T, E> {
     let key = canonical(path);
-    let mut cache = lock(btree_cache());
+    let mut cache = lock(&engine.btrees);
 
     if !cache.contains_key(&key) {
         let tree = open()?;
@@ -233,8 +225,8 @@ pub fn with_btree<T, E>(
 }
 
 /// fsync every cached B+ Tree with pending mutations and drop the handles.
-pub fn sync_and_clear_btrees<E>() {
-    let mut cache = lock(btree_cache());
+pub fn sync_and_clear_btrees(engine: &Engine) {
+    let mut cache = lock(&engine.btrees);
     for (_, (mut tree, ops)) in cache.drain() {
         if ops > 0
             && let Err(e) = tree.sync()
@@ -245,9 +237,9 @@ pub fn sync_and_clear_btrees<E>() {
 }
 
 /// Drop a cached B+ Tree handle without syncing (file replaced/removed).
-pub fn evict_btree(path: &Path) {
+pub fn evict_btree(engine: &Engine, path: &Path) {
     let key = canonical(path);
-    lock(btree_cache()).remove(&key);
+    lock(&engine.btrees).remove(&key);
 }
 
 // ── checkpoints ──────────────────────────────────────────────────────────────
@@ -267,31 +259,46 @@ pub fn evict_btree(path: &Path) {
 /// boundaries and process exit. Use [`flush_and_clear_heaps`] /
 /// [`sync_and_clear_btrees`] to actually release resources.
 pub fn checkpoint() {
+    for engine in crate::backend::engine::open_engines() {
+        checkpoint_engine(&engine);
+    }
+}
+
+/// [`checkpoint`] with an unconditional fsync. Call before the process exits.
+pub fn checkpoint_durable() {
+    for engine in crate::backend::engine::open_engines() {
+        *lock(&engine.last_sync) = Some(std::time::Instant::now());
+        flush_caches(&engine, true);
+    }
+}
+
+/// [`checkpoint`] for one engine.
+pub fn checkpoint_engine(engine: &Engine) {
     let due = {
-        let mut last = lock(last_sync());
+        let mut last = lock(&engine.last_sync);
         let due = last.is_none_or(|t| t.elapsed() >= SYNC_INTERVAL);
         if due {
             *last = Some(std::time::Instant::now());
         }
         due
     };
-    flush_caches(due);
+    flush_caches(engine, due);
 }
 
-/// [`checkpoint`] with an unconditional fsync. Call before the process exits.
-pub fn checkpoint_durable() {
-    *lock(last_sync()) = Some(std::time::Instant::now());
-    flush_caches(true);
+/// Drop the cached manager for `path` in whichever open engine holds it.
+///
+/// For code that replaces a heap file without knowing which engine, if any,
+/// has it open.
+pub fn evict_heap_everywhere(path: &Path) -> io::Result<()> {
+    for engine in crate::backend::engine::open_engines() {
+        evict_heap(&engine, path)?;
+    }
+    Ok(())
 }
 
-fn last_sync() -> &'static Mutex<Option<std::time::Instant>> {
-    static LAST: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
-    LAST.get_or_init(|| Mutex::new(None))
-}
-
-fn flush_caches(durable: bool) {
+fn flush_caches(engine: &Engine, durable: bool) {
     {
-        let mut cache = lock(heap_cache());
+        let mut cache = lock(&engine.heaps);
         for entry in cache.values_mut() {
             let flushed = if durable {
                 entry.manager.flush()
@@ -305,7 +312,7 @@ fn flush_caches(durable: bool) {
         }
     }
     {
-        let mut cache = lock(btree_cache());
+        let mut cache = lock(&engine.btrees);
         for (tree, ops) in cache.values_mut() {
             let flushed = if durable {
                 tree.sync()

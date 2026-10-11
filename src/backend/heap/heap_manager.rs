@@ -281,7 +281,7 @@ impl HeapManager {
 
         // A cached manager on this path would hold the OLD shared pool and
         // FSM handle; evict it so subsequent opens bind to the new file.
-        crate::backend::cache::evict_heap(&file_path)?;
+        crate::backend::cache::evict_heap_everywhere(&file_path)?;
 
         // Create new file
         let mut file = OpenOptions::new()

@@ -696,14 +696,17 @@ pub(super) fn remove_index_files_for_table(
 
     // Drop any cached B+ Tree handle(s) for the files being removed so a
     // later CREATE INDEX on the same name cannot reuse the stale tree.
-    evict_btree(std::path::Path::new(&legacy_idx));
+    evict_btree(engine, std::path::Path::new(&legacy_idx));
     if let Some(name) = index_name {
-        evict_btree(std::path::Path::new(&engine.paths().index(db, table, name)));
+        evict_btree(
+            engine,
+            std::path::Path::new(&engine.paths().index(db, table, name)),
+        );
     } else if let Ok(entries) = std::fs::read_dir(base_path) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
             if fname.starts_with(&prefix) && fname.ends_with(".idx") {
-                evict_btree(&entry.path());
+                evict_btree(engine, &entry.path());
             }
         }
     }

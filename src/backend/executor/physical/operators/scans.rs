@@ -219,8 +219,13 @@ pub enum IndexScanMode {
 pub struct IndexScanOperator {
     /// B+ Tree index for key lookups, when this scan owns its handle.
     btree: Option<BTree>,
-    /// Index file and key types, when lookups go through the cached handle.
-    cached_index: Option<(PathBuf, Vec<DataType>)>,
+    /// Engine, index file and key types, when lookups go through the
+    /// engine's cached handle.
+    cached_index: Option<(
+        std::sync::Arc<crate::backend::engine::Engine>,
+        PathBuf,
+        Vec<DataType>,
+    )>,
     /// Heap manager for fetching actual tuple data from (page_id, slot_id).
     heap_manager: HeapManager,
     /// The scan mode (point lookup or range scan).
@@ -276,6 +281,7 @@ impl IndexScanOperator {
     /// The cached handle is the one DML maintains, so the scan reads the same
     /// pages DML writes and reuses pages already cached by earlier queries.
     pub fn with_cached_index(
+        engine: std::sync::Arc<crate::backend::engine::Engine>,
         idx_path: PathBuf,
         key_types: Vec<DataType>,
         heap_manager: HeapManager,
@@ -286,7 +292,7 @@ impl IndexScanOperator {
         let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
         Self {
             btree: None,
-            cached_index: Some((idx_path, key_types)),
+            cached_index: Some((engine, idx_path, key_types)),
             heap_manager,
             mode,
             column_info,
@@ -315,7 +321,7 @@ impl IndexScanOperator {
     /// Look the keys up in the owned tree, or in the cached handle.
     fn search_index(&mut self) -> io::Result<Vec<(u32, u32)>> {
         if self.btree.is_none()
-            && let Some((path, key_types)) = &self.cached_index
+            && let Some((engine, path, key_types)) = &self.cached_index
         {
             let open = || -> io::Result<BTree> {
                 let mut btree = BTree::open(path.clone())?;
@@ -323,7 +329,7 @@ impl IndexScanOperator {
                 Ok(btree)
             };
             let mode = &self.mode;
-            let hit = crate::backend::cache::with_btree(path, open, |btree| {
+            let hit = crate::backend::cache::with_btree(engine, path, open, |btree| {
                 // A handle cached with other key types would compare keys
                 // differently; leave it alone and use a private one.
                 if btree.key_types() != key_types.as_slice() {

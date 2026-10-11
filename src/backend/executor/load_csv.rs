@@ -86,13 +86,14 @@ pub fn insert_row(
 
     let table_path = PathBuf::from(catalog.engine().paths().heap(db_name, table_name));
     let (page_id, slot_id) =
-        crate::backend::cache::with_heap(&table_path, |hm| hm.insert_tuple(&bytes)).map_err(
-            |e| match e.kind() {
-                // A row the heap refuses (empty or larger than a page).
-                io::ErrorKind::InvalidInput => RookError::TypeMismatch(e.to_string()),
-                _ => RookError::Io(e),
-            },
-        )?;
+        crate::backend::cache::with_heap(catalog.engine(), &table_path, |hm| {
+            hm.insert_tuple(&bytes)
+        })
+        .map_err(|e| match e.kind() {
+            // A row the heap refuses (empty or larger than a page).
+            io::ErrorKind::InvalidInput => RookError::TypeMismatch(e.to_string()),
+            _ => RookError::Io(e),
+        })?;
 
     if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
         catalog.engine(),

@@ -154,7 +154,7 @@ pub fn update_by_pointers(
     }
 
     let path = catalog.engine().paths().heap(db_name, table_name);
-    let file = crate::backend::heap::HeapFile::open(std::path::Path::new(&path))
+    let file = crate::backend::heap::HeapFile::open(catalog.engine(), std::path::Path::new(&path))
         .map_err(|e| RookError::Io(e).with_context("Failed to open table file"))?;
     let file_identity = file.identity();
 

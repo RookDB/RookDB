@@ -100,7 +100,7 @@ fn apply_to_child_rows(
     if !heap_path.exists() {
         return Ok(Vec::new());
     }
-    let file = HeapFile::open(&heap_path)
+    let file = HeapFile::open(catalog.engine(), &heap_path)
         .map_err(|e| format!("Failed to open child heap for {}: {}", label, e))?;
     let schema: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
 

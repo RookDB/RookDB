@@ -23,8 +23,8 @@ impl HeapFile {
     ///
     /// The pool is taken from the cached `HeapManager`, which keeps it
     /// resident between statements and has it written out at checkpoints.
-    pub fn open(path: &Path) -> io::Result<Self> {
-        let pool = crate::backend::cache::with_heap(path, |hm| Ok(Arc::clone(&hm.pool)))?;
+    pub fn open(engine: &crate::backend::engine::Engine, path: &Path) -> io::Result<Self> {
+        let pool = crate::backend::cache::with_heap(engine, path, |hm| Ok(Arc::clone(&hm.pool)))?;
         let identity = {
             let guard = pool.lock().unwrap_or_else(|p| p.into_inner());
             let file = guard.file.as_ref().ok_or_else(|| {

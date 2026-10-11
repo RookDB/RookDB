@@ -31,6 +31,7 @@ fn try_index_for_value(
                 continue;
             }
             let search_res = crate::backend::cache::with_btree(
+                engine,
                 &idx_path,
                 || -> std::io::Result<crate::backend::index::btree::BTree> {
                     let mut bt = crate::backend::index::btree::BTree::open(idx_path.clone())?;
@@ -57,6 +58,7 @@ fn try_index_for_value(
     let legacy_idx = std::path::PathBuf::from(engine.paths().legacy_index(db_name, table_name));
     if legacy_idx.exists() {
         let search_res = crate::backend::cache::with_btree(
+            engine,
             &legacy_idx,
             || -> std::io::Result<crate::backend::index::btree::BTree> {
                 let mut bt = crate::backend::index::btree::BTree::open(legacy_idx.clone())?;

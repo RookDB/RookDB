@@ -73,5 +73,5 @@ pub fn insert_raw_tuple(
     let table_path = PathBuf::from(engine.paths().heap(db_name, table_name));
 
     // Process-cached manager: avoids a full file+FSM open per tuple.
-    crate::backend::cache::with_heap(&table_path, |hm| hm.insert_tuple(tuple_data))
+    crate::backend::cache::with_heap(engine, &table_path, |hm| hm.insert_tuple(tuple_data))
 }

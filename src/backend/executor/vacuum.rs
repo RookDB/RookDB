@@ -62,7 +62,8 @@ pub fn vacuum_table(
     }
 
     // 1. Snapshot the dead-tuple counter before compaction resets it.
-    let dead_before = read_dead_tuple_count(&heap_path).map_err(|e| e.to_string())?;
+    let dead_before =
+        read_dead_tuple_count(catalog.engine(), &heap_path).map_err(|e| e.to_string())?;
 
     // 2. Compact pages with dead slots (+ FSM rebuild + counter reset).
     let pages_compacted = super::delete::compaction_table(catalog.engine(), db_name, table_name)
@@ -95,8 +96,11 @@ pub fn vacuum_table(
 }
 
 /// Read the header's `dead_tuple_count` field (bytes 20..24 of page 0).
-fn read_dead_tuple_count(heap_path: &std::path::Path) -> io::Result<u32> {
-    let file = crate::backend::heap::HeapFile::open(heap_path)?;
+fn read_dead_tuple_count(
+    engine: &crate::backend::engine::Engine,
+    heap_path: &std::path::Path,
+) -> io::Result<u32> {
+    let file = crate::backend::heap::HeapFile::open(engine, heap_path)?;
     Ok(file.header()?.dead_tuple_count)
 }
 
@@ -168,7 +172,7 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
         }
 
         // Drop any stale cached handle before truncating/recreating the index file.
-        crate::backend::cache::evict_btree(&idx_path);
+        crate::backend::cache::evict_btree(catalog.engine(), &idx_path);
 
         // Fresh tree over the post-compaction heap.
         let mut btree = BTree::create_composite(idx_path.clone(), key_types)
@@ -204,7 +208,7 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
         btree
             .sync()
             .map_err(|e| format!("Failed to sync rebuilt index '{}': {}", idx_name, e))?;
-        crate::backend::cache::evict_btree(&idx_path);
+        crate::backend::cache::evict_btree(catalog.engine(), &idx_path);
         log::info!(
             "[Vacuum] Rebuilt index '{}' with {} entries",
             idx_name,

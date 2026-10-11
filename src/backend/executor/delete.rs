@@ -104,7 +104,7 @@ pub fn compaction_table(
 ) -> io::Result<usize> {
     let result = (|| -> io::Result<usize> {
         let path = engine.paths().heap(db_name, table_name);
-        let file = HeapFile::open(std::path::Path::new(&path))?;
+        let file = HeapFile::open(engine, std::path::Path::new(&path))?;
         let file_identity = file.identity();
 
         let total_pages = file.page_count();
@@ -149,7 +149,7 @@ pub fn compaction_table(
             // The rebuild reads the heap file and replaces the FSM fork, so
             // the compacted pages go to the file and the cached manager,
             // which holds the old fork, is dropped first.
-            crate::backend::cache::evict_heap(std::path::Path::new(&path))?;
+            crate::backend::cache::evict_heap(engine, std::path::Path::new(&path))?;
             rebuild_table_fsm(engine, db_name, table_name)?;
         }
 
@@ -232,7 +232,7 @@ pub fn delete_by_pointers(
     let columns = &table.columns;
 
     let path = catalog.engine().paths().heap(db_name, table_name);
-    let file = HeapFile::open(std::path::Path::new(&path))
+    let file = HeapFile::open(catalog.engine(), std::path::Path::new(&path))
         .map_err(|e| RookError::Io(e).with_context("Failed to open table file"))?;
     let file_identity = file.identity();
 

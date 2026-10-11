@@ -85,12 +85,15 @@ pub fn collect_table_statistics(
     table_name: &str,
 ) -> io::Result<TableStatistics> {
     let table_path = engine.paths().heap(db_name, table_name);
-    collect_heap_statistics(Path::new(&table_path))
+    collect_heap_statistics(engine, Path::new(&table_path))
 }
 
 /// Statistics for the heap file at `path`, read through its buffer pool.
-pub fn collect_heap_statistics(path: &Path) -> io::Result<TableStatistics> {
-    let file = HeapFile::open(path)?;
+pub fn collect_heap_statistics(
+    engine: &crate::backend::engine::Engine,
+    path: &Path,
+) -> io::Result<TableStatistics> {
+    let file = HeapFile::open(engine, path)?;
     let total_pages = file.page_count();
     let file_size_bytes = total_pages as u64 * PAGE_SIZE as u64;
     let data_pages = total_pages.saturating_sub(1);

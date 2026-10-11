@@ -27,7 +27,11 @@ fn test_collect_table_statistics_counts_pages_and_tuples() {
     heap.flush().expect("Failed to flush table");
     drop(heap);
 
-    let stats = collect_heap_statistics(&temp_path).expect("Failed to collect stats");
+    let stats = collect_heap_statistics(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        &temp_path,
+    )
+    .expect("Failed to collect stats");
 
     assert_eq!(stats.total_pages, 2);
     assert_eq!(stats.data_pages, 1);
@@ -45,7 +49,11 @@ fn test_collect_table_statistics_counts_pages_and_tuples() {
     assert_eq!(page.slot_bytes, 3 * 8);
     assert_eq!(page.header_bytes, 8);
 
-    storage_manager::backend::cache::evict_heap(&temp_path).expect("Failed to evict table");
+    storage_manager::backend::cache::evict_heap(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        &temp_path,
+    )
+    .expect("Failed to evict table");
     std::fs::remove_file(&temp_path).expect("Failed to remove temp table file");
     let _ = std::fs::remove_file(format!("{}.fsm", temp_path.display()));
 }
@@ -70,14 +78,22 @@ fn test_collect_table_statistics_skips_soft_deleted_rows() {
     drop(heap);
 
     // Soft-delete the first row the way SQL DELETE does.
-    let file = HeapFile::open(&temp_path).expect("Failed to open table");
+    let file = HeapFile::open(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        &temp_path,
+    )
+    .expect("Failed to open table");
     let mut page = Page::new();
     file.read_page(&mut page, 1).expect("Failed to read page");
     assert!(page.mark_deleted(0));
     file.write_page(&page, 1).expect("Failed to write page");
     drop(file);
 
-    let stats = collect_heap_statistics(&temp_path).expect("Failed to collect stats");
+    let stats = collect_heap_statistics(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        &temp_path,
+    )
+    .expect("Failed to collect stats");
 
     // The deleted row's slot still takes space but the row is not counted.
     assert_eq!(stats.total_tuple_count, 1);
@@ -86,7 +102,11 @@ fn test_collect_table_statistics_skips_soft_deleted_rows() {
     assert_eq!(stats.max_tuple_bytes, sizes[1] as u32);
     assert_eq!(stats.total_slot_bytes, 2 * 8);
 
-    storage_manager::backend::cache::evict_heap(&temp_path).expect("Failed to evict table");
+    storage_manager::backend::cache::evict_heap(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        &temp_path,
+    )
+    .expect("Failed to evict table");
     std::fs::remove_file(&temp_path).expect("Failed to remove temp table file");
     let _ = std::fs::remove_file(format!("{}.fsm", temp_path.display()));
 }

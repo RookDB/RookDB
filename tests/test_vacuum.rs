@@ -309,9 +309,12 @@ fn vacuum_reclaims_space_left_by_reused_slots() {
     }
 
     let path = std::path::PathBuf::from("database/base/rdb/events.dat");
-    let free_before = storage_manager::statistics::collect_heap_statistics(&path)
-        .unwrap()
-        .total_free_bytes;
+    let free_before = storage_manager::statistics::collect_heap_statistics(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        &path,
+    )
+    .unwrap()
+    .total_free_bytes;
 
     let stats = vacuum_table(&catalog, "rdb", "events").expect("vacuum failed");
     assert_eq!(
@@ -319,7 +322,11 @@ fn vacuum_reclaims_space_left_by_reused_slots() {
         "the page with stale bytes must be compacted"
     );
 
-    let after = storage_manager::statistics::collect_heap_statistics(&path).unwrap();
+    let after = storage_manager::statistics::collect_heap_statistics(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        &path,
+    )
+    .unwrap();
     assert!(
         after.total_free_bytes > free_before,
         "free space must grow: {} -> {}",

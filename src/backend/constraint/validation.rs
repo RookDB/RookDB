@@ -98,6 +98,7 @@ pub(crate) fn check_unique_insert_meta(
             let kt2 = key_types.clone();
             let open_path = idx_path.clone();
             match crate::backend::cache::with_btree(
+                engine,
                 &idx_path,
                 move || -> std::io::Result<crate::backend::index::btree::BTree> {
                     let mut bt = crate::backend::index::btree::BTree::open(open_path)?;
@@ -237,6 +238,7 @@ pub(crate) fn check_unique_insert_meta(
             std::path::PathBuf::from(engine.paths().legacy_index(db_name, table_name));
         if legacy_idx_path.exists() {
             match crate::backend::cache::with_btree(
+                engine,
                 &legacy_idx_path,
                 || -> std::io::Result<crate::backend::index::btree::BTree> {
                     let mut bt =

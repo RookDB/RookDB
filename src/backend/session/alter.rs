@@ -399,8 +399,8 @@ fn rewrite_rows(
 
     // The cached handles still describe the replaced file.
     crate::backend::buffer_manager::shared_pool::invalidate(Path::new(&dat_path));
-    let _ = crate::backend::cache::evict_heap(Path::new(&dat_path));
-    let _ = crate::backend::cache::evict_heap(Path::new(&tmp_path));
+    let _ = crate::backend::cache::evict_heap(engine, Path::new(&dat_path));
+    let _ = crate::backend::cache::evict_heap(engine, Path::new(&tmp_path));
     crate::backend::buffer_manager::shared_pool::invalidate(Path::new(&tmp_path));
 
     remove_index_files_for_table(engine, db, table, None);

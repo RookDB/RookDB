@@ -451,7 +451,7 @@ pub fn create_index_with_flags(
     // DDL landed: forget memoised metadata/discovery for this table and any
     // stale handle for the freshly rewritten index file.
     catalog.engine().invalidate_metadata();
-    crate::backend::cache::evict_btree(&idx_path);
+    crate::backend::cache::evict_btree(catalog.engine(), &idx_path);
 
     log::info!(
         "[CreateIndex] Index '{}' created with {} entries on {}.{}({})",
@@ -762,6 +762,7 @@ pub fn update_index_on_insert(
         };
 
         let res = crate::backend::cache::with_btree(
+            engine,
             idx_path,
             || {
                 open_btree_for_meta(idx_path, meta)
@@ -870,6 +871,7 @@ pub fn update_index_on_delete(
         };
 
         let del = crate::backend::cache::with_btree(
+            engine,
             idx_path,
             || {
                 open_btree_for_meta(idx_path, meta)
@@ -973,6 +975,7 @@ pub fn update_index_on_update(
         }
 
         let res = crate::backend::cache::with_btree(
+            engine,
             idx_path,
             || {
                 open_btree_for_meta(idx_path, meta)
