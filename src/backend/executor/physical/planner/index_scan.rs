@@ -5,8 +5,6 @@
 //! predicate against a table's indexes. When several indexes qualify the
 //! most selective mode wins (see `scan_mode_priority`).
 
-use std::path::PathBuf;
-
 use rook_ast::logical::LogicalTableScan;
 
 use super::super::operators::{IndexScanMode, IndexScanOperator, PhysicalOperator};
@@ -49,7 +47,7 @@ impl PhysicalPlanner {
             })
             .collect();
 
-        let heap_path = PathBuf::from(self.catalog.engine().paths().heap(&self.db_name, &ts.table));
+        let heap_path = self.catalog.engine().paths().heap(&self.db_name, &ts.table);
         if !heap_path.exists() {
             return Ok(None);
         }
@@ -128,12 +126,11 @@ impl PhysicalPlanner {
 
         // Try legacy index if no named index matched
         if best_mode.is_none() {
-            let legacy_idx_path = PathBuf::from(
-                self.catalog
-                    .engine()
-                    .paths()
-                    .legacy_index(&self.db_name, &ts.table),
-            );
+            let legacy_idx_path = self
+                .catalog
+                .engine()
+                .paths()
+                .legacy_index(&self.db_name, &ts.table);
             let meta_path = self
                 .catalog
                 .engine()
@@ -171,11 +168,11 @@ impl PhysicalPlanner {
         if let (Some(idx_name), Some(ref col_name), Some(mode)) =
             (best_idx_name, best_col_name, best_mode)
         {
-            let idx_path = PathBuf::from(self.catalog.engine().paths().index(
-                &self.db_name,
-                &ts.table,
-                &idx_name,
-            ));
+            let idx_path = self
+                .catalog
+                .engine()
+                .paths()
+                .index(&self.db_name, &ts.table, &idx_name);
             if !idx_path.exists() {
                 return Ok(None);
             }

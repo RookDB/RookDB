@@ -25,8 +25,7 @@ fn try_index_for_value(
             if !idx_col.eq_ignore_ascii_case(column_name) {
                 continue;
             }
-            let idx_path =
-                std::path::PathBuf::from(engine.paths().index(db_name, table_name, idx_name));
+            let idx_path = engine.paths().index(db_name, table_name, idx_name);
             if !idx_path.exists() {
                 continue;
             }
@@ -55,7 +54,7 @@ fn try_index_for_value(
     }
 
     // Fallback to legacy single-index file
-    let legacy_idx = std::path::PathBuf::from(engine.paths().legacy_index(db_name, table_name));
+    let legacy_idx = engine.paths().legacy_index(db_name, table_name);
     if legacy_idx.exists() {
         let search_res = crate::backend::cache::with_btree(
             engine,
@@ -153,7 +152,7 @@ pub(crate) fn child_has_referencing_row(
             Ok(Some(result)) => result,
             Ok(None) => {
                 // Table not in system tables: fall back to matching the key's text.
-                let heap_path = std::path::PathBuf::from(engine.paths().heap(db_name, child_table));
+                let heap_path = engine.paths().heap(db_name, child_table);
                 return scan_raw_heap_for_string(&heap_path, &super::fk_actions::key_text(value));
             }
             Err(e) => {
@@ -204,7 +203,7 @@ fn scan_heap_for_value(
 ) -> Result<bool, String> {
     use crate::types::Comparable;
 
-    let heap_path = std::path::PathBuf::from(engine.paths().heap(db_name, table_name));
+    let heap_path = engine.paths().heap(db_name, table_name);
     if !heap_path.exists() {
         return Ok(false);
     }

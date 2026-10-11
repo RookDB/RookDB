@@ -531,7 +531,7 @@ pub fn table_statistics(
     table_name: &str,
 ) -> io::Result<std::sync::Arc<crate::statistics::TableStatistics>> {
     let key = (db_name.to_string(), table_name.to_string());
-    let path = PathBuf::from(engine.paths().heap(db_name, table_name));
+    let path = engine.paths().heap(db_name, table_name);
     let file_len = std::fs::metadata(&path)?.len();
 
     if let Some((len, hit)) = lock(&engine.statistics).get(&key)

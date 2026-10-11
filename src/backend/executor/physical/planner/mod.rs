@@ -4,8 +4,6 @@
 //! physical operator tree. It uses the catalog to resolve table schemas and file
 //! paths needed for operators like `SeqScan`.
 
-use std::path::PathBuf;
-
 use rook_ast::logical::*;
 
 use super::expr::{Expr, Predicate, expr_from_ast};
@@ -537,7 +535,7 @@ impl PhysicalPlanner {
             })
             .collect();
 
-        let heap_path = PathBuf::from(self.catalog.engine().paths().heap(&self.db_name, &ts.table));
+        let heap_path = self.catalog.engine().paths().heap(&self.db_name, &ts.table);
 
         if !heap_path.exists() {
             return Err(RookError::NotFound {
@@ -558,11 +556,11 @@ impl PhysicalPlanner {
         if !named_indexes.is_empty() {
             // Use the first named index for the full scan
             let first_idx_name = &named_indexes[0].0;
-            let index_path = PathBuf::from(self.catalog.engine().paths().index(
-                &self.db_name,
-                &ts.table,
-                first_idx_name,
-            ));
+            let index_path =
+                self.catalog
+                    .engine()
+                    .paths()
+                    .index(&self.db_name, &ts.table, first_idx_name);
 
             if index_path.exists() {
                 log::info!(
@@ -610,12 +608,11 @@ impl PhysicalPlanner {
         }
 
         // Fallback: check for legacy single-index file
-        let legacy_index_path = PathBuf::from(
-            self.catalog
-                .engine()
-                .paths()
-                .legacy_index(&self.db_name, &ts.table),
-        );
+        let legacy_index_path = self
+            .catalog
+            .engine()
+            .paths()
+            .legacy_index(&self.db_name, &ts.table);
 
         if legacy_index_path.exists() {
             log::info!(

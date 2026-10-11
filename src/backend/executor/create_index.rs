@@ -32,7 +32,7 @@ pub(crate) fn index_file_path(
     table_name: &str,
     index_name: &str,
 ) -> PathBuf {
-    PathBuf::from(engine.paths().index(db_name, table_name, index_name))
+    engine.paths().index(db_name, table_name, index_name)
 }
 
 /// Construct the legacy `.idx` file path (single-index fallback).
@@ -41,7 +41,7 @@ fn legacy_index_file_path(
     db_name: &str,
     table_name: &str,
 ) -> PathBuf {
-    PathBuf::from(engine.paths().legacy_index(db_name, table_name))
+    engine.paths().legacy_index(db_name, table_name)
 }
 
 /// Construct the legacy `.idx.meta` file path (single-index fallback).
@@ -50,7 +50,7 @@ fn legacy_index_meta_file_path(
     db_name: &str,
     table_name: &str,
 ) -> PathBuf {
-    PathBuf::from(engine.paths().legacy_index_meta(db_name, table_name))
+    engine.paths().legacy_index_meta(db_name, table_name)
 }
 
 /// The key layout of an index: its columns, their positions in the row and
@@ -360,7 +360,7 @@ pub fn create_index_with_flags(
     };
 
     // 4. Build paths — use index-name-based files
-    let heap_path = PathBuf::from(catalog.engine().paths().heap(db_name, table_name));
+    let heap_path = catalog.engine().paths().heap(db_name, table_name);
     let idx_path = index_file_path(catalog.engine(), db_name, table_name, &resolved_name);
 
     if !heap_path.exists() {
@@ -532,7 +532,7 @@ pub fn ensure_parent_column_index(
         return false; // PK/UNIQUE/user index already covers the probe
     }
 
-    let heap_path = PathBuf::from(catalog.engine().paths().heap(db_name, parent_table));
+    let heap_path = catalog.engine().paths().heap(db_name, parent_table);
     if !heap_path.exists() {
         log::warn!(
             "[AutoIndex] FK parent heap missing: {:?}; skipping parent-side index",

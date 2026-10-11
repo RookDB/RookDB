@@ -263,7 +263,7 @@ fn child_rows_referencing(
     let Some(columns) = table_columns(catalog, db_name, child_table) else {
         return Ok(Vec::new());
     };
-    let heap_path = std::path::PathBuf::from(catalog.engine().paths().heap(db_name, child_table));
+    let heap_path = catalog.engine().paths().heap(db_name, child_table);
     if !heap_path.exists() {
         return Ok(Vec::new());
     }

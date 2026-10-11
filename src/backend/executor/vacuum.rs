@@ -122,7 +122,7 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
         .map(|t| t.columns.iter().map(|c| c.data_type.clone()).collect())
         .ok_or_else(|| format!("Table '{}.{}' not found in catalog", db_name, table_name))?;
 
-    let heap_path = PathBuf::from(engine.paths().heap(db_name, table_name));
+    let heap_path = engine.paths().heap(db_name, table_name);
     let heap_manager =
         HeapManager::open(heap_path).map_err(|e| format!("Failed to open heap: {}", e))?;
 

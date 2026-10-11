@@ -96,7 +96,7 @@ fn apply_to_child_rows(
         },
     };
 
-    let heap_path = std::path::PathBuf::from(catalog.engine().paths().heap(db_name, child_table));
+    let heap_path = catalog.engine().paths().heap(db_name, child_table);
     if !heap_path.exists() {
         return Ok(Vec::new());
     }

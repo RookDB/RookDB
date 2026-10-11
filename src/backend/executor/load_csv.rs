@@ -7,7 +7,6 @@
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use std::path::PathBuf;
 
 use crate::backend::error::{RookError, RookResult};
 use crate::catalog::types::{Catalog, Column};
@@ -84,7 +83,7 @@ pub fn insert_row(
     let schema: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
     let bytes = serialize_nullable_typed_row(&schema, &row).map_err(RookError::TypeMismatch)?;
 
-    let table_path = PathBuf::from(catalog.engine().paths().heap(db_name, table_name));
+    let table_path = catalog.engine().paths().heap(db_name, table_name);
     let (page_id, slot_id) =
         crate::backend::cache::with_heap(catalog.engine(), &table_path, |hm| {
             hm.insert_tuple(&bytes)

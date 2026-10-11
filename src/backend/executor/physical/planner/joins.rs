@@ -156,17 +156,16 @@ impl PhysicalPlanner {
                 if let Some((idx_name, _, _)) = matched_idx
                     && is_outer_small
                 {
-                    let idx_path = std::path::PathBuf::from(self.catalog.engine().paths().index(
+                    let idx_path = self.catalog.engine().paths().index(
                         &self.db_name,
                         &inner_ts.table,
                         idx_name,
-                    ));
-                    let heap_path = std::path::PathBuf::from(
-                        self.catalog
-                            .engine()
-                            .paths()
-                            .heap(&self.db_name, &inner_ts.table),
                     );
+                    let heap_path = self
+                        .catalog
+                        .engine()
+                        .paths()
+                        .heap(&self.db_name, &inner_ts.table);
                     if idx_path.exists()
                         && heap_path.exists()
                         && let Some(outer_key_idx) =

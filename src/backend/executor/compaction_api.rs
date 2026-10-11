@@ -4,7 +4,6 @@
 //! internal state implementations from other teams.
 
 use std::io;
-use std::path::PathBuf;
 
 use crate::backend::heap::HeapManager;
 
@@ -16,8 +15,8 @@ pub fn rebuild_table_fsm(
     db_name: &str,
     table_name: &str,
 ) -> io::Result<()> {
-    let table_path = PathBuf::from(engine.paths().heap(db_name, table_name));
-    let fsm_path = PathBuf::from(engine.paths().heap_fsm(db_name, table_name));
+    let table_path = engine.paths().heap(db_name, table_name);
+    let fsm_path = engine.paths().heap_fsm(db_name, table_name);
 
     // 1. Delete the old FSM fork file
     if fsm_path.exists() {
@@ -43,7 +42,7 @@ pub fn update_page_free_space(
     page_id: u32,
     reclaimed_bytes: u32,
 ) -> io::Result<()> {
-    let table_path = PathBuf::from(engine.paths().heap(db_name, table_name));
+    let table_path = engine.paths().heap(db_name, table_name);
 
     // Open the HeapManager (loads the FSM)
     let mut hm = HeapManager::open(table_path)?;
@@ -70,7 +69,7 @@ pub fn insert_raw_tuple(
     table_name: &str,
     tuple_data: &[u8],
 ) -> io::Result<(u32, u32)> {
-    let table_path = PathBuf::from(engine.paths().heap(db_name, table_name));
+    let table_path = engine.paths().heap(db_name, table_name);
 
     // Process-cached manager: avoids a full file+FSM open per tuple.
     crate::backend::cache::with_heap(engine, &table_path, |hm| hm.insert_tuple(tuple_data))
