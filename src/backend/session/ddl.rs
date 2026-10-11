@@ -77,8 +77,9 @@ pub(super) fn drop_database(
 
     let mut lines = Vec::new();
     catalog.databases.remove(db_name);
-    let _ = std::fs::remove_dir_all(crate::backend::paths::database_dir(db_name));
-    if let Err(e) = crate::backend::system_table::delete_database_metadata(db_name) {
+    let engine = std::sync::Arc::clone(catalog.engine());
+    let _ = std::fs::remove_dir_all(engine.paths().database_dir(db_name));
+    if let Err(e) = crate::backend::system_table::delete_database_metadata(&engine, db_name) {
         lines.push(format!(
             "[DropDatabase] Warning: failed to clean up system table metadata: {}",
             e
@@ -385,10 +386,12 @@ pub(super) fn drop_table(
     }
 
     // Foreign keys that reference the table (RESTRICT check)
-    let ref_fks = crate::backend::constraint::loaders::load_referencing_foreign_keys(db, table)
-        .map_err(|e| {
-            io::Error::other(format!("Failed to check referencing foreign keys: {}", e))
-        })?;
+    let ref_fks = crate::backend::constraint::loaders::load_referencing_foreign_keys(
+        catalog.engine(),
+        db,
+        table,
+    )
+    .map_err(|e| io::Error::other(format!("Failed to check referencing foreign keys: {}", e)))?;
     if !ref_fks.is_empty() && !cascade {
         let child_tbls: Vec<String> = ref_fks.iter().map(|fk| fk.0.clone()).collect();
         return Err(io::Error::new(
@@ -409,7 +412,11 @@ pub(super) fn drop_table(
         }
     }
     if cascade && !ref_fks.is_empty() {
-        let count = crate::backend::system_table::delete_referencing_foreign_keys(db, table)?;
+        let count = crate::backend::system_table::delete_referencing_foreign_keys(
+            catalog.engine(),
+            db,
+            table,
+        )?;
         lines.push(format!(
             "Cascaded drop of {} referencing foreign key constraints.",
             count
@@ -419,12 +426,13 @@ pub(super) fn drop_table(
     if let Some(db_obj) = catalog.databases.get_mut(db) {
         db_obj.tables.remove(table);
     }
-    let dat_path = crate::backend::paths::heap(db, table);
+    let dat_path = catalog.engine().paths().heap(db, table);
     let _ = std::fs::remove_file(&dat_path);
-    let _ = std::fs::remove_file(format!("{}.fsm", dat_path));
+    let _ = std::fs::remove_file(catalog.engine().paths().heap_fsm(db, table));
     remove_index_files_for_table(catalog.engine(), db, table, None);
 
-    if let Err(e) = crate::backend::system_table::delete_table_metadata(db, table) {
+    if let Err(e) = crate::backend::system_table::delete_table_metadata(catalog.engine(), db, table)
+    {
         lines.push(format!(
             "[DropTable] Warning: failed to clean up system table metadata for '{}.{}': {}",
             db, table, e
@@ -471,7 +479,7 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<S
         ));
     }
 
-    let dat_path = crate::backend::paths::heap(db, table);
+    let dat_path = catalog.engine().paths().heap(db, table);
     let mut hm = crate::heap::HeapManager::create(std::path::PathBuf::from(&dat_path))
         .map_err(|e| io::Error::other(format!("Failed to create table file: {}", e)))?;
     hm.flush()
@@ -678,21 +686,19 @@ pub(super) fn remove_index_files_for_table(
 ) {
     use crate::backend::cache::evict_btree;
 
-    let base_dir = crate::backend::paths::database_dir(db);
+    let base_dir = engine.paths().database_dir(db);
     let base_path = std::path::Path::new(&base_dir);
     if !base_path.exists() {
         return;
     }
-    let legacy_idx = crate::backend::paths::legacy_index(db, table);
+    let legacy_idx = engine.paths().legacy_index(db, table);
     let prefix = format!("{}.", table);
 
     // Drop any cached B+ Tree handle(s) for the files being removed so a
     // later CREATE INDEX on the same name cannot reuse the stale tree.
     evict_btree(std::path::Path::new(&legacy_idx));
     if let Some(name) = index_name {
-        evict_btree(std::path::Path::new(&crate::backend::paths::index(
-            db, table, name,
-        )));
+        evict_btree(std::path::Path::new(&engine.paths().index(db, table, name)));
     } else if let Ok(entries) = std::fs::read_dir(base_path) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
@@ -706,12 +712,12 @@ pub(super) fn remove_index_files_for_table(
     engine.invalidate_metadata();
 
     if let Some(name) = index_name {
-        let idx_path = crate::backend::paths::index(db, table, name);
+        let idx_path = engine.paths().index(db, table, name);
         let _ = std::fs::remove_file(&idx_path);
-        let _ = std::fs::remove_file(format!("{}.meta", idx_path));
+        let _ = std::fs::remove_file(engine.paths().index_meta(db, table, name));
     } else {
         let _ = std::fs::remove_file(&legacy_idx);
-        let _ = std::fs::remove_file(format!("{}.meta", legacy_idx));
+        let _ = std::fs::remove_file(engine.paths().legacy_index_meta(db, table));
         if let Ok(entries) = std::fs::read_dir(base_path) {
             for entry in entries.flatten() {
                 let fname = entry.file_name().to_string_lossy().to_string();
@@ -726,19 +732,24 @@ pub(super) fn remove_index_files_for_table(
 }
 
 /// Rename all index files for a table from `old_name` to `new_name`.
-pub(super) fn rename_index_files_for_table(db: &str, old_name: &str, new_name: &str) {
-    let base_dir = crate::backend::paths::database_dir(db);
+pub(super) fn rename_index_files_for_table(
+    engine: &crate::backend::engine::Engine,
+    db: &str,
+    old_name: &str,
+    new_name: &str,
+) {
+    let base_dir = engine.paths().database_dir(db);
     let base_path = std::path::Path::new(&base_dir);
     if !base_path.exists() {
         return;
     }
 
-    let old_legacy = crate::backend::paths::legacy_index(db, old_name);
-    let new_legacy = crate::backend::paths::legacy_index(db, new_name);
+    let old_legacy = engine.paths().legacy_index(db, old_name);
+    let new_legacy = engine.paths().legacy_index(db, new_name);
     let _ = std::fs::rename(&old_legacy, &new_legacy);
     let _ = std::fs::rename(
-        format!("{}.meta", old_legacy),
-        format!("{}.meta", new_legacy),
+        engine.paths().legacy_index_meta(db, old_name),
+        engine.paths().legacy_index_meta(db, new_name),
     );
 
     // {old_name}.{index_name}.idx → {new_name}.{index_name}.idx
@@ -749,12 +760,7 @@ pub(super) fn rename_index_files_for_table(db: &str, old_name: &str, new_name: &
             if let Some(suffix) = fname.strip_prefix(&prefix)
                 && (fname.ends_with(".idx") || fname.ends_with(".idx.meta"))
             {
-                let new_fname = format!(
-                    "{}/{}.{}",
-                    crate::backend::paths::database_dir(db),
-                    new_name,
-                    suffix
-                );
+                let new_fname = base_path.join(format!("{}.{}", new_name, suffix));
                 let _ = std::fs::rename(entry.path(), &new_fname);
             }
         }
@@ -783,7 +789,12 @@ pub(super) fn drop_index(
     };
     let mut lines = Vec::new();
     let mut forget = |table: &str| {
-        if let Err(e) = crate::backend::system_table::delete_index_metadata(db, table, index_name) {
+        if let Err(e) = crate::backend::system_table::delete_index_metadata(
+            catalog.engine(),
+            db,
+            table,
+            index_name,
+        ) {
             lines.push(format!(
                 "[DropIndex] Warning: failed to clean up sys_indexes for '{}': {}",
                 index_name, e
@@ -792,9 +803,9 @@ pub(super) fn drop_index(
     };
 
     if !table_name.is_empty() {
-        let named_idx_path = crate::backend::paths::index(db, table_name, index_name);
-        let legacy_idx_path = crate::backend::paths::legacy_index(db, table_name);
-        let legacy_meta_path = format!("{}.meta", legacy_idx_path);
+        let named_idx_path = catalog.engine().paths().index(db, table_name, index_name);
+        let legacy_idx_path = catalog.engine().paths().legacy_index(db, table_name);
+        let legacy_meta_path = catalog.engine().paths().legacy_index_meta(db, table_name);
 
         if std::path::Path::new(&named_idx_path).exists() {
             remove_index_files_for_table(catalog.engine(), db, table_name, Some(index_name));
@@ -826,11 +837,11 @@ pub(super) fn drop_index(
     }
 
     // No table name: find the index file by scanning the database directory.
-    let base_dir = crate::backend::paths::database_dir(db);
+    let base_dir = catalog.engine().paths().database_dir(db);
     let entries = std::fs::read_dir(&base_dir).map_err(|_| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("Database directory '{}' not found", base_dir),
+            format!("Database directory '{}' not found", base_dir.display()),
         )
     })?;
     for entry in entries.flatten() {
@@ -843,11 +854,14 @@ pub(super) fn drop_index(
         let (tbl_name, meta_path) = match without_suffix.rfind('.') {
             Some(dot) if without_suffix[dot + 1..].eq_ignore_ascii_case(index_name) => (
                 &without_suffix[..dot],
-                format!("{}/{}.meta", crate::backend::paths::database_dir(db), fname),
+                base_dir.join(format!("{}.meta", fname)),
             ),
             Some(_) => continue,
             None => {
-                let meta_path = crate::backend::paths::legacy_index_meta(db, without_suffix);
+                let meta_path = catalog
+                    .engine()
+                    .paths()
+                    .legacy_index_meta(db, without_suffix);
                 if !legacy_index_name(&meta_path, without_suffix)
                     .is_some_and(|n| n.eq_ignore_ascii_case(index_name))
                 {
@@ -879,7 +893,7 @@ pub(super) fn drop_index(
 
 /// The generated name (`idx_{table}_{column}`) of a legacy single-index file,
 /// read from its metadata.
-fn legacy_index_name(meta_path: &str, table: &str) -> Option<String> {
+fn legacy_index_name(meta_path: &std::path::Path, table: &str) -> Option<String> {
     #[derive(serde::Deserialize)]
     struct IndexMeta {
         column_name: String,

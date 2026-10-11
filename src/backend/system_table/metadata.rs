@@ -12,9 +12,13 @@ use super::*;
 ///
 /// Returns the total number of deleted rows, or an error if the table can't
 /// be found in `sys_tables`.
-pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result<usize> {
+pub fn delete_table_metadata(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> std::io::Result<usize> {
     // Resolve table_id from sys_tables
-    let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let db_id = db_rows
         .iter()
@@ -38,7 +42,7 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
             )
         })?;
 
-    let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let table_id = tbl_rows
         .iter()
@@ -70,9 +74,9 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
         })?;
 
     let mut total = 0usize;
-    total += delete_rows_by_table_id("constraints", SYS_CONSTRAINTS_SCHEMA, table_id)?;
-    total += delete_rows_by_table_id("columns", SYS_COLUMNS_SCHEMA, table_id)?;
-    total += delete_rows_by_table_id("indexes", SYS_INDEXES_SCHEMA, table_id)?;
+    total += delete_rows_by_table_id(engine, "constraints", SYS_CONSTRAINTS_SCHEMA, table_id)?;
+    total += delete_rows_by_table_id(engine, "columns", SYS_COLUMNS_SCHEMA, table_id)?;
+    total += delete_rows_by_table_id(engine, "indexes", SYS_INDEXES_SCHEMA, table_id)?;
 
     log::info!(
         "[SystemCatalog] Deleted {} metadata rows for table '{}.{}' (table_id={})",
@@ -100,7 +104,7 @@ pub fn insert_constraint_metadata(
     ref_columns: Option<&str>, // for FOREIGN KEY
 ) -> std::io::Result<()> {
     // 1. Resolve db_name → db_id
-    let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let db_id = db_rows
         .iter()
@@ -125,7 +129,7 @@ pub fn insert_constraint_metadata(
         })?;
 
     // 2. Resolve (db_id, table_name) → table_id
-    let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let table_id = tbl_rows
         .iter()
@@ -157,7 +161,7 @@ pub fn insert_constraint_metadata(
         })?;
 
     // 3. Compute next constraint_id by scanning sys_constraints
-    let constr_rows = scan_system_table("constraints", SYS_CONSTRAINTS_SCHEMA)
+    let constr_rows = scan_system_table(engine, "constraints", SYS_CONSTRAINTS_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let next_constr_id = constr_rows
         .iter()
@@ -177,7 +181,7 @@ pub fn insert_constraint_metadata(
         Some(ref_table.unwrap_or("").to_string()),
         Some(ref_columns.unwrap_or("").to_string()),
     ];
-    let res = insert_system_rows("constraints", SYS_CONSTRAINTS_SCHEMA, &[constr_row]);
+    let res = insert_system_rows(engine, "constraints", SYS_CONSTRAINTS_SCHEMA, &[constr_row]);
     if res.is_ok() {
         engine.invalidate_metadata();
     }
@@ -201,7 +205,7 @@ pub fn insert_index_metadata(
     is_primary: bool,
 ) -> std::io::Result<()> {
     // 1. Resolve db_name → db_id from sys_databases
-    let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let db_id = db_rows
         .iter()
@@ -226,7 +230,7 @@ pub fn insert_index_metadata(
         })?;
 
     // 2. Resolve (db_id, table_name) → table_id from sys_tables
-    let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let table_id = tbl_rows
         .iter()
@@ -258,7 +262,7 @@ pub fn insert_index_metadata(
         })?;
 
     // 3. Compute next index_id by scanning sys_indexes
-    let idx_rows = scan_system_table("indexes", SYS_INDEXES_SCHEMA)
+    let idx_rows = scan_system_table(engine, "indexes", SYS_INDEXES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let next_idx_id = idx_rows.iter().fold(1i32, |max_id, row| match row.first() {
         Some(Some(crate::types::DataValue::Int(id))) => std::cmp::max(max_id, *id + 1),
@@ -274,7 +278,7 @@ pub fn insert_index_metadata(
         Some(if is_primary { "true" } else { "false" }.to_string()), // is_primary
         Some(column_name.to_string()),                               // columns
     ];
-    let res = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &[idx_row]);
+    let res = insert_system_rows(engine, "indexes", SYS_INDEXES_SCHEMA, &[idx_row]);
     if res.is_ok() {
         engine.invalidate_metadata();
     }
@@ -288,12 +292,13 @@ pub fn insert_index_metadata(
 ///
 /// Returns the number of deleted rows (0 or 1).
 pub fn delete_index_metadata(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     index_name: &str,
 ) -> std::io::Result<usize> {
     // Resolve db_name → db_id
-    let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let db_id = db_rows
         .iter()
@@ -318,7 +323,7 @@ pub fn delete_index_metadata(
         })?;
 
     // Resolve (db_id, table_name) → table_id
-    let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let table_id = tbl_rows
         .iter()
@@ -350,7 +355,7 @@ pub fn delete_index_metadata(
         })?;
 
     // Scan sys_indexes to find matching row
-    let idx_path = sys_path("indexes");
+    let idx_path = sys_path(engine, "indexes");
     if !idx_path.exists() {
         return Ok(0);
     }
@@ -407,14 +412,15 @@ pub fn delete_index_metadata(
 /// Used when dropping a column: removes NOT NULL, UNIQUE, CHECK, FOREIGN KEY
 /// constraints that reference the dropped column.
 pub fn delete_column_constraints(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     column_name: &str,
 ) -> std::io::Result<usize> {
     // Resolve db_name → db_id, (db_id, table_name) → table_id
-    let (table_id, _db_id) = resolve_table_id(db_name, table_name)?;
+    let (table_id, _db_id) = resolve_table_id(engine, db_name, table_name)?;
 
-    let constr_path = sys_path("constraints");
+    let constr_path = sys_path(engine, "constraints");
     if !constr_path.exists() {
         return Ok(0);
     }
@@ -515,14 +521,15 @@ pub fn rename_identifier_in_expr(expr: &str, old_name: &str, new_name: &str) -> 
 /// For composite constraint entries (e.g. "id,name"), only the matching part
 /// is replaced.
 pub fn rename_column_in_constraints(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     old_name: &str,
     new_name: &str,
 ) -> std::io::Result<usize> {
-    let (table_id, _db_id) = resolve_table_id(db_name, table_name)?;
+    let (table_id, _db_id) = resolve_table_id(engine, db_name, table_name)?;
 
-    let constr_path = sys_path("constraints");
+    let constr_path = sys_path(engine, "constraints");
     if !constr_path.exists() {
         return Ok(0);
     }
@@ -631,18 +638,19 @@ pub fn rename_column_in_constraints(
 /// at `new_name`. Called after a table rename so its children keep finding
 /// their parent. Returns the number of rows rewritten.
 pub fn rename_referenced_table_in_constraints(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     child_tables: &[String],
     old_name: &str,
     new_name: &str,
 ) -> std::io::Result<usize> {
-    let constr_path = sys_path("constraints");
+    let constr_path = sys_path(engine, "constraints");
     if !constr_path.exists() {
         return Ok(0);
     }
     let child_ids: Vec<i32> = child_tables
         .iter()
-        .filter_map(|t| resolve_table_id(db_name, t).ok().map(|(id, _)| id))
+        .filter_map(|t| resolve_table_id(engine, db_name, t).ok().map(|(id, _)| id))
         .collect();
 
     let mut heap = crate::backend::heap::HeapManager::open(constr_path.clone())?;
@@ -695,9 +703,12 @@ pub fn rename_referenced_table_in_constraints(
 ///
 /// Returns the total number of deleted rows, or an error if the database
 /// can't be found in `sys_databases`.
-pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
+pub fn delete_database_metadata(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+) -> std::io::Result<usize> {
     // 1. Resolve db_name → db_id
-    let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let db_id = db_rows
         .iter()
@@ -722,7 +733,7 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
         })?;
 
     // 2. Find all tables belonging to this database
-    let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let table_ids: Vec<i32> = tbl_rows
         .iter()
@@ -744,19 +755,19 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
 
     // 3. Delete metadata for each table (columns, constraints, indexes)
     for table_id in &table_ids {
-        total += delete_rows_by_table_id("constraints", SYS_CONSTRAINTS_SCHEMA, *table_id)?;
-        total += delete_rows_by_table_id("columns", SYS_COLUMNS_SCHEMA, *table_id)?;
-        total += delete_rows_by_table_id("indexes", SYS_INDEXES_SCHEMA, *table_id)?;
+        total += delete_rows_by_table_id(engine, "constraints", SYS_CONSTRAINTS_SCHEMA, *table_id)?;
+        total += delete_rows_by_table_id(engine, "columns", SYS_COLUMNS_SCHEMA, *table_id)?;
+        total += delete_rows_by_table_id(engine, "indexes", SYS_INDEXES_SCHEMA, *table_id)?;
     }
 
     // 4. Delete table entries from sys_tables (db_id is at column index 1)
-    total += delete_rows_by_column("tables", SYS_TABLES_SCHEMA, 1, db_id)?;
+    total += delete_rows_by_column(engine, "tables", SYS_TABLES_SCHEMA, 1, db_id)?;
 
     // 5. Delete view entries from sys_views (db_id is at column index 1)
-    total += delete_rows_by_column("views", SYS_VIEWS_SCHEMA, 1, db_id)?;
+    total += delete_rows_by_column(engine, "views", SYS_VIEWS_SCHEMA, 1, db_id)?;
 
     // 6. Delete the database entry from sys_databases (db_id is at column index 0)
-    total += delete_rows_by_column("databases", SYS_DATABASES_SCHEMA, 0, db_id)?;
+    total += delete_rows_by_column(engine, "databases", SYS_DATABASES_SCHEMA, 0, db_id)?;
 
     log::info!(
         "[SystemCatalog] Deleted {} metadata rows for database '{}' (db_id={})",
@@ -774,12 +785,13 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
 /// and `sys_tables` (col 1), and by `delete_table_metadata` via the
 /// more specific `delete_rows_by_table_id` wrapper.
 fn delete_rows_by_column(
+    engine: &crate::backend::engine::Engine,
     name: &str,
     schema: &[DataType],
     column_idx: usize,
     target_id: i32,
 ) -> std::io::Result<usize> {
-    let path = sys_path(name);
+    let path = sys_path(engine, name);
     if !path.exists() {
         return Ok(0);
     }
@@ -819,20 +831,22 @@ fn delete_rows_by_column(
 ///
 /// Uses `HeapManager::delete_tuple` to mark each matching slot as deleted.
 fn delete_rows_by_table_id(
+    engine: &crate::backend::engine::Engine,
     name: &str,
     schema: &[DataType],
     target_table_id: i32,
 ) -> std::io::Result<usize> {
-    delete_rows_by_column(name, schema, 1, target_table_id)
+    delete_rows_by_column(engine, name, schema, 1, target_table_id)
 }
 
 /// Scan `sys_constraints` and delete all FOREIGN KEY rows referencing `parent_table_name`.
 pub fn delete_referencing_foreign_keys(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     parent_table_name: &str,
 ) -> std::io::Result<usize> {
     // Resolve db_id
-    let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let db_id = db_rows
         .iter()
@@ -857,7 +871,7 @@ pub fn delete_referencing_foreign_keys(
         })?;
 
     // Load sys_tables for the db to create a table_id → db_id mapping
-    let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let mut table_id_to_db_id = std::collections::HashMap::new();
     for row in &tbl_rows {
@@ -870,7 +884,7 @@ pub fn delete_referencing_foreign_keys(
         }
     }
 
-    let constr_path = sys_path("constraints");
+    let constr_path = sys_path(engine, "constraints");
     if !constr_path.exists() {
         return Ok(0);
     }

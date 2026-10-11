@@ -4,13 +4,11 @@ mod common;
 use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
 use storage_manager::types::DataType;
 
-use storage_manager::layout::CATALOG_FILE;
-
 #[test]
 fn test_save_catalog() {
     let _ws = common::TestWorkspace::new("save", "save_catalog");
     // Step 1: Ensure the catalog file exists (create if missing)
-    if !Path::new(CATALOG_FILE).exists() {
+    if !Path::new("database/global/catalog.json").exists() {
         init_catalog();
     }
 
@@ -88,7 +86,8 @@ fn test_save_catalog() {
         && c.constraints.default.is_none()));
 
     // Step 7: Clean up (optional)
-    if Path::new(CATALOG_FILE).exists() {
-        fs::remove_file(CATALOG_FILE).expect("Failed to clean up test catalog.json");
+    if Path::new("database/global/catalog.json").exists() {
+        fs::remove_file("database/global/catalog.json")
+            .expect("Failed to clean up test catalog.json");
     }
 }

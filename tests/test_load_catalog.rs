@@ -3,13 +3,11 @@ use std::path::Path;
 mod common;
 use storage_manager::catalog::{Catalog, init_catalog, load_catalog};
 
-use storage_manager::layout::CATALOG_FILE;
-
 #[test]
 fn test_load_catalog() {
     let _ws = common::TestWorkspace::new("load", "load_catalog");
     // Step 1: Ensure a valid catalog file exists before loading
-    if !Path::new(CATALOG_FILE).exists() {
+    if !Path::new("database/global/catalog.json").exists() {
         init_catalog(); // create catalog.json if missing
     }
 

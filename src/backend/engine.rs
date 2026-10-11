@@ -22,7 +22,7 @@ type TableKey = (String, String);
 
 /// The state of one data directory. See the module documentation.
 pub struct Engine {
-    root: PathBuf,
+    paths: crate::backend::paths::Paths,
     pub(crate) table_meta: Mutex<HashMap<TableKey, Arc<TableMeta>>>,
     pub(crate) statistics: Mutex<HashMap<TableKey, (u64, Arc<crate::statistics::TableStatistics>)>>,
     pub(crate) referencing_fks: Mutex<HashMap<TableKey, Arc<RefFks>>>,
@@ -43,7 +43,7 @@ impl Engine {
             return engine;
         }
         let engine = Arc::new(Engine {
-            root: root.clone(),
+            paths: crate::backend::paths::Paths::new(root.clone()),
             table_meta: Mutex::default(),
             statistics: Mutex::default(),
             referencing_fks: Mutex::default(),
@@ -64,7 +64,12 @@ impl Engine {
 
     /// The data directory this engine manages.
     pub fn root(&self) -> &Path {
-        &self.root
+        self.paths.root()
+    }
+
+    /// Where this data directory keeps each of its files.
+    pub fn paths(&self) -> &crate::backend::paths::Paths {
+        &self.paths
     }
 
     /// Forget everything cached about tables: metadata, statistics,
@@ -81,7 +86,9 @@ impl Engine {
 
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Engine").field("root", &self.root).finish()
+        f.debug_struct("Engine")
+            .field("root", &self.paths.root())
+            .finish()
     }
 }
 

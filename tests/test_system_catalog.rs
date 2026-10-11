@@ -13,7 +13,6 @@ mod common;
 use storage_manager::catalog::{
     create_database, create_table, init_catalog, load_catalog, save_catalog,
 };
-use storage_manager::layout::{CATALOG_FILE, SYSTEM_DIR};
 use storage_manager::types::DataType;
 
 #[test]
@@ -31,7 +30,7 @@ fn init_bootstraps_system_tables() {
         "indexes.dat",
         "views.dat",
     ] {
-        let path = format!("{}/{}", SYSTEM_DIR, file);
+        let path = format!("{}/{}", "database/system", file);
         assert!(Path::new(&path).exists(), "{} should exist", path);
     }
 }
@@ -83,7 +82,7 @@ fn legacy_json_catalog_is_migrated_once() {
     // system tables on entry, so wipe them (and any stray JSON) to restore
     // the "only a catalog.json exists" state this test needs.
     let _ = std::fs::remove_dir_all("database/system");
-    let _ = std::fs::remove_file(CATALOG_FILE);
+    let _ = std::fs::remove_file("database/global/catalog.json");
 
     std::fs::create_dir_all("database/global").unwrap();
     let json = r#"{
@@ -101,14 +100,14 @@ fn legacy_json_catalog_is_migrated_once() {
             }
         }
     }"#;
-    std::fs::write(CATALOG_FILE, json).unwrap();
+    std::fs::write("database/global/catalog.json", json).unwrap();
 
     init_catalog();
 
     // The JSON file is renamed out of the way and its content lives in the
     // system tables from now on.
     assert!(
-        Path::new(&format!("{}.migrated", CATALOG_FILE)).exists(),
+        Path::new(&format!("{}.migrated", "database/global/catalog.json")).exists(),
         "catalog.json must be renamed to catalog.json.migrated"
     );
     let catalog = load_catalog();

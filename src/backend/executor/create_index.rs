@@ -26,22 +26,31 @@ use crate::types::value::{DataValue, OrderedF32, OrderedF64};
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Construct the `.idx` file path for a named index.
-pub(crate) fn index_file_path(db_name: &str, table_name: &str, index_name: &str) -> PathBuf {
-    PathBuf::from(crate::backend::paths::index(
-        db_name, table_name, index_name,
-    ))
+pub(crate) fn index_file_path(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> PathBuf {
+    PathBuf::from(engine.paths().index(db_name, table_name, index_name))
 }
 
 /// Construct the legacy `.idx` file path (single-index fallback).
-fn legacy_index_file_path(db_name: &str, table_name: &str) -> PathBuf {
-    PathBuf::from(crate::backend::paths::legacy_index(db_name, table_name))
+fn legacy_index_file_path(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> PathBuf {
+    PathBuf::from(engine.paths().legacy_index(db_name, table_name))
 }
 
 /// Construct the legacy `.idx.meta` file path (single-index fallback).
-fn legacy_index_meta_file_path(db_name: &str, table_name: &str) -> PathBuf {
-    PathBuf::from(crate::backend::paths::legacy_index_meta(
-        db_name, table_name,
-    ))
+fn legacy_index_meta_file_path(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> PathBuf {
+    PathBuf::from(engine.paths().legacy_index_meta(db_name, table_name))
 }
 
 /// The key layout of an index: its columns, their positions in the row and
@@ -175,12 +184,13 @@ pub fn load_table_indexes_multi(
 
     use crate::backend::system_table::SYS_INDEXES_SCHEMA;
 
-    let (table_id, _) = match crate::backend::system_table::resolve_table_id(db_name, table_name) {
-        Ok(ids) => ids,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let (table_id, _) =
+        match crate::backend::system_table::resolve_table_id(engine, db_name, table_name) {
+            Ok(ids) => ids,
+            Err(_) => return Ok(Vec::new()),
+        };
 
-    let idx_path = PathBuf::from(format!("{}/indexes.dat", crate::layout::SYSTEM_DIR));
+    let idx_path = engine.paths().system_table("indexes");
     if !idx_path.exists() {
         return Ok(Vec::new());
     }
@@ -235,8 +245,12 @@ pub fn load_table_indexes_multi(
 }
 
 /// Check if a legacy single-index file exists for a table.
-pub fn legacy_index_exists(db_name: &str, table_name: &str) -> bool {
-    legacy_index_file_path(db_name, table_name).exists()
+pub fn legacy_index_exists(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> bool {
+    legacy_index_file_path(engine, db_name, table_name).exists()
 }
 
 // ── Create Index ──────────────────────────────────────────────────────────────
@@ -346,8 +360,8 @@ pub fn create_index_with_flags(
     };
 
     // 4. Build paths — use index-name-based files
-    let heap_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
-    let idx_path = index_file_path(db_name, table_name, &resolved_name);
+    let heap_path = PathBuf::from(catalog.engine().paths().heap(db_name, table_name));
+    let idx_path = index_file_path(catalog.engine(), db_name, table_name, &resolved_name);
 
     if !heap_path.exists() {
         return Err(format!("Heap file not found: {:?}", heap_path).into());
@@ -518,7 +532,7 @@ pub fn ensure_parent_column_index(
         return false; // PK/UNIQUE/user index already covers the probe
     }
 
-    let heap_path = PathBuf::from(crate::backend::paths::heap(db_name, parent_table));
+    let heap_path = PathBuf::from(catalog.engine().paths().heap(db_name, parent_table));
     if !heap_path.exists() {
         log::warn!(
             "[AutoIndex] FK parent heap missing: {:?}; skipping parent-side index",
@@ -571,7 +585,9 @@ pub fn ensure_parent_column_index(
 /// Returns the number of indexes created.
 pub fn ensure_fk_parent_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> usize {
     let referencing = match crate::backend::constraint::loaders::load_referencing_foreign_keys(
-        db_name, table_name,
+        catalog.engine(),
+        db_name,
+        table_name,
     ) {
         Ok(fks) => fks,
         Err(e) => {
@@ -608,14 +624,15 @@ fn discover_indexes_for_table(
 
     // 1. Named indexes: sys_indexes gives the columns, the table schema
     //    gives their positions and types.
-    let schema = crate::backend::constraint::loaders::load_table_schema(db_name, table_name)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let schema =
+        crate::backend::constraint::loaders::load_table_schema(engine, db_name, table_name)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
     for (idx_name, columns, is_unique) in
         load_table_indexes_multi(engine, db_name, table_name).unwrap_or_default()
     {
-        let idx_path = index_file_path(db_name, table_name, &idx_name);
+        let idx_path = index_file_path(engine, db_name, table_name, &idx_name);
         if !idx_path.exists() {
             continue;
         }
@@ -650,8 +667,8 @@ fn discover_indexes_for_table(
     }
 
     // 2. Fallback: check for legacy single-index file
-    let legacy_idx = legacy_index_file_path(db_name, table_name);
-    let legacy_meta = legacy_index_meta_file_path(db_name, table_name);
+    let legacy_idx = legacy_index_file_path(engine, db_name, table_name);
+    let legacy_meta = legacy_index_meta_file_path(engine, db_name, table_name);
     if legacy_idx.exists() && legacy_meta.exists() {
         // Only add if not already covered by a named index (avoid duplicates)
         if !discovered.iter().any(|(p, _)| *p == legacy_idx)

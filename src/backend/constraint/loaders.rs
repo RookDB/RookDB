@@ -6,7 +6,6 @@
 
 use crate::backend::heap::HeapManager;
 use crate::types::{DataType, DataValue};
-use std::path::PathBuf;
 
 /// A referencing foreign key record:
 /// `(child_table_name, child_column, parent_column, parent_table_name, action_type)`.
@@ -20,25 +19,26 @@ pub type ReferencingFk = (String, String, String, String, String);
 ///
 /// Returns a list of `(child_table_name, child_column, parent_column, parent_table_name, action_type)`.
 pub fn load_referencing_foreign_keys(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     our_table_name: &str,
 ) -> Result<Vec<ReferencingFk>, String> {
     use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_TABLES_SCHEMA};
 
-    let constr_path = PathBuf::from(format!("{}/constraints.dat", crate::layout::SYSTEM_DIR));
+    let constr_path = engine.paths().system_table("constraints");
     if !constr_path.exists() {
         return Ok(Vec::new());
     }
 
     // Resolve db_name → db_id
-    let (_, _db_id) = match crate::backend::system_table::resolve_table_id(db_name, our_table_name)
-    {
-        Ok(ids) => ids,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let (_, _db_id) =
+        match crate::backend::system_table::resolve_table_id(engine, db_name, our_table_name) {
+            Ok(ids) => ids,
+            Err(_) => return Ok(Vec::new()),
+        };
 
     // Load sys_tables for the db to create a table_id → table_name mapping
-    let tbl_path = PathBuf::from(format!("{}/tables.dat", crate::layout::SYSTEM_DIR));
+    let tbl_path = engine.paths().system_table("tables");
     let mut tbl_id_to_name: std::collections::HashMap<i32, String> =
         std::collections::HashMap::new();
     if tbl_path.exists()
@@ -131,17 +131,18 @@ pub fn load_referencing_foreign_keys(
 ///
 /// Returns `Vec<(column_name, DataType)>` ordered by ordinal position.
 pub(crate) fn load_table_schema(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
 ) -> Result<Option<Vec<(String, DataType)>>, String> {
     use crate::backend::system_table::{SYS_COLUMNS_SCHEMA, resolve_table_id};
 
-    let (table_id, _) = match resolve_table_id(db_name, table_name) {
+    let (table_id, _) = match resolve_table_id(engine, db_name, table_name) {
         Ok(ids) => ids,
         Err(_) => return Ok(None),
     };
 
-    let col_path = PathBuf::from(format!("{}/columns.dat", crate::layout::SYSTEM_DIR));
+    let col_path = engine.paths().system_table("columns");
     if !col_path.exists() {
         return Ok(None);
     }
@@ -199,11 +200,12 @@ pub(crate) fn load_table_schema(
 ///
 /// Returns `(full_schema_types, column_position, column_type)`.
 pub(crate) fn load_table_schema_for_column(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     column_name: &str,
 ) -> Result<Option<(Vec<DataType>, usize, DataType)>, String> {
-    let schema_names = match load_table_schema(db_name, table_name) {
+    let schema_names = match load_table_schema(engine, db_name, table_name) {
         Ok(Some(s)) => s,
         Ok(None) => return Ok(None),
         Err(e) => return Err(e),

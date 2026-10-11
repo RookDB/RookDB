@@ -7,7 +7,6 @@ pub use backend::error_handler;
 pub use backend::executor;
 pub use backend::executor::insert_single_tuple;
 pub use backend::heap;
-pub use backend::layout;
 pub use backend::operation_log;
 pub use backend::page;
 pub use backend::planner;

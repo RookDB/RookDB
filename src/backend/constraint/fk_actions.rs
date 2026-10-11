@@ -96,7 +96,7 @@ fn apply_to_child_rows(
         },
     };
 
-    let heap_path = std::path::PathBuf::from(crate::backend::paths::heap(db_name, child_table));
+    let heap_path = std::path::PathBuf::from(catalog.engine().paths().heap(db_name, child_table));
     if !heap_path.exists() {
         return Ok(Vec::new());
     }
@@ -193,7 +193,12 @@ fn apply_to_child_rows(
         if modified {
             file.write_page(&page, page_num)
                 .map_err(|e| e.to_string())?;
-            let _ = crate::backend::visibility_map::vm_clear_page(db_name, child_table, page_num);
+            let _ = crate::backend::visibility_map::vm_clear_page(
+                catalog.engine(),
+                db_name,
+                child_table,
+                page_num,
+            );
         }
     }
 
@@ -204,7 +209,7 @@ fn apply_to_child_rows(
     }
 
     for (old_bytes, new_bytes, old_page, old_slot) in relocations {
-        match insert_raw_tuple(db_name, child_table, &new_bytes) {
+        match insert_raw_tuple(catalog.engine(), db_name, child_table, &new_bytes) {
             Ok((new_page, new_slot)) => {
                 let _ = update_index_on_update(
                     catalog.engine(),
@@ -284,7 +289,7 @@ pub(crate) fn cascade_delete_child_rows(
 
     // CASCADE FKs that reference THIS child table.
     let cascade_to_grandchildren: Vec<(String, String, String)> =
-        match loaders::load_referencing_foreign_keys(db_name, child_table) {
+        match loaders::load_referencing_foreign_keys(catalog.engine(), db_name, child_table) {
             Ok(fks) => fks
                 .into_iter()
                 .filter(|(_, _, _, _, action)| {
@@ -391,7 +396,7 @@ pub(crate) fn set_null_child_rows(
 
     // Recursive SET NULL into grandchild tables that reference the column.
     let set_null_to_grandchildren: HashSet<(String, String)> =
-        match loaders::load_referencing_foreign_keys(db_name, child_table) {
+        match loaders::load_referencing_foreign_keys(catalog.engine(), db_name, child_table) {
             Ok(fks) => fks
                 .into_iter()
                 .filter(|(_, _, parent_col, _, action)| {
@@ -463,7 +468,7 @@ pub(crate) fn update_child_rows_fk(
 
     // Recursive UPDATE CASCADE into grandchild tables
     let update_cascade_fks: Vec<(String, String)> =
-        match loaders::load_referencing_foreign_keys(db_name, child_table) {
+        match loaders::load_referencing_foreign_keys(catalog.engine(), db_name, child_table) {
             Ok(fks) => fks
                 .into_iter()
                 .filter(|(_, _, parent_col, _, action)| {

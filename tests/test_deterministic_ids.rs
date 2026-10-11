@@ -28,11 +28,7 @@ fn read_id_pairs(
     name_idx: usize,
 ) -> Vec<(String, i32)> {
     use storage_manager::types::{DataValue, deserialize_nullable_row};
-    let path = std::path::PathBuf::from(format!(
-        "{}/{}.dat",
-        storage_manager::layout::SYSTEM_DIR,
-        sys_table
-    ));
+    let path = std::path::PathBuf::from(format!("{}/{}.dat", "database/system", sys_table));
     let heap = storage_manager::heap::HeapManager::open(path).expect("open system table");
     let mut pairs = Vec::new();
     for result in heap.scan() {

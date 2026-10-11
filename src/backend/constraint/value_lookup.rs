@@ -25,9 +25,8 @@ fn try_index_for_value(
             if !idx_col.eq_ignore_ascii_case(column_name) {
                 continue;
             }
-            let idx_path = std::path::PathBuf::from(crate::backend::paths::index(
-                db_name, table_name, idx_name,
-            ));
+            let idx_path =
+                std::path::PathBuf::from(engine.paths().index(db_name, table_name, idx_name));
             if !idx_path.exists() {
                 continue;
             }
@@ -55,8 +54,7 @@ fn try_index_for_value(
     }
 
     // Fallback to legacy single-index file
-    let legacy_idx =
-        std::path::PathBuf::from(crate::backend::paths::legacy_index(db_name, table_name));
+    let legacy_idx = std::path::PathBuf::from(engine.paths().legacy_index(db_name, table_name));
     if legacy_idx.exists() {
         let search_res = crate::backend::cache::with_btree(
             &legacy_idx,
@@ -108,7 +106,7 @@ pub(crate) fn value_exists_in_table(
     }
 
     // Fallback: sequential heap scan
-    let schema = match loaders::load_table_schema(db_name, table_name) {
+    let schema = match loaders::load_table_schema(engine, db_name, table_name) {
         Ok(Some(s)) => s,
         Ok(None) => return Ok(false),
         Err(e) => {
@@ -127,7 +125,14 @@ pub(crate) fn value_exists_in_table(
         return Ok(false);
     };
     let schema_types: Vec<DataType> = schema.into_iter().map(|(_, dt)| dt).collect();
-    scan_heap_for_value(db_name, table_name, &schema_types, col_pos, key_value)
+    scan_heap_for_value(
+        engine,
+        db_name,
+        table_name,
+        &schema_types,
+        col_pos,
+        key_value,
+    )
 }
 
 /// Check whether a child table has any row whose given column matches the value.
@@ -142,12 +147,11 @@ pub(crate) fn child_has_referencing_row(
 ) -> Result<bool, String> {
     // Load the child table's column schema from sys_columns to get the correct type
     let (schema, col_pos, col_type) =
-        match loaders::load_table_schema_for_column(db_name, child_table, child_col) {
+        match loaders::load_table_schema_for_column(engine, db_name, child_table, child_col) {
             Ok(Some(result)) => result,
             Ok(None) => {
                 // Table not in system tables: fall back to matching the key's text.
-                let heap_path =
-                    std::path::PathBuf::from(crate::backend::paths::heap(db_name, child_table));
+                let heap_path = std::path::PathBuf::from(engine.paths().heap(db_name, child_table));
                 return scan_raw_heap_for_string(&heap_path, &super::fk_actions::key_text(value));
             }
             Err(e) => {
@@ -184,11 +188,12 @@ pub(crate) fn child_has_referencing_row(
         return Ok(result);
     }
 
-    scan_heap_for_value(db_name, child_table, &schema, col_pos, &key_value)
+    scan_heap_for_value(engine, db_name, child_table, &schema, col_pos, &key_value)
 }
 
 /// Scan a table heap for a row whose column `col_pos` equals `key_value`.
 fn scan_heap_for_value(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     schema: &[DataType],
@@ -197,7 +202,7 @@ fn scan_heap_for_value(
 ) -> Result<bool, String> {
     use crate::types::Comparable;
 
-    let heap_path = std::path::PathBuf::from(crate::backend::paths::heap(db_name, table_name));
+    let heap_path = std::path::PathBuf::from(engine.paths().heap(db_name, table_name));
     if !heap_path.exists() {
         return Ok(false);
     }

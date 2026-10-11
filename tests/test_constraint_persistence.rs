@@ -211,14 +211,15 @@ fn flags_round_trip_through_repeated_cycles() {
 /// Count sys_constraints rows of `ctype` belonging to `db.table`.
 fn count_constraint_rows(db: &str, table: &str, ctype: &str) -> usize {
     use storage_manager::backend::system_table as st;
-    let (_, db_id) = match st::resolve_table_id(db, table) {
+    let (_, db_id) = match st::resolve_table_id(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        db,
+        table,
+    ) {
         Ok(x) => x,
         Err(_) => return 0,
     };
-    let path = std::path::PathBuf::from(format!(
-        "{}/constraints.dat",
-        storage_manager::layout::SYSTEM_DIR
-    ));
+    let path = std::path::PathBuf::from(format!("{}/constraints.dat", "database/system"));
     if !path.exists() {
         return 0;
     }

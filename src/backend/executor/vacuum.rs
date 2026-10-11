@@ -56,23 +56,23 @@ pub fn vacuum_table(
         .get(table_name)
         .ok_or_else(|| format!("Table '{}.{}' not found", db_name, table_name))?;
 
-    let heap_path = crate::backend::paths::heap(db_name, table_name);
+    let heap_path = catalog.engine().paths().heap(db_name, table_name);
     if !PathBuf::from(&heap_path).exists() {
-        return Err(format!("Heap file not found: {}", heap_path));
+        return Err(format!("Heap file not found: {}", heap_path.display()));
     }
 
     // 1. Snapshot the dead-tuple counter before compaction resets it.
     let dead_before = read_dead_tuple_count(&heap_path).map_err(|e| e.to_string())?;
 
     // 2. Compact pages with dead slots (+ FSM rebuild + counter reset).
-    let pages_compacted =
-        super::delete::compaction_table(db_name, table_name).map_err(|e| e.to_string())?;
+    let pages_compacted = super::delete::compaction_table(catalog.engine(), db_name, table_name)
+        .map_err(|e| e.to_string())?;
 
     let mut indexes_rebuilt = 0usize;
     if pages_compacted > 0 {
         // 4. Slot renumbering invalidated every stored row pointer → rebuild
         //    all indexes from the fresh heap.
-        indexes_rebuilt = rebuild_indexes(catalog.engine(), db_name, table_name)?;
+        indexes_rebuilt = rebuild_indexes(catalog, db_name, table_name)?;
     }
 
     // 5. Stamp last_vacuum through a FRESH manager (post-invalidation).
@@ -95,8 +95,8 @@ pub fn vacuum_table(
 }
 
 /// Read the header's `dead_tuple_count` field (bytes 20..24 of page 0).
-fn read_dead_tuple_count(heap_path: &str) -> io::Result<u32> {
-    let file = crate::backend::heap::HeapFile::open(std::path::Path::new(heap_path))?;
+fn read_dead_tuple_count(heap_path: &std::path::Path) -> io::Result<u32> {
+    let file = crate::backend::heap::HeapFile::open(heap_path)?;
     Ok(file.header()?.dead_tuple_count)
 }
 
@@ -104,17 +104,13 @@ fn read_dead_tuple_count(heap_path: &str) -> io::Result<u32> {
 ///
 /// Preserves `.idx.meta` files (they describe columns/types, not contents);
 /// only the `.idx` B+Tree files are regenerated.
-fn rebuild_indexes(
-    engine: &crate::backend::engine::Engine,
-    db_name: &str,
-    table_name: &str,
-) -> Result<usize, String> {
+fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result<usize, String> {
+    let engine = catalog.engine();
     let indexes = load_table_indexes_multi(engine, db_name, table_name)?;
     if indexes.is_empty() {
         return Ok(0);
     }
 
-    let catalog = crate::catalog::load_catalog();
     let schema_types: Vec<DataType> = catalog
         .databases
         .get(db_name)
@@ -122,7 +118,7 @@ fn rebuild_indexes(
         .map(|t| t.columns.iter().map(|c| c.data_type.clone()).collect())
         .ok_or_else(|| format!("Table '{}.{}' not found in catalog", db_name, table_name))?;
 
-    let heap_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
+    let heap_path = PathBuf::from(engine.paths().heap(db_name, table_name));
     let heap_manager =
         HeapManager::open(heap_path).map_err(|e| format!("Failed to open heap: {}", e))?;
 
@@ -166,7 +162,7 @@ fn rebuild_indexes(
             continue;
         }
 
-        let idx_path = index_file_path(db_name, table_name, idx_name);
+        let idx_path = index_file_path(engine, db_name, table_name, idx_name);
         if !idx_path.exists() {
             continue;
         }
@@ -224,8 +220,8 @@ fn rebuild_indexes(
 ///
 /// Opens a fresh HeapManager AFTER cache invalidation so the write lands on
 /// the post-compaction file state; dropping it flushes via the shared pool.
-fn stamp_last_vacuum(heap_path: &str) -> Result<(), String> {
-    let mut manager = HeapManager::open(PathBuf::from(heap_path)).map_err(|e| e.to_string())?;
+fn stamp_last_vacuum(heap_path: &std::path::Path) -> Result<(), String> {
+    let mut manager = HeapManager::open(heap_path.to_path_buf()).map_err(|e| e.to_string())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)

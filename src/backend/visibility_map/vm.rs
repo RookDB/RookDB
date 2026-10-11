@@ -35,8 +35,8 @@ use std::sync::{Mutex, OnceLock};
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
-fn vm_path(db_name: &str, table_name: &str) -> PathBuf {
-    PathBuf::from(crate::backend::paths::visibility_map(db_name, table_name))
+fn vm_path(engine: &crate::backend::engine::Engine, db_name: &str, table_name: &str) -> PathBuf {
+    engine.paths().visibility_map(db_name, table_name)
 }
 
 /// Byte index and bit mask within that byte for `page_id`.
@@ -59,7 +59,8 @@ struct VmCache {
 }
 
 struct VmRegistry {
-    tables: HashMap<String, VmCache>,
+    /// Cached maps, keyed by visibility-map file.
+    tables: HashMap<PathBuf, VmCache>,
 }
 
 impl VmRegistry {
@@ -69,10 +70,6 @@ impl VmRegistry {
         }
     }
 
-    fn key(db: &str, table: &str) -> String {
-        format!("{}::{}", db, table)
-    }
-
     /// Ensure the cache holds at least `needed_bytes` bytes.
     fn ensure_capacity(cache: &mut VmCache, needed_bytes: usize) {
         if cache.bytes.len() < needed_bytes {
@@ -80,9 +77,8 @@ impl VmRegistry {
         }
     }
 
-    fn get_mut(&mut self, db: &str, table: &str) -> &mut VmCache {
-        let key = Self::key(db, table);
-        self.tables.entry(key).or_default()
+    fn get_mut(&mut self, path: &std::path::Path) -> &mut VmCache {
+        self.tables.entry(path.to_path_buf()).or_default()
     }
 }
 
@@ -148,16 +144,21 @@ fn write_vm_byte(path: &std::path::Path, byte_idx: u64, value: u8) -> io::Result
 ///
 /// Called by `compaction_table` for each page that contained no dead slots
 /// (or after successfully compacting a page and leaving it clean).
-pub fn vm_set_page(db_name: &str, table_name: &str, page_id: u32) -> io::Result<()> {
+pub fn vm_set_page(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+    page_id: u32,
+) -> io::Result<()> {
     if page_id == 0 {
         return Ok(()); // header page – never mark visible
     }
     let (byte_idx, mask) = byte_and_mask(page_id);
-    let path = vm_path(db_name, table_name);
+    let path = vm_path(engine, db_name, table_name);
 
     {
         let mut reg = registry().lock().unwrap();
-        let cache = reg.get_mut(db_name, table_name);
+        let cache = reg.get_mut(&vm_path(engine, db_name, table_name));
         VmRegistry::ensure_capacity(cache, byte_idx as usize + 1);
         cache.bytes[byte_idx as usize] |= mask;
         cache.dirty = true;
@@ -171,16 +172,21 @@ pub fn vm_set_page(db_name: &str, table_name: &str, page_id: u32) -> io::Result<
 /// Mark `page_id` as **dirty** (a write touched the page).
 ///
 /// Called by DELETE and UPDATE before modifying any slot on the page.
-pub fn vm_clear_page(db_name: &str, table_name: &str, page_id: u32) -> io::Result<()> {
+pub fn vm_clear_page(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+    page_id: u32,
+) -> io::Result<()> {
     if page_id == 0 {
         return Ok(()); // header page – always dirty
     }
     let (byte_idx, mask) = byte_and_mask(page_id);
-    let path = vm_path(db_name, table_name);
+    let path = vm_path(engine, db_name, table_name);
 
     let already_clear = {
         let mut reg = registry().lock().unwrap();
-        let cache = reg.get_mut(db_name, table_name);
+        let cache = reg.get_mut(&vm_path(engine, db_name, table_name));
         VmRegistry::ensure_capacity(cache, byte_idx as usize + 1);
         let already = cache.bytes[byte_idx as usize] & mask == 0;
         if !already {
@@ -200,7 +206,12 @@ pub fn vm_clear_page(db_name: &str, table_name: &str, page_id: u32) -> io::Resul
 /// Returns `true` if `page_id` is currently all-visible.
 ///
 /// Called by vacuum/compaction to decide whether a page can be skipped.
-pub fn vm_is_visible(db_name: &str, table_name: &str, page_id: u32) -> bool {
+pub fn vm_is_visible(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+    page_id: u32,
+) -> bool {
     if page_id == 0 {
         return false;
     }
@@ -209,14 +220,14 @@ pub fn vm_is_visible(db_name: &str, table_name: &str, page_id: u32) -> bool {
     // Check in-memory cache first.
     {
         let mut reg = registry().lock().unwrap();
-        let cache = reg.get_mut(db_name, table_name);
+        let cache = reg.get_mut(&vm_path(engine, db_name, table_name));
         if (byte_idx as usize) < cache.bytes.len() {
             return cache.bytes[byte_idx as usize] & mask != 0;
         }
     }
 
     // Fall back to disk read.
-    let path = vm_path(db_name, table_name);
+    let path = vm_path(engine, db_name, table_name);
     match read_vm_byte(&path, byte_idx) {
         Ok(b) => b & mask != 0,
         Err(_) => false,
@@ -226,10 +237,15 @@ pub fn vm_is_visible(db_name: &str, table_name: &str, page_id: u32) -> bool {
 /// Returns the count of all-visible pages from 1..=`max_page_id`.
 ///
 /// Useful for diagnostic output (mirrors `pg_visibility_map_summary`).
-pub fn vm_visible_count(db_name: &str, table_name: &str, max_page_id: u32) -> u32 {
+pub fn vm_visible_count(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+    max_page_id: u32,
+) -> u32 {
     let mut count = 0u32;
     for page_id in 1..=max_page_id {
-        if vm_is_visible(db_name, table_name, page_id) {
+        if vm_is_visible(engine, db_name, table_name, page_id) {
             count += 1;
         }
     }
@@ -237,8 +253,8 @@ pub fn vm_visible_count(db_name: &str, table_name: &str, max_page_id: u32) -> u3
 }
 
 /// Invalidate the in-memory cache for a table (e.g. after a table drop).
-pub fn vm_evict(db_name: &str, table_name: &str) {
-    let key = VmRegistry::key(db_name, table_name);
+pub fn vm_evict(engine: &crate::backend::engine::Engine, db_name: &str, table_name: &str) {
+    let key = vm_path(engine, db_name, table_name);
     if let Ok(mut reg) = registry().lock() {
         reg.tables.remove(&key);
     }

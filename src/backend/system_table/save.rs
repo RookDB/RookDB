@@ -17,12 +17,12 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     // To prevent FK rows from pointing to wrong tables, we resolve the numeric table_id
     // to the table NAME before deletion, then re-resolve to the new table_id after rebuild.
     let mut fk_rows = Vec::new();
-    let constr_path = sys_path("constraints");
+    let constr_path = sys_path(catalog.engine(), "constraints");
     if constr_path.exists() {
         // Also load sys_tables to resolve table_id → table_name
         let mut tbl_id_to_name: std::collections::HashMap<i32, String> =
             std::collections::HashMap::new();
-        let tbl_path = sys_path("tables");
+        let tbl_path = sys_path(catalog.engine(), "tables");
         if tbl_path.exists()
             && let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path)
         {
@@ -93,7 +93,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     }
 
     // Index rows only live in sys_indexes: read them before it is rebuilt.
-    let saved_indexes = load_saved_indexes();
+    let saved_indexes = load_saved_indexes(catalog.engine());
 
     // Delete existing system table files to start fresh
     for name in &[
@@ -104,7 +104,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
         "indexes",
         "views",
     ] {
-        let path = sys_path(name);
+        let path = sys_path(catalog.engine(), name);
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -115,7 +115,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
         }
     }
     // Create fresh files and populate
-    create_system_table_files();
+    create_system_table_files(catalog.engine());
     populate_system_tables(catalog, fk_rows, Some(saved_indexes));
     // System tables rewritten wholesale: table_ids may have changed and
     // constraint/index rows were rebuilt — forget all memoised metadata.
@@ -204,7 +204,7 @@ pub(crate) fn populate_system_tables(
             let table_id = next_table_id;
             next_table_id += 1;
 
-            let file_path = crate::backend::paths::heap(db_name, tbl_name);
+            let file_path = crate::backend::paths::relative_heap(db_name, tbl_name);
 
             tbl_rows.push(vec![
                 Some(table_id.to_string()),
@@ -302,16 +302,26 @@ pub(crate) fn populate_system_tables(
     }
 
     // Batch-write each system table
-    if let Err(e) = insert_system_rows("databases", SYS_DATABASES_SCHEMA, &db_rows) {
+    if let Err(e) = insert_system_rows(
+        catalog.engine(),
+        "databases",
+        SYS_DATABASES_SCHEMA,
+        &db_rows,
+    ) {
         log::error!("[SystemCatalog] Failed to write sys_databases: {}", e);
     }
-    if let Err(e) = insert_system_rows("tables", SYS_TABLES_SCHEMA, &tbl_rows) {
+    if let Err(e) = insert_system_rows(catalog.engine(), "tables", SYS_TABLES_SCHEMA, &tbl_rows) {
         log::error!("[SystemCatalog] Failed to write sys_tables: {}", e);
     }
-    if let Err(e) = insert_system_rows("columns", SYS_COLUMNS_SCHEMA, &col_rows) {
+    if let Err(e) = insert_system_rows(catalog.engine(), "columns", SYS_COLUMNS_SCHEMA, &col_rows) {
         log::error!("[SystemCatalog] Failed to write sys_columns: {}", e);
     }
-    if let Err(e) = insert_system_rows("constraints", SYS_CONSTRAINTS_SCHEMA, &constr_rows) {
+    if let Err(e) = insert_system_rows(
+        catalog.engine(),
+        "constraints",
+        SYS_CONSTRAINTS_SCHEMA,
+        &constr_rows,
+    ) {
         log::error!("[SystemCatalog] Failed to write sys_constraints: {}", e);
     }
 
@@ -352,13 +362,13 @@ pub(crate) fn populate_system_tables(
             next_view_id += 1;
         }
     }
-    if let Err(e) = insert_system_rows("views", SYS_VIEWS_SCHEMA, &view_rows) {
+    if let Err(e) = insert_system_rows(catalog.engine(), "views", SYS_VIEWS_SCHEMA, &view_rows) {
         log::error!("[SystemCatalog] Failed to write sys_views: {}", e);
     }
 
     match indexes {
-        Some(saved) => write_saved_indexes(&saved, &db_rows, &tbl_rows),
-        None => populate_indexes_from_meta(&table_name_to_id),
+        Some(saved) => write_saved_indexes(catalog.engine(), &saved, &db_rows, &tbl_rows),
+        None => populate_indexes_from_meta(catalog.engine(), &table_name_to_id),
     }
 
     let view_count: usize = catalog.databases.values().map(|d| d.views.len()).sum();
@@ -389,7 +399,7 @@ pub(crate) struct SavedIndex {
 }
 
 /// Read every `sys_indexes` row with its table's database and name.
-fn load_saved_indexes() -> Vec<SavedIndex> {
+fn load_saved_indexes(engine: &crate::backend::engine::Engine) -> Vec<SavedIndex> {
     use crate::types::DataValue;
     let text = |v: &Option<DataValue>| match v {
         Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => Some(s.clone()),
@@ -403,14 +413,14 @@ fn load_saved_indexes() -> Vec<SavedIndex> {
 
     // SYS_DATABASES_SCHEMA: db_id, name
     let databases: std::collections::HashMap<i32, String> =
-        scan_system_table("databases", SYS_DATABASES_SCHEMA)
+        scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
             .unwrap_or_default()
             .iter()
             .filter_map(|r| Some((int(r.first()?)?, text(r.get(1)?)?)))
             .collect();
     // SYS_TABLES_SCHEMA: table_id, db_id, name, file_path
     let tables: std::collections::HashMap<i32, (String, String)> =
-        scan_system_table("tables", SYS_TABLES_SCHEMA)
+        scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
             .unwrap_or_default()
             .iter()
             .filter_map(|r| {
@@ -419,7 +429,7 @@ fn load_saved_indexes() -> Vec<SavedIndex> {
             })
             .collect();
     // SYS_INDEXES_SCHEMA: index_id, table_id, name, is_unique, is_primary, columns
-    scan_system_table("indexes", SYS_INDEXES_SCHEMA)
+    scan_system_table(engine, "indexes", SYS_INDEXES_SCHEMA)
         .unwrap_or_default()
         .iter()
         .filter_map(|r| {
@@ -439,6 +449,7 @@ fn load_saved_indexes() -> Vec<SavedIndex> {
 /// Write `saved` back to `sys_indexes` against the new table ids, dropping
 /// rows whose table or index file no longer exists.
 fn write_saved_indexes(
+    engine: &crate::backend::engine::Engine,
     saved: &[SavedIndex],
     db_rows: &[Vec<Option<String>>],
     tbl_rows: &[Vec<Option<String>>],
@@ -459,10 +470,8 @@ fn write_saved_indexes(
     let idx_rows: Vec<Vec<Option<String>>> = saved
         .iter()
         .filter(|ix| {
-            std::path::Path::new(&crate::backend::paths::index(&ix.db, &ix.table, &ix.name))
-                .exists()
-                || std::path::Path::new(&crate::backend::paths::legacy_index(&ix.db, &ix.table))
-                    .exists()
+            engine.paths().index(&ix.db, &ix.table, &ix.name).exists()
+                || engine.paths().legacy_index(&ix.db, &ix.table).exists()
         })
         .filter_map(|ix| {
             let table_id = table_ids.get(&(ix.db.as_str(), ix.table.as_str()))?;
@@ -482,7 +491,7 @@ fn write_saved_indexes(
         .collect();
 
     if !idx_rows.is_empty()
-        && let Err(e) = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &idx_rows)
+        && let Err(e) = insert_system_rows(engine, "indexes", SYS_INDEXES_SCHEMA, &idx_rows)
     {
         log::error!("[SystemCatalog] Failed to write sys_indexes: {}", e);
     }
@@ -495,8 +504,11 @@ fn write_saved_indexes(
 ///
 /// `table_name_to_id` maps table names to their assigned table IDs (from
 /// `sys_tables`) so the index rows can reference the correct table.
-fn populate_indexes_from_meta(table_name_to_id: &std::collections::HashMap<String, i32>) {
-    let base_dir = std::path::Path::new(crate::layout::DATABASE_DIR);
+fn populate_indexes_from_meta(
+    engine: &crate::backend::engine::Engine,
+    table_name_to_id: &std::collections::HashMap<String, i32>,
+) {
+    let base_dir = engine.paths().base_dir();
     if !base_dir.exists() {
         return;
     }
@@ -653,7 +665,7 @@ fn populate_indexes_from_meta(table_name_to_id: &std::collections::HashMap<Strin
     }
 
     if !idx_rows.is_empty()
-        && let Err(e) = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &idx_rows)
+        && let Err(e) = insert_system_rows(engine, "indexes", SYS_INDEXES_SCHEMA, &idx_rows)
     {
         log::error!("[SystemCatalog] Failed to write sys_indexes: {}", e);
     }

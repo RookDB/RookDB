@@ -4,8 +4,8 @@ pub use types::{Catalog, Column, Constraints, Database, Table};
 pub mod catalog;
 
 pub use catalog::{
-    create_database, create_table, init_catalog, load_catalog, save_catalog, show_databases,
-    show_tables,
+    create_database, create_table, init_catalog, init_catalog_in, load_catalog, load_catalog_in,
+    save_catalog, show_databases, show_tables,
 };
 
 pub use crate::types::DataType;

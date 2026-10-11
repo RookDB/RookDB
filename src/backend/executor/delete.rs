@@ -97,9 +97,13 @@ fn compaction_log_details(pages_compacted: Option<usize>, error: Option<&str>) -
 ///
 /// Call this periodically (e.g. via menu option) rather than on every DELETE.
 /// Returns the number of pages that were actually rewritten.
-pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
+pub fn compaction_table(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<usize> {
     let result = (|| -> io::Result<usize> {
-        let path = crate::backend::paths::heap(db_name, table_name);
+        let path = engine.paths().heap(db_name, table_name);
         let file = HeapFile::open(std::path::Path::new(&path))?;
         let file_identity = file.identity();
 
@@ -112,7 +116,7 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
             // slot on this page, so a set VM bit means zero dead tuples →
             // nothing to compact here.  This is the whole point of tracking
             // the VM: we skip reading, locking, and scanning clean pages.
-            if vm_is_visible(db_name, table_name, page_num) {
+            if vm_is_visible(engine, db_name, table_name, page_num) {
                 continue;
             }
 
@@ -131,7 +135,7 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
 
             // Page is now clean (either had no dead tuples, or just compacted).
             // Mark all-visible so the next compaction can skip it entirely.
-            let _ = vm_set_page(db_name, table_name, page_num);
+            let _ = vm_set_page(engine, db_name, table_name, page_num);
             // Lock is automatically released here when _page_lock is dropped
         }
 
@@ -146,7 +150,7 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
             // the compacted pages go to the file and the cached manager,
             // which holds the old fork, is dropped first.
             crate::backend::cache::evict_heap(std::path::Path::new(&path))?;
-            rebuild_table_fsm(db_name, table_name)?;
+            rebuild_table_fsm(engine, db_name, table_name)?;
         }
 
         Ok(pages_compacted)
@@ -155,11 +159,11 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
     match &result {
         Ok(pages_compacted) => {
             let details = compaction_log_details(Some(*pages_compacted), None);
-            let _ = log_compaction(db_name, table_name, details, "success");
+            let _ = log_compaction(engine, db_name, table_name, details, "success");
         }
         Err(err) => {
             let details = compaction_log_details(None, Some(&err.to_string()));
-            let _ = log_compaction(db_name, table_name, details, "failed");
+            let _ = log_compaction(engine, db_name, table_name, details, "failed");
         }
     }
 
@@ -184,6 +188,7 @@ struct HeldPage {
 
 /// Write the held page back if any slot on it was deleted, then release it.
 fn flush_held_page(
+    engine: &crate::backend::engine::Engine,
     file: &HeapFile,
     held: &mut Option<HeldPage>,
     db_name: &str,
@@ -193,7 +198,7 @@ fn flush_held_page(
         && h.dirty
     {
         file.write_page(&h.page, h.page_num)?;
-        let _ = vm_clear_page(db_name, table_name, h.page_num);
+        let _ = vm_clear_page(engine, db_name, table_name, h.page_num);
     }
     Ok(())
 }
@@ -226,7 +231,7 @@ pub fn delete_by_pointers(
         })?;
     let columns = &table.columns;
 
-    let path = crate::backend::paths::heap(db_name, table_name);
+    let path = catalog.engine().paths().heap(db_name, table_name);
     let file = HeapFile::open(std::path::Path::new(&path))
         .map_err(|e| RookError::Io(e).with_context("Failed to open table file"))?;
     let file_identity = file.identity();
@@ -264,7 +269,7 @@ pub fn delete_by_pointers(
 
     for &(page_num, slot_idx) in pointers {
         if !hold_pages || held.as_ref().map(|h| h.page_num) != Some(page_num) {
-            flush_held_page(&file, &mut held, db_name, table_name)?;
+            flush_held_page(catalog.engine(), &file, &mut held, db_name, table_name)?;
 
             // Acquire exclusive write lock on this page
             let lock = PageWriteLock::acquire(file_identity, page_num);
@@ -328,7 +333,7 @@ pub fn delete_by_pointers(
         deleted_count += 1;
     }
 
-    flush_held_page(&file, &mut held, db_name, table_name)?;
+    flush_held_page(catalog.engine(), &file, &mut held, db_name, table_name)?;
 
     if deleted_count > 0 {
         file.record_dead_tuples(deleted_count as u32)?;
@@ -339,7 +344,7 @@ pub fn delete_by_pointers(
         returning_rows,
     };
     let details = delete_log_details(Some(result.deleted_count), None);
-    let _ = log_delete(db_name, table_name, details, "success");
+    let _ = log_delete(catalog.engine(), db_name, table_name, details, "success");
 
     Ok(result)
 }

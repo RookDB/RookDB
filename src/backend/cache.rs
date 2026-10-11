@@ -357,12 +357,16 @@ pub struct TableMeta {
     pub named_indexes: Vec<(String, Vec<String>, bool)>,
 }
 
-fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
+fn load_meta(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> Option<Arc<TableMeta>> {
     use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_INDEXES_SCHEMA};
 
     // One resolve pass (scans sys_databases + sys_tables).
     let (table_id, db_id) =
-        match crate::backend::system_table::resolve_table_id(db_name, table_name) {
+        match crate::backend::system_table::resolve_table_id(engine, db_name, table_name) {
             Ok(ids) => ids,
             Err(_) => return None,
         };
@@ -370,7 +374,7 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
     // Scan sys_indexes once.
     let mut unique_indexes = Vec::new();
     let mut named_indexes = Vec::new();
-    if let Some(rows) = scan_sys("indexes", SYS_INDEXES_SCHEMA) {
+    if let Some(rows) = scan_sys(engine, "indexes", SYS_INDEXES_SCHEMA) {
         for row in rows {
             if row.len() < 6 {
                 continue;
@@ -405,7 +409,7 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
     // Scan sys_constraints once for CHECK + FK rows of this table.
     let mut foreign_keys = Vec::new();
     let mut check_exprs = Vec::new();
-    if let Some(rows) = scan_sys("constraints", SYS_CONSTRAINTS_SCHEMA) {
+    if let Some(rows) = scan_sys(engine, "constraints", SYS_CONSTRAINTS_SCHEMA) {
         for row in rows {
             if row.len() < 6 {
                 continue;
@@ -472,14 +476,11 @@ fn text_at(row: &[Option<crate::types::DataValue>], idx: usize) -> String {
 }
 
 fn scan_sys(
+    engine: &crate::backend::engine::Engine,
     name: &str,
     schema: &[crate::types::DataType],
 ) -> Option<Vec<Vec<Option<crate::types::DataValue>>>> {
-    let path = PathBuf::from(format!(
-        "{}/{}.dat",
-        crate::layout::SYSTEM_DIR,
-        name.trim_end_matches(".dat")
-    ));
+    let path = engine.paths().system_table(name.trim_end_matches(".dat"));
     if !path.exists() {
         return None;
     }
@@ -499,7 +500,7 @@ pub fn metadata(engine: &Engine, db_name: &str, table_name: &str) -> Option<Arc<
     if let Some(hit) = lock(&engine.table_meta).get(&key) {
         return Some(Arc::clone(hit));
     }
-    let loaded = load_meta(db_name, table_name)?;
+    let loaded = load_meta(engine, db_name, table_name)?;
     lock(&engine.table_meta).insert(key, Arc::clone(&loaded));
     Some(loaded)
 }
@@ -523,7 +524,7 @@ pub fn table_statistics(
     table_name: &str,
 ) -> io::Result<std::sync::Arc<crate::statistics::TableStatistics>> {
     let key = (db_name.to_string(), table_name.to_string());
-    let path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
+    let path = PathBuf::from(engine.paths().heap(db_name, table_name));
     let file_len = std::fs::metadata(&path)?.len();
 
     if let Some((len, hit)) = lock(&engine.statistics).get(&key)
@@ -532,7 +533,7 @@ pub fn table_statistics(
         return Ok(std::sync::Arc::clone(hit));
     }
 
-    let stats = crate::statistics::collect_table_statistics(db_name, table_name)?;
+    let stats = crate::statistics::collect_table_statistics(engine, db_name, table_name)?;
     let arc = std::sync::Arc::new(stats);
     lock(&engine.statistics).insert(key, (file_len, std::sync::Arc::clone(&arc)));
     Ok(arc)
@@ -554,9 +555,10 @@ pub fn referencing_fks(engine: &Engine, db_name: &str, table_name: &str) -> std:
     if let Some(hit) = lock(&engine.referencing_fks).get(&key) {
         return std::sync::Arc::clone(hit);
     }
-    let loaded =
-        crate::backend::constraint::loaders::load_referencing_foreign_keys(db_name, table_name)
-            .unwrap_or_default();
+    let loaded = crate::backend::constraint::loaders::load_referencing_foreign_keys(
+        engine, db_name, table_name,
+    )
+    .unwrap_or_default();
     let arc = std::sync::Arc::new(loaded);
     lock(&engine.referencing_fks).insert(key, std::sync::Arc::clone(&arc));
     arc

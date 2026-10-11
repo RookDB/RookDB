@@ -245,8 +245,13 @@ fn index_is_maintained_on_insert() {
         ],
     )
     .unwrap();
-    let (page_id, slot_id) =
-        storage_manager::executor::insert_raw_tuple("mnt_db", "staff", &row_bytes).unwrap();
+    let (page_id, slot_id) = storage_manager::executor::insert_raw_tuple(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        "mnt_db",
+        "staff",
+        &row_bytes,
+    )
+    .unwrap();
     storage_manager::executor::create_index::update_index_on_insert(
         &storage_manager::backend::engine::Engine::current_dir(),
         "mnt_db",

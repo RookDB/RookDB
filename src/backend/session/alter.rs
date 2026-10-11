@@ -165,7 +165,7 @@ pub(super) fn alter_table(
             let col_idx = find(&updated_table.columns, column)?;
             // Existing rows must have a value; the null bitmap answers that
             // without decoding the row.
-            let dat_path = crate::backend::paths::heap(db, &alter.table);
+            let dat_path = catalog.engine().paths().heap(db, &alter.table);
             if Path::new(&dat_path).exists() {
                 let heap = HeapManager::open(PathBuf::from(&dat_path)).map_err(|e| {
                     io::Error::other(format!(
@@ -203,9 +203,12 @@ pub(super) fn alter_table(
     // Update sys_constraints metadata for column operations
     match &alter.action {
         AlterTableAction::DropColumn { column } => {
-            if let Err(e) =
-                crate::backend::system_table::delete_column_constraints(db, &alter.table, column)
-            {
+            if let Err(e) = crate::backend::system_table::delete_column_constraints(
+                catalog.engine(),
+                db,
+                &alter.table,
+                column,
+            ) {
                 lines.push(format!(
                     "[AlterTable] Warning: failed to clean up constraint metadata for column '{}': {}",
                     column, e
@@ -214,6 +217,7 @@ pub(super) fn alter_table(
         }
         AlterTableAction::RenameColumn { old_name, new_name } => {
             if let Err(e) = crate::backend::system_table::rename_column_in_constraints(
+                catalog.engine(),
                 db,
                 &alter.table,
                 old_name,
@@ -265,11 +269,14 @@ fn rename_table(
             .iter()
             .map(|fk| fk.0.clone())
             .collect();
-    let old_dat = crate::backend::paths::heap(db, old_name);
-    let new_dat = crate::backend::paths::heap(db, new_name);
+    let old_dat = catalog.engine().paths().heap(db, old_name);
+    let new_dat = catalog.engine().paths().heap(db, new_name);
     let _ = std::fs::rename(&old_dat, &new_dat);
-    let _ = std::fs::rename(format!("{}.fsm", old_dat), format!("{}.fsm", new_dat));
-    rename_index_files_for_table(db, old_name, new_name);
+    let _ = std::fs::rename(
+        catalog.engine().paths().heap_fsm(db, old_name),
+        catalog.engine().paths().heap_fsm(db, new_name),
+    );
+    rename_index_files_for_table(catalog.engine(), db, old_name, new_name);
 
     let mut lines = Vec::new();
     if let Some(d) = catalog.databases.get_mut(db) {
@@ -294,7 +301,11 @@ fn rename_table(
         })
         .collect();
     crate::backend::system_table::rename_referenced_table_in_constraints(
-        db, &children, old_name, new_name,
+        catalog.engine(),
+        db,
+        &children,
+        old_name,
+        new_name,
     )?;
     catalog.engine().invalidate_metadata();
     lines.push(format!("Renamed table '{}' to '{}'.", old_name, new_name));
@@ -335,7 +346,7 @@ fn rewrite_rows(
     new_schema: &[DataType],
     mut change: impl FnMut(Vec<Option<DataValue>>) -> io::Result<Vec<Option<DataValue>>>,
 ) -> io::Result<()> {
-    let dat_path = crate::backend::paths::heap(db, table);
+    let dat_path = engine.paths().heap(db, table);
     if !Path::new(&dat_path).exists() {
         return Ok(());
     }
@@ -363,7 +374,7 @@ fn rewrite_rows(
     }
     drop(old_heap);
 
-    let tmp_path = format!("{}.backfill", dat_path);
+    let tmp_path = crate::backend::paths::with_suffix(&dat_path, ".backfill");
     {
         let mut tmp_heap = HeapManager::create(PathBuf::from(&tmp_path)).map_err(|e| {
             io::Error::other(format!("Failed to create temp heap for backfill: {}", e))
@@ -374,14 +385,17 @@ fn rewrite_rows(
         tmp_heap.flush()?;
     }
 
-    let fsm_path = format!("{}.fsm", dat_path);
+    let fsm_path = engine.paths().heap_fsm(db, table);
     std::fs::remove_file(&dat_path).map_err(|e| {
         io::Error::other(format!("Failed to remove old heap during backfill: {}", e))
     })?;
     let _ = std::fs::remove_file(&fsm_path);
     std::fs::rename(&tmp_path, &dat_path)
         .map_err(|e| io::Error::other(format!("Failed to rename backfill heap: {}", e)))?;
-    let _ = std::fs::rename(format!("{}.fsm", tmp_path), &fsm_path);
+    let _ = std::fs::rename(
+        crate::backend::paths::with_suffix(&tmp_path, ".fsm"),
+        &fsm_path,
+    );
 
     // The cached handles still describe the replaced file.
     crate::backend::buffer_manager::shared_pool::invalidate(Path::new(&dat_path));

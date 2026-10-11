@@ -475,7 +475,7 @@ impl PhysicalPlanner {
             if sys_name == "__singlerow__" {
                 return Ok(Box::new(SingleRowOperator::new()));
             }
-            let heap_path = PathBuf::from(format!("database/system/{}.dat", sys_name));
+            let heap_path = self.catalog.engine().paths().system_table(sys_name);
             if !heap_path.exists() {
                 return Err(RookError::NotFound {
                     entity: "System table",
@@ -537,7 +537,7 @@ impl PhysicalPlanner {
             })
             .collect();
 
-        let heap_path = PathBuf::from(crate::backend::paths::heap(&self.db_name, &ts.table));
+        let heap_path = PathBuf::from(self.catalog.engine().paths().heap(&self.db_name, &ts.table));
 
         if !heap_path.exists() {
             return Err(RookError::NotFound {
@@ -558,7 +558,7 @@ impl PhysicalPlanner {
         if !named_indexes.is_empty() {
             // Use the first named index for the full scan
             let first_idx_name = &named_indexes[0].0;
-            let index_path = PathBuf::from(crate::backend::paths::index(
+            let index_path = PathBuf::from(self.catalog.engine().paths().index(
                 &self.db_name,
                 &ts.table,
                 first_idx_name,
@@ -610,10 +610,12 @@ impl PhysicalPlanner {
         }
 
         // Fallback: check for legacy single-index file
-        let legacy_index_path = PathBuf::from(crate::backend::paths::legacy_index(
-            &self.db_name,
-            &ts.table,
-        ));
+        let legacy_index_path = PathBuf::from(
+            self.catalog
+                .engine()
+                .paths()
+                .legacy_index(&self.db_name, &ts.table),
+        );
 
         if legacy_index_path.exists() {
             log::info!(

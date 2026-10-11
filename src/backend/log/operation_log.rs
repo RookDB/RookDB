@@ -9,6 +9,7 @@ pub fn current_timestamp_iso() -> String {
 }
 
 fn append_log(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     operation: &str,
@@ -16,10 +17,10 @@ fn append_log(
     details: Value,
     status: &str,
 ) -> io::Result<()> {
-    let dir = format!("database/logs/{}/{}", db_name, table_name);
+    let dir = engine.paths().log_dir(db_name, table_name);
     create_dir_all(&dir)?;
 
-    let path = format!("{}/{}", dir, file_name);
+    let path = dir.join(file_name);
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
     let entry = json!({
@@ -37,21 +38,51 @@ fn append_log(
     Ok(())
 }
 
-pub fn log_update(db_name: &str, table_name: &str, details: Value, status: &str) -> io::Result<()> {
-    append_log(db_name, table_name, "update", "update.log", details, status)
-}
-
-pub fn log_delete(db_name: &str, table_name: &str, details: Value, status: &str) -> io::Result<()> {
-    append_log(db_name, table_name, "delete", "delete.log", details, status)
-}
-
-pub fn log_compaction(
+pub fn log_update(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     details: Value,
     status: &str,
 ) -> io::Result<()> {
     append_log(
+        engine,
+        db_name,
+        table_name,
+        "update",
+        "update.log",
+        details,
+        status,
+    )
+}
+
+pub fn log_delete(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+    details: Value,
+    status: &str,
+) -> io::Result<()> {
+    append_log(
+        engine,
+        db_name,
+        table_name,
+        "delete",
+        "delete.log",
+        details,
+        status,
+    )
+}
+
+pub fn log_compaction(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+    details: Value,
+    status: &str,
+) -> io::Result<()> {
+    append_log(
+        engine,
         db_name,
         table_name,
         "compaction",

@@ -49,7 +49,7 @@ impl PhysicalPlanner {
             })
             .collect();
 
-        let heap_path = PathBuf::from(crate::backend::paths::heap(&self.db_name, &ts.table));
+        let heap_path = PathBuf::from(self.catalog.engine().paths().heap(&self.db_name, &ts.table));
         if !heap_path.exists() {
             return Ok(None);
         }
@@ -128,11 +128,17 @@ impl PhysicalPlanner {
 
         // Try legacy index if no named index matched
         if best_mode.is_none() {
-            let legacy_idx_path = PathBuf::from(crate::backend::paths::legacy_index(
-                &self.db_name,
-                &ts.table,
-            ));
-            let meta_path = crate::backend::paths::legacy_index_meta(&self.db_name, &ts.table);
+            let legacy_idx_path = PathBuf::from(
+                self.catalog
+                    .engine()
+                    .paths()
+                    .legacy_index(&self.db_name, &ts.table),
+            );
+            let meta_path = self
+                .catalog
+                .engine()
+                .paths()
+                .legacy_index_meta(&self.db_name, &ts.table);
             if legacy_idx_path.exists()
                 && let Ok(meta_json) = std::fs::read_to_string(&meta_path)
             {
@@ -165,7 +171,7 @@ impl PhysicalPlanner {
         if let (Some(idx_name), Some(ref col_name), Some(mode)) =
             (best_idx_name, best_col_name, best_mode)
         {
-            let idx_path = PathBuf::from(crate::backend::paths::index(
+            let idx_path = PathBuf::from(self.catalog.engine().paths().index(
                 &self.db_name,
                 &ts.table,
                 &idx_name,

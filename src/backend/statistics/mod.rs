@@ -79,8 +79,12 @@ impl TableStatistics {
     }
 }
 
-pub fn collect_table_statistics(db_name: &str, table_name: &str) -> io::Result<TableStatistics> {
-    let table_path = crate::backend::paths::heap(db_name, table_name);
+pub fn collect_table_statistics(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<TableStatistics> {
+    let table_path = engine.paths().heap(db_name, table_name);
     collect_heap_statistics(Path::new(&table_path))
 }
 

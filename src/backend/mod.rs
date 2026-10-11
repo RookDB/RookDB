@@ -11,7 +11,6 @@ pub mod fsm;
 pub mod heap;
 pub mod index;
 pub mod instrumentation;
-pub mod layout;
 pub mod log;
 pub mod name_validation;
 pub mod page;

@@ -153,7 +153,7 @@ pub fn update_by_pointers(
         compiled.push((idx, expr));
     }
 
-    let path = crate::backend::paths::heap(db_name, table_name);
+    let path = catalog.engine().paths().heap(db_name, table_name);
     let file = crate::backend::heap::HeapFile::open(std::path::Path::new(&path))
         .map_err(|e| RookError::Io(e).with_context("Failed to open table file"))?;
     let file_identity = file.identity();
@@ -399,7 +399,12 @@ pub fn update_by_pointers(
 
             file.write_page(&page, page_id)?;
             if moved_on_page {
-                let _ = crate::backend::visibility_map::vm_clear_page(db_name, table_name, page_id);
+                let _ = crate::backend::visibility_map::vm_clear_page(
+                    catalog.engine(),
+                    db_name,
+                    table_name,
+                    page_id,
+                );
             }
             start = end;
         }
@@ -414,6 +419,7 @@ pub fn update_by_pointers(
                 (update.pointer.page_id, update.pointer.slot_index as u32)
             } else {
                 crate::backend::executor::compaction_api::insert_raw_tuple(
+                    catalog.engine(),
                     db_name,
                     table_name,
                     &update.new_bytes,
@@ -468,7 +474,13 @@ pub fn update_by_pointers(
         returning_rows,
     };
     let details = update_log_details(Some(result.updated_count), None);
-    let _ = crate::backend::log::operation_log::log_update(db_name, table_name, details, "success");
+    let _ = crate::backend::log::operation_log::log_update(
+        catalog.engine(),
+        db_name,
+        table_name,
+        details,
+        "success",
+    );
 
     Ok(result)
 }

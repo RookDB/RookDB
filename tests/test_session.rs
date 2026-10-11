@@ -134,3 +134,82 @@ fn ddl_round_trip() {
         ["Dropped table 'c' from database 'app'."]
     );
 }
+
+/// Every file under `dir` with its length, sorted.
+fn files_under(dir: &str) -> Vec<(std::path::PathBuf, u64)> {
+    let mut found = Vec::new();
+    let mut pending = vec![std::path::PathBuf::from(dir)];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                found.push((path, len));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn a_session_keeps_every_file_under_its_engine_root() {
+    use storage_manager::backend::engine::Engine;
+
+    let _ws = common::TestWorkspace::new("session", "root");
+    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
+
+    // The test workspace keeps its own catalog in the working directory.
+    let before = files_under("database");
+
+    // A data directory that is not the working directory.
+    let root = std::env::current_dir().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&root).unwrap();
+    let engine = Engine::open(&root);
+    storage_manager::catalog::init_catalog_in(&engine);
+    let mut s = Session::new(storage_manager::catalog::load_catalog_in(&engine));
+
+    for sql in [
+        "CREATE DATABASE app",
+        "USE app",
+        "CREATE TABLE p (id INT PRIMARY KEY, n INT CHECK (n >= 0))",
+        "CREATE TABLE c (id INT PRIMARY KEY, pid INT REFERENCES p(id) ON DELETE CASCADE)",
+        "INSERT INTO p VALUES (1, 10), (2, 20), (3, 30)",
+        "INSERT INTO c VALUES (1, 1), (2, 2), (3, 3)",
+        "CREATE INDEX p_n ON p (n)",
+        "UPDATE p SET n = n + 1 WHERE id = 2",
+        "DELETE FROM p WHERE id = 3",
+        "VACUUM p",
+        "DROP INDEX p_n",
+        "ALTER TABLE p ADD COLUMN note VARCHAR(10)",
+        "VACUUM p",
+        "ALTER TABLE c RENAME TO kids",
+    ] {
+        ok(&mut s, sql);
+    }
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT p.id, p.n FROM p JOIN kids ON kids.pid = p.id ORDER BY p.id"
+        ),
+        [vec![int(1), int(10)], vec![int(2), int(21)]]
+    );
+    storage_manager::backend::cache::checkpoint_durable();
+
+    assert!(root.join("database/base/app/p.dat").exists());
+    assert!(root.join("database/base/app/kids.dat").exists());
+    assert!(root.join("database/system/tables.dat").exists());
+    assert_eq!(
+        files_under("database"),
+        before,
+        "nothing may change under the working directory"
+    );
+
+    // A second session on the same root reads what the first one wrote.
+    drop(s);
+    let mut again = Session::new(storage_manager::catalog::load_catalog_in(&engine));
+    ok(&mut again, "USE app");
+    assert_eq!(rows(&mut again, "SELECT COUNT(*) FROM kids").len(), 1);
+}

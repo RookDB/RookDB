@@ -11,9 +11,13 @@ use crate::backend::heap::HeapManager;
 /// Rebuild the table's Free Space Map (FSM) from scratch.
 /// Call this ONCE after a full table compaction/rewrite is completed.
 /// This avoids the need to update free space continuously during rewriting.
-pub fn rebuild_table_fsm(db_name: &str, table_name: &str) -> io::Result<()> {
-    let table_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
-    let fsm_path = PathBuf::from(crate::backend::paths::heap_fsm(db_name, table_name));
+pub fn rebuild_table_fsm(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<()> {
+    let table_path = PathBuf::from(engine.paths().heap(db_name, table_name));
+    let fsm_path = PathBuf::from(engine.paths().heap_fsm(db_name, table_name));
 
     // 1. Delete the old FSM fork file
     if fsm_path.exists() {
@@ -33,12 +37,13 @@ pub fn rebuild_table_fsm(db_name: &str, table_name: &str) -> io::Result<()> {
 /// Call this after manually reorganizing tuples within a single page
 /// to make the newly reclaimed space searchable for future inserts.
 pub fn update_page_free_space(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     page_id: u32,
     reclaimed_bytes: u32,
 ) -> io::Result<()> {
-    let table_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
+    let table_path = PathBuf::from(engine.paths().heap(db_name, table_name));
 
     // Open the HeapManager (loads the FSM)
     let mut hm = HeapManager::open(table_path)?;
@@ -60,11 +65,12 @@ pub fn update_page_free_space(
 /// This allows the compaction team to relocate a tuple without
 /// interacting with the FSM or raw page layout directly.
 pub fn insert_raw_tuple(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     tuple_data: &[u8],
 ) -> io::Result<(u32, u32)> {
-    let table_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
+    let table_path = PathBuf::from(engine.paths().heap(db_name, table_name));
 
     // Process-cached manager: avoids a full file+FSM open per tuple.
     crate::backend::cache::with_heap(&table_path, |hm| hm.insert_tuple(tuple_data))

@@ -28,9 +28,8 @@ pub use info_schema::*;
 pub use metadata::*;
 pub use save::*;
 
-pub(crate) const SYS_DIR: &str = crate::layout::SYSTEM_DIR;
-pub(crate) fn sys_path(table: &str) -> PathBuf {
-    PathBuf::from(format!("{}/{}.dat", SYS_DIR, table))
+pub(crate) fn sys_path(engine: &crate::backend::engine::Engine, table: &str) -> PathBuf {
+    engine.paths().system_table(table)
 }
 
 // ── Column schemas for each system table ──────────────────────────────────────
@@ -116,37 +115,37 @@ fn datatype_to_string(dt: &DataType) -> String {
 ///
 /// Returns `true` if a migration happened, `false` if system tables already
 /// existed (or if no JSON catalog was found).
-pub fn bootstrap_system_catalog() -> bool {
-    let sys_dir = std::path::Path::new(SYS_DIR);
-    let catalog_json = std::path::Path::new(crate::layout::CATALOG_FILE);
+pub fn bootstrap_system_catalog(engine: &std::sync::Arc<crate::backend::engine::Engine>) -> bool {
+    let sys_dir = engine.paths().system_dir();
+    let catalog_json = engine.paths().catalog_file();
 
     // If system directory already exists with at least one table file, skip.
-    if sys_dir.exists() && sys_path("databases").exists() {
+    if sys_dir.exists() && sys_path(engine, "databases").exists() {
         return false;
     }
 
     // No JSON catalog to bootstrap from — just create empty system tables.
     if !catalog_json.exists() {
         log::info!("[SystemCatalog] No catalog.json found; creating empty system tables.");
-        create_system_table_files();
+        create_system_table_files(engine);
         return false;
     }
 
     log::info!("[SystemCatalog] Migrating catalog.json → system tables ...");
 
     // Read the existing JSON catalog.
-    let catalog = crate::catalog::load_catalog();
+    let catalog = crate::catalog::load_catalog_in(engine);
 
     // Create system directory and heap files.
-    std::fs::create_dir_all(SYS_DIR).ok();
-    create_system_table_files();
+    std::fs::create_dir_all(&sys_dir).ok();
+    create_system_table_files(engine);
 
     // Populate system tables from the in-memory catalog.
     populate_system_tables(&catalog, Vec::new(), None);
 
     // Rename catalog.json so we don't migrate again.
-    let migrated_str = format!("{}.migrated", crate::layout::CATALOG_FILE);
-    let _ = std::fs::rename(catalog_json, &migrated_str);
+    let migrated_str = crate::backend::paths::with_suffix(&catalog_json, ".migrated");
+    let _ = std::fs::rename(&catalog_json, &migrated_str);
 
     log::info!("[SystemCatalog] Migration complete. catalog.json → system tables.");
     true
@@ -155,10 +154,12 @@ pub fn bootstrap_system_catalog() -> bool {
 ///
 /// Scans each system table via direct disk reads and reconstructs the
 /// in-memory `Catalog` hierarchy.
-pub fn load_catalog_from_system() -> Catalog {
-    let mut catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
+pub fn load_catalog_from_system(
+    engine: &std::sync::Arc<crate::backend::engine::Engine>,
+) -> Catalog {
+    let mut catalog = Catalog::new(std::sync::Arc::clone(engine));
 
-    let databases = match scan_system_table("databases", SYS_DATABASES_SCHEMA) {
+    let databases = match scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA) {
         Ok(rows) => rows,
         Err(e) => {
             log::error!("[SystemCatalog] Failed to read sys_databases: {}", e);
@@ -166,7 +167,7 @@ pub fn load_catalog_from_system() -> Catalog {
         }
     };
 
-    let tables = match scan_system_table("tables", SYS_TABLES_SCHEMA) {
+    let tables = match scan_system_table(engine, "tables", SYS_TABLES_SCHEMA) {
         Ok(rows) => rows,
         Err(e) => {
             log::error!("[SystemCatalog] Failed to read sys_tables: {}", e);
@@ -174,7 +175,7 @@ pub fn load_catalog_from_system() -> Catalog {
         }
     };
 
-    let columns = match scan_system_table("columns", SYS_COLUMNS_SCHEMA) {
+    let columns = match scan_system_table(engine, "columns", SYS_COLUMNS_SCHEMA) {
         Ok(rows) => rows,
         Err(e) => {
             log::error!("[SystemCatalog] Failed to read sys_columns: {}", e);
@@ -182,7 +183,7 @@ pub fn load_catalog_from_system() -> Catalog {
         }
     };
 
-    let views_data = match scan_system_table("views", SYS_VIEWS_SCHEMA) {
+    let views_data = match scan_system_table(engine, "views", SYS_VIEWS_SCHEMA) {
         Ok(rows) => rows,
         Err(e) => {
             log::error!("[SystemCatalog] Failed to read sys_views: {}", e);
@@ -197,7 +198,7 @@ pub fn load_catalog_from_system() -> Catalog {
     // without this mapping every
     // Column was rebuilt with `Constraints::default()`, silently disabling
     // NOT NULL/UNIQUE validation after any process restart.
-    let constraints = match scan_system_table("constraints", SYS_CONSTRAINTS_SCHEMA) {
+    let constraints = match scan_system_table(engine, "constraints", SYS_CONSTRAINTS_SCHEMA) {
         Ok(rows) => rows,
         Err(e) => {
             log::error!("[SystemCatalog] Failed to read sys_constraints: {}", e);
@@ -450,8 +451,12 @@ pub fn load_catalog_from_system() -> Catalog {
     catalog
 }
 /// Internal helper to resolve (db_name, table_name) → (table_id, db_id).
-pub fn resolve_table_id(db_name: &str, table_name: &str) -> std::io::Result<(i32, i32)> {
-    let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
+pub fn resolve_table_id(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> std::io::Result<(i32, i32)> {
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let db_id = db_rows
         .iter()
@@ -475,7 +480,7 @@ pub fn resolve_table_id(db_name: &str, table_name: &str) -> std::io::Result<(i32
             )
         })?;
 
-    let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let table_id = tbl_rows
         .iter()
@@ -509,21 +514,21 @@ pub fn resolve_table_id(db_name: &str, table_name: &str) -> std::io::Result<(i32
     Ok((table_id, db_id))
 }
 /// Check if the system tables exist and are accessible.
-pub fn system_tables_exist() -> bool {
-    let sys_dir = std::path::Path::new(SYS_DIR);
+pub fn system_tables_exist(engine: &crate::backend::engine::Engine) -> bool {
+    let sys_dir = engine.paths().system_dir();
     sys_dir.exists()
-        && sys_path("databases").exists()
-        && sys_path("tables").exists()
-        && sys_path("columns").exists()
-        && sys_path("constraints").exists()
-        && sys_path("indexes").exists()
-        && sys_path("views").exists()
+        && sys_path(engine, "databases").exists()
+        && sys_path(engine, "tables").exists()
+        && sys_path(engine, "columns").exists()
+        && sys_path(engine, "constraints").exists()
+        && sys_path(engine, "indexes").exists()
+        && sys_path(engine, "views").exists()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 /// Create empty system table heap files (with HeapManager).
-fn create_system_table_files() {
-    let _ = std::fs::create_dir_all(SYS_DIR);
+fn create_system_table_files(engine: &crate::backend::engine::Engine) {
+    let _ = std::fs::create_dir_all(engine.paths().system_dir());
 
     for name in &[
         "databases",
@@ -533,7 +538,7 @@ fn create_system_table_files() {
         "indexes",
         "views",
     ] {
-        let path = sys_path(name);
+        let path = sys_path(engine, name);
         if !path.exists() {
             match crate::backend::heap::HeapManager::create(path.clone()) {
                 Ok(mut hm) => {
@@ -555,15 +560,16 @@ fn create_system_table_files() {
 /// Public wrapper: ensure all system table files exist, creating any that are
 /// missing. Called during startup to support incremental schema additions
 /// (e.g. adding `sys_views` to an existing system catalog).
-pub fn ensure_system_tables() {
-    create_system_table_files();
+pub fn ensure_system_tables(engine: &crate::backend::engine::Engine) {
+    create_system_table_files(engine);
 }
 /// Scan all rows from a system table and return decoded values.
 fn scan_system_table(
+    engine: &crate::backend::engine::Engine,
     name: &str,
     schema: &[DataType],
 ) -> Result<Vec<Vec<Option<crate::types::DataValue>>>, String> {
-    let path = sys_path(name);
+    let path = sys_path(engine, name);
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -590,11 +596,12 @@ fn scan_system_table(
 ///
 /// Opens the HeapManager once, inserts all rows, and closes.
 fn insert_system_rows(
+    engine: &crate::backend::engine::Engine,
     name: &str,
     schema: &[DataType],
     rows: &[Vec<Option<String>>],
 ) -> std::io::Result<()> {
-    let path = sys_path(name);
+    let path = sys_path(engine, name);
     let mut heap = crate::backend::heap::HeapManager::open(path)?;
 
     for row in rows {

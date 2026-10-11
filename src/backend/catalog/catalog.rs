@@ -4,10 +4,16 @@ use std::path::Path;
 
 use crate::catalog::types::*;
 use crate::heap::HeapManager;
-use crate::layout::*;
 
+/// Create the directories and system tables of the working directory's
+/// data directory if they are missing.
 pub fn init_catalog() {
-    let catalog_path = Path::new(CATALOG_FILE);
+    init_catalog_in(&crate::backend::engine::Engine::current_dir())
+}
+
+/// [`init_catalog`] for the data directory of `engine`.
+pub fn init_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) {
+    let catalog_path = engine.paths().catalog_file();
 
     debug_print_catalog(&format!(
         "Initializing catalog at: {}",
@@ -31,9 +37,9 @@ pub fn init_catalog() {
     }
 
     // Ensure base database directory exists
-    let base_dir = Path::new(DATABASE_DIR);
+    let base_dir = engine.paths().base_dir();
     if !base_dir.exists() {
-        match fs::create_dir_all(base_dir) {
+        match fs::create_dir_all(&base_dir) {
             Ok(_) => {
                 debug_print_catalog(&format!(
                     "Created base database directory: {}",
@@ -48,22 +54,22 @@ pub fn init_catalog() {
     }
 
     // Create system directory if not exist
-    let system_dir = Path::new(SYSTEM_DIR);
+    let system_dir = engine.paths().system_dir();
     if !system_dir.exists()
-        && let Err(e) = fs::create_dir_all(system_dir)
+        && let Err(e) = fs::create_dir_all(&system_dir)
     {
         log::error!("Failed to create system directory: {}", e);
     }
 
     // Bootstrap: migrate catalog.json → system tables if needed
-    let migrated = crate::backend::system_table::bootstrap_system_catalog();
+    let migrated = crate::backend::system_table::bootstrap_system_catalog(engine);
     if migrated {
         debug_print_catalog("Catalog migrated from JSON to system tables.");
     }
 
     // Ensure all system table files exist (e.g. sys_views may be missing if
     // this is an existing system catalog that predates the views feature).
-    crate::backend::system_table::ensure_system_tables();
+    crate::backend::system_table::ensure_system_tables(engine);
 
     // NOTE: catalog.json is no longer created or maintained.
     // The system table heap files under database/system/ are the single
@@ -75,29 +81,36 @@ pub fn init_catalog() {
 /// Loads the catalog from disk into memory.
 /// Returns an empty catalog if the file is missing or invalid.
 pub fn load_catalog() -> Catalog {
+    load_catalog_in(&crate::backend::engine::Engine::current_dir())
+}
+
+/// [`load_catalog`] for the data directory of `engine`.
+pub fn load_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) -> Catalog {
     // Always load from system tables (the single source of truth).
-    if crate::backend::system_table::system_tables_exist() {
+    if crate::backend::system_table::system_tables_exist(engine) {
         debug_print_catalog("Loading catalog from system tables.");
-        return crate::backend::system_table::load_catalog_from_system();
+        return crate::backend::system_table::load_catalog_from_system(engine);
     }
 
     // Fallback: if system tables do not exist, attempt JSON load for backward
     // compatibility during migration. This path is exercised during the first
     // call before bootstrap_system_catalog() has created the heap files.
-    let catalog_path = Path::new(CATALOG_FILE);
+    let catalog_path = engine.paths().catalog_file();
     if !catalog_path.exists() {
         debug_print_catalog("No catalog.json or system tables found. Returning empty catalog.");
-        return Catalog::new(crate::backend::engine::Engine::current_dir());
+        return Catalog::new(std::sync::Arc::clone(engine));
     }
 
     match fs::read_to_string(catalog_path) {
-        Ok(data) => serde_json::from_str::<Catalog>(&data).unwrap_or_else(|e| {
-            log::error!("Failed to parse catalog JSON: {}", e);
-            Catalog::new(crate::backend::engine::Engine::current_dir())
-        }),
+        Ok(data) => serde_json::from_str::<Catalog>(&data)
+            .map(|parsed| Catalog::with_databases(std::sync::Arc::clone(engine), parsed.databases))
+            .unwrap_or_else(|e| {
+                log::error!("Failed to parse catalog JSON: {}", e);
+                Catalog::new(std::sync::Arc::clone(engine))
+            }),
         Err(e) => {
             log::error!("Failed to read catalog.json: {}", e);
-            Catalog::new(crate::backend::engine::Engine::current_dir())
+            Catalog::new(std::sync::Arc::clone(engine))
         }
     }
 }
@@ -106,14 +119,14 @@ pub fn load_catalog() -> Catalog {
 /// Returns Ok(()) on success, or an error with a detailed message if something goes wrong.
 pub fn save_catalog(catalog: &Catalog) -> std::io::Result<()> {
     // Always save to system tables (the single source of truth).
-    if crate::backend::system_table::system_tables_exist() {
+    if crate::backend::system_table::system_tables_exist(catalog.engine()) {
         debug_print_catalog("Saving catalog to system tables.");
         return crate::backend::system_table::save_catalog_to_system(catalog);
     }
 
     // Fallback: save as JSON if system tables don't exist yet
     // (during initial bootstrap before migration completes).
-    let catalog_path = Path::new(CATALOG_FILE);
+    let catalog_path = catalog.engine().paths().catalog_file();
     debug_print_catalog(&format!("Saving catalog to: {}", catalog_path.display()));
     let json = serde_json::to_string_pretty(catalog)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -195,7 +208,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
     debug_print_catalog(&format!("Persisted database to catalog: '{}'", db_name));
 
     // Create database directory on disk
-    let db_path_str = crate::backend::paths::database_dir(db_name);
+    let db_path_str = catalog.engine().paths().database_dir(db_name);
     let db_path = Path::new(&db_path_str);
 
     if !db_path.exists() {
@@ -292,7 +305,7 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     }
 
     // Construct table file path
-    let table_file_path = crate::backend::paths::heap(db_name, table_name);
+    let table_file_path = catalog.engine().paths().heap(db_name, table_name);
 
     // Create and initialize table file
     let table_path = Path::new(&table_file_path);
@@ -300,26 +313,33 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
     if !table_path.exists() {
         match HeapManager::create(table_path.to_path_buf()) {
             Ok(_) => {
-                log::info!("Table data file created at '{}'.", table_file_path);
+                log::info!(
+                    "Table data file created at '{}'.",
+                    table_file_path.display()
+                );
             }
 
             Err(e) => {
                 log::error!(
                     "Failed to create table data file '{}': {}",
-                    table_file_path,
+                    table_file_path.display(),
                     e
                 );
 
                 println!(
                     "Failed to create table data file '{}': {}",
-                    table_file_path, e
+                    table_file_path.display(),
+                    e
                 );
 
                 return;
             }
         }
     } else {
-        log::info!("Table data file '{}' already exists.", table_file_path);
+        log::info!(
+            "Table data file '{}' already exists.",
+            table_file_path.display()
+        );
     }
 
     log::info!(
