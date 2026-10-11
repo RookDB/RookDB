@@ -11,7 +11,7 @@
 //! UPDATE is implemented using delete + insert semantics for latest-version wins.
 //! Rows with the SLOT_FLAG_DELETED bit set are invisible and are never updated.
 
-use std::io;
+use crate::backend::error::{ConstraintKind, RookError, RookResult};
 
 use crate::backend::log::operation_log::current_timestamp_iso;
 use crate::backend::page::page_lock::PageWriteLock;
@@ -112,19 +112,21 @@ pub fn update_by_pointers(
     table_name: &str,
     pointers: &[(u32, u32)],
     assignments: &[SetAssignment],
-) -> io::Result<UpdateResult> {
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
-        )
-    })?;
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
+) -> RookResult<UpdateResult> {
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db_name.to_string(),
+        })?;
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Table",
+            name: table_name.to_string(),
+        })?;
     let columns = &table.columns;
 
     // Bind each SET expression to the table's columns once for the statement.
@@ -142,27 +144,18 @@ pub fn update_by_pointers(
         let idx = columns
             .iter()
             .position(|c| c.name.eq_ignore_ascii_case(&asgn.column))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Assignment column '{}' not found in table '{}'",
-                        asgn.column, table_name
-                    ),
-                )
+            .ok_or_else(|| RookError::NotFound {
+                entity: "Assignment column",
+                name: format!("{}\' in table \'{}", asgn.column, table_name),
             })?;
-        let expr = expr_from_ast(&asgn.value, &names).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("SET {}: {}", asgn.column, e),
-            )
-        })?;
+        let expr = expr_from_ast(&asgn.value, &names)
+            .map_err(|e| e.with_context(format!("SET {}", asgn.column)))?;
         compiled.push((idx, expr));
     }
 
     let path = crate::backend::paths::heap(db_name, table_name);
     let file = crate::backend::heap::HeapFile::open(std::path::Path::new(&path))
-        .map_err(|e| io::Error::other(format!("Failed to open table file: {}", e)))?;
+        .map_err(|e| RookError::Io(e).with_context("Failed to open table file"))?;
     let file_identity = file.identity();
 
     let mut updated_count = 0usize;
@@ -193,48 +186,32 @@ pub fn update_by_pointers(
         let updated_values = match apply_assignments(columns, &row_schema, &compiled, &decoded) {
             Ok(v) => v,
             Err(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("assignment error: {}", e),
-                ));
+                return Err(RookError::TypeMismatch(e).with_context("assignment error"));
             }
         };
         let new_bytes = match serialize_nullable_typed_row(&schema, &updated_values) {
             Ok(b) => b,
             Err(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("serialization error: {}", e),
-                ));
+                return Err(RookError::TypeMismatch(e).with_context("serialization error"));
             }
         };
 
         // Constraint validation against disk, excluding all pointers in this batch
-        if let Err(e) = crate::backend::constraint::validate_row_update_with_excludes(
+        crate::backend::constraint::validate_row_update_with_excludes(
             catalog,
             db_name,
             table_name,
             &updated_values,
             pointers,
-        ) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("constraint violation: {}", e),
-            ));
-        }
+        )?;
 
-        if let Err(e) = crate::backend::constraint::validate_update_restrict(
+        crate::backend::constraint::validate_update_restrict(
             db_name,
             table_name,
             columns,
             &decoded,
             &updated_values,
-        ) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("FOREIGN KEY RESTRICT constraint: {}", e),
-            ));
-        }
+        )?;
 
         log::info!(
             "[Update] Validated row at (page={}, slot={}): new values={:?}",
@@ -335,9 +312,11 @@ pub fn update_by_pointers(
     }
 
     if has_intra_batch_conflict {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "UNIQUE constraint violated: the update gives two rows the same key".to_string(),
+        return Err(RookError::constraint(
+            ConstraintKind::Unique,
+            table_name,
+            None,
+            "UNIQUE constraint violated: the update gives two rows the same key",
         ));
     }
 
@@ -366,15 +345,12 @@ pub fn update_by_pointers(
                 let Some(key) = key else { continue };
                 let len = crate::backend::index::btree::encoded_key_len(&key)?;
                 if len > crate::backend::index::btree::MAX_ENCODED_KEY_SIZE {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "index key of {} bytes for index '{}' exceeds the maximum of {} bytes",
-                            len,
-                            idx_name,
-                            crate::backend::index::btree::MAX_ENCODED_KEY_SIZE
-                        ),
-                    ));
+                    return Err(RookError::TypeMismatch(format!(
+                        "index key of {} bytes for index '{}' exceeds the maximum of {} bytes",
+                        len,
+                        idx_name,
+                        crate::backend::index::btree::MAX_ENCODED_KEY_SIZE
+                    )));
                 }
             }
         }

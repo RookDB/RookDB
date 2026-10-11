@@ -7,6 +7,8 @@
 
 use std::io;
 
+use crate::backend::error::{RookError, RookResult};
+
 use crate::backend::executor::compaction_api::rebuild_table_fsm;
 use crate::backend::executor::create_index::update_index_on_delete;
 use crate::backend::heap::HeapFile;
@@ -207,24 +209,26 @@ pub fn delete_by_pointers(
     db_name: &str,
     table_name: &str,
     pointers: &[(u32, u32)],
-) -> io::Result<DeleteResult> {
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
-        )
-    })?;
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
+) -> RookResult<DeleteResult> {
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db_name.to_string(),
+        })?;
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Table",
+            name: table_name.to_string(),
+        })?;
     let columns = &table.columns;
 
     let path = crate::backend::paths::heap(db_name, table_name);
     let file = HeapFile::open(std::path::Path::new(&path))
-        .map_err(|e| io::Error::other(format!("Failed to open table file: {}", e)))?;
+        .map_err(|e| RookError::Io(e).with_context("Failed to open table file"))?;
     let file_identity = file.identity();
 
     let mut deleted_count = 0usize;
@@ -253,8 +257,7 @@ pub fn delete_by_pointers(
             let decoded = decode_row(tuple_data, columns)?;
             crate::backend::constraint::check_row_delete_restrictions(
                 catalog, db_name, table_name, &decoded,
-            )
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+            )?;
         }
     }
 

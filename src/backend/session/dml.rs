@@ -41,11 +41,10 @@ pub(super) fn query(catalog: &Catalog, db: &str, plan: &QueryPlan) -> RookResult
 
 /// UPDATE: the planner finds the target rows, then they are rewritten in place.
 pub(super) fn update(catalog: &Catalog, db: &str, upd: &UpdatePlan) -> RookResult<StatementResult> {
-    let fail = |e: String| RookError::Internal(e).with_context("Update failed");
     let pointers = select_matching_pointers(catalog, db, &upd.table, upd.selection.clone())
-        .map_err(|e| fail(e.to_string()))?;
+        .map_err(|e| e.with_context("Update failed"))?;
     let result = update_by_pointers(catalog, db, &upd.table, &pointers, &upd.assignments)
-        .map_err(|e| fail(e.to_string()))?;
+        .map_err(|e| e.with_context("Update failed"))?;
     Ok(StatementResult::message(format!(
         "\nUpdated {} row(s).",
         result.updated_count
@@ -54,11 +53,10 @@ pub(super) fn update(catalog: &Catalog, db: &str, upd: &UpdatePlan) -> RookResul
 
 /// DELETE: the planner finds the target rows, then they are deleted.
 pub(super) fn delete(catalog: &Catalog, db: &str, del: &DeletePlan) -> RookResult<StatementResult> {
-    let fail = |e: String| RookError::Internal(e).with_context("Delete failed");
     let pointers = select_matching_pointers(catalog, db, &del.table, del.selection.clone())
-        .map_err(|e| fail(e.to_string()))?;
-    let result =
-        delete_by_pointers(catalog, db, &del.table, &pointers).map_err(|e| fail(e.to_string()))?;
+        .map_err(|e| e.with_context("Delete failed"))?;
+    let result = delete_by_pointers(catalog, db, &del.table, &pointers)
+        .map_err(|e| e.with_context("Delete failed"))?;
     Ok(StatementResult::message(format!(
         "\nDeleted {} row(s).",
         result.deleted_count

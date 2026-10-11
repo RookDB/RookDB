@@ -194,7 +194,7 @@ fn cell(
 /// with zero rows. Either way no row was updated, which is what these tests
 /// go on to check.
 fn rejected_as_zero(
-    result: std::io::Result<storage_manager::executor::UpdateResult>,
+    result: storage_manager::backend::error::RookResult<storage_manager::executor::UpdateResult>,
 ) -> storage_manager::executor::UpdateResult {
     result.unwrap_or_else(|_| storage_manager::executor::UpdateResult {
         updated_count: 0,
