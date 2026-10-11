@@ -267,6 +267,9 @@ pub fn delete_by_pointers(
         }
     }
 
+    // The first index failure; the indexes are rebuilt once the rows are
+    // written, rather than maintained row by row after that.
+    let mut index_error: Option<String> = None;
     for &(page_num, slot_idx) in pointers {
         if !hold_pages || held.as_ref().map(|h| h.page_num) != Some(page_num) {
             flush_held_page(catalog.engine(), &file, &mut held, db_name, table_name)?;
@@ -307,16 +310,18 @@ pub fn delete_by_pointers(
         }
 
         // Update any existing B+ Tree index
-        if let Err(e) = update_index_on_delete(
-            catalog.engine(),
-            db_name,
-            table_name,
-            columns,
-            &tuple_data,
-            page_num,
-            slot_idx,
-        ) {
-            log::warn!("Failed to update index for deleted tuple: {}", e);
+        if index_error.is_none()
+            && let Err(e) = update_index_on_delete(
+                catalog.engine(),
+                db_name,
+                table_name,
+                columns,
+                &tuple_data,
+                page_num,
+                slot_idx,
+            )
+        {
+            index_error = Some(e.to_string());
         }
 
         page.mark_deleted(slot_idx);
@@ -334,6 +339,15 @@ pub fn delete_by_pointers(
     }
 
     flush_held_page(catalog.engine(), &file, &mut held, db_name, table_name)?;
+
+    if let Some(cause) = index_error {
+        crate::backend::executor::create_index::repair_indexes(
+            catalog,
+            db_name,
+            table_name,
+            &format!("Index maintenance failed for a deleted row: {}", cause),
+        )?;
+    }
 
     if deleted_count > 0 {
         file.record_dead_tuples(deleted_count as u32)?;

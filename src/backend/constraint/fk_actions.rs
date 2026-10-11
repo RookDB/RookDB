@@ -43,6 +43,10 @@ fn apply_to_child_rows(
     use crate::page::Page;
     use crate::types::Comparable;
 
+    // The first index failure; the child's indexes are rebuilt once its rows
+    // are written, rather than maintained row by row after that.
+    let mut index_error: Option<String> = None;
+
     let Some(table) = catalog
         .databases
         .get(db_name)
@@ -131,20 +135,18 @@ fn apply_to_child_rows(
 
             match &new_value {
                 None => {
-                    if let Err(e) = update_index_on_delete(
-                        catalog.engine(),
-                        db_name,
-                        child_table,
-                        columns,
-                        &old_bytes,
-                        page_num,
-                        slot,
-                    ) {
-                        log::warn!(
-                            "[{}] Failed to update child index for deleted tuple: {}",
-                            label,
-                            e
-                        );
+                    if index_error.is_none()
+                        && let Err(e) = update_index_on_delete(
+                            catalog.engine(),
+                            db_name,
+                            child_table,
+                            columns,
+                            &old_bytes,
+                            page_num,
+                            slot,
+                        )
+                    {
+                        index_error = Some(e.to_string());
                     }
                     page.mark_deleted(slot);
                     dead += 1;
@@ -161,18 +163,22 @@ fn apply_to_child_rows(
                             }
                         };
                     if page.overwrite(slot, &new_bytes) {
-                        let _ = update_index_on_update(
-                            catalog.engine(),
-                            db_name,
-                            child_table,
-                            columns,
-                            &old_bytes,
-                            &new_bytes,
-                            page_num,
-                            slot,
-                            page_num,
-                            slot,
-                        );
+                        if index_error.is_none()
+                            && let Err(e) = update_index_on_update(
+                                catalog.engine(),
+                                db_name,
+                                child_table,
+                                columns,
+                                &old_bytes,
+                                &new_bytes,
+                                page_num,
+                                slot,
+                                page_num,
+                                slot,
+                            )
+                        {
+                            index_error = Some(e.to_string());
+                        }
                     } else {
                         log::warn!(
                             "[{}] New tuple larger than old ({} > {}); relocating slot",
@@ -211,23 +217,45 @@ fn apply_to_child_rows(
     for (old_bytes, new_bytes, old_page, old_slot) in relocations {
         match insert_raw_tuple(catalog.engine(), db_name, child_table, &new_bytes) {
             Ok((new_page, new_slot)) => {
-                let _ = update_index_on_update(
-                    catalog.engine(),
-                    db_name,
-                    child_table,
-                    columns,
-                    &old_bytes,
-                    &new_bytes,
-                    old_page,
-                    old_slot,
-                    new_page,
-                    new_slot,
-                );
+                if index_error.is_none()
+                    && let Err(e) = update_index_on_update(
+                        catalog.engine(),
+                        db_name,
+                        child_table,
+                        columns,
+                        &old_bytes,
+                        &new_bytes,
+                        old_page,
+                        old_slot,
+                        new_page,
+                        new_slot,
+                    )
+                {
+                    index_error = Some(e.to_string());
+                }
             }
+            // The old image is already marked deleted: the row is lost
+            // unless the statement fails loudly.
             Err(e) => {
-                log::error!("[{}] Failed to relocate grown child tuple: {}", label, e);
+                return Err(format!(
+                    "[{}] Failed to write back a grown row of '{}': {}",
+                    label, child_table, e
+                ));
             }
         }
+    }
+
+    if let Some(cause) = index_error {
+        crate::backend::executor::create_index::repair_indexes(
+            catalog,
+            db_name,
+            child_table,
+            &format!(
+                "[{}] Index maintenance failed for a child row: {}",
+                label, cause
+            ),
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     Ok(matched)

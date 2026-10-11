@@ -737,7 +737,7 @@ pub(super) fn remove_index_files_for_table(
 /// Build the indexes `indexes` of a table again from its rows, after a change
 /// that rewrote or emptied it. An index on the column `dropped`, which no
 /// longer exists, is dropped instead; the result has a line for each.
-pub(super) fn rebuild_indexes(
+pub(crate) fn rebuild_indexes(
     catalog: &Catalog,
     db: &str,
     table: &str,

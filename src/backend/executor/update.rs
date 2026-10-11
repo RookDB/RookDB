@@ -413,6 +413,9 @@ pub fn update_by_pointers(
         }
     }
 
+    // The first index failure; the indexes are rebuilt once every row is
+    // written, rather than maintained row by row after that.
+    let mut index_error: Option<String> = None;
     if !pending_updates.is_empty() {
         for (i, update) in pending_updates.iter().enumerate() {
             let (new_page_id, new_slot_id) = if in_place[i] {
@@ -434,23 +437,33 @@ pub fn update_by_pointers(
                 new_slot_id
             );
 
-            if let Err(e) = crate::backend::executor::create_index::update_index_on_update(
-                catalog.engine(),
-                db_name,
-                table_name,
-                columns,
-                &update.old_tuple_data,
-                &update.new_bytes,
-                update.pointer.page_id,
-                update.pointer.slot_index as u32,
-                new_page_id,
-                new_slot_id,
-            ) {
-                log::warn!("Failed to update index for updated tuple: {}", e);
+            if index_error.is_none()
+                && let Err(e) = crate::backend::executor::create_index::update_index_on_update(
+                    catalog.engine(),
+                    db_name,
+                    table_name,
+                    columns,
+                    &update.old_tuple_data,
+                    &update.new_bytes,
+                    update.pointer.page_id,
+                    update.pointer.slot_index as u32,
+                    new_page_id,
+                    new_slot_id,
+                )
+            {
+                index_error = Some(e.to_string());
             }
 
             returning_rows.push(super::delete::display_row(columns, &update.updated_values));
         }
+    }
+    if let Some(cause) = index_error {
+        crate::backend::executor::create_index::repair_indexes(
+            catalog,
+            db_name,
+            table_name,
+            &format!("Index maintenance failed for an updated row: {}", cause),
+        )?;
     }
 
     // FK cascade propagation

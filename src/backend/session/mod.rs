@@ -10,6 +10,7 @@
 
 mod alter;
 mod ddl;
+pub(crate) use ddl::rebuild_indexes;
 mod dml;
 mod names;
 

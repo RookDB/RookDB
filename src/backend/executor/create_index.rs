@@ -460,6 +460,34 @@ pub fn create_index_with_flags(
     Ok(inserted_count)
 }
 
+/// After keeping the indexes of `table` in step with a changed row failed:
+/// build them again from the table's rows, which are the truth, so no index
+/// misses a row or points at a dead one. The row changes stand. When the
+/// rebuild fails too, the error names both failures.
+pub(crate) fn repair_indexes(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    cause: &str,
+) -> crate::backend::error::RookResult<()> {
+    log::warn!(
+        "[Index] {}; rebuilding the indexes of '{}.{}'",
+        cause,
+        db_name,
+        table_name
+    );
+    let indexes =
+        crate::backend::system_table::table_indexes(catalog.engine(), db_name, table_name);
+    crate::backend::session::rebuild_indexes(catalog, db_name, table_name, &indexes, None)
+        .map(|_| ())
+        .map_err(|e| {
+            crate::backend::error::RookError::Io(std::io::Error::other(format!(
+                "{}; rebuilding the indexes of '{}' failed too ({}), so they are out of date",
+                cause, table_name, e
+            )))
+        })
+}
+
 // ── Auto-indexing for constraint targets ─────────────────────────────────────
 
 /// True when some index on `(db, table)` has `column` as its FIRST key
@@ -872,12 +900,7 @@ pub fn update_index_on_delete(
                 );
             }
             Err(e) => {
-                log::warn!(
-                    "[IndexDelete] Failed to delete from index {:?}: {}, skipping",
-                    idx_path,
-                    e
-                );
-                continue;
+                return Err(format!("Failed to delete from index {:?}: {}", idx_path, e).into());
             }
         }
     }
@@ -958,7 +981,7 @@ pub fn update_index_on_update(
         );
 
         if let Err(e) = res {
-            log::warn!("[IndexUpdate] Failed to update index {:?}: {}", idx_path, e);
+            return Err(format!("Failed to update index {:?}: {}", idx_path, e).into());
         }
     }
 
