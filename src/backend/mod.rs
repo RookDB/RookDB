@@ -15,6 +15,7 @@ pub mod log;
 pub mod name_validation;
 pub mod page;
 pub mod planner;
+pub mod session;
 pub mod statistics;
 pub mod system_table;
 pub mod table;
