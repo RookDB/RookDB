@@ -238,7 +238,8 @@ pub fn delete_by_pointers(
     // references this one, deleting a row cannot cascade back into this
     // file, so the page is held across those rows and written once instead
     // of being read and rewritten for every row.
-    let hold_pages = crate::backend::cache::referencing_fks(db_name, table_name).is_empty();
+    let hold_pages =
+        crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name).is_empty();
     let mut held: Option<HeldPage> = None;
 
     // A row still referenced through a RESTRICT foreign key fails the whole
@@ -302,6 +303,7 @@ pub fn delete_by_pointers(
 
         // Update any existing B+ Tree index
         if let Err(e) = update_index_on_delete(
+            catalog.engine(),
             db_name,
             table_name,
             columns,

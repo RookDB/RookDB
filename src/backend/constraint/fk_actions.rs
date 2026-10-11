@@ -132,6 +132,7 @@ fn apply_to_child_rows(
             match &new_value {
                 None => {
                     if let Err(e) = update_index_on_delete(
+                        catalog.engine(),
                         db_name,
                         child_table,
                         columns,
@@ -161,6 +162,7 @@ fn apply_to_child_rows(
                         };
                     if page.overwrite(slot, &new_bytes) {
                         let _ = update_index_on_update(
+                            catalog.engine(),
                             db_name,
                             child_table,
                             columns,
@@ -205,6 +207,7 @@ fn apply_to_child_rows(
         match insert_raw_tuple(db_name, child_table, &new_bytes) {
             Ok((new_page, new_slot)) => {
                 let _ = update_index_on_update(
+                    catalog.engine(),
                     db_name,
                     child_table,
                     columns,

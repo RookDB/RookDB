@@ -73,7 +73,10 @@ fn make_catalog() -> Catalog {
             views: HashMap::new(),
         },
     );
-    Catalog { databases }
+    Catalog::with_databases(
+        storage_manager::backend::engine::Engine::current_dir(),
+        databases,
+    )
 }
 
 /// Create the table file at its canonical location with `n` rows

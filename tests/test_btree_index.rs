@@ -102,9 +102,12 @@ fn create_index_builds_persistent_files() {
     );
     // The index is described by sys_indexes alone; no metadata sidecar.
     assert!(!Path::new("database/base/idx_db/staff.by_salary.idx.meta").exists());
-    let indexes =
-        storage_manager::executor::create_index::load_table_indexes_multi("idx_db", "staff")
-            .unwrap();
+    let indexes = storage_manager::executor::create_index::load_table_indexes_multi(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        "idx_db",
+        "staff",
+    )
+    .unwrap();
     assert!(
         indexes
             .iter()
@@ -130,9 +133,12 @@ fn index_survives_a_catalog_save_and_stays_maintained() {
     // A full save rewrites every system table, sys_indexes included.
     storage_manager::catalog::save_catalog(&load_catalog()).unwrap();
     let catalog = load_catalog();
-    let indexes =
-        storage_manager::executor::create_index::load_table_indexes_multi("idx_db", "staff")
-            .unwrap();
+    let indexes = storage_manager::executor::create_index::load_table_indexes_multi(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        "idx_db",
+        "staff",
+    )
+    .unwrap();
     assert_eq!(indexes.len(), 1, "{:?}", indexes);
 
     // A row inserted after the save reaches the index.
@@ -242,6 +248,7 @@ fn index_is_maintained_on_insert() {
     let (page_id, slot_id) =
         storage_manager::executor::insert_raw_tuple("mnt_db", "staff", &row_bytes).unwrap();
     storage_manager::executor::create_index::update_index_on_insert(
+        &storage_manager::backend::engine::Engine::current_dir(),
         "mnt_db",
         "staff",
         &storage_manager::executor::parse_text_row(

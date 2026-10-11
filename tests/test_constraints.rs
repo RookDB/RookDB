@@ -179,8 +179,24 @@ fn check_expression_is_enforced() {
     save_catalog(&catalog).unwrap();
 
     // Register CHECK (price > 0) the way the DDL handler does.
-    let _ = insert_constraint_metadata("ck", "items", "CHECK", "", None, None); // no-op guard
-    let _ = insert_constraint_metadata("ck", "items", "CHECK", "price > 0", None, None);
+    let _ = insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        "ck",
+        "items",
+        "CHECK",
+        "",
+        None,
+        None,
+    ); // no-op guard
+    let _ = insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        "ck",
+        "items",
+        "CHECK",
+        "price > 0",
+        None,
+        None,
+    );
 
     let catalog = load_catalog();
     assert!(
@@ -231,8 +247,17 @@ fn setup_fk(db: &str, action: &str) -> Catalog {
     );
     save_catalog(&catalog).unwrap();
 
-    let _ = insert_constraint_metadata(db, "customers", "PRIMARY KEY", "id", None, None);
     let _ = insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        db,
+        "customers",
+        "PRIMARY KEY",
+        "id",
+        None,
+        None,
+    );
+    let _ = insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
         db,
         "orders",
         &format!("FOREIGN KEY{}", action),
@@ -418,8 +443,17 @@ fn fk_restrict_protects_a_key_spelled_null() {
         ],
     );
     save_catalog(&catalog).unwrap();
-    let _ = insert_constraint_metadata("fkn", "parent", "PRIMARY KEY", "code", None, None);
     let _ = insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
+        "fkn",
+        "parent",
+        "PRIMARY KEY",
+        "code",
+        None,
+        None,
+    );
+    let _ = insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
         "fkn",
         "child",
         "FOREIGN KEY",

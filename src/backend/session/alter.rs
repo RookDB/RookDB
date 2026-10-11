@@ -100,6 +100,7 @@ pub(super) fn alter_table(
             let old_schema = schema(&updated_table.columns);
             updated_table.columns.push(col);
             rewrite_rows(
+                catalog.engine(),
                 db,
                 &alter.table,
                 &old_schema,
@@ -124,6 +125,7 @@ pub(super) fn alter_table(
             let old_schema = schema(&updated_table.columns);
             updated_table.columns.remove(pos);
             rewrite_rows(
+                catalog.engine(),
                 db,
                 &alter.table,
                 &old_schema,
@@ -258,10 +260,11 @@ fn rename_table(
     }
     // Foreign keys store the parent's name: remember who references this
     // table so those rows can follow the rename.
-    let referencing: Vec<String> = crate::backend::cache::referencing_fks(db, old_name)
-        .iter()
-        .map(|fk| fk.0.clone())
-        .collect();
+    let referencing: Vec<String> =
+        crate::backend::cache::referencing_fks(catalog.engine(), db, old_name)
+            .iter()
+            .map(|fk| fk.0.clone())
+            .collect();
     let old_dat = crate::backend::paths::heap(db, old_name);
     let new_dat = crate::backend::paths::heap(db, new_name);
     let _ = std::fs::rename(&old_dat, &new_dat);
@@ -293,7 +296,7 @@ fn rename_table(
     crate::backend::system_table::rename_referenced_table_in_constraints(
         db, &children, old_name, new_name,
     )?;
-    crate::backend::cache::invalidate_metadata();
+    catalog.engine().invalidate_metadata();
     lines.push(format!("Renamed table '{}' to '{}'.", old_name, new_name));
     Ok(StatementResult::lines(lines))
 }
@@ -325,6 +328,7 @@ fn parse_default(ty: &DataType, raw: &str, column: &str) -> io::Result<Option<Da
 /// so a failure leaves the table as it was. Index files are removed, since
 /// they point at the old row locations.
 fn rewrite_rows(
+    engine: &crate::backend::engine::Engine,
     db: &str,
     table: &str,
     old_schema: &[DataType],
@@ -385,6 +389,6 @@ fn rewrite_rows(
     let _ = crate::backend::cache::evict_heap(Path::new(&tmp_path));
     crate::backend::buffer_manager::shared_pool::invalidate(Path::new(&tmp_path));
 
-    remove_index_files_for_table(db, table, None);
+    remove_index_files_for_table(engine, db, table, None);
     Ok(())
 }

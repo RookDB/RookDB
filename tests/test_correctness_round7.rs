@@ -209,6 +209,7 @@ fn on_delete_set_null_applies_to_unflushed_child_rows() {
 
     // Declare the FK action in sys_constraints (same as test_constraints.rs).
     insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
         "db7",
         "child",
         "FOREIGN KEY ON DELETE SET NULL",

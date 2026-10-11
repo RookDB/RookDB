@@ -91,6 +91,7 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
 ///
 /// Returns `Ok(())` on success, or an error if the table isn't found.
 pub fn insert_constraint_metadata(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     constraint_type: &str, // e.g. "NOT NULL", "UNIQUE", "PRIMARY KEY", "CHECK", "FOREIGN KEY"
@@ -178,7 +179,7 @@ pub fn insert_constraint_metadata(
     ];
     let res = insert_system_rows("constraints", SYS_CONSTRAINTS_SCHEMA, &[constr_row]);
     if res.is_ok() {
-        crate::backend::cache::invalidate_metadata();
+        engine.invalidate_metadata();
     }
     res
 }
@@ -191,6 +192,7 @@ pub fn insert_constraint_metadata(
 /// Returns `Ok(())` on success, or an error if any system table can't be
 /// read or the table isn't found.
 pub fn insert_index_metadata(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     index_name: &str,
@@ -274,8 +276,7 @@ pub fn insert_index_metadata(
     ];
     let res = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &[idx_row]);
     if res.is_ok() {
-        crate::backend::cache::invalidate_metadata();
-        crate::backend::executor::create_index::invalidate_discovery(db_name, Some(table_name));
+        engine.invalidate_metadata();
     }
     res
 }
@@ -927,9 +928,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn make_test_catalog() -> Catalog {
-        let mut catalog = Catalog {
-            databases: HashMap::new(),
-        };
+        let mut catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
 
         let users = Table {
             columns: vec![

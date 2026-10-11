@@ -95,7 +95,12 @@ pub fn insert_row(
         )?;
 
     if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
-        db_name, table_name, &row, page_id, slot_id,
+        catalog.engine(),
+        db_name,
+        table_name,
+        &row,
+        page_id,
+        slot_id,
     ) {
         // A row the index cannot see would vanish from every index scan:
         // take the row back out and fail the insert.

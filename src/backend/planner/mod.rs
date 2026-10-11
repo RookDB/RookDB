@@ -65,7 +65,9 @@ fn load_table_statistics(
     for table_name in db.tables.keys().filter(|t| joined_tables.contains(*t)) {
         // Process-cached (file-size validated): collection reads every heap
         // page and would otherwise dominate per-query planning latency.
-        if let Ok(table_stats) = crate::backend::cache::table_statistics(db_name, table_name) {
+        if let Ok(table_stats) =
+            crate::backend::cache::table_statistics(catalog.engine(), db_name, table_name)
+        {
             let cloned: crate::statistics::TableStatistics = (*table_stats).clone();
             stats.insert(table_name.clone(), cloned);
         }

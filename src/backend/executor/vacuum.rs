@@ -72,7 +72,7 @@ pub fn vacuum_table(
     if pages_compacted > 0 {
         // 4. Slot renumbering invalidated every stored row pointer → rebuild
         //    all indexes from the fresh heap.
-        indexes_rebuilt = rebuild_indexes(db_name, table_name)?;
+        indexes_rebuilt = rebuild_indexes(catalog.engine(), db_name, table_name)?;
     }
 
     // 5. Stamp last_vacuum through a FRESH manager (post-invalidation).
@@ -104,8 +104,12 @@ fn read_dead_tuple_count(heap_path: &str) -> io::Result<u32> {
 ///
 /// Preserves `.idx.meta` files (they describe columns/types, not contents);
 /// only the `.idx` B+Tree files are regenerated.
-fn rebuild_indexes(db_name: &str, table_name: &str) -> Result<usize, String> {
-    let indexes = load_table_indexes_multi(db_name, table_name)?;
+fn rebuild_indexes(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> Result<usize, String> {
+    let indexes = load_table_indexes_multi(engine, db_name, table_name)?;
     if indexes.is_empty() {
         return Ok(0);
     }

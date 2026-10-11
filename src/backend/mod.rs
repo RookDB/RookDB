@@ -3,6 +3,7 @@ pub mod cache;
 pub mod catalog;
 pub mod constraint;
 pub mod disk;
+pub mod engine;
 pub mod error;
 pub mod error_handler;
 pub mod executor;

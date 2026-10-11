@@ -258,7 +258,6 @@ mod tests {
         ColumnSchema, LogicalInsert, LogicalPlan, LogicalProject, LogicalTableScan,
     };
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     /// A mock child operator that yields a fixed set of tuples.
@@ -651,9 +650,7 @@ mod tests {
             values_rows: Vec::new(),
         });
 
-        let catalog = Catalog {
-            databases: HashMap::new(),
-        };
+        let catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
         let planner = PhysicalPlanner::new(catalog, "test_db".to_string());
         let result = planner.plan(&plan);
 
@@ -693,9 +690,7 @@ mod tests {
             values_rows: Vec::new(),
         });
 
-        let catalog = Catalog {
-            databases: HashMap::new(),
-        };
+        let catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
         let planner = PhysicalPlanner::new(catalog, "test_db".to_string());
         let result = planner.plan(&plan);
 
@@ -728,9 +723,7 @@ mod tests {
             values_rows: Vec::new(),
         });
 
-        let catalog = Catalog {
-            databases: HashMap::new(),
-        };
+        let catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
         let planner = PhysicalPlanner::new(catalog, "test_db".to_string());
         let result = planner.plan(&plan);
 
@@ -757,9 +750,7 @@ mod tests {
             values_rows: Vec::new(),
         });
 
-        let catalog = Catalog {
-            databases: HashMap::new(),
-        };
+        let catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
         let planner = PhysicalPlanner::new(catalog, "test_db".to_string());
         let mut op = planner.plan(&plan).unwrap();
 

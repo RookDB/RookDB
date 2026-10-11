@@ -206,6 +206,7 @@ pub fn update_by_pointers(
         )?;
 
         crate::backend::constraint::validate_update_restrict(
+            catalog.engine(),
             db_name,
             table_name,
             columns,
@@ -236,7 +237,7 @@ pub fn update_by_pointers(
 
     // Intra-batch uniqueness validation: ensure no two updated rows in the same
     // statement produce duplicate keys for any UNIQUE constraint or index.
-    let meta = crate::backend::cache::metadata(db_name, table_name);
+    let meta = crate::backend::cache::metadata(catalog.engine(), db_name, table_name);
     let mut has_intra_batch_conflict = false;
 
     // Check column-level UNIQUE constraints
@@ -428,6 +429,7 @@ pub fn update_by_pointers(
             );
 
             if let Err(e) = crate::backend::executor::create_index::update_index_on_update(
+                catalog.engine(),
                 db_name,
                 table_name,
                 columns,

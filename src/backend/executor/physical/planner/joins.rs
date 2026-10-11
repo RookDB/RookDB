@@ -132,6 +132,7 @@ impl PhysicalPlanner {
             {
                 let named_indexes =
                     crate::backend::executor::create_index::load_table_indexes_multi(
+                        self.catalog.engine(),
                         &self.db_name,
                         &inner_ts.table,
                     )

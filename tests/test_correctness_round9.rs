@@ -154,6 +154,7 @@ fn a_fk_restrict_blocks_delete_of_bigint_parent_key() {
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
         "db9",
         "child",
         "FOREIGN KEY",
@@ -235,6 +236,7 @@ fn a_fk_restrict_blocks_delete_of_numeric_parent_key() {
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
         "db9",
         "child",
         "FOREIGN KEY",
@@ -295,6 +297,7 @@ fn control_a_fk_restrict_still_blocks_int_parent_key() {
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
         "db9",
         "child",
         "FOREIGN KEY",
@@ -354,6 +357,7 @@ fn a_update_restrict_blocks_bigint_parent_key_change() {
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
         "db9",
         "child",
         "FOREIGN KEY",

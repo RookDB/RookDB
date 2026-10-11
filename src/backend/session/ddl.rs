@@ -217,7 +217,7 @@ pub(super) fn create_table(
     let mut lines = vec![format!("Table '{}' created successfully.", params.table)];
 
     for tc in &params.constraints {
-        save_table_constraint(db, &params.table, &tc.definition);
+        save_table_constraint(catalog.engine(), db, &params.table, &tc.definition);
     }
 
     // Auto-create B+ Tree indexes on PRIMARY KEY, UNIQUE, and REFERENCES columns.
@@ -422,7 +422,7 @@ pub(super) fn drop_table(
     let dat_path = crate::backend::paths::heap(db, table);
     let _ = std::fs::remove_file(&dat_path);
     let _ = std::fs::remove_file(format!("{}.fsm", dat_path));
-    remove_index_files_for_table(db, table, None);
+    remove_index_files_for_table(catalog.engine(), db, table, None);
 
     if let Err(e) = crate::backend::system_table::delete_table_metadata(db, table) {
         lines.push(format!(
@@ -457,7 +457,7 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<S
     }
 
     // Emptying a referenced parent would orphan its children.
-    if let Some(child) = crate::backend::cache::referencing_fks(db, table)
+    if let Some(child) = crate::backend::cache::referencing_fks(catalog.engine(), db, table)
         .iter()
         .map(|fk| fk.0.clone())
         .find(|child| !child.eq_ignore_ascii_case(table))
@@ -480,7 +480,7 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<S
     // The index files are stale after truncation. Their sys_indexes rows are
     // left: delete_table_metadata would also drop sys_columns and
     // sys_constraints, and the next catalog save rebuilds sys_indexes.
-    remove_index_files_for_table(db, table, None);
+    remove_index_files_for_table(catalog.engine(), db, table, None);
 
     Ok(StatementResult::message(format!(
         "Truncated table '{}' (0 rows).",
@@ -670,7 +670,12 @@ pub(super) fn vacuum(catalog: &Catalog, db: &str, table: &str) -> RookResult<Sta
 /// When `index_name` is `None`, removes ALL index files for the table:
 /// - Legacy `{table}.idx` and `{table}.idx.meta`
 /// - All named `{table}.{any_name}.idx` and `{table}.{any_name}.idx.meta`
-pub(super) fn remove_index_files_for_table(db: &str, table: &str, index_name: Option<&str>) {
+pub(super) fn remove_index_files_for_table(
+    engine: &crate::backend::engine::Engine,
+    db: &str,
+    table: &str,
+    index_name: Option<&str>,
+) {
     use crate::backend::cache::evict_btree;
 
     let base_dir = crate::backend::paths::database_dir(db);
@@ -698,8 +703,7 @@ pub(super) fn remove_index_files_for_table(db: &str, table: &str, index_name: Op
     }
 
     // Index set changed — forget memoised discovery/metadata.
-    crate::backend::cache::invalidate_metadata();
-    crate::backend::executor::create_index::invalidate_discovery(db, Some(table));
+    engine.invalidate_metadata();
 
     if let Some(name) = index_name {
         let idx_path = crate::backend::paths::index(db, table, name);
@@ -793,7 +797,7 @@ pub(super) fn drop_index(
         let legacy_meta_path = format!("{}.meta", legacy_idx_path);
 
         if std::path::Path::new(&named_idx_path).exists() {
-            remove_index_files_for_table(db, table_name, Some(index_name));
+            remove_index_files_for_table(catalog.engine(), db, table_name, Some(index_name));
         } else if std::path::Path::new(&legacy_idx_path).exists()
             && legacy_index_name(&legacy_meta_path, table_name)
                 .is_some_and(|n| n.eq_ignore_ascii_case(index_name))

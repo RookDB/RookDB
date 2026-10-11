@@ -4,7 +4,7 @@
 //! for repeated query forms (such as bulk INSERTs and repetitive SELECTs).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use crate::backend::executor::{insert_row, parse_text_row, parse_text_value};
 use crate::catalog::Catalog;
@@ -13,7 +13,7 @@ use rook_ast::logical::LogicalPlan;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 
-const DEFAULT_CACHE_CAPACITY: usize = 512;
+pub(crate) const DEFAULT_CACHE_CAPACITY: usize = 512;
 
 /// Normalize a SQL statement for plan-cache lookup: replace literals with
 /// `$1, $2, ...` placeholders, extract the literal values in order, and
@@ -530,33 +530,28 @@ impl PlanCache {
     }
 }
 
-fn global_plan_cache() -> &'static Mutex<PlanCache> {
-    static CACHE: OnceLock<Mutex<PlanCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(PlanCache::new(DEFAULT_CACHE_CAPACITY)))
-}
-
 /// Invalidate all entries in the plan cache (called when DDL runs).
-pub fn invalidate_plan_cache() {
-    let mut cache = global_plan_cache()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    cache.clear();
+pub fn invalidate_plan_cache(engine: &crate::backend::engine::Engine) {
+    crate::backend::engine::lock(&engine.plans).clear();
 }
 
 /// Look up an entry in the plan cache.
-pub fn get_cached_plan(db_name: &str, normalized_sql: &str) -> Option<PlanCacheEntry> {
-    let cache = global_plan_cache()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    cache.get(db_name, normalized_sql)
+pub fn get_cached_plan(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    normalized_sql: &str,
+) -> Option<PlanCacheEntry> {
+    crate::backend::engine::lock(&engine.plans).get(db_name, normalized_sql)
 }
 
 /// Store an entry in the plan cache.
-pub fn store_cached_plan(db_name: &str, normalized_sql: &str, entry: PlanCacheEntry) {
-    let mut cache = global_plan_cache()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    cache.insert(db_name, normalized_sql, entry);
+pub fn store_cached_plan(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    normalized_sql: &str,
+    entry: PlanCacheEntry,
+) {
+    crate::backend::engine::lock(&engine.plans).insert(db_name, normalized_sql, entry);
 }
 
 /// Register a SQL parser function (e.g. from rook-parser).
@@ -735,7 +730,9 @@ pub fn execute_cached_insert(
         return Ok(None);
     }
 
-    if let Some(PlanCacheEntry::Insert(cached_insert)) = get_cached_plan(db_name, &normalized) {
+    if let Some(PlanCacheEntry::Insert(cached_insert)) =
+        get_cached_plan(catalog.engine(), db_name, &normalized)
+    {
         let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
         return cached_insert
             .execute(catalog, db_name, &param_refs)
@@ -746,7 +743,12 @@ pub fn execute_cached_insert(
     if let Some(cached_insert) = parse_insert_template(&normalized, params.len()) {
         let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
         let res = cached_insert.execute(catalog, db_name, &param_refs)?;
-        store_cached_plan(db_name, &normalized, PlanCacheEntry::Insert(cached_insert));
+        store_cached_plan(
+            catalog.engine(),
+            db_name,
+            &normalized,
+            PlanCacheEntry::Insert(cached_insert),
+        );
         return Ok(Some(res));
     }
 
@@ -762,7 +764,12 @@ pub fn execute_cached_insert(
         };
         let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
         let res = cached_insert.execute(catalog, db_name, &param_refs)?;
-        store_cached_plan(db_name, &normalized, PlanCacheEntry::Insert(cached_insert));
+        store_cached_plan(
+            catalog.engine(),
+            db_name,
+            &normalized,
+            PlanCacheEntry::Insert(cached_insert),
+        );
         return Ok(Some(res));
     }
 
@@ -782,7 +789,7 @@ impl PreparedStatement {
     /// Prepare a statement from a SQL string.
     pub fn prepare(catalog: &Catalog, db_name: &str, sql: &str) -> Result<Self, String> {
         let (normalized, default_params) = normalize_sql(sql);
-        if let Some(entry) = get_cached_plan(db_name, &normalized) {
+        if let Some(entry) = get_cached_plan(catalog.engine(), db_name, &normalized) {
             return Ok(Self {
                 sql_template: normalized,
                 db_name: db_name.to_string(),
@@ -793,7 +800,7 @@ impl PreparedStatement {
 
         if let Some(cached_insert) = parse_insert_template(&normalized, default_params.len()) {
             let entry = PlanCacheEntry::Insert(cached_insert);
-            store_cached_plan(db_name, &normalized, entry.clone());
+            store_cached_plan(catalog.engine(), db_name, &normalized, entry.clone());
             return Ok(Self {
                 sql_template: normalized,
                 db_name: db_name.to_string(),
@@ -819,7 +826,7 @@ impl PreparedStatement {
             }
         };
 
-        store_cached_plan(db_name, &normalized, entry.clone());
+        store_cached_plan(catalog.engine(), db_name, &normalized, entry.clone());
         Ok(Self {
             sql_template: normalized,
             db_name: db_name.to_string(),

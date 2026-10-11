@@ -548,9 +548,12 @@ impl PhysicalPlanner {
 
         // Check for any index files (named or legacy) alongside the heap file
         // First try loading named indexes from sys_indexes
-        let named_indexes =
-            crate::backend::executor::create_index::load_table_indexes(&self.db_name, &ts.table)
-                .unwrap_or_default();
+        let named_indexes = crate::backend::executor::create_index::load_table_indexes(
+            self.catalog.engine(),
+            &self.db_name,
+            &ts.table,
+        )
+        .unwrap_or_default();
 
         if !named_indexes.is_empty() {
             // Use the first named index for the full scan
@@ -930,11 +933,10 @@ mod tests {
 
     /// Create a dummy PhysicalPlanner for testing private methods.
     fn make_planner() -> PhysicalPlanner {
-        use std::collections::HashMap;
         PhysicalPlanner {
-            catalog: std::sync::Arc::new(Catalog {
-                databases: HashMap::new(),
-            }),
+            catalog: std::sync::Arc::new(Catalog::new(
+                crate::backend::engine::Engine::current_dir(),
+            )),
             db_name: "test".to_string(),
         }
     }

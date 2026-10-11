@@ -33,6 +33,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::backend::engine::Engine;
 use crate::backend::heap::heap_manager::HeapManager;
 
 // ── tuning knobs ─────────────────────────────────────────────────────────────
@@ -356,13 +357,6 @@ pub struct TableMeta {
     pub named_indexes: Vec<(String, Vec<String>, bool)>,
 }
 
-type MetaCacheMap = HashMap<(String, String), Arc<TableMeta>>;
-
-fn meta_cache() -> &'static Mutex<MetaCacheMap> {
-    static CACHE: OnceLock<Mutex<MetaCacheMap>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
     use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_INDEXES_SCHEMA};
 
@@ -500,33 +494,22 @@ fn scan_sys(
 
 /// Fetch (and memoise) metadata for `(db, table)`. Returns `None` when the
 /// table is not present in the system tables yet.
-pub fn metadata(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
+pub fn metadata(engine: &Engine, db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
     let key = (db_name.to_string(), table_name.to_string());
-    if let Some(hit) = lock(meta_cache()).get(&key) {
+    if let Some(hit) = lock(&engine.table_meta).get(&key) {
         return Some(Arc::clone(hit));
     }
     let loaded = load_meta(db_name, table_name)?;
-    lock(meta_cache()).insert(key, Arc::clone(&loaded));
+    lock(&engine.table_meta).insert(key, Arc::clone(&loaded));
     Some(loaded)
 }
 
 /// Forget all cached table metadata (call after any DDL persists).
-pub fn invalidate_metadata() {
-    lock(meta_cache()).clear();
-    lock(ref_fk_cache()).clear();
-    lock(stats_cache()).clear();
-    crate::backend::planner::plan_cache::invalidate_plan_cache();
+pub fn invalidate_metadata(engine: &Engine) {
+    engine.invalidate_metadata();
 }
 
 // ── table statistics cache ───────────────────────────────────────────────────
-
-type StatsCacheMap =
-    HashMap<(String, String), (u64, std::sync::Arc<crate::statistics::TableStatistics>)>;
-
-fn stats_cache() -> &'static Mutex<StatsCacheMap> {
-    static CACHE: OnceLock<Mutex<StatsCacheMap>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
 
 /// Memoised `collect_table_statistics`, validated by heap file size.
 ///
@@ -535,6 +518,7 @@ fn stats_cache() -> &'static Mutex<StatsCacheMap> {
 /// cardinality estimates only, so a size-keyed snapshot is sufficient: any
 /// append/truncate/compaction changes the file length and forces a recompute.
 pub fn table_statistics(
+    engine: &Engine,
     db_name: &str,
     table_name: &str,
 ) -> io::Result<std::sync::Arc<crate::statistics::TableStatistics>> {
@@ -542,7 +526,7 @@ pub fn table_statistics(
     let path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
     let file_len = std::fs::metadata(&path)?.len();
 
-    if let Some((len, hit)) = lock(stats_cache()).get(&key)
+    if let Some((len, hit)) = lock(&engine.statistics).get(&key)
         && *len == file_len
     {
         return Ok(std::sync::Arc::clone(hit));
@@ -550,7 +534,7 @@ pub fn table_statistics(
 
     let stats = crate::statistics::collect_table_statistics(db_name, table_name)?;
     let arc = std::sync::Arc::new(stats);
-    lock(stats_cache()).insert(key, (file_len, std::sync::Arc::clone(&arc)));
+    lock(&engine.statistics).insert(key, (file_len, std::sync::Arc::clone(&arc)));
     Ok(arc)
 }
 
@@ -561,27 +545,20 @@ pub fn table_statistics(
 /// `(child_table, child_column, parent_column, parent_table_name, action_type)`.
 pub type RefFks = Vec<(String, String, String, String, String)>;
 
-type RefFkCacheMap = HashMap<(String, String), std::sync::Arc<RefFks>>;
-
-fn ref_fk_cache() -> &'static Mutex<RefFkCacheMap> {
-    static CACHE: OnceLock<Mutex<RefFkCacheMap>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// Memoised [`crate::backend::constraint::loaders::load_referencing_foreign_keys`].
 ///
 /// Called once per updated/deleted row by FK propagation — a full system-table
 /// sweep per row made bulk UPDATE/DELETE quadratic.
-pub fn referencing_fks(db_name: &str, table_name: &str) -> std::sync::Arc<RefFks> {
+pub fn referencing_fks(engine: &Engine, db_name: &str, table_name: &str) -> std::sync::Arc<RefFks> {
     let key = (db_name.to_string(), table_name.to_string());
-    if let Some(hit) = lock(ref_fk_cache()).get(&key) {
+    if let Some(hit) = lock(&engine.referencing_fks).get(&key) {
         return std::sync::Arc::clone(hit);
     }
     let loaded =
         crate::backend::constraint::loaders::load_referencing_foreign_keys(db_name, table_name)
             .unwrap_or_default();
     let arc = std::sync::Arc::new(loaded);
-    lock(ref_fk_cache()).insert(key, std::sync::Arc::clone(&arc));
+    lock(&engine.referencing_fks).insert(key, std::sync::Arc::clone(&arc));
     arc
 }
 

@@ -67,7 +67,42 @@ pub struct Database {
 }
 
 /// Represents the top-level catalog holding all databases.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Catalog {
     pub databases: HashMap<String, Database>,
+    /// The engine of the data directory this catalog describes.
+    #[serde(skip, default = "crate::backend::engine::Engine::current_dir")]
+    engine: std::sync::Arc<crate::backend::engine::Engine>,
 }
+
+impl Catalog {
+    /// An empty catalog for the data directory of `engine`.
+    pub fn new(engine: std::sync::Arc<crate::backend::engine::Engine>) -> Self {
+        Catalog {
+            databases: HashMap::new(),
+            engine,
+        }
+    }
+
+    /// `databases` in the data directory of `engine`.
+    pub fn with_databases(
+        engine: std::sync::Arc<crate::backend::engine::Engine>,
+        databases: HashMap<String, Database>,
+    ) -> Self {
+        Catalog { databases, engine }
+    }
+
+    /// The engine of this catalog's data directory.
+    pub fn engine(&self) -> &std::sync::Arc<crate::backend::engine::Engine> {
+        &self.engine
+    }
+}
+
+/// Catalogs are equal when they describe the same schema.
+impl PartialEq for Catalog {
+    fn eq(&self, other: &Self) -> bool {
+        self.databases == other.databases
+    }
+}
+
+impl Eq for Catalog {}

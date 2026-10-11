@@ -10,6 +10,7 @@ use crate::types::{DataType, DataValue};
 /// Returns `Some(true)` if found, `Some(false)` if not found (in any index),
 /// or `None` if no indexes exist (caller should fall back to heap scan).
 fn try_index_for_value(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     column_name: &str,
@@ -18,7 +19,7 @@ fn try_index_for_value(
 ) -> Option<bool> {
     // Try named indexes: load all indexes from sys_indexes for this table
     if let Ok(indexes) =
-        crate::backend::executor::create_index::load_table_indexes(db_name, table_name)
+        crate::backend::executor::create_index::load_table_indexes(engine, db_name, table_name)
     {
         for (idx_name, idx_col, _is_unique) in &indexes {
             if !idx_col.eq_ignore_ascii_case(column_name) {
@@ -87,6 +88,7 @@ fn try_index_for_value(
 /// `key_value` must already have the column's type. First tries a B+ Tree
 /// index lookup (for speed), falling back to a sequential heap scan.
 pub(crate) fn value_exists_in_table(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     column_name: &str,
@@ -94,8 +96,14 @@ pub(crate) fn value_exists_in_table(
     key_value: &DataValue,
 ) -> Result<bool, String> {
     // Try all B+ Tree indexes first (named + legacy)
-    if let Some(result) = try_index_for_value(db_name, table_name, column_name, col_type, key_value)
-    {
+    if let Some(result) = try_index_for_value(
+        engine,
+        db_name,
+        table_name,
+        column_name,
+        col_type,
+        key_value,
+    ) {
         return Ok(result);
     }
 
@@ -126,6 +134,7 @@ pub(crate) fn value_exists_in_table(
 ///
 /// Used by parent DELETE validation to detect referencing rows.
 pub(crate) fn child_has_referencing_row(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     child_table: &str,
     child_col: &str,
@@ -164,9 +173,14 @@ pub(crate) fn child_has_referencing_row(
     };
 
     // Try all B+ Tree indexes (named + legacy)
-    if let Some(result) =
-        try_index_for_value(db_name, child_table, child_col, &col_type, &key_value)
-    {
+    if let Some(result) = try_index_for_value(
+        engine,
+        db_name,
+        child_table,
+        child_col,
+        &col_type,
+        &key_value,
+    ) {
         return Ok(result);
     }
 

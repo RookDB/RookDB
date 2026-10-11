@@ -119,8 +119,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     populate_system_tables(catalog, fk_rows, Some(saved_indexes));
     // System tables rewritten wholesale: table_ids may have changed and
     // constraint/index rows were rebuilt — forget all memoised metadata.
-    crate::backend::cache::invalidate_metadata();
-    crate::backend::executor::create_index::invalidate_discovery("", None);
+    catalog.engine().invalidate_metadata();
     Ok(())
 }
 

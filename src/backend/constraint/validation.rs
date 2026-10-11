@@ -377,6 +377,7 @@ pub(crate) fn check_foreign_key_insert_meta(
         // A value that cannot be a parent key cannot be found among them.
         let found = match crate::types::functions::assign_cast(child_value, &parent_col_type) {
             Ok(key) => value_lookup::value_exists_in_table(
+                catalog.engine(),
                 db_name,
                 parent_table,
                 parent_col,

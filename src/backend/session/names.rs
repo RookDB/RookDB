@@ -159,7 +159,12 @@ fn predicate_node_references_table(pred: &rook_ast::PredicateNode, table: &str) 
 ///   "PRIMARY KEY (id)", "UNIQUE (name)", "UNIQUE",
 ///   "FOREIGN KEY (user_id) REFERENCES users(id)",
 ///   "CHECK (age > 0)"
-pub(super) fn save_table_constraint(db: &str, table: &str, definition: &str) {
+pub(super) fn save_table_constraint(
+    engine: &crate::backend::engine::Engine,
+    db: &str,
+    table: &str,
+    definition: &str,
+) {
     use crate::backend::system_table::insert_constraint_metadata;
 
     // ASCII-only folding: keyword matching needs nothing beyond A-Z, and it
@@ -171,19 +176,19 @@ pub(super) fn save_table_constraint(db: &str, table: &str, definition: &str) {
     if let Some(rest) = upper.strip_prefix("PRIMARY KEY (") {
         if let Some(end) = rest.rfind(')') {
             let cols = rest[..end].to_string();
-            let _ = insert_constraint_metadata(db, table, "PRIMARY KEY", &cols, None, None);
+            let _ = insert_constraint_metadata(engine, db, table, "PRIMARY KEY", &cols, None, None);
         }
     }
     // UNIQUE (cols...)
     else if let Some(rest) = upper.strip_prefix("UNIQUE (") {
         if let Some(end) = rest.rfind(')') {
             let cols = rest[..end].to_string();
-            let _ = insert_constraint_metadata(db, table, "UNIQUE", &cols, None, None);
+            let _ = insert_constraint_metadata(engine, db, table, "UNIQUE", &cols, None, None);
         }
     }
     // UNIQUE without columns (table-level shorthand)
     else if upper == "UNIQUE" {
-        let _ = insert_constraint_metadata(db, table, "UNIQUE", "", None, None);
+        let _ = insert_constraint_metadata(engine, db, table, "UNIQUE", "", None, None);
     }
     // FOREIGN KEY (cols) REFERENCES ref_table(ref_cols) [ON DELETE CASCADE|RESTRICT]
     //
@@ -231,6 +236,7 @@ pub(super) fn save_table_constraint(db: &str, table: &str, definition: &str) {
                         }
                         let constr_type = format!("FOREIGN KEY{}{}", delete_action, update_action);
                         let _ = insert_constraint_metadata(
+                            engine,
                             db,
                             table,
                             &constr_type,
@@ -246,6 +252,7 @@ pub(super) fn save_table_constraint(db: &str, table: &str, definition: &str) {
                         .unwrap_or(ref_rest)
                         .to_string();
                     let _ = insert_constraint_metadata(
+                        engine,
                         db,
                         table,
                         "FOREIGN KEY",
@@ -265,7 +272,7 @@ pub(super) fn save_table_constraint(db: &str, table: &str, definition: &str) {
         if let Some(end) = find_matching_paren(remaining) {
             let expr = remaining[1..end].trim();
             if !expr.is_empty() {
-                let _ = insert_constraint_metadata(db, table, "CHECK", expr, None, None);
+                let _ = insert_constraint_metadata(engine, db, table, "CHECK", expr, None, None);
             }
         }
     }

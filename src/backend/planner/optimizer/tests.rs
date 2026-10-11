@@ -17,9 +17,7 @@ use std::collections::HashMap;
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
 fn make_test_catalog() -> Catalog {
-    let mut catalog = Catalog {
-        databases: HashMap::new(),
-    };
+    let mut catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
     let users_table = Table {
         columns: vec![
             Column {

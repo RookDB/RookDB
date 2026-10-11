@@ -70,7 +70,8 @@ pub fn validate_row_delete(
         return Ok(());
     };
     // Load FK constraints where OUR table is the parent (process-cached).
-    let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
+    let foreign_keys =
+        crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
 
     for fk in foreign_keys.iter() {
         // fk: (child_table, child_col, parent_col, parent_table, action_type)
@@ -185,7 +186,8 @@ fn check_delete_restrictions_from(
     let Some(columns) = table_columns(catalog, db_name, table_name) else {
         return Ok(());
     };
-    let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
+    let foreign_keys =
+        crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
 
     for fk in foreign_keys.iter() {
         let child_table = &fk.0;
@@ -198,6 +200,7 @@ fn check_delete_restrictions_from(
         match delete_action(&fk.4) {
             DeleteAction::Restrict => {
                 if value_lookup::child_has_referencing_row(
+                    catalog.engine(),
                     db_name,
                     child_table,
                     child_col,
@@ -296,7 +299,8 @@ pub fn propagate_update_to_children(
     old_row: &[Option<DataValue>],
     new_row: &[Option<DataValue>],
 ) -> Result<(), RookError> {
-    let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
+    let foreign_keys =
+        crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
 
     for fk in foreign_keys.iter() {
         let child_table = &fk.0;
@@ -337,6 +341,7 @@ pub fn propagate_update_to_children(
             )?;
         } else {
             restrict_update(
+                catalog.engine(),
                 table_name,
                 parent_col,
                 child_table,
@@ -354,13 +359,14 @@ pub fn propagate_update_to_children(
 ///
 /// Returns Err if any child table references the old value of a changed column.
 pub fn validate_update_restrict(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     columns: &[Column],
     old_row: &[Option<DataValue>],
     new_row: &[Option<DataValue>],
 ) -> Result<(), RookError> {
-    let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
+    let foreign_keys = crate::backend::cache::referencing_fks(engine, db_name, table_name);
 
     for fk in foreign_keys.iter() {
         let child_table = &fk.0;
@@ -380,6 +386,7 @@ pub fn validate_update_restrict(
             continue;
         }
         restrict_update(
+            engine,
             table_name,
             parent_col,
             child_table,
@@ -394,6 +401,7 @@ pub fn validate_update_restrict(
 
 /// Fail when a child row still references `old_val`, the key being changed.
 fn restrict_update(
+    engine: &crate::backend::engine::Engine,
     table_name: &str,
     parent_col: &str,
     child_table: &str,
@@ -401,7 +409,7 @@ fn restrict_update(
     db_name: &str,
     old_val: &DataValue,
 ) -> Result<(), RookError> {
-    if value_lookup::child_has_referencing_row(db_name, child_table, child_col, old_val)? {
+    if value_lookup::child_has_referencing_row(engine, db_name, child_table, child_col, old_val)? {
         return Err(RookError::constraint(
             ConstraintKind::ForeignKey,
             table_name,
@@ -469,7 +477,7 @@ pub fn validate_row_update_with_excludes(
 
     // Load constraint/index metadata once (process-cached; a miss does one
     // pass over sys_tables/sys_indexes/sys_constraints instead of five).
-    let meta = crate::backend::cache::metadata(db_name, table_name);
+    let meta = crate::backend::cache::metadata(catalog.engine(), db_name, table_name);
 
     // 1. NOT NULL
     validation::check_not_null(table_name, columns, new_values)?;

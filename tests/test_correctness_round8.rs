@@ -637,6 +637,7 @@ fn h_update_cascade_growing_varchar_preserves_row() {
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
+        &storage_manager::backend::engine::Engine::current_dir(),
         "db8",
         "c",
         "FOREIGN KEY ON UPDATE CASCADE",

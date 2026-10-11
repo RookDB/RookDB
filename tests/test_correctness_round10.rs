@@ -77,7 +77,7 @@ impl TestWorkspace {
         storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
         // The plan cache is process-global; drop entries from earlier tests so
         // keys cannot leak across workspaces.
-        invalidate_plan_cache();
+        invalidate_plan_cache(&storage_manager::backend::engine::Engine::current_dir());
         storage_manager::catalog::init_catalog();
         Self { prev_cwd, path }
     }

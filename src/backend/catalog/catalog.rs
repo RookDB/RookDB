@@ -87,23 +87,17 @@ pub fn load_catalog() -> Catalog {
     let catalog_path = Path::new(CATALOG_FILE);
     if !catalog_path.exists() {
         debug_print_catalog("No catalog.json or system tables found. Returning empty catalog.");
-        return Catalog {
-            databases: HashMap::new(),
-        };
+        return Catalog::new(crate::backend::engine::Engine::current_dir());
     }
 
     match fs::read_to_string(catalog_path) {
         Ok(data) => serde_json::from_str::<Catalog>(&data).unwrap_or_else(|e| {
             log::error!("Failed to parse catalog JSON: {}", e);
-            Catalog {
-                databases: HashMap::new(),
-            }
+            Catalog::new(crate::backend::engine::Engine::current_dir())
         }),
         Err(e) => {
             log::error!("Failed to read catalog.json: {}", e);
-            Catalog {
-                databases: HashMap::new(),
-            }
+            Catalog::new(crate::backend::engine::Engine::current_dir())
         }
     }
 }

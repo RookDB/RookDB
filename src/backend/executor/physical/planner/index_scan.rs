@@ -56,6 +56,7 @@ impl PhysicalPlanner {
 
         // Load indexes (both named and legacy), preserving composite layouts
         let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
+            self.catalog.engine(),
             &self.db_name,
             &ts.table,
         )

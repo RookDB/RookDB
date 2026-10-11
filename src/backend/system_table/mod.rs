@@ -156,9 +156,7 @@ pub fn bootstrap_system_catalog() -> bool {
 /// Scans each system table via direct disk reads and reconstructs the
 /// in-memory `Catalog` hierarchy.
 pub fn load_catalog_from_system() -> Catalog {
-    let mut catalog = Catalog {
-        databases: HashMap::new(),
-    };
+    let mut catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
 
     let databases = match scan_system_table("databases", SYS_DATABASES_SCHEMA) {
         Ok(rows) => rows,

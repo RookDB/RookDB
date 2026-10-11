@@ -48,7 +48,7 @@ fn legacy_index_meta_file_path(db_name: &str, table_name: &str) -> PathBuf {
 /// their types. Read from a legacy index's `.idx.meta` file, or built from
 /// `sys_indexes` and the table schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct IndexMeta {
+pub(crate) struct IndexMeta {
     /// The name of the indexed column (for human reference).
     ///
     /// Legacy single-column field; kept for backward compatibility with
@@ -141,10 +141,11 @@ fn load_index_meta(meta_path: &PathBuf) -> Result<IndexMeta, String> {
 /// For composite indexes only the FIRST column is reported; use
 /// [`load_table_indexes_multi`] when the full key layout matters.
 pub fn load_table_indexes(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
 ) -> Result<Vec<(String, String, bool)>, String> {
-    Ok(load_table_indexes_multi(db_name, table_name)?
+    Ok(load_table_indexes_multi(engine, db_name, table_name)?
         .into_iter()
         .map(|(name, mut cols, unique)| {
             let first = cols.drain(..).next().unwrap_or_default();
@@ -160,6 +161,7 @@ pub fn load_table_indexes(
 ///
 /// Returns `Vec<(index_name, Vec<column_name>, is_unique)>`.
 pub fn load_table_indexes_multi(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
 ) -> Result<Vec<(String, Vec<String>, bool)>, String> {
@@ -167,7 +169,7 @@ pub fn load_table_indexes_multi(
     // per (db, table), invalidated on DDL). Physical planning calls this for
     // every query — a full sys_indexes scan per SELECT was the dominant
     // fixed cost of point lookups.
-    if let Some(meta) = crate::backend::cache::metadata(db_name, table_name) {
+    if let Some(meta) = crate::backend::cache::metadata(engine, db_name, table_name) {
         return Ok(meta.named_indexes.clone());
     }
 
@@ -414,6 +416,7 @@ pub fn create_index_with_flags(
     // 9. Save index metadata to sys_indexes system table (comma-separated
     //     column list for composite indexes)
     if let Err(e) = crate::backend::system_table::insert_index_metadata(
+        catalog.engine(),
         db_name,
         table_name,
         &resolved_name,
@@ -433,8 +436,7 @@ pub fn create_index_with_flags(
 
     // DDL landed: forget memoised metadata/discovery for this table and any
     // stale handle for the freshly rewritten index file.
-    invalidate_discovery(db_name, Some(table_name));
-    crate::backend::cache::invalidate_metadata();
+    catalog.engine().invalidate_metadata();
     crate::backend::cache::evict_btree(&idx_path);
 
     log::info!(
@@ -454,8 +456,13 @@ pub fn create_index_with_flags(
 /// True when some index on `(db, table)` has `column` as its FIRST key
 /// column — the only position usable by single-key equality probes
 /// (FK existence checks, per-column UNIQUE checks).
-fn column_is_indexed(db_name: &str, table_name: &str, column: &str) -> bool {
-    load_table_indexes_multi(db_name, table_name)
+fn column_is_indexed(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+    column: &str,
+) -> bool {
+    load_table_indexes_multi(engine, db_name, table_name)
         .unwrap_or_default()
         .iter()
         .any(|(_name, cols, _u)| {
@@ -507,7 +514,7 @@ pub fn ensure_parent_column_index(
         return false;
     };
 
-    if column_is_indexed(db_name, parent_table, parent_col) {
+    if column_is_indexed(catalog.engine(), db_name, parent_table, parent_col) {
         return false; // PK/UNIQUE/user index already covers the probe
     }
 
@@ -592,7 +599,11 @@ pub fn ensure_fk_parent_indexes(catalog: &Catalog, db_name: &str, table_name: &s
 
 /// For a given table, discover all index files (named and legacy) and return
 /// `Vec<(idx_path, IndexMeta)>`.
-fn discover_indexes_for_table(db_name: &str, table_name: &str) -> Vec<(PathBuf, IndexMeta)> {
+fn discover_indexes_for_table(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> Vec<(PathBuf, IndexMeta)> {
     let mut discovered = Vec::new();
 
     // 1. Named indexes: sys_indexes gives the columns, the table schema
@@ -602,7 +613,7 @@ fn discover_indexes_for_table(db_name: &str, table_name: &str) -> Vec<(PathBuf, 
         .flatten()
         .unwrap_or_default();
     for (idx_name, columns, is_unique) in
-        load_table_indexes_multi(db_name, table_name).unwrap_or_default()
+        load_table_indexes_multi(engine, db_name, table_name).unwrap_or_default()
     {
         let idx_path = index_file_path(db_name, table_name, &idx_name);
         if !idx_path.exists() {
@@ -659,27 +670,24 @@ fn discover_indexes_for_table(db_name: &str, table_name: &str) -> Vec<(PathBuf, 
     discovered
 }
 
-type IndexList = std::sync::Arc<Vec<(PathBuf, IndexMeta)>>;
-type DiscoveryCacheMap = std::sync::Mutex<std::collections::HashMap<(String, String), IndexList>>;
-
+pub(crate) type IndexList = std::sync::Arc<Vec<(PathBuf, IndexMeta)>>;
 /// Memoised [`discover_indexes_for_table`] — one sys_indexes scan per
 /// `(db, table)` instead of one per row. Invalidated on CREATE INDEX and
 /// wherever system tables are rewritten (DDL).
-fn discovery_cache() -> &'static DiscoveryCacheMap {
-    static CACHE: std::sync::OnceLock<DiscoveryCacheMap> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-fn discover_cached(db_name: &str, table_name: &str) -> IndexList {
+fn discover_cached(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> IndexList {
     let key = (db_name.to_string(), table_name.to_string());
-    if let Ok(map) = discovery_cache().lock()
+    if let Ok(map) = engine.index_discovery.lock()
         && let Some(hit) = map.get(&key)
     {
         return std::sync::Arc::clone(hit);
     }
 
-    let discovered = std::sync::Arc::new(discover_indexes_for_table(db_name, table_name));
-    if let Ok(mut map) = discovery_cache().lock() {
+    let discovered = std::sync::Arc::new(discover_indexes_for_table(engine, db_name, table_name));
+    if let Ok(mut map) = engine.index_discovery.lock() {
         map.insert(key, std::sync::Arc::clone(&discovered));
     }
     discovered
@@ -688,20 +696,18 @@ fn discover_cached(db_name: &str, table_name: &str) -> IndexList {
 /// Forget memoised index discovery for a table (or all tables when `None`).
 ///
 /// Call after any DDL that changes a table's index set.
-pub fn invalidate_discovery(db_name: &str, table_name: Option<&str>) {
-    let mut cleared_all = false;
-    if let Ok(mut map) = discovery_cache().lock() {
-        match table_name {
-            Some(t) => {
-                map.remove(&(db_name.to_string(), t.to_string()));
-            }
-            None => {
-                map.clear();
-                cleared_all = true;
-            }
+pub fn invalidate_discovery(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: Option<&str>,
+) {
+    let mut map = crate::backend::engine::lock(&engine.index_discovery);
+    match table_name {
+        Some(t) => {
+            map.remove(&(db_name.to_string(), t.to_string()));
         }
+        None => map.clear(),
     }
-    let _ = cleared_all;
 }
 
 /// After a tuple is inserted into the heap, update all existing B+ Tree indexes
@@ -713,13 +719,14 @@ pub fn invalidate_discovery(db_name: &str, table_name: Option<&str>) {
 ///
 /// Returns `Ok(())` on success or if no indexes exist (no-op).
 pub fn update_index_on_insert(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     values: &[Option<DataValue>],
     page_id: u32,
     slot_id: u32,
 ) -> crate::backend::error::RookResult<()> {
-    let indexes = discover_cached(db_name, table_name);
+    let indexes = discover_cached(engine, db_name, table_name);
     if indexes.is_empty() {
         return Ok(()); // No indexes to update
     }
@@ -812,6 +819,7 @@ fn open_btree_for_meta(idx_path: &Path, meta: &IndexMeta) -> Option<BTree> {
 /// Returns `Ok(true)` if at least one index was updated, `Ok(false)` if no
 /// indexes exist, or `Err` on failure.
 pub fn update_index_on_delete(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     columns: &[crate::catalog::types::Column],
@@ -819,7 +827,7 @@ pub fn update_index_on_delete(
     page_id: u32,
     slot_id: u32,
 ) -> crate::backend::error::RookResult<bool> {
-    let indexes = discover_cached(db_name, table_name);
+    let indexes = discover_cached(engine, db_name, table_name);
     if indexes.is_empty() {
         return Ok(false); // No indexes to update
     }
@@ -902,6 +910,7 @@ pub fn update_index_on_delete(
 ///   - Inserts the new key at `(new_page_id, new_slot_id)`
 #[allow(clippy::too_many_arguments)]
 pub fn update_index_on_update(
+    engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     columns: &[crate::catalog::types::Column],
@@ -912,7 +921,7 @@ pub fn update_index_on_update(
     new_page_id: u32,
     new_slot_id: u32,
 ) -> crate::backend::error::RookResult<()> {
-    let indexes = discover_cached(db_name, table_name);
+    let indexes = discover_cached(engine, db_name, table_name);
     if indexes.is_empty() {
         return Ok(()); // No indexes to update
     }
