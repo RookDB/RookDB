@@ -103,7 +103,17 @@ pub fn fold_expr(expr: &ExprNode) -> ExprNode {
 }
 
 /// Fold a binary operation between two constants.
+///
+/// A division by a constant zero is left unfolded: it is an error, not a
+/// value, and the executor is the one place that reports it. Folding it to
+/// NULL made `SELECT 10 / 0` fail typing with "Cannot infer type for NULL
+/// literal" and made `WHERE 10 / 0 = 1` quietly match nothing.
 pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> ExprNode {
+    let unfolded = || ExprNode::Binary {
+        left: Box::new(ExprNode::Constant(a.clone())),
+        op,
+        right: Box::new(ExprNode::Constant(b.clone())),
+    };
     let result = match (a, b) {
         (ConstantValue::Null, _) | (_, ConstantValue::Null) => ConstantValue::Null,
         (ConstantValue::Int(ai), ConstantValue::Int(bi)) => {
@@ -112,10 +122,11 @@ pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> Expr
                 ArithOp::Sub => ai.saturating_sub(*bi),
                 ArithOp::Mul => ai.saturating_mul(*bi),
                 ArithOp::Div => {
-                    if *bi == 0 {
-                        return ExprNode::Constant(ConstantValue::Null);
+                    // `checked_div` also declines i64::MIN / -1.
+                    match ai.checked_div(*bi) {
+                        Some(v) => v,
+                        None => return unfolded(),
                     }
-                    ai / bi
                 }
             };
             ConstantValue::Int(v)
@@ -127,7 +138,7 @@ pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> Expr
                 ArithOp::Mul => af * bf,
                 ArithOp::Div => {
                     if *bf == 0.0 {
-                        return ExprNode::Constant(ConstantValue::Null);
+                        return unfolded();
                     }
                     af / bf
                 }
@@ -142,7 +153,7 @@ pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> Expr
                 ArithOp::Mul => af * bf,
                 ArithOp::Div => {
                     if *bf == 0.0 {
-                        return ExprNode::Constant(ConstantValue::Null);
+                        return unfolded();
                     }
                     af / bf
                 }
@@ -157,7 +168,7 @@ pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> Expr
                 ArithOp::Mul => af * bf,
                 ArithOp::Div => {
                     if bf == 0.0 {
-                        return ExprNode::Constant(ConstantValue::Null);
+                        return unfolded();
                     }
                     af / bf
                 }

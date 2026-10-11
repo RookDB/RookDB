@@ -194,7 +194,16 @@ fn test_fold_division_by_zero() {
         op: ArithOp::Div,
         right: Box::new(constant_int(0)),
     };
-    assert_eq!(fold_expr(&expr), ExprNode::Constant(ConstantValue::Null));
+    // Left for the executor, which reports "Division by zero"; folding it to
+    // NULL turned the error into a value.
+    assert_eq!(fold_expr(&expr), expr);
+
+    let float_expr = ExprNode::Binary {
+        left: Box::new(constant_int(5)),
+        op: ArithOp::Div,
+        right: Box::new(ExprNode::Constant(ConstantValue::Float(0.0))),
+    };
+    assert_eq!(fold_expr(&float_expr), float_expr);
 }
 
 #[test]
