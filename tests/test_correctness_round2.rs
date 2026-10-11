@@ -21,8 +21,10 @@
 //!   F. Integer arithmetic overflow panics (`attempt to add with overflow`)
 //!      in debug builds instead of returning a query error.
 
+mod common;
+
+use common::load_catalog;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use rook_ast::QueryPlan;
 
@@ -33,7 +35,7 @@ use storage_manager::backend::executor::physical::operators::{PhysicalOperator, 
 use storage_manager::backend::executor::physical::tuple::{ColumnInfo, Tuple};
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::delete::delete_by_pointers;
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::executor::update::update_by_pointers;
@@ -43,34 +45,12 @@ use storage_manager::types::datatype::DataType;
 use storage_manager::types::row::deserialize_nullable_row;
 use storage_manager::types::value::DataValue;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr2_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr2", tag))
     }
 }
 
@@ -146,7 +126,6 @@ fn run_select(
 
 #[test]
 fn agg_empty_input_multi_aggregate_returns_one_row() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("aggmulti");
     setup_empty(
         "testdb",
@@ -179,7 +158,6 @@ fn agg_empty_input_multi_aggregate_returns_one_row() {
 
 #[test]
 fn agg_empty_input_count_col_returns_one_row() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("aggcount");
     setup_empty(
         "testdb",
@@ -207,7 +185,6 @@ fn agg_empty_input_count_col_returns_one_row() {
 /// two tests above.
 #[test]
 fn agg_empty_input_count_star_returns_one_row() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("aggstar");
     setup_empty(
         "testdb",
@@ -305,7 +282,6 @@ fn int_tuples(descending: bool, n: usize) -> (Vec<Tuple>, Vec<ColumnInfo>) {
 
 #[test]
 fn sort_next_batch_clears_batch_per_contract() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let (tuples, schema) = int_tuples(true, 5);
     let src = MockSource {
         tuples,
@@ -341,7 +317,6 @@ fn sort_next_batch_clears_batch_per_contract() {
 
 #[test]
 fn adaptive_sort_threshold_crossing_keeps_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let (tuples, schema) = int_tuples(true, 50);
     // estimate 0 ("unknown") but 50 actual rows > threshold 10 → bug path
     let src = MockSource {
@@ -383,7 +358,6 @@ fn adaptive_sort_threshold_crossing_keeps_rows() {
 /// up-front and works correctly.
 #[test]
 fn adaptive_sort_predeclared_external_works() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let (tuples, schema) = int_tuples(true, 50);
     let src = MockSource {
         tuples,
@@ -426,7 +400,7 @@ fn read_text_column(
     table: &str,
     column: &str,
 ) -> Vec<String> {
-    let path: PathBuf = format!("database/base/testdb/{}.dat", table).into();
+    let path: PathBuf = common::path(format!("database/base/testdb/{}.dat", table));
     let heap = HeapManager::open(path).expect("open heap");
     let t = catalog
         .databases
@@ -466,7 +440,6 @@ fn read_text_column(
 /// evaluates to NULL and the column is silently NULLed.
 #[test]
 fn update_quoted_string_with_arith_char_is_literal() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("setlit");
     let catalog = setup_with_rows(
         "testdb",
@@ -495,7 +468,6 @@ fn update_quoted_string_with_arith_char_is_literal() {
 /// instead of collapsing to one quote.
 #[test]
 fn update_escaped_quote_in_literal() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("setquote");
     let catalog = setup_with_rows(
         "testdb",
@@ -527,7 +499,6 @@ fn update_escaped_quote_in_literal() {
 
 #[test]
 fn int_overflow_returns_query_error() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ovf");
     let catalog = setup_with_rows(
         "testdb",

@@ -22,13 +22,13 @@ impl Drop for TestCleanup {
 fn setup_db_dir(test_id: &str) -> (PathBuf, TestCleanup) {
     // Unique DB name to avoid parallel test collisions
     let unique_db = format!("{}_{}", DB_NAME, test_id);
-    let db_path = PathBuf::from(format!("database/base/{}", unique_db));
+    let db_path = common::path(format!("database/base/{}", unique_db));
     let _ = fs::remove_dir_all(&db_path);
     let _ = fs::create_dir_all(&db_path);
     (
         db_path,
         TestCleanup {
-            path: PathBuf::from(format!("database/base/{}", unique_db)),
+            path: common::path(format!("database/base/{}", unique_db)),
         },
     )
 }

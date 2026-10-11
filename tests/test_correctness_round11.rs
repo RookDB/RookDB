@@ -41,43 +41,22 @@
 //! behaviour for each scenario so the divergences cannot be explained away
 //! as engine limits.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use storage_manager::backend::executor::load_csv::insert_single_tuple;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr11_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr11", tag))
     }
 }
 
@@ -139,7 +118,6 @@ fn try_select(
 
 #[test]
 fn k1_hash_join_real_vs_double_inner_join_loses_all_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("k1_real_double");
 
     let mut catalog = load_catalog();
@@ -192,7 +170,6 @@ fn k1_hash_join_real_vs_double_inner_join_loses_all_rows() {
 
 #[test]
 fn k2_hash_join_numeric_vs_int_inner_join_loses_all_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("k2_numeric_int");
 
     let mut catalog = load_catalog();
@@ -247,7 +224,6 @@ fn k2_hash_join_numeric_vs_int_inner_join_loses_all_rows() {
 
 #[test]
 fn k3_hash_join_date_vs_timestamp_inner_join_loses_all_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("k3_date_ts");
 
     let mut catalog = load_catalog();
@@ -296,7 +272,6 @@ fn k3_hash_join_date_vs_timestamp_inner_join_loses_all_rows() {
 
 #[test]
 fn l_sum_bigint_overflow_silently_returns_null() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("l_sum_overflow");
 
     let mut catalog = load_catalog();
@@ -338,7 +313,6 @@ fn l_sum_bigint_overflow_silently_returns_null() {
 
 #[test]
 fn m_where_bigint_literal_beyond_i32_range_matches_zero_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("m_bigint_literal");
 
     let mut catalog = load_catalog();
@@ -395,7 +369,6 @@ fn m_where_bigint_literal_beyond_i32_range_matches_zero_rows() {
 
 #[test]
 fn x1_hash_join_promoted_types_still_match() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x1_int_bigint");
 
     let mut catalog = load_catalog();
@@ -422,7 +395,6 @@ fn x1_hash_join_promoted_types_still_match() {
 
 #[test]
 fn x2_same_type_inner_join_via_hash_join_matches() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x2_same_type");
 
     let mut catalog = load_catalog();
@@ -448,7 +420,6 @@ fn x2_same_type_inner_join_via_hash_join_matches() {
 
 #[test]
 fn x3_sum_bigint_within_range_still_exact() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x3_sum_range");
 
     let mut catalog = load_catalog();

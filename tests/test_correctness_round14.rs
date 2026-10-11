@@ -49,43 +49,22 @@
 //! Controls (expected to PASS) document the working behaviour for each
 //! scenario so the divergences cannot be explained away as engine limits.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr14_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr14", tag))
     }
 }
 
@@ -160,7 +139,6 @@ fn setup_sc(db: &str, table: &str, rows: &[&[&str]]) {
 
 #[test]
 fn w_case_when_with_comparison_condition_parses_and_evaluates() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("w_case");
 
     setup_sc("db14w", "t", &[&["5", "'a'"], &["15", "'b'"]]);
@@ -195,7 +173,6 @@ fn w_case_when_with_comparison_condition_parses_and_evaluates() {
 
 #[test]
 fn w2_case_when_constant_condition_parses_too() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("w2_case_const");
 
     setup_sc("db14w2", "t", &[&["5", "'a'"]]);
@@ -220,7 +197,6 @@ fn w2_case_when_constant_condition_parses_too() {
 
 #[test]
 fn x_cast_fractional_double_to_int_truncates() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x_cast_int");
 
     let mut catalog = load_catalog();
@@ -255,7 +231,6 @@ fn x_cast_fractional_double_to_int_truncates() {
 
 #[test]
 fn x2_cast_negative_fractional_double_to_int_truncates_toward_zero() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x2_cast_neg");
 
     let mut catalog = load_catalog();
@@ -282,7 +257,6 @@ fn x2_cast_negative_fractional_double_to_int_truncates_toward_zero() {
 
 #[test]
 fn y_order_by_positional_constant_sorts_by_output_column() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("y_order_pos");
 
     setup_sc("db14y", "t", &[&["3", "'c'"], &["1", "'a'"], &["2", "'b'"]]);
@@ -332,7 +306,6 @@ fn y_order_by_positional_constant_sorts_by_output_column() {
 
 #[test]
 fn z_string_concat_operator_parses_and_concatenates() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("z_concat");
 
     setup_sc("db14z", "t", &[&["1", "'ab'"]]);
@@ -363,7 +336,6 @@ fn z_string_concat_operator_parses_and_concatenates() {
 #[test]
 fn x3_non_fractional_and_string_int_casts_still_work() {
     // Guard: casts that already work keep working after any fix.
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x3_cast_ok");
 
     let mut catalog = load_catalog();
@@ -392,7 +364,6 @@ fn x3_non_fractional_and_string_int_casts_still_work() {
 #[test]
 fn y2_limit_offset_and_in_still_work() {
     // Guard: LIMIT/OFFSET, IN, BETWEEN, NOT IN with NULLs keep working.
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("y2_limit");
 
     setup_sc(

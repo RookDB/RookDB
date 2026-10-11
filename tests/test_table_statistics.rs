@@ -1,3 +1,5 @@
+mod common;
+
 use std::env;
 
 use storage_manager::heap::HeapManager;
@@ -28,7 +30,7 @@ fn test_collect_table_statistics_counts_pages_and_tuples() {
     drop(heap);
 
     let stats = collect_heap_statistics(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &storage_manager::backend::engine::Engine::open(std::env::temp_dir()),
         &temp_path,
     )
     .expect("Failed to collect stats");
@@ -50,7 +52,7 @@ fn test_collect_table_statistics_counts_pages_and_tuples() {
     assert_eq!(page.header_bytes, 8);
 
     storage_manager::backend::cache::evict_heap(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &storage_manager::backend::engine::Engine::open(std::env::temp_dir()),
         &temp_path,
     )
     .expect("Failed to evict table");
@@ -79,7 +81,7 @@ fn test_collect_table_statistics_skips_soft_deleted_rows() {
 
     // Soft-delete the first row the way SQL DELETE does.
     let file = HeapFile::open(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &storage_manager::backend::engine::Engine::open(std::env::temp_dir()),
         &temp_path,
     )
     .expect("Failed to open table");
@@ -90,7 +92,7 @@ fn test_collect_table_statistics_skips_soft_deleted_rows() {
     drop(file);
 
     let stats = collect_heap_statistics(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &storage_manager::backend::engine::Engine::open(std::env::temp_dir()),
         &temp_path,
     )
     .expect("Failed to collect stats");
@@ -103,7 +105,7 @@ fn test_collect_table_statistics_skips_soft_deleted_rows() {
     assert_eq!(stats.total_slot_bytes, 2 * 8);
 
     storage_manager::backend::cache::evict_heap(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &storage_manager::backend::engine::Engine::open(std::env::temp_dir()),
         &temp_path,
     )
     .expect("Failed to evict table");

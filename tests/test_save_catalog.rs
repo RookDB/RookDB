@@ -1,14 +1,14 @@
+use common::{init_catalog, load_catalog};
 use std::fs;
-use std::path::Path;
 mod common;
-use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
+use storage_manager::catalog::{Column, Database, Table, save_catalog};
 use storage_manager::types::DataType;
 
 #[test]
 fn test_save_catalog() {
     let _ws = common::TestWorkspace::new("save", "save_catalog");
     // Step 1: Ensure the catalog file exists (create if missing)
-    if !Path::new("database/global/catalog.json").exists() {
+    if !common::path("database/global/catalog.json").exists() {
         init_catalog();
     }
 
@@ -24,7 +24,7 @@ fn test_save_catalog() {
                 let _ = save_catalog(&cat);
             }
             // Also clean up any directory it might have created
-            let _ = std::fs::remove_dir_all(format!("database/base/{}", self.0));
+            let _ = std::fs::remove_dir_all(common::path(format!("database/base/{}", self.0)));
         }
     }
     let _cleanup = CatalogCleanup("test_db");
@@ -86,8 +86,8 @@ fn test_save_catalog() {
         && c.constraints.default.is_none()));
 
     // Step 7: Clean up (optional)
-    if Path::new("database/global/catalog.json").exists() {
-        fs::remove_file("database/global/catalog.json")
+    if common::path("database/global/catalog.json").exists() {
+        fs::remove_file(common::path("database/global/catalog.json"))
             .expect("Failed to clean up test catalog.json");
     }
 }

@@ -1,26 +1,22 @@
 //! Shared helpers for RookDB integration tests.
 //!
-//! The storage engine resolves every path (`database/base/...`,
-//! `database/system/...`) relative to the process working directory, which
-//! is shared by all `#[test]` functions in a binary. [`TestWorkspace`] gives
-//! each test an isolated directory under the crate root, switches the process
-//! into it, and — critically — cleans up even when the test panics: the
-//! `Drop` implementation restores the original directory and removes the
-//! whole workspace.
-//!
-//! Because `set_current_dir` is process-wide, tests within one binary must
-//! not overlap. `TestWorkspace` therefore also holds the shared [`CWD_MUTEX`]
-//! for as long as it lives, so simply creating a guard serialises the test.
+//! [`TestWorkspace`] gives each test its own data directory under the crate
+//! root and opens that directory's engine. The working directory never
+//! changes: the test reaches its workspace through [`load_catalog`],
+//! [`init_catalog`], [`engine`] and [`path`], which follow the workspace of
+//! the current thread, so tests in one binary run in parallel. Dropping the
+//! workspace removes it, even when the test panics.
 //!
 //! Workspace names embed the process ID so different test binaries (which
 //! run in parallel as separate processes) never collide.
 
-use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+#![allow(dead_code)]
 
-/// Serialises tests within one binary (see type-level docs).
-/// Cross-binary parallelism stays safe thanks to PID-scoped names below.
-pub static CWD_MUTEX: Mutex<()> = Mutex::new(());
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use storage_manager::backend::engine::Engine;
 
 static SWEEP_STALE: std::sync::Once = std::sync::Once::new();
 
@@ -62,68 +58,91 @@ fn sweep_stale_workspaces() {
 }
 
 pub struct TestWorkspace {
-    /// Absolute path of the original CWD, restored on drop.
-    prev_cwd: PathBuf,
     /// Absolute path of the workspace, removed on drop.
     path: PathBuf,
-    /// Held for this workspace's lifetime so no other test in this binary
-    /// can touch the shared working directory while it is active.
-    _lock: Option<MutexGuard<'static, ()>>,
+    /// The workspace's engine, kept open for the test.
+    engine: Arc<Engine>,
+}
+
+thread_local! {
+    /// The engine of the workspace the current test opened. Each test runs
+    /// on its own thread, so tests in one binary can run in parallel.
+    static CURRENT: RefCell<Option<Arc<Engine>>> = const { RefCell::new(None) };
 }
 
 impl TestWorkspace {
-    /// Create `<crate root>/database_<prefix>_p<pid>_<tag>/`, chdir into it
-    /// and bootstrap the system catalog inside it.
+    /// Create `<crate root>/database_<prefix>_p<pid>_<tag>/`, open its engine
+    /// and bootstrap the system catalog inside it. The working directory is
+    /// left alone: the test reaches the workspace through [`load_catalog`],
+    /// [`init_catalog`], [`engine`] and [`path`].
     ///
     /// The returned guard must be bound (`let _ws = ...`) so it lives until
-    /// the end of the test; dropping it undoes everything.
+    /// the end of the test; dropping it removes the workspace.
     pub fn new(prefix: &str, tag: &str) -> Self {
         sweep_stale_workspaces();
-        // Ignore poisoning: a panicked predecessor leaves the mutex locked,
-        // but the CWD bookkeeping itself stays consistent.
-        let lock = CWD_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!(
+        let path = std::env::current_dir().expect("read cwd").join(format!(
             "database_{}_p{}_{}",
             prefix,
             std::process::id(),
             tag
         ));
         let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
+        std::fs::create_dir_all(&path).expect("create workspace");
 
-        std::env::set_current_dir(&path).expect("chdir into workspace");
         storage_manager::backend::executor::row_select::register_where_parser(
             rook_parser::parse_where_text,
         );
         storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
+        storage_manager::backend::planner::plan_cache::register_sql_parser(rook_parser::parse_sql);
 
-        Self {
-            prev_cwd,
-            path,
-            _lock: Some(lock),
-        }
+        let engine = Engine::open(&path);
+        storage_manager::catalog::init_catalog_in(&engine);
+        CURRENT.with(|c| *c.borrow_mut() = Some(Arc::clone(&engine)));
+        Self { path, engine }
     }
 
-    /// Absolute path of the workspace (rarely needed; paths are relative).
+    /// Absolute path of the workspace.
     #[allow(dead_code)]
     pub fn path(&self) -> &std::path::Path {
         &self.path
+    }
+
+    /// The workspace's engine.
+    #[allow(dead_code)]
+    pub fn engine(&self) -> &Arc<Engine> {
+        &self.engine
     }
 }
 
 impl Drop for TestWorkspace {
     fn drop(&mut self) {
-        // Leave the workspace before deleting it: removing the current
-        // directory of a running process fails on some platforms. The mutex
-        // guard field unlocks afterwards, letting the next test proceed.
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-        self._lock = None;
+        CURRENT.with(|c| *c.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// The engine of the current test's workspace.
+#[allow(dead_code)]
+pub fn engine() -> Arc<Engine> {
+    CURRENT
+        .with(|c| c.borrow().clone())
+        .expect("no TestWorkspace is open on this thread")
+}
+
+/// The catalog of the current test's workspace.
+#[allow(dead_code)]
+pub fn load_catalog() -> storage_manager::catalog::Catalog {
+    storage_manager::catalog::load_catalog_in(&engine())
+}
+
+/// Bootstrap the current workspace's system catalog (idempotent).
+#[allow(dead_code)]
+pub fn init_catalog() {
+    storage_manager::catalog::init_catalog_in(&engine())
+}
+
+/// `relative` inside the current test's workspace.
+#[allow(dead_code)]
+pub fn path(relative: impl AsRef<std::path::Path>) -> PathBuf {
+    engine().root().join(relative)
 }

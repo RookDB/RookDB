@@ -8,11 +8,10 @@
 
 mod common;
 
+use common::load_catalog;
 use rook_ast::QueryPlan;
 use storage_manager::backend::executor::vacuum::vacuum_table;
-use storage_manager::catalog::{
-    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{Catalog, Column, create_database, create_table, save_catalog};
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
 
@@ -63,7 +62,7 @@ fn setup(db: &str) -> Catalog {
 /// Read the raw dead_tuple_count header field.
 fn dead_count(db: &str, table: &str) -> u32 {
     use std::fs::OpenOptions;
-    let path = format!("database/base/{}/{}.dat", db, table);
+    let path = common::path(format!("database/base/{}/{}.dat", db, table));
     // The counter is kept in the pooled header page; write it out first.
     storage_manager::backend::cache::checkpoint();
     let mut f = OpenOptions::new().read(true).open(&path).unwrap();
@@ -127,10 +126,9 @@ fn vacuum_reclaims_dead_tuples_and_preserves_live_rows() {
     assert_eq!(dead_count("vdb", "events"), 0, "counter must reset");
 
     // Exactly the odd rows survive, readable via fresh heap scans.
-    let heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(
-        "database/base/vdb/events.dat",
-    ))
-    .unwrap();
+    let heap =
+        storage_manager::heap::HeapManager::open(common::path("database/base/vdb/events.dat"))
+            .unwrap();
     let schema = vec![DataType::Int, DataType::Varchar(60)];
     let mut live_ids = Vec::new();
     for r in heap.scan() {
@@ -183,14 +181,13 @@ fn vacuum_rebuilds_indexes_for_renumbered_slots() {
 
     // The rebuilt index must resolve every surviving id to a LIVE row with
     // matching contents.
-    let idx_path = std::path::PathBuf::from("database/base/idb/events.idx_events_id.idx");
+    let idx_path = common::path("database/base/idb/events.idx_events_id.idx");
     let mut btree = storage_manager::backend::index::btree::BTree::open(idx_path).unwrap();
     btree.set_key_type(DataType::Int);
 
-    let mut heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(
-        "database/base/idb/events.dat",
-    ))
-    .unwrap();
+    let mut heap =
+        storage_manager::heap::HeapManager::open(common::path("database/base/idb/events.dat"))
+            .unwrap();
     for id in [0i32, 5, 9, 20, 25, 29] {
         let tid = btree
             .search(&storage_manager::types::DataValue::Int(id))
@@ -242,7 +239,7 @@ fn vacuum_enables_space_reuse_without_page_growth() {
         use std::fs::OpenOptions;
         let mut f = OpenOptions::new()
             .read(true)
-            .open(format!("database/base/{}/{}.dat", db, t))
+            .open(common::path(format!("database/base/{}/{}.dat", db, t)))
             .unwrap();
         storage_manager::backend::table::page_count(&mut f).unwrap()
     }
@@ -308,13 +305,11 @@ fn vacuum_reclaims_space_left_by_reused_slots() {
         insert_single_tuple(&catalog, "rdb", "events", &[&i.to_string(), "new_row"]).unwrap();
     }
 
-    let path = std::path::PathBuf::from("database/base/rdb/events.dat");
-    let free_before = storage_manager::statistics::collect_heap_statistics(
-        &storage_manager::backend::engine::Engine::current_dir(),
-        &path,
-    )
-    .unwrap()
-    .total_free_bytes;
+    let path = common::path("database/base/rdb/events.dat");
+    let free_before =
+        storage_manager::statistics::collect_heap_statistics(&common::engine(), &path)
+            .unwrap()
+            .total_free_bytes;
 
     let stats = vacuum_table(&catalog, "rdb", "events").expect("vacuum failed");
     assert_eq!(
@@ -322,11 +317,8 @@ fn vacuum_reclaims_space_left_by_reused_slots() {
         "the page with stale bytes must be compacted"
     );
 
-    let after = storage_manager::statistics::collect_heap_statistics(
-        &storage_manager::backend::engine::Engine::current_dir(),
-        &path,
-    )
-    .unwrap();
+    let after =
+        storage_manager::statistics::collect_heap_statistics(&common::engine(), &path).unwrap();
     assert!(
         after.total_free_bytes > free_before,
         "free space must grow: {} -> {}",

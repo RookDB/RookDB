@@ -1,48 +1,27 @@
-use std::path::PathBuf;
+mod common;
+
+use common::{init_catalog, load_catalog};
 
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{
-    create_database, create_table, init_catalog, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::heap::HeapManager;
 use storage_manager::types::DataType;
 
-use std::sync::Mutex;
-
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
 /// Per-test isolated workspace: creates `database_ws_<pid>_<tag>` under the
 /// crate root, switches the process into it, and removes it on drop — even
 /// when the test panics. Restores the previous working directory first.
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("test_hsm_integration", tag))
     }
 }
 
 #[test]
 fn test_multiple_columns_insertion() {
-    let _lock = TEST_MUTEX.lock().unwrap();
-
     let _ws = TestWorkspace::new("01");
     init_catalog();
 
@@ -112,7 +91,7 @@ fn test_multiple_columns_insertion() {
     assert!(success2, "Second tuple insertion failed");
 
     // Verify inserted tuple count
-    let path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+    let path = common::path(format!("database/base/{}/{}.dat", db_name, table_name));
 
     let manager = HeapManager::open(path).expect("Failed to open heap manager");
 
@@ -125,8 +104,6 @@ fn test_multiple_columns_insertion() {
 
 #[test]
 fn test_multiple_tables_isolation() {
-    let _lock = TEST_MUTEX.lock().unwrap();
-
     let _ws = TestWorkspace::new("03");
     init_catalog();
 
@@ -211,7 +188,7 @@ fn test_multiple_tables_isolation() {
     assert!(insert_single_tuple(&catalog, db_name, table2, &t2_v2).unwrap());
 
     // Verify users table
-    let path1 = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table1));
+    let path1 = common::path(format!("database/base/{}/{}.dat", db_name, table1));
 
     let t1_manager = HeapManager::open(path1).expect("Failed to open table1 manager");
 
@@ -222,7 +199,7 @@ fn test_multiple_tables_isolation() {
     );
 
     // Verify orders table
-    let path2 = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table2));
+    let path2 = common::path(format!("database/base/{}/{}.dat", db_name, table2));
 
     let t2_manager = HeapManager::open(path2).expect("Failed to open table2 manager");
 

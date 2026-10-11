@@ -48,47 +48,26 @@
 //! blank-padded comparison, INSERT..SELECT string round-trip (quotes and
 //! spaces), and single-row UPDATE collision rejection.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use rook_parser::parse_set_clause;
 use storage_manager::backend::executor::create_index::create_index_with_flags;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::insert_single_tuple;
 use storage_manager::executor::update::update_by_pointers;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr17_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr17", tag))
     }
 }
 
@@ -154,7 +133,6 @@ fn do_update(db: &str, table: &str, pred: &str, set_clause: &str) -> Result<usiz
 
 #[test]
 fn ah_insert_with_composite_unique_index_does_not_crash() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ah_comp");
 
     let db = "db17ah";
@@ -231,7 +209,6 @@ fn ah_insert_with_composite_unique_index_does_not_crash() {
 
 #[test]
 fn ai_update_respects_varchar_length_limit() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ai_vc");
 
     let db = "db17ai";
@@ -288,7 +265,6 @@ fn ai_update_respects_varchar_length_limit() {
 
 #[test]
 fn aj_batch_update_cannot_create_unique_violation() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("aj_batch");
 
     let db = "db17aj";
@@ -363,7 +339,6 @@ fn aj_batch_update_cannot_create_unique_violation() {
 
 #[test]
 fn ak_multirow_insert_atomicity_on_unique_violation() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ak_atom");
 
     let db = "db17ak";
@@ -402,7 +377,6 @@ fn ak_multirow_insert_atomicity_on_unique_violation() {
 
 #[test]
 fn x1_unique_lifecycle_and_char_padding_still_work() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x1_guard");
 
     let db = "db17x1";
@@ -485,7 +459,6 @@ fn x1_unique_lifecycle_and_char_padding_still_work() {
 
 #[test]
 fn x2_insert_select_string_roundtrip_still_work() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x2_roundtrip");
 
     let db = "db17x2";

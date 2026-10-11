@@ -20,48 +20,27 @@
 //!      single wrapping pass round-trips leading/trailing/all-quote values
 //!      correctly — this suite pins that behaviour end-to-end.
 
+mod common;
+
+use common::load_catalog;
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
-use std::sync::Mutex;
 
 use rook_ast::QueryPlan;
 
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr6_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr6", tag))
     }
 }
 
@@ -209,7 +188,6 @@ fn correlated_not_in_with_null_in_subquery_is_unknown() {
 /// Control: same query WITHOUT the NULL-producing CASE — NOT IN works.
 #[test]
 fn control_correlated_not_in_without_nulls() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("corr_notin_ctl");
 
     let mut catalog = load_catalog();
@@ -274,7 +252,6 @@ fn control_correlated_not_in_without_nulls() {
 
 #[test]
 fn add_column_backfill_then_insert_is_durable() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("addcol_swap");
 
     let mut catalog = load_catalog();
@@ -296,7 +273,7 @@ fn add_column_backfill_then_insert_is_durable() {
     // the CLI crate; here we replicate the heap rewrite it performs via the
     // library-level operations: read rows with old schema, write new file).
     // Simpler and equally valid: perform the swap the way the CLI does.
-    let dat_path = PathBuf::from("database/base/t6db/t.dat");
+    let dat_path = common::path("database/base/t6db/t.dat");
     assert!(dat_path.exists(), "heap file must exist");
 
     // Snapshot the inode before the swap.
@@ -322,7 +299,7 @@ fn add_column_backfill_then_insert_is_durable() {
         }
         drop(old_heap);
 
-        let tmp = PathBuf::from("database/base/t6db/t.dat.backfill");
+        let tmp = common::path("database/base/t6db/t.dat.backfill");
         {
             let mut tmp_heap = storage_manager::heap::HeapManager::create(tmp.clone()).unwrap();
             for row in &migrated {
@@ -395,7 +372,6 @@ fn add_column_backfill_then_insert_is_durable() {
 
 #[test]
 fn varchar_leading_and_trailing_apostrophe_roundtrip() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("quote_ctl");
 
     let mut catalog = load_catalog();

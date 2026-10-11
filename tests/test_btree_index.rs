@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo test --test test_btree_index -- --test-threads=1
 
-use std::path::Path;
+use common::load_catalog;
 mod common;
 
 use rook_ast::logical::{LogicalPlan, LogicalTableScan};
@@ -13,9 +13,7 @@ use rook_ast::{QueryPlan, SelectPlan};
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::planner::PhysicalPlanner;
-use storage_manager::catalog::{
-    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{Catalog, Column, create_database, create_table, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
@@ -97,13 +95,13 @@ fn create_index_builds_persistent_files() {
     assert_eq!(entries, 6, "one index entry per row");
 
     assert!(
-        Path::new("database/base/idx_db/staff.by_salary.idx").exists(),
+        common::path("database/base/idx_db/staff.by_salary.idx").exists(),
         "index pages file must exist"
     );
     // The index is described by sys_indexes alone; no metadata sidecar.
-    assert!(!Path::new("database/base/idx_db/staff.by_salary.idx.meta").exists());
+    assert!(!common::path("database/base/idx_db/staff.by_salary.idx.meta").exists());
     let indexes = storage_manager::executor::create_index::load_table_indexes_multi(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "idx_db",
         "staff",
     )
@@ -134,7 +132,7 @@ fn index_survives_a_catalog_save_and_stays_maintained() {
     storage_manager::catalog::save_catalog(&load_catalog()).unwrap();
     let catalog = load_catalog();
     let indexes = storage_manager::executor::create_index::load_table_indexes_multi(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "idx_db",
         "staff",
     )
@@ -147,7 +145,7 @@ fn index_survives_a_catalog_save_and_stays_maintained() {
             .unwrap()
     );
     storage_manager::backend::cache::checkpoint();
-    let mut btree = storage_manager::backend::index::btree::BTree::open(std::path::PathBuf::from(
+    let mut btree = storage_manager::backend::index::btree::BTree::open(common::path(
         "database/base/idx_db/staff.by_salary.idx",
     ))
     .unwrap();
@@ -246,14 +244,14 @@ fn index_is_maintained_on_insert() {
     )
     .unwrap();
     let (page_id, slot_id) = storage_manager::executor::insert_raw_tuple(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "mnt_db",
         "staff",
         &row_bytes,
     )
     .unwrap();
     storage_manager::executor::create_index::update_index_on_insert(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "mnt_db",
         "staff",
         &storage_manager::executor::parse_text_row(

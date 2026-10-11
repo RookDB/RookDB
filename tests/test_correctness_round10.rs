@@ -47,47 +47,23 @@
 //! Controls (expected to PASS) document the planner-path behaviour for each
 //! scenario so the divergences cannot be explained away as engine limits.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
 
-use storage_manager::backend::planner::plan_cache::{execute_cached_insert, invalidate_plan_cache};
+use common::load_catalog;
+
+use storage_manager::backend::planner::plan_cache::execute_cached_insert;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 use storage_manager::types::value::DataValue;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr10_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        // The plan cache is process-global; drop entries from earlier tests so
-        // keys cannot leak across workspaces.
-        invalidate_plan_cache(&storage_manager::backend::engine::Engine::current_dir());
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr10", tag))
     }
 }
 
@@ -160,7 +136,6 @@ fn run_planner_insert(
 
 #[test]
 fn g_plan_cache_insert_into_table_named_with_values_substring() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("g_values_name");
 
     let mut catalog = load_catalog();
@@ -208,7 +183,6 @@ fn g_plan_cache_insert_into_table_named_with_values_substring() {
 
 #[test]
 fn h_plan_cache_multirow_insert_valid_sql_errors_instead() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("h_multirow_valid");
 
     let mut catalog = load_catalog();
@@ -252,7 +226,6 @@ fn h_plan_cache_multirow_insert_valid_sql_errors_instead() {
 
 #[test]
 fn h2_plan_cache_silently_inserts_corrupted_row_for_invalid_sql() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("h2_multirow_corrupt");
 
     let mut catalog = load_catalog();
@@ -301,7 +274,6 @@ fn h2_plan_cache_silently_inserts_corrupted_row_for_invalid_sql() {
 
 #[test]
 fn i_plan_cache_unknown_column_silently_inserts_all_null_row() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("i_unknown_col");
 
     let mut catalog = load_catalog();
@@ -343,7 +315,6 @@ fn i_plan_cache_unknown_column_silently_inserts_all_null_row() {
 
 #[test]
 fn i2_plan_cache_extra_value_in_column_list_is_silently_dropped() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("i2_extra_value");
 
     let mut catalog = load_catalog();
@@ -379,7 +350,6 @@ fn i2_plan_cache_extra_value_in_column_list_is_silently_dropped() {
 
 #[test]
 fn j_plan_cache_missing_column_ignores_declared_default() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("j_default");
 
     let mut catalog = load_catalog();
@@ -424,7 +394,6 @@ fn j_plan_cache_missing_column_ignores_declared_default() {
 
 #[test]
 fn x_regression_plain_single_row_cached_insert_works() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x_plain_insert");
 
     let mut catalog = load_catalog();

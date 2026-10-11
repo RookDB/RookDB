@@ -10,49 +10,28 @@
 //! Run with:
 //!   cargo test --test test_fk_actions -- --test-threads=1
 
-use std::sync::Mutex;
+mod common;
+
+use common::{init_catalog, load_catalog};
 
 use rook_parser::parse_set_clause;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Catalog, Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, init_catalog, load_catalog};
+use storage_manager::catalog::{create_database, create_table};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::heap::HeapManager;
 use storage_manager::types::datatype::DataType;
 use storage_manager::types::row::deserialize_nullable_row;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-use std::path::PathBuf;
-
 /// Per-test isolated workspace: creates `database_ws_<pid>_<tag>` under the
 /// crate root, switches the process into it, and removes it on drop — even
 /// when the test panics. Restores the previous working directory first.
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("test_fk_actions", tag))
     }
 }
 
@@ -157,7 +136,8 @@ fn create_three_tier_schema(catalog: &mut Catalog, db_name: &str) {
 
 /// Count the number of tuples (rows) in a table by scanning the heap.
 fn count_tuples(db_name: &str, table_name: &str) -> usize {
-    let path: std::path::PathBuf = format!("database/base/{}/{}.dat", db_name, table_name).into();
+    let path: std::path::PathBuf =
+        common::path(format!("database/base/{}/{}.dat", db_name, table_name));
     if !path.exists() {
         return 0;
     }
@@ -170,7 +150,8 @@ fn count_tuples(db_name: &str, table_name: &str) -> usize {
 /// Scan a table and return all values of a specific column as debug-formatted strings.
 /// NULL values appear as "NULL".
 fn get_column_values(db_name: &str, table_name: &str, column_name: &str) -> Vec<String> {
-    let path: std::path::PathBuf = format!("database/base/{}/{}.dat", db_name, table_name).into();
+    let path: std::path::PathBuf =
+        common::path(format!("database/base/{}/{}.dat", db_name, table_name));
     if !path.exists() {
         return Vec::new();
     }
@@ -228,7 +209,6 @@ fn get_column_values(db_name: &str, table_name: &str, column_name: &str) -> Vec<
 
 #[test]
 fn test_minimal_delete_cascade() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("01");
     init_catalog();
 
@@ -280,7 +260,7 @@ fn test_minimal_delete_cascade() {
 
     // FK: orders.user_id → users.id ON DELETE CASCADE
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "orders",
         "FOREIGN KEY ON DELETE CASCADE",
@@ -321,7 +301,6 @@ fn test_minimal_delete_cascade() {
 
 #[test]
 fn test_recursive_delete_cascade() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("03");
     init_catalog();
 
@@ -338,7 +317,7 @@ fn test_recursive_delete_cascade() {
     //   orders.user_id → users.id ON DELETE CASCADE
     //   order_items.order_id → orders.id ON DELETE CASCADE
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "orders",
         "FOREIGN KEY ON DELETE CASCADE",
@@ -348,7 +327,7 @@ fn test_recursive_delete_cascade() {
     )
     .expect("Failed to insert orders FK constraint");
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "order_items",
         "FOREIGN KEY ON DELETE CASCADE",
@@ -417,7 +396,6 @@ fn test_recursive_delete_cascade() {
 
 #[test]
 fn test_recursive_delete_set_null() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("05");
     init_catalog();
 
@@ -432,7 +410,7 @@ fn test_recursive_delete_set_null() {
 
     // FK: orders.user_id → users.id ON DELETE SET NULL
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "orders",
         "FOREIGN KEY ON DELETE SET NULL",
@@ -443,7 +421,7 @@ fn test_recursive_delete_set_null() {
     .expect("Failed to insert orders FK constraint");
     // FK: order_items.order_id → orders.id ON DELETE SET NULL
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "order_items",
         "FOREIGN KEY ON DELETE SET NULL",
@@ -526,7 +504,6 @@ fn test_recursive_delete_set_null() {
 
 #[test]
 fn test_recursive_update_cascade() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("07");
     init_catalog();
 
@@ -541,7 +518,7 @@ fn test_recursive_update_cascade() {
 
     // FK: orders.user_id → users.id ON UPDATE CASCADE
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "orders",
         "FOREIGN KEY ON UPDATE CASCADE",
@@ -552,7 +529,7 @@ fn test_recursive_update_cascade() {
     .expect("Failed to insert orders FK constraint");
     // FK: order_items.order_id → orders.id ON UPDATE CASCADE
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "order_items",
         "FOREIGN KEY ON UPDATE CASCADE",
@@ -629,7 +606,6 @@ fn test_recursive_update_cascade() {
 
 #[test]
 fn test_recursive_update_cascade_same_column_chain() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("09");
     init_catalog();
 
@@ -682,7 +658,7 @@ fn test_recursive_update_cascade_same_column_chain() {
 
     // FK: orders.fk_user_id → users.id ON UPDATE CASCADE
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "orders",
         "FOREIGN KEY ON UPDATE CASCADE",
@@ -693,7 +669,7 @@ fn test_recursive_update_cascade_same_column_chain() {
     .expect("Failed to insert orders FK constraint");
     // FK: order_items.fk_user_id → orders.fk_user_id ON UPDATE CASCADE (same column chain!)
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "order_items",
         "FOREIGN KEY ON UPDATE CASCADE",
@@ -763,7 +739,6 @@ fn test_recursive_update_cascade_same_column_chain() {
 
 #[test]
 fn test_recursive_update_set_null() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("11");
     init_catalog();
 
@@ -778,7 +753,7 @@ fn test_recursive_update_set_null() {
 
     // FK: orders.user_id → users.id ON UPDATE SET NULL
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "orders",
         "FOREIGN KEY ON UPDATE SET NULL",
@@ -789,7 +764,7 @@ fn test_recursive_update_set_null() {
     .expect("Failed to insert orders FK constraint");
     // FK: order_items.order_id → orders.id ON UPDATE SET NULL
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "order_items",
         "FOREIGN KEY ON UPDATE SET NULL",
@@ -858,7 +833,6 @@ fn test_recursive_update_set_null() {
 
 #[test]
 fn test_recursive_update_set_null_same_column_chain() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("13");
     init_catalog();
 
@@ -911,7 +885,7 @@ fn test_recursive_update_set_null_same_column_chain() {
 
     // FK: orders.fk_user_id → users.id ON UPDATE SET NULL
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "orders",
         "FOREIGN KEY ON UPDATE SET NULL",
@@ -922,7 +896,7 @@ fn test_recursive_update_set_null_same_column_chain() {
     .expect("Failed to insert orders FK constraint");
     // FK: order_items.fk_user_id → orders.fk_user_id ON UPDATE SET NULL (same column chain!)
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "order_items",
         "FOREIGN KEY ON UPDATE SET NULL",
@@ -993,7 +967,6 @@ fn test_recursive_update_set_null_same_column_chain() {
 
 #[test]
 fn test_cycle_detection_delete_cascade() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("15");
     init_catalog();
 
@@ -1041,7 +1014,7 @@ fn test_cycle_detection_delete_cascade() {
     //   table_a.a_ref → table_b.id ON DELETE CASCADE
     //   table_b.b_ref → table_a.id ON DELETE CASCADE
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "table_a",
         "FOREIGN KEY ON DELETE CASCADE",
@@ -1051,7 +1024,7 @@ fn test_cycle_detection_delete_cascade() {
     )
     .expect("Failed to insert table_a FK constraint");
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "table_b",
         "FOREIGN KEY ON DELETE CASCADE",
@@ -1108,7 +1081,6 @@ fn test_cycle_detection_delete_cascade() {
 
 #[test]
 fn test_fk_restrict_blocks_delete() {
-    let _lock = TEST_MUTEX.lock().unwrap();
     let _ws = TestWorkspace::new("17");
     init_catalog();
 
@@ -1146,7 +1118,7 @@ fn test_fk_restrict_blocks_delete() {
 
     // FK with RESTRICT (default): just "FOREIGN KEY"
     storage_manager::backend::system_table::insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db_name,
         "children",
         "FOREIGN KEY",

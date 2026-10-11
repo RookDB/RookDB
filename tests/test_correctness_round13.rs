@@ -57,45 +57,24 @@
 //! same-type / single-leaf behaviour for each scenario so the
 //! divergences cannot be explained away as engine limits.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::executor::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 use storage_manager::types::value::{DataValue, NumericValue};
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr13_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr13", tag))
     }
 }
 
@@ -201,7 +180,6 @@ fn t2_range_predicate_on_indexed_numeric_must_not_crash() {
     // End-to-end: the index planner builds RangeLookup sentinels from
     // min_for_type/max_for_type (scale 0 extremes) for NUMERIC columns;
     // the B+ Tree then compares them against stored scale-2 keys.
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("t2_range_num");
 
     let mut catalog = load_catalog();
@@ -258,7 +236,6 @@ fn t2_range_predicate_on_indexed_numeric_must_not_crash() {
 
 #[test]
 fn u_indexed_numeric_point_lookup_with_numeric_literals() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("u_idx_num");
 
     let mut catalog = load_catalog();
@@ -336,7 +313,6 @@ fn u_indexed_numeric_point_lookup_with_numeric_literals() {
 
 #[test]
 fn v_string_literal_vs_date_column() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("v_date_literal");
 
     let mut catalog = load_catalog();
@@ -384,7 +360,6 @@ fn v_string_literal_vs_date_column() {
 
 #[test]
 fn v2_string_literal_vs_timestamp_column() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("v2_ts_literal");
 
     let mut catalog = load_catalog();
@@ -416,7 +391,6 @@ fn u2_indexed_numeric_scale0_int_literal_probe_fails_too() {
     // The mistyped-probe bug is not limited to scale > 0: NUMERIC(p, 0)
     // encodes BCD keys with (p+1).div_ceil(2) bytes, and the INT probe's
     // 4-byte to_bytes() blob fails that decode during multi-leaf navigation.
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("u2_idx_num_s0");
 
     let mut catalog = load_catalog();
@@ -464,7 +438,6 @@ fn u2_indexed_numeric_scale0_int_literal_probe_fails_too() {
 fn x1_indexed_int_point_lookup_still_works() {
     // Guard: the well-typed index path (INT column, INT literal) is intact
     // and spans multiple leaves.
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x1_idx_int");
 
     let mut catalog = load_catalog();
@@ -489,7 +462,6 @@ fn x1_indexed_int_point_lookup_still_works() {
 #[test]
 fn x3_unindexed_cross_type_numeric_predicates_still_work() {
     // Guard: the seq-scan path has full cross-type NUMERIC promotion.
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x3_unindexed_num");
 
     let mut catalog = load_catalog();

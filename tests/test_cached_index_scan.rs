@@ -5,14 +5,13 @@
 
 mod common;
 
+use common::load_catalog;
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::row_select::{
     parse_where_text, register_where_parser, select_matching_pointers,
 };
-use storage_manager::catalog::{
-    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{Catalog, Column, create_database, create_table, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::executor::delete_by_pointers;
 use storage_manager::insert_single_tuple;

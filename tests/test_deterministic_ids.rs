@@ -9,7 +9,8 @@
 
 mod common;
 
-use storage_manager::catalog::{Column, create_database, create_table, load_catalog, save_catalog};
+use common::load_catalog;
+use storage_manager::catalog::{Column, create_database, create_table, save_catalog};
 use storage_manager::types::DataType;
 
 fn plain_col(name: &str) -> Column {
@@ -28,7 +29,7 @@ fn read_id_pairs(
     name_idx: usize,
 ) -> Vec<(String, i32)> {
     use storage_manager::types::{DataValue, deserialize_nullable_row};
-    let path = std::path::PathBuf::from(format!("{}/{}.dat", "database/system", sys_table));
+    let path = common::path(format!("database/system/{}.dat", sys_table));
     let heap = storage_manager::heap::HeapManager::open(path).expect("open system table");
     let mut pairs = Vec::new();
     for result in heap.scan() {

@@ -8,8 +8,8 @@ use storage_manager::types::DataValue;
 
 fn session() -> Session {
     storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-    storage_manager::catalog::init_catalog();
-    Session::new(storage_manager::catalog::load_catalog())
+    common::init_catalog();
+    Session::new(common::load_catalog())
 }
 
 fn run(session: &mut Session, sql: &str) -> Result<StatementResult, String> {
@@ -136,9 +136,9 @@ fn ddl_round_trip() {
 }
 
 /// Every file under `dir` with its length, sorted.
-fn files_under(dir: &str) -> Vec<(std::path::PathBuf, u64)> {
+fn files_under(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
     let mut found = Vec::new();
-    let mut pending = vec![std::path::PathBuf::from(dir)];
+    let mut pending = vec![dir.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = entry.path();
@@ -161,11 +161,12 @@ fn a_session_keeps_every_file_under_its_engine_root() {
     let _ws = common::TestWorkspace::new("session", "root");
     storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
 
-    // The test workspace keeps its own catalog in the working directory.
-    let before = files_under("database");
+    // The test workspace's own data directory must not change.
+    let watched = _ws.path().join("database");
+    let before = files_under(&watched);
 
-    // A data directory that is not the working directory.
-    let root = std::env::current_dir().unwrap().join("elsewhere");
+    // A second data directory, opened next to it.
+    let root = _ws.path().join("elsewhere");
     std::fs::create_dir_all(&root).unwrap();
     let engine = Engine::open(&root);
     storage_manager::catalog::init_catalog_in(&engine);
@@ -202,9 +203,9 @@ fn a_session_keeps_every_file_under_its_engine_root() {
     assert!(root.join("database/base/app/kids.dat").exists());
     assert!(root.join("database/system/tables.dat").exists());
     assert_eq!(
-        files_under("database"),
+        files_under(&watched),
         before,
-        "nothing may change under the working directory"
+        "nothing may change under the other data directory"
     );
 
     // A second session on the same root reads what the first one wrote.

@@ -8,11 +8,10 @@
 
 mod common;
 
+use common::{init_catalog, load_catalog};
 use storage_manager::backend::constraint::validate_row_insert;
 use storage_manager::backend::system_table::insert_constraint_metadata;
-use storage_manager::catalog::{
-    Catalog, Column, create_database, create_table, init_catalog, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{Catalog, Column, create_database, create_table, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
@@ -179,17 +178,9 @@ fn check_expression_is_enforced() {
     save_catalog(&catalog).unwrap();
 
     // Register CHECK (price > 0) the way the DDL handler does.
+    let _ = insert_constraint_metadata(&common::engine(), "ck", "items", "CHECK", "", None, None); // no-op guard
     let _ = insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
-        "ck",
-        "items",
-        "CHECK",
-        "",
-        None,
-        None,
-    ); // no-op guard
-    let _ = insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "ck",
         "items",
         "CHECK",
@@ -248,7 +239,7 @@ fn setup_fk(db: &str, action: &str) -> Catalog {
     save_catalog(&catalog).unwrap();
 
     let _ = insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db,
         "customers",
         "PRIMARY KEY",
@@ -257,7 +248,7 @@ fn setup_fk(db: &str, action: &str) -> Catalog {
         None,
     );
     let _ = insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         db,
         "orders",
         &format!("FOREIGN KEY{}", action),
@@ -444,7 +435,7 @@ fn fk_restrict_protects_a_key_spelled_null() {
     );
     save_catalog(&catalog).unwrap();
     let _ = insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "fkn",
         "parent",
         "PRIMARY KEY",
@@ -453,7 +444,7 @@ fn fk_restrict_protects_a_key_spelled_null() {
         None,
     );
     let _ = insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "fkn",
         "child",
         "FOREIGN KEY",

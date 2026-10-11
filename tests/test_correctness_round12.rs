@@ -66,53 +66,26 @@
 //! for each scenario so the divergences cannot be explained away as engine
 //! limits.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use rook_parser::parse_set_clause;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
-use storage_manager::backend::planner::plan_cache::{execute_cached_insert, invalidate_plan_cache};
+use storage_manager::backend::planner::plan_cache::execute_cached_insert;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::insert_single_tuple;
 use storage_manager::executor::update::update_by_pointers;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr12_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        // Mirror the production wiring (main.rs / stress_bench.rs): the
-        // plan-cache fallback path parses via the registered hook.
-        storage_manager::backend::planner::plan_cache::register_sql_parser(rook_parser::parse_sql);
-        // The plan cache is process-global; drop entries from earlier tests so
-        // keys cannot leak across workspaces.
-        invalidate_plan_cache(&storage_manager::backend::engine::Engine::current_dir());
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr12", tag))
     }
 }
 
@@ -204,7 +177,6 @@ fn rejected_as_zero(
 
 #[test]
 fn n_plan_cache_insert_with_null_literal_is_rejected() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("n_null_insert");
 
     let mut catalog = load_catalog();
@@ -255,7 +227,6 @@ fn n_plan_cache_insert_with_null_literal_is_rejected() {
 
 #[test]
 fn o_update_unknown_set_column_silently_dropped_row_reported_updated() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("o_unknown_col");
 
     let mut catalog = load_catalog();
@@ -296,7 +267,6 @@ fn o_update_unknown_set_column_silently_dropped_row_reported_updated() {
 
 #[test]
 fn o2_update_mixed_valid_and_unknown_columns_reports_partial_work() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("o2_mixed");
 
     let mut catalog = load_catalog();
@@ -339,7 +309,6 @@ fn o2_update_mixed_valid_and_unknown_columns_reports_partial_work() {
 
 #[test]
 fn p_update_numeric_text_literal_parse_failure_silently_nulls() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("p_numeric_null");
 
     let mut catalog = load_catalog();
@@ -393,7 +362,6 @@ fn p_update_numeric_text_literal_parse_failure_silently_nulls() {
 
 #[test]
 fn q_update_set_int_overflow_wraps_instead_of_erroring() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("q_int_overflow");
 
     let mut catalog = load_catalog();
@@ -436,7 +404,6 @@ fn q_update_set_int_overflow_wraps_instead_of_erroring() {
 
 #[test]
 fn r_update_set_division_by_zero_silently_returns_original() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("r_div_zero");
 
     let mut catalog = load_catalog();
@@ -485,7 +452,6 @@ fn r_update_set_division_by_zero_silently_returns_original() {
 
 #[test]
 fn s_update_set_bigint_literal_on_int_column_silently_nulls() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("s_bigint_literal");
 
     let mut catalog = load_catalog();
@@ -532,7 +498,6 @@ fn s_update_set_bigint_literal_on_int_column_silently_nulls() {
 fn n2_plan_cache_insert_null_via_column_list_rejected_too() {
     // NULL via an explicit column list must behave exactly like the planner
     // path; the same arity mismatch breaks it.
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("n2_null_cols");
 
     let mut catalog = load_catalog();
@@ -562,7 +527,6 @@ fn n2_plan_cache_insert_null_via_column_list_rejected_too() {
 #[test]
 fn x2_update_set_valid_arithmetic_still_works() {
     // Guard: in-range SET arithmetic keeps working.
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x2_valid_arith");
 
     let mut catalog = load_catalog();
@@ -593,7 +557,6 @@ fn x2_update_set_valid_arithmetic_still_works() {
 #[test]
 fn x3_plan_cache_plain_inserts_still_work() {
     // Guard: the round-10 fast path still works (no NULLs involved).
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x3_plain");
 
     let mut catalog = load_catalog();

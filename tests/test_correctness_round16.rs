@@ -53,43 +53,22 @@
 //! from the main FROM clause, aggregate NULL semantics, set-op NULL
 //! dedup, and LIMIT edge cases.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr16_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr16", tag))
     }
 }
 
@@ -209,7 +188,6 @@ fn setup_t(db: &str) {
 
 #[test]
 fn ae_right_join_is_null_predicate_not_pushed_below_join() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ae_right");
     setup_emp_dept("db16ae");
     let catalog = load_catalog();
@@ -251,7 +229,6 @@ fn ae_right_join_is_null_predicate_not_pushed_below_join() {
 
 #[test]
 fn ae2_left_and_full_join_single_side_predicates_not_pushed() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ae2_left_full");
     setup_emp_dept("db16ae2");
     let catalog = load_catalog();
@@ -308,7 +285,6 @@ fn ae2_left_and_full_join_single_side_predicates_not_pushed() {
 
 #[test]
 fn af_correlated_scalar_subquery_in_where_is_correlated() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("af_where");
     setup_emp_dept("db16af");
     let catalog = load_catalog();
@@ -348,7 +324,6 @@ fn af_correlated_scalar_subquery_in_where_is_correlated() {
 
 #[test]
 fn af2_correlated_scalar_in_select_list_and_having() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("af2_select_having");
     setup_emp_dept("db16af2");
     let catalog = load_catalog();
@@ -398,7 +373,6 @@ fn af2_correlated_scalar_in_select_list_and_having() {
 
 #[test]
 fn ag_later_cte_can_reference_earlier_cte() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ag_chain");
     setup_t("db16ag");
     let catalog = load_catalog();
@@ -431,7 +405,6 @@ fn ag_later_cte_can_reference_earlier_cte() {
 
 #[test]
 fn ag2_cte_visible_in_setop_branches_and_subqueries() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ag2_scope");
     setup_t("db16ag2");
     let catalog = load_catalog();
@@ -499,7 +472,6 @@ fn ag2_cte_visible_in_setop_branches_and_subqueries() {
 
 #[test]
 fn x1_preserved_side_pushdown_and_inner_join_still_work() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x1_guard");
     setup_emp_dept("db16x1");
     let catalog = load_catalog();
@@ -536,7 +508,6 @@ fn x1_preserved_side_pushdown_and_inner_join_still_work() {
 
 #[test]
 fn x2_uncorrelated_subqueries_and_correlated_exists_still_work() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x2_guard");
     setup_emp_dept("db16x2");
     let catalog = load_catalog();
@@ -582,7 +553,6 @@ fn x2_uncorrelated_subqueries_and_correlated_exists_still_work() {
 
 #[test]
 fn x3_basic_cte_and_aggregate_null_semantics_still_work() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x3_guard");
     setup_emp_dept("db16x3");
     setup_t("db16x3t");

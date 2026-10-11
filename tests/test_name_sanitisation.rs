@@ -7,10 +7,11 @@
 
 mod common;
 
+use common::load_catalog;
 use storage_manager::backend::name_validation::{
     validate_database_name, validate_index_name, validate_table_name,
 };
-use storage_manager::catalog::{Column, create_database, create_table, load_catalog};
+use storage_manager::catalog::{Column, create_database, create_table};
 use storage_manager::types::DataType;
 
 fn plain_col(name: &str) -> Column {
@@ -67,7 +68,7 @@ fn engine_rejects_traversal_table_names() {
             bad
         );
     }
-    assert!(!std::path::Path::new("database/base/escape.dat").exists());
+    assert!(!common::path("database/base/escape.dat").exists());
 }
 
 #[test]

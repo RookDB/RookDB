@@ -17,49 +17,29 @@
 //!      a varchar containing a single quote corrupts the row (values shift
 //!      / insert fails).
 
+mod common;
+
+use common::load_catalog;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use rook_ast::QueryPlan;
 
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 use storage_manager::types::value::DataValue;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr3_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr3", tag))
     }
 }
 
@@ -111,7 +91,6 @@ fn fmt_rows(tuples: &[Tuple]) -> Vec<Vec<String>> {
 
 #[test]
 fn fullscan_index_drops_null_key_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("fullscan");
 
     let mut catalog = load_catalog();
@@ -163,7 +142,6 @@ fn fullscan_index_drops_null_key_rows() {
 /// isolates the defect to the FullScan path, not the heap or insert path.
 #[test]
 fn seqscan_no_index_returns_all_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("noidx");
 
     let mut catalog = load_catalog();
@@ -192,7 +170,6 @@ fn seqscan_no_index_returns_all_rows() {
 
 #[test]
 fn position_returns_char_offset_for_multibyte() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("pos");
 
     let mut catalog = load_catalog();
@@ -235,7 +212,6 @@ fn position_returns_char_offset_for_multibyte() {
 
 #[test]
 fn select_star_join_duplicate_column_names() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("stardup");
 
     let mut catalog = load_catalog();
@@ -298,7 +274,6 @@ fn select_star_join_duplicate_column_names() {
 
 #[test]
 fn insert_select_roundtrip_quoted_string() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("insq");
 
     let mut catalog = load_catalog();
@@ -339,7 +314,7 @@ fn insert_select_roundtrip_quoted_string() {
     // Read back what actually landed in dst.
     use storage_manager::heap::HeapManager;
     use storage_manager::types::row::deserialize_nullable_row;
-    let path: PathBuf = "database/base/testdb/dst.dat".into();
+    let path: PathBuf = common::path("database/base/testdb/dst.dat");
     let heap = HeapManager::open(path).expect("open heap");
     let t = catalog.databases.get("testdb").unwrap().tables["dst"].clone();
     let schema: Vec<DataType> = t.columns.iter().map(|c| c.data_type.clone()).collect();

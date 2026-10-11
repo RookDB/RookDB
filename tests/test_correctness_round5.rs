@@ -27,8 +27,9 @@
 //!      abiding caller sees duplicated rows — the same family as round-2
 //!      bug B.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use rook_ast::QueryPlan;
 
@@ -43,40 +44,18 @@ use storage_manager::backend::executor::physical::operators::{
 };
 use storage_manager::backend::executor::physical::tuple::{ColumnInfo, Tuple};
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 use storage_manager::types::value::DataValue;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr5_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr5", tag))
     }
 }
 
@@ -122,7 +101,6 @@ fn fmt_rows(tuples: &[Tuple]) -> Vec<Vec<String>> {
 
 #[test]
 fn set_numeric_column_preserves_value() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("set_numeric");
 
     let mut catalog = load_catalog();
@@ -169,7 +147,6 @@ fn set_numeric_column_preserves_value() {
 /// typed path (it has a dedicated `ColumnValue::Int` arm).
 #[test]
 fn control_set_int_column_still_works() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("set_int_ctl");
 
     let mut catalog = load_catalog();
@@ -207,7 +184,6 @@ fn control_set_int_column_still_works() {
 
 #[test]
 fn insert_select_roundtrip_trailing_apostrophe() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ins_sel_quote");
 
     let mut catalog = load_catalog();
@@ -287,7 +263,6 @@ fn insert_select_roundtrip_trailing_apostrophe() {
 
 #[test]
 fn abs_min_int_returns_error_not_panic() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("abs_min");
 
     let mut catalog = load_catalog();
@@ -336,7 +311,6 @@ fn abs_min_int_returns_error_not_panic() {
 
 #[test]
 fn substring_negative_length_returns_error_not_panic() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("substr_neg");
 
     let mut catalog = load_catalog();
@@ -578,7 +552,6 @@ fn control_sort_next_batch_still_clears() {
 
 #[test]
 fn numeric_arithmetic_preserves_exact_precision() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("numeric_arithmetic");
 
     let mut catalog = load_catalog();
@@ -638,7 +611,6 @@ fn numeric_arithmetic_preserves_exact_precision() {
 
 #[test]
 fn distinct_aggregate_plans_and_executes_correctly() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("distinct_agg");
 
     let mut catalog = load_catalog();

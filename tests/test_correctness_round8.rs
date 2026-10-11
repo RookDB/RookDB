@@ -45,8 +45,9 @@
 //!      `"a,b"` fields split into extra columns. The single-row path in the
 //!      same file does all three correctly.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use rook_parser::parse_set_clause;
 use storage_manager::backend::error::RookResult;
@@ -57,7 +58,7 @@ use storage_manager::backend::executor::physical::operators::{
 use storage_manager::backend::executor::physical::tuple::{ColumnInfo, Tuple};
 use storage_manager::backend::system_table::insert_constraint_metadata;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::executor::load_csv::{insert_single_tuple, load_csv};
 use storage_manager::executor::update::update_by_pointers;
@@ -68,34 +69,12 @@ use storage_manager::types::functions::{DatePart, date_trunc_ceil, round};
 use storage_manager::types::row::serialize_nullable_typed_row;
 use storage_manager::types::value::{DataValue, NumericValue, OrderedF64};
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr8_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr8", tag))
     }
 }
 
@@ -614,7 +593,6 @@ fn g_ceil_timestamp_subsecond_is_not_a_boundary() {
 
 #[test]
 fn h_update_cascade_growing_varchar_preserves_row() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("h_cascade");
 
     let mut catalog = load_catalog();
@@ -637,7 +615,7 @@ fn h_update_cascade_growing_varchar_preserves_row() {
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "db8",
         "c",
         "FOREIGN KEY ON UPDATE CASCADE",
@@ -692,7 +670,6 @@ fn h_update_cascade_growing_varchar_preserves_row() {
 
 #[test]
 fn i_bulk_load_maps_null_literal_to_null() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("i_null");
 
     let mut catalog = load_catalog();
@@ -727,7 +704,6 @@ fn i_bulk_load_maps_null_literal_to_null() {
 
 #[test]
 fn i_bulk_load_enforces_unique() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("i_unique");
 
     let mut catalog = load_catalog();
@@ -761,7 +737,6 @@ fn i_bulk_load_enforces_unique() {
 
 #[test]
 fn i_bulk_load_handles_quoted_comma() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("i_quote");
 
     let mut catalog = load_catalog();

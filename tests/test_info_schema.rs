@@ -7,9 +7,10 @@
 
 mod common;
 
+use common::load_catalog;
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::types::DataType;
 
 /// One database with one two-column table.

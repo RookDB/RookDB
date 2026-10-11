@@ -15,21 +15,19 @@ fn test_fsm_page_allocation() {
 
     impl Drop for TestCleanup {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(format!("database/base/{}", self.0));
+            let _ = fs::remove_dir_all(common::path(format!("database/base/{}", self.0)));
 
             // Ensure no leftover file chunks
-            let _ = fs::remove_file(format!("database/base/{}/gd.csv", self.0));
+            let _ = fs::remove_file(common::path(format!("database/base/{}/gd.csv", self.0)));
         }
     }
 
     let _cleanup = TestCleanup("test_fsm_alloc");
 
-    let _ = fs::remove_dir_all("database/base/test_fsm_alloc");
+    let _ = fs::remove_dir_all(common::path("database/base/test_fsm_alloc"));
 
     // Use the provided load_csv with HeapManager for proper FSM integration
-    use storage_manager::catalog::{
-        create_database, create_table, init_catalog, load_catalog, save_catalog,
-    };
+    use storage_manager::catalog::{create_database, create_table, save_catalog};
 
     use storage_manager::catalog::types::{Column, Constraints};
 
@@ -38,9 +36,9 @@ fn test_fsm_page_allocation() {
     use storage_manager::types::DataType;
 
     // Setup
-    init_catalog();
+    common::init_catalog();
 
-    let mut catalog = load_catalog();
+    let mut catalog = common::load_catalog();
 
     // Create database
     let db_name = "test_fsm_alloc";
@@ -71,17 +69,15 @@ fn test_fsm_page_allocation() {
     // IMPORTANT: Create the heap file first
     use storage_manager::heap::HeapManager;
 
-    use std::path::PathBuf;
-
     // Note: HeapManager expects just "database/base/{db_name}/{table_name}.dat"
-    let heap_file_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, "pages_test"));
+    let heap_file_path = common::path(format!("database/base/{}/{}.dat", db_name, "pages_test"));
 
     let _ = fs::create_dir_all(heap_file_path.parent().unwrap());
 
     let _ = HeapManager::create(heap_file_path);
 
     // Create CSV fixture for this test (header + 500 rows)
-    let csv_path = format!("database/base/{}/gd.csv", db_name);
+    let csv_path = common::path(format!("database/base/{}/gd.csv", db_name));
 
     let mut csv_file = std::fs::File::create(&csv_path).expect("Failed to create test CSV");
 
@@ -92,9 +88,9 @@ fn test_fsm_page_allocation() {
     }
 
     // Load CSV - this should use HeapManager with FSM tree search
-    println!("Loading 500 rows from {}...", csv_path);
+    println!("Loading 500 rows from {}...", csv_path.display());
 
-    match load_csv(&catalog, db_name, "pages_test", &csv_path) {
+    match load_csv(&catalog, db_name, "pages_test", csv_path.to_str().unwrap()) {
         Ok(count) => {
             println!("Inserted {} tuples", count);
 
@@ -113,7 +109,7 @@ fn test_fsm_page_allocation() {
 
     use storage_manager::page;
 
-    let heap_file_path = format!("database/base/{}/{}.dat", db_name, "pages_test");
+    let heap_file_path = common::path(format!("database/base/{}/{}.dat", db_name, "pages_test"));
 
     match std::fs::OpenOptions::new().read(true).open(&heap_file_path) {
         Ok(mut file) => {

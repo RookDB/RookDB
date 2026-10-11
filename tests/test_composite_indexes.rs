@@ -8,12 +8,11 @@
 mod common;
 
 use common::TestWorkspace;
+use common::load_catalog;
 use rook_ast::QueryPlan;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
-use storage_manager::catalog::{
-    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{Catalog, Column, create_database, create_table, save_catalog};
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
 
@@ -259,7 +258,7 @@ fn composite_index_tracks_dml() {
     );
 
     // Direct index inspection: exactly the surviving combos resolve.
-    let idx_path = std::path::PathBuf::from("database/base/ddb/orders.idx_cr.idx");
+    let idx_path = common::path("database/base/ddb/orders.idx_cr.idx");
     let mut btree = storage_manager::backend::index::btree::BTree::open(idx_path).unwrap();
     btree.set_key_types(vec![DataType::Int, DataType::Varchar(30)]);
     for (c, r, should_exist) in [

@@ -39,8 +39,8 @@ use storage_manager::table::page_count;
 const DB: &str = "_testdb_delete";
 const TBL: &str = "_tbl_delete";
 
-fn table_path() -> String {
-    format!("database/base/{}/{}.dat", DB, TBL)
+fn table_path() -> std::path::PathBuf {
+    common::path(format!("database/base/{}/{}.dat", DB, TBL))
 }
 
 /// Build a minimal in-memory Catalog with one table (id:INT, name:TEXT).
@@ -73,10 +73,7 @@ fn make_catalog() -> Catalog {
             views: HashMap::new(),
         },
     );
-    Catalog::with_databases(
-        storage_manager::backend::engine::Engine::current_dir(),
-        databases,
-    )
+    Catalog::with_databases(common::engine(), databases)
 }
 
 /// Create the table file at its canonical location with `n` rows
@@ -84,9 +81,9 @@ fn make_catalog() -> Catalog {
 /// type-aware writer.
 fn setup_table(n: u32) {
     let path = table_path();
-    std::fs::create_dir_all(format!("database/base/{}", DB)).expect("create db dir");
+    std::fs::create_dir_all(common::path(format!("database/base/{}", DB))).expect("create db dir");
     let _ = remove_file(&path);
-    let _ = remove_file(format!("{}.fsm", path));
+    let _ = remove_file(format!("{}.fsm", path.display()));
 
     HeapManager::create(std::path::PathBuf::from(&path)).expect("HeapManager::create");
 

@@ -27,48 +27,27 @@
 //!   N. `get_tuple` / `delete_tuple` pin-leak on error paths (deleted/bad
 //!      slot) — resolved by ensuring frames are always unpinned on error paths.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use rook_ast::QueryPlan;
 
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr4_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr4", tag))
     }
 }
 
@@ -126,7 +105,6 @@ fn fmt_rows(tuples: &[Tuple]) -> Vec<Vec<String>> {
 // value finds it.
 #[test]
 fn vacuum_stale_btree_handle_loses_new_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("vacuum_stale");
 
     let mut catalog = load_catalog();
@@ -207,7 +185,6 @@ fn vacuum_stale_btree_handle_loses_new_rows() {
 // NULL-key row present the appended rows break the ordering.
 #[test]
 fn order_by_control_sorted_output_when_all_keys_non_null() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("orderby_ctl");
 
     let mut catalog = load_catalog();
@@ -253,7 +230,6 @@ fn order_by_control_sorted_output_when_all_keys_non_null() {
 
 #[test]
 fn order_by_with_null_key_row_violates_claimed_ordering() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("orderby_bug");
 
     let mut catalog = load_catalog();
@@ -305,7 +281,6 @@ fn order_by_with_null_key_row_violates_claimed_ordering() {
 /// is observable. This pins the expected output used by the bug probe.
 #[test]
 fn order_by_no_index_control_nulls_first() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("orderby_noindex");
 
     let mut catalog = load_catalog();
@@ -354,7 +329,6 @@ fn order_by_no_index_control_nulls_first() {
 // Display decorates VARCHAR with quotes, hence the quoted expectation.
 #[test]
 fn update_set_literal_with_arith_char_survives_end_to_end() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("update_mask");
 
     let mut catalog = load_catalog();
@@ -397,7 +371,6 @@ fn update_set_literal_with_arith_char_survives_end_to_end() {
 // Guards finding K's setup against pointer-drift false positives.
 #[test]
 fn control_delete_pointers_target_expected_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("del_ctl");
 
     let mut catalog = load_catalog();
@@ -451,10 +424,10 @@ fn control_delete_pointers_target_expected_rows() {
 // leaked pins, eventually exhausting the buffer pool.
 #[test]
 fn get_tuple_error_paths_do_not_leak_buffer_pool_pins() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("pin_leak");
 
-    let heap_path = _ws.path.join("base").join("test_pins.dat");
+    std::fs::create_dir_all(_ws.0.path().join("base")).unwrap();
+    let heap_path = _ws.0.path().join("base").join("test_pins.dat");
     let mut manager = storage_manager::backend::heap::heap_manager::HeapManager::create(heap_path)
         .expect("create heap");
 

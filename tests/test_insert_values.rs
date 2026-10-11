@@ -10,10 +10,9 @@
 mod common;
 
 use common::TestWorkspace;
+use common::load_catalog;
 use rook_ast::QueryPlan;
-use storage_manager::catalog::{
-    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{Catalog, Column, create_database, create_table, save_catalog};
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
 

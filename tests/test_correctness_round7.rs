@@ -29,44 +29,23 @@
 //!      reordering — plan_insert maps values positionally via the column
 //!      list; rows must land in the named columns.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use storage_manager::backend::system_table::insert_constraint_metadata;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr7_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr7", tag))
     }
 }
 
@@ -123,7 +102,6 @@ fn tuples_to_strings(
 
 #[test]
 fn set_operation_order_by_and_limit_apply_to_union_result() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("setop_orderby");
 
     let mut catalog = load_catalog();
@@ -182,7 +160,6 @@ fn set_operation_order_by_and_limit_apply_to_union_result() {
 
 #[test]
 fn on_delete_set_null_applies_to_unflushed_child_rows() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("fk_setnull");
 
     let mut catalog = load_catalog();
@@ -209,7 +186,7 @@ fn on_delete_set_null_applies_to_unflushed_child_rows() {
 
     // Declare the FK action in sys_constraints (same as test_constraints.rs).
     insert_constraint_metadata(
-        &storage_manager::backend::engine::Engine::current_dir(),
+        &common::engine(),
         "db7",
         "child",
         "FOREIGN KEY ON DELETE SET NULL",
@@ -278,7 +255,6 @@ fn on_delete_set_null_applies_to_unflushed_child_rows() {
 
 #[test]
 fn control_limit_offset_with_order_by_returns_window() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("limit_offset");
 
     let mut catalog = load_catalog();
@@ -315,7 +291,6 @@ fn control_limit_offset_with_order_by_returns_window() {
 
 #[test]
 fn control_insert_column_list_reorder() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("insert_reorder");
 
     let mut catalog = load_catalog();

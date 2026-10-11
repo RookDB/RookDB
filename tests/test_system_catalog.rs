@@ -7,12 +7,11 @@
 //!
 //! Run with: cargo test --test test_system_catalog -- --test-threads=1
 
+use common::{init_catalog, load_catalog};
 use std::path::Path;
 mod common;
 
-use storage_manager::catalog::{
-    create_database, create_table, init_catalog, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::types::DataType;
 
 #[test]
@@ -30,8 +29,8 @@ fn init_bootstraps_system_tables() {
         "indexes.dat",
         "views.dat",
     ] {
-        let path = format!("{}/{}", "database/system", file);
-        assert!(Path::new(&path).exists(), "{} should exist", path);
+        let path = common::path(format!("database/system/{}", file));
+        assert!(Path::new(&path).exists(), "{} should exist", path.display());
     }
 }
 
@@ -81,10 +80,10 @@ fn legacy_json_catalog_is_migrated_once() {
     // Simulate a pre-system-tables installation: the guard bootstrapped the
     // system tables on entry, so wipe them (and any stray JSON) to restore
     // the "only a catalog.json exists" state this test needs.
-    let _ = std::fs::remove_dir_all("database/system");
-    let _ = std::fs::remove_file("database/global/catalog.json");
+    let _ = std::fs::remove_dir_all(common::path("database/system"));
+    let _ = std::fs::remove_file(common::path("database/global/catalog.json"));
 
-    std::fs::create_dir_all("database/global").unwrap();
+    std::fs::create_dir_all(common::path("database/global")).unwrap();
     let json = r#"{
         "databases": {
             "old_db": {
@@ -100,14 +99,14 @@ fn legacy_json_catalog_is_migrated_once() {
             }
         }
     }"#;
-    std::fs::write("database/global/catalog.json", json).unwrap();
+    std::fs::write(common::path("database/global/catalog.json"), json).unwrap();
 
     init_catalog();
 
     // The JSON file is renamed out of the way and its content lives in the
     // system tables from now on.
     assert!(
-        Path::new(&format!("{}.migrated", "database/global/catalog.json")).exists(),
+        common::path("database/global/catalog.json.migrated").exists(),
         "catalog.json must be renamed to catalog.json.migrated"
     );
     let catalog = load_catalog();

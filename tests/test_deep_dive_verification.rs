@@ -2,43 +2,23 @@
 //! deep-dive of the codebase. These are NOT permanent tests — they probe
 //! specific suspected defects to confirm/refute them.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::{init_catalog, load_catalog};
 
 use rook_parser::parse_set_clause;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Catalog, Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, init_catalog, load_catalog};
+use storage_manager::catalog::{create_database, create_table};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_ddv_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("ddv", tag))
     }
 }
 
@@ -72,7 +52,6 @@ fn create_test_table(catalog: &mut Catalog, table: &str, cols: Vec<Column>) {
 
 #[test]
 fn verify_index_scan_null_eq() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("idxnull");
     init_catalog();
     let mut catalog = load_catalog();
@@ -116,7 +95,6 @@ fn verify_index_scan_null_eq() {
 
 #[test]
 fn verify_char_index_padding() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("charidx");
     init_catalog();
     let mut catalog = load_catalog();
@@ -163,7 +141,7 @@ fn read_text_column(catalog: &Catalog, table: &str, column: &str) -> Vec<String>
     use storage_manager::heap::HeapManager;
     use storage_manager::types::row::deserialize_nullable_row;
 
-    let path: std::path::PathBuf = format!("database/base/testdb/{}.dat", table).into();
+    let path: std::path::PathBuf = common::path(format!("database/base/testdb/{}.dat", table));
     let heap = HeapManager::open(path).expect("open heap");
     let t = catalog
         .databases
@@ -198,7 +176,6 @@ fn read_text_column(catalog: &Catalog, table: &str, column: &str) -> Vec<String>
 }
 
 fn run_text_arith(tag: &str, rows: &[&str]) -> Result<Vec<String>, String> {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new(tag);
     init_catalog();
     let mut catalog = load_catalog();
@@ -266,7 +243,6 @@ fn verify_update_text_arith_on_null() {
 
 #[test]
 fn verify_update_roundtrip_corruption() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("updrt");
     init_catalog();
     let mut catalog = load_catalog();
@@ -325,7 +301,7 @@ fn verify_update_roundtrip_corruption() {
     use storage_manager::types::row::deserialize_nullable_row;
     use storage_manager::types::value::DataValue;
 
-    let path: std::path::PathBuf = "database/base/testdb/r_t.dat".into();
+    let path: std::path::PathBuf = common::path("database/base/testdb/r_t.dat");
     let heap = HeapManager::open(path).expect("open heap");
     let t = &catalog.databases.get("testdb").unwrap().tables["r_t"];
     let schema: Vec<DataType> = t.columns.iter().map(|c| c.data_type.clone()).collect();
@@ -384,7 +360,6 @@ fn verify_update_roundtrip_corruption() {
 /// string literal → the column gets overwritten with its own name as text.
 #[test]
 fn verify_update_self_reference() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("updself");
     init_catalog();
     let mut catalog = load_catalog();
@@ -425,7 +400,6 @@ fn verify_update_self_reference() {
 
 #[test]
 fn verify_duplicate_keys_straddle_free() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("dupkeys");
     init_catalog();
     let mut catalog = load_catalog();

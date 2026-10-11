@@ -62,43 +62,22 @@
 //! ("Unknown scalar function: 'REPLACE'") — a missing feature rather than a
 //! correctness bug, unlike every finding above.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod common;
+
+use common::load_catalog;
 
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
+use storage_manager::catalog::{create_database, create_table, save_catalog};
 use storage_manager::executor::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-struct TestWorkspace {
-    prev_cwd: PathBuf,
-    path: PathBuf,
-}
+/// A workspace for one test; see `common::TestWorkspace`.
+struct TestWorkspace(#[allow(dead_code)] common::TestWorkspace);
 
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
-        let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!("database_ws_p{}_cr15_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(path.join("base")).expect("create workspace");
-        std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::catalog::init_catalog();
-        Self { prev_cwd, path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        Self(common::TestWorkspace::new("cr15", tag))
     }
 }
 
@@ -180,7 +159,6 @@ fn setup_emp(db: &str) {
 
 #[test]
 fn aa_scalar_subquery_in_where_comparison_works() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("aa_scalar");
     setup_emp("db15aa");
     let catalog = load_catalog();
@@ -212,7 +190,6 @@ fn aa_scalar_subquery_in_where_comparison_works() {
 
 #[test]
 fn aa2_scalar_subquery_positions_both_sides_and_between() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("aa2_scalar_pos");
     setup_emp("db15aa2");
     let catalog = load_catalog();
@@ -274,7 +251,6 @@ fn aa2_scalar_subquery_positions_both_sides_and_between() {
 
 #[test]
 fn ab_set_operation_mismatched_arity_is_rejected() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ab_arity");
     setup_emp("db15ab");
     let catalog = load_catalog();
@@ -309,7 +285,6 @@ fn ab_set_operation_mismatched_arity_is_rejected() {
 
 #[test]
 fn ac_positional_group_by_resolves_output_ordinal() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ac_groupby_pos");
     setup_emp("db15ac");
     let catalog = load_catalog();
@@ -353,7 +328,6 @@ fn ac_positional_group_by_resolves_output_ordinal() {
 
 #[test]
 fn ad_is_not_distinct_from_is_supported() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("ad_indf");
     setup_emp("db15ad");
     let catalog = load_catalog();
@@ -390,7 +364,6 @@ fn ad_is_not_distinct_from_is_supported() {
 /// round-15 probing) so predicate-evaluator regressions surface here.
 #[test]
 fn x1_predicate_three_valued_logic_stays_correct() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x1_tvl");
 
     let mut catalog = load_catalog();
@@ -441,7 +414,6 @@ fn x1_predicate_three_valued_logic_stays_correct() {
 /// fixes for AB cannot regress the matching-arity paths.
 #[test]
 fn x2_intersect_except_matching_arity_stay_correct() {
-    let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("x2_setops");
     setup_emp("db15x2");
     let catalog = load_catalog();
