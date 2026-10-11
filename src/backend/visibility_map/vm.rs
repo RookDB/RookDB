@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -53,23 +53,19 @@ fn byte_and_mask(page_id: u32) -> (u64, u8) {
 
 /// Per-table in-memory copy of the VM byte array.
 #[derive(Default, Clone)]
-struct VmCache {
+pub(crate) struct VmCache {
     bytes: Vec<u8>,
     dirty: bool,
 }
 
-struct VmRegistry {
+/// An engine's cached visibility maps.
+#[derive(Default)]
+pub(crate) struct VmRegistry {
     /// Cached maps, keyed by visibility-map file.
     tables: HashMap<PathBuf, VmCache>,
 }
 
 impl VmRegistry {
-    fn new() -> Self {
-        Self {
-            tables: HashMap::new(),
-        }
-    }
-
     /// Ensure the cache holds at least `needed_bytes` bytes.
     fn ensure_capacity(cache: &mut VmCache, needed_bytes: usize) {
         if cache.bytes.len() < needed_bytes {
@@ -82,10 +78,8 @@ impl VmRegistry {
     }
 }
 
-static VM_REGISTRY: OnceLock<Mutex<VmRegistry>> = OnceLock::new();
-
-fn registry() -> &'static Mutex<VmRegistry> {
-    VM_REGISTRY.get_or_init(|| Mutex::new(VmRegistry::new()))
+fn registry(engine: &crate::backend::engine::Engine) -> &Mutex<VmRegistry> {
+    &engine.visibility_maps
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -157,7 +151,7 @@ pub fn vm_set_page(
     let path = vm_path(engine, db_name, table_name);
 
     {
-        let mut reg = registry().lock().unwrap();
+        let mut reg = registry(engine).lock().unwrap();
         let cache = reg.get_mut(&vm_path(engine, db_name, table_name));
         VmRegistry::ensure_capacity(cache, byte_idx as usize + 1);
         cache.bytes[byte_idx as usize] |= mask;
@@ -185,7 +179,7 @@ pub fn vm_clear_page(
     let path = vm_path(engine, db_name, table_name);
 
     let already_clear = {
-        let mut reg = registry().lock().unwrap();
+        let mut reg = registry(engine).lock().unwrap();
         let cache = reg.get_mut(&vm_path(engine, db_name, table_name));
         VmRegistry::ensure_capacity(cache, byte_idx as usize + 1);
         let already = cache.bytes[byte_idx as usize] & mask == 0;
@@ -219,7 +213,7 @@ pub fn vm_is_visible(
 
     // Check in-memory cache first.
     {
-        let mut reg = registry().lock().unwrap();
+        let mut reg = registry(engine).lock().unwrap();
         let cache = reg.get_mut(&vm_path(engine, db_name, table_name));
         if (byte_idx as usize) < cache.bytes.len() {
             return cache.bytes[byte_idx as usize] & mask != 0;
@@ -255,7 +249,7 @@ pub fn vm_visible_count(
 /// Invalidate the in-memory cache for a table (e.g. after a table drop).
 pub fn vm_evict(engine: &crate::backend::engine::Engine, db_name: &str, table_name: &str) {
     let key = vm_path(engine, db_name, table_name);
-    if let Ok(mut reg) = registry().lock() {
+    if let Ok(mut reg) = registry(engine).lock() {
         reg.tables.remove(&key);
     }
 }

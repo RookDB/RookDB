@@ -35,6 +35,8 @@ pub struct Engine {
     pub(crate) heaps: Mutex<crate::backend::cache::HeapCacheMap>,
     /// Open indexes, kept between statements.
     pub(crate) btrees: Mutex<crate::backend::cache::BTreeCacheMap>,
+    /// Cached visibility maps of this directory's tables.
+    pub(crate) visibility_maps: Mutex<crate::backend::visibility_map::vm::VmRegistry>,
     /// When this engine's files were last fsynced.
     pub(crate) last_sync: Mutex<Option<std::time::Instant>>,
 }
@@ -58,6 +60,7 @@ impl Engine {
             index_discovery: Mutex::default(),
             heaps: Mutex::default(),
             btrees: Mutex::default(),
+            visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
                 crate::backend::planner::plan_cache::DEFAULT_CACHE_CAPACITY,
