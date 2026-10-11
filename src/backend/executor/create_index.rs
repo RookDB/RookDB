@@ -4,17 +4,14 @@
 //! from each tuple, and inserts it into a new B+ Tree index file at
 //! `database/base/{db}/{table}.{index_name}.idx`.
 //!
-//! Also stores index metadata in a companion `.idx.meta` file so that DML
-//! operations (INSERT, DELETE, UPDATE) can update the index automatically.
+//! The index is recorded in `sys_indexes` (name, columns, uniqueness). DML
+//! finds a table's indexes there, and takes each key column's position and
+//! type from the table's current schema, so INSERT, DELETE and UPDATE keep
+//! every index up to date.
 //!
 //! # Multiple indexes per table
 //!
-//! Each index gets its own file pair:
-//!   `database/base/{db}/{table}.{index_name}.idx`
-//!   `database/base/{db}/{table}.{index_name}.idx.meta`
-//!
-//! The `update_index_on_*` functions query `sys_indexes` to discover all
-//! indexes defined on a table and maintain each one individually.
+//! Each index has its own file, `database/base/{db}/{table}.{index_name}.idx`.
 
 use std::path::{Path, PathBuf};
 
@@ -35,13 +32,6 @@ pub(crate) fn index_file_path(db_name: &str, table_name: &str, index_name: &str)
     ))
 }
 
-/// Construct the `.idx.meta` file path for a named index.
-fn index_meta_file_path(db_name: &str, table_name: &str, index_name: &str) -> PathBuf {
-    PathBuf::from(crate::backend::paths::index_meta(
-        db_name, table_name, index_name,
-    ))
-}
-
 /// Construct the legacy `.idx` file path (single-index fallback).
 fn legacy_index_file_path(db_name: &str, table_name: &str) -> PathBuf {
     PathBuf::from(crate::backend::paths::legacy_index(db_name, table_name))
@@ -54,7 +44,9 @@ fn legacy_index_meta_file_path(db_name: &str, table_name: &str) -> PathBuf {
     ))
 }
 
-/// Metadata about an index, stored alongside the `.idx` file.
+/// The key layout of an index: its columns, their positions in the row and
+/// their types. Read from a legacy index's `.idx.meta` file, or built from
+/// `sys_indexes` and the table schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexMeta {
     /// The name of the indexed column (for human reference).
@@ -249,9 +241,7 @@ pub fn legacy_index_exists(db_name: &str, table_name: &str) -> bool {
 
 /// Build a B+ Tree index on the specified column(s) of a table.
 ///
-/// Each index gets its own file pair:
-///   `database/base/{db}/{table}.{index_name}.idx`
-///   `database/base/{db}/{table}.{index_name}.idx.meta`
+/// The index file is `database/base/{db}/{table}.{index_name}.idx`.
 ///
 /// Multiple columns form a composite key: entries whose key is the
 /// concatenation of the column values in the given order.
@@ -287,7 +277,7 @@ pub fn create_index(
 /// Build a B+ Tree index with explicit constraint flags.
 ///
 /// Identical to [`create_index`] except that the index is registered as
-/// unique and/or primary in both `.idx.meta` and `sys_indexes`. The unique
+/// unique and/or primary in `sys_indexes`. The unique
 /// flag is what lets the UNIQUE checker (`constraint::validation`) use the
 /// index as its fast path instead of falling back to an O(n) heap scan per
 /// row.
@@ -356,7 +346,6 @@ pub fn create_index_with_flags(
     // 4. Build paths — use index-name-based files
     let heap_path = PathBuf::from(crate::backend::paths::heap(db_name, table_name));
     let idx_path = index_file_path(db_name, table_name, &resolved_name);
-    let meta_path = index_meta_file_path(db_name, table_name, &resolved_name);
 
     if !heap_path.exists() {
         return Err(format!("Heap file not found: {:?}", heap_path).into());
@@ -422,23 +411,7 @@ pub fn create_index_with_flags(
         .sync()
         .map_err(|e| format!("Failed to sync index: {}", e))?;
 
-    // 9. Write index metadata file for DML integration
-    let meta = IndexMeta {
-        column_name: indexed_cols[0].name.clone(),
-        column_idx: indexed_idxs[0],
-        key_type: format!("{}", indexed_cols[0].data_type),
-        column_names: indexed_cols.iter().map(|c| c.name.clone()).collect(),
-        column_idxs: indexed_idxs.clone(),
-        key_types: key_types.iter().map(|t| format!("{}", t)).collect(),
-        is_unique,
-        is_primary,
-    };
-    let meta_json = serde_json::to_string_pretty(&meta)
-        .map_err(|e| format!("Failed to serialize index metadata: {}", e))?;
-    std::fs::write(&meta_path, meta_json)
-        .map_err(|e| format!("Failed to write index metadata: {}", e))?;
-
-    // 10. Save index metadata to sys_indexes system table (comma-separated
+    // 9. Save index metadata to sys_indexes system table (comma-separated
     //     column list for composite indexes)
     if let Err(e) = crate::backend::system_table::insert_index_metadata(
         db_name,
@@ -618,29 +591,51 @@ pub fn ensure_fk_parent_indexes(catalog: &Catalog, db_name: &str, table_name: &s
 // ── DML Index Update Helpers ──────────────────────────────────────────────────
 
 /// For a given table, discover all index files (named and legacy) and return
-/// `Vec<(meta_path, idx_path, IndexMeta)>`.
-fn discover_indexes_for_table(
-    db_name: &str,
-    table_name: &str,
-) -> Vec<(PathBuf, PathBuf, IndexMeta)> {
+/// `Vec<(idx_path, IndexMeta)>`.
+fn discover_indexes_for_table(db_name: &str, table_name: &str) -> Vec<(PathBuf, IndexMeta)> {
     let mut discovered = Vec::new();
 
-    // 1. Try loading all named indexes from sys_indexes
-    if let Ok(indexes) = load_table_indexes(db_name, table_name) {
-        for (idx_name, _col_name, _is_unique) in &indexes {
-            let idx_path = index_file_path(db_name, table_name, idx_name);
-            let meta_path = index_meta_file_path(db_name, table_name, idx_name);
-            if idx_path.exists() && meta_path.exists() {
-                if let Ok(meta) = load_index_meta(&meta_path) {
-                    discovered.push((meta_path, idx_path, meta));
-                } else {
-                    log::warn!(
-                        "[IndexDiscover] Failed to parse metadata for named index '{}'",
-                        idx_name
-                    );
-                }
-            }
+    // 1. Named indexes: sys_indexes gives the columns, the table schema
+    //    gives their positions and types.
+    let schema = crate::backend::constraint::loaders::load_table_schema(db_name, table_name)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    for (idx_name, columns, is_unique) in
+        load_table_indexes_multi(db_name, table_name).unwrap_or_default()
+    {
+        let idx_path = index_file_path(db_name, table_name, &idx_name);
+        if !idx_path.exists() {
+            continue;
         }
+        let positions: Option<Vec<usize>> = columns
+            .iter()
+            .map(|c| {
+                schema
+                    .iter()
+                    .position(|(name, _)| name.eq_ignore_ascii_case(c))
+            })
+            .collect();
+        let Some(positions) = positions else {
+            log::warn!(
+                "[IndexDiscover] Index '{}' names a column {:?} not in '{}'",
+                idx_name,
+                columns,
+                table_name
+            );
+            continue;
+        };
+        let meta = IndexMeta {
+            column_name: columns[0].clone(),
+            column_idx: positions[0],
+            key_type: schema[positions[0]].1.to_string(),
+            key_types: positions.iter().map(|&i| schema[i].1.to_string()).collect(),
+            column_names: columns,
+            column_idxs: positions,
+            is_unique,
+            is_primary: false,
+        };
+        discovered.push((idx_path, meta));
     }
 
     // 2. Fallback: check for legacy single-index file
@@ -648,7 +643,7 @@ fn discover_indexes_for_table(
     let legacy_meta = legacy_index_meta_file_path(db_name, table_name);
     if legacy_idx.exists() && legacy_meta.exists() {
         // Only add if not already covered by a named index (avoid duplicates)
-        if !discovered.iter().any(|(_, p, _)| *p == legacy_idx)
+        if !discovered.iter().any(|(p, _)| *p == legacy_idx)
             && let Ok(meta) = load_index_meta(&legacy_meta)
         {
             log::info!(
@@ -657,14 +652,14 @@ fn discover_indexes_for_table(
                 table_name,
                 legacy_idx
             );
-            discovered.push((legacy_meta, legacy_idx, meta));
+            discovered.push((legacy_idx, meta));
         }
     }
 
     discovered
 }
 
-type IndexList = std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>>;
+type IndexList = std::sync::Arc<Vec<(PathBuf, IndexMeta)>>;
 type DiscoveryCacheMap = std::sync::Mutex<std::collections::HashMap<(String, String), IndexList>>;
 
 /// Memoised [`discover_indexes_for_table`] — one sys_indexes scan per
@@ -675,10 +670,7 @@ fn discovery_cache() -> &'static DiscoveryCacheMap {
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-fn discover_cached(
-    db_name: &str,
-    table_name: &str,
-) -> std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>> {
+fn discover_cached(db_name: &str, table_name: &str) -> IndexList {
     let key = (db_name.to_string(), table_name.to_string());
     if let Ok(map) = discovery_cache().lock()
         && let Some(hit) = map.get(&key)
@@ -732,7 +724,7 @@ pub fn update_index_on_insert(
         return Ok(()); // No indexes to update
     }
 
-    for (_meta_path, idx_path, meta) in indexes.iter() {
+    for (idx_path, meta) in indexes.iter() {
         // Build the (possibly composite) key; rows where ANY key component
         // is NULL are not indexed.
         let Some(key_values) = build_key_from_decoded(meta, values) else {
@@ -839,7 +831,7 @@ pub fn update_index_on_delete(
 
     let mut any_updated = false;
 
-    for (_meta_path, idx_path, meta) in indexes.iter() {
+    for (idx_path, meta) in indexes.iter() {
         // Build the (possibly composite) key from the deleted row. Rows with
         // ANY NULL key component were never indexed.
         let Some(key_values) = build_key_from_decoded(meta, &decoded) else {
@@ -933,7 +925,7 @@ pub fn update_index_on_update(
     let new_decoded = crate::types::deserialize_nullable_row(&schema_types, new_tuple_data)
         .map_err(|e| format!("Failed to deserialize new tuple: {}", e))?;
 
-    for (_meta_path, idx_path, meta) in indexes.iter() {
+    for (idx_path, meta) in indexes.iter() {
         let old_key = build_key_from_decoded(meta, &old_decoded);
         let new_key = build_key_from_decoded(meta, &new_decoded);
 

@@ -92,6 +92,9 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
         }
     }
 
+    // Index rows only live in sys_indexes: read them before it is rebuilt.
+    let saved_indexes = load_saved_indexes();
+
     // Delete existing system table files to start fresh
     for name in &[
         "databases",
@@ -113,7 +116,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     }
     // Create fresh files and populate
     create_system_table_files();
-    populate_system_tables(catalog, fk_rows);
+    populate_system_tables(catalog, fk_rows, Some(saved_indexes));
     // System tables rewritten wholesale: table_ids may have changed and
     // constraint/index rows were rebuilt — forget all memoised metadata.
     crate::backend::cache::invalidate_metadata();
@@ -125,7 +128,14 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
 ///
 /// Writes databases, tables, columns, constraints, and (where possible)
 /// indexes to their respective heap files.
-pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec<Option<String>>>) {
+///
+/// `indexes` are the `sys_indexes` rows to write back. `None` (the one-time
+/// migration from `catalog.json`) recovers them from `.idx.meta` files.
+pub(crate) fn populate_system_tables(
+    catalog: &Catalog,
+    mut constr_rows: Vec<Vec<Option<String>>>,
+    indexes: Option<Vec<SavedIndex>>,
+) {
     // Sequence counters for auto-generated IDs
     let mut next_db_id = 1i32;
     let mut next_table_id = 1i32;
@@ -347,7 +357,10 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
         log::error!("[SystemCatalog] Failed to write sys_views: {}", e);
     }
 
-    populate_indexes_from_meta(&table_name_to_id);
+    match indexes {
+        Some(saved) => write_saved_indexes(&saved, &db_rows, &tbl_rows),
+        None => populate_indexes_from_meta(&table_name_to_id),
+    }
 
     let view_count: usize = catalog.databases.values().map(|d| d.views.len()).sum();
     log::info!(
@@ -365,7 +378,121 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
     );
 }
 
+/// One `sys_indexes` row, identified by database and table name so it
+/// survives the table ids changing when the system tables are rebuilt.
+pub(crate) struct SavedIndex {
+    db: String,
+    table: String,
+    name: String,
+    is_unique: bool,
+    is_primary: bool,
+    columns: String,
+}
+
+/// Read every `sys_indexes` row with its table's database and name.
+fn load_saved_indexes() -> Vec<SavedIndex> {
+    use crate::types::DataValue;
+    let text = |v: &Option<DataValue>| match v {
+        Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let int = |v: &Option<DataValue>| match v {
+        Some(DataValue::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let flag = |v: &Option<DataValue>| matches!(v, Some(DataValue::Bool(true)));
+
+    // SYS_DATABASES_SCHEMA: db_id, name
+    let databases: std::collections::HashMap<i32, String> =
+        scan_system_table("databases", SYS_DATABASES_SCHEMA)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| Some((int(r.first()?)?, text(r.get(1)?)?)))
+            .collect();
+    // SYS_TABLES_SCHEMA: table_id, db_id, name, file_path
+    let tables: std::collections::HashMap<i32, (String, String)> =
+        scan_system_table("tables", SYS_TABLES_SCHEMA)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| {
+                let db = databases.get(&int(r.get(1)?)?)?.clone();
+                Some((int(r.first()?)?, (db, text(r.get(2)?)?)))
+            })
+            .collect();
+    // SYS_INDEXES_SCHEMA: index_id, table_id, name, is_unique, is_primary, columns
+    scan_system_table("indexes", SYS_INDEXES_SCHEMA)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| {
+            let (db, table) = tables.get(&int(r.get(1)?)?)?.clone();
+            Some(SavedIndex {
+                db,
+                table,
+                name: text(r.get(2)?)?,
+                is_unique: flag(r.get(3)?),
+                is_primary: flag(r.get(4)?),
+                columns: text(r.get(5)?)?,
+            })
+        })
+        .collect()
+}
+
+/// Write `saved` back to `sys_indexes` against the new table ids, dropping
+/// rows whose table or index file no longer exists.
+fn write_saved_indexes(
+    saved: &[SavedIndex],
+    db_rows: &[Vec<Option<String>>],
+    tbl_rows: &[Vec<Option<String>>],
+) {
+    // db_rows: [db_id, name]; tbl_rows: [table_id, db_id, name, file_path]
+    let db_names: std::collections::HashMap<&str, &str> = db_rows
+        .iter()
+        .filter_map(|r| Some((r[0].as_deref()?, r[1].as_deref()?)))
+        .collect();
+    let table_ids: std::collections::HashMap<(&str, &str), &str> = tbl_rows
+        .iter()
+        .filter_map(|r| {
+            let db = *db_names.get(r[1].as_deref()?)?;
+            Some(((db, r[2].as_deref()?), r[0].as_deref()?))
+        })
+        .collect();
+
+    let idx_rows: Vec<Vec<Option<String>>> = saved
+        .iter()
+        .filter(|ix| {
+            std::path::Path::new(&crate::backend::paths::index(&ix.db, &ix.table, &ix.name))
+                .exists()
+                || std::path::Path::new(&crate::backend::paths::legacy_index(&ix.db, &ix.table))
+                    .exists()
+        })
+        .filter_map(|ix| {
+            let table_id = table_ids.get(&(ix.db.as_str(), ix.table.as_str()))?;
+            Some((table_id.to_string(), ix))
+        })
+        .enumerate()
+        .map(|(i, (table_id, ix))| {
+            vec![
+                Some((i + 1).to_string()),
+                Some(table_id),
+                Some(ix.name.clone()),
+                Some(ix.is_unique.to_string()),
+                Some(ix.is_primary.to_string()),
+                Some(ix.columns.clone()),
+            ]
+        })
+        .collect();
+
+    if !idx_rows.is_empty()
+        && let Err(e) = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &idx_rows)
+    {
+        log::error!("[SystemCatalog] Failed to write sys_indexes: {}", e);
+    }
+}
+
 /// Scan `database/base/**/*.idx.meta` files and populate `sys_indexes`.
+///
+/// Only used when migrating from `catalog.json`; afterwards `sys_indexes`
+/// is the only record of which indexes exist.
 ///
 /// `table_name_to_id` maps table names to their assigned table IDs (from
 /// `sys_tables`) so the index rows can reference the correct table.

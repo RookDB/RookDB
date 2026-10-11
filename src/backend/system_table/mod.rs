@@ -142,7 +142,7 @@ pub fn bootstrap_system_catalog() -> bool {
     create_system_table_files();
 
     // Populate system tables from the in-memory catalog.
-    populate_system_tables(&catalog, Vec::new());
+    populate_system_tables(&catalog, Vec::new(), None);
 
     // Rename catalog.json so we don't migrate again.
     let migrated_str = format!("{}.migrated", crate::layout::CATALOG_FILE);

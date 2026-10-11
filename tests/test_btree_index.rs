@@ -100,9 +100,58 @@ fn create_index_builds_persistent_files() {
         Path::new("database/base/idx_db/staff.by_salary.idx").exists(),
         "index pages file must exist"
     );
+    // The index is described by sys_indexes alone; no metadata sidecar.
+    assert!(!Path::new("database/base/idx_db/staff.by_salary.idx.meta").exists());
+    let indexes =
+        storage_manager::executor::create_index::load_table_indexes_multi("idx_db", "staff")
+            .unwrap();
     assert!(
-        Path::new("database/base/idx_db/staff.by_salary.idx.meta").exists(),
-        "index metadata file must exist"
+        indexes
+            .iter()
+            .any(|(name, cols, _)| name == "by_salary" && cols == &["salary".to_string()]),
+        "sys_indexes must record the index: {:?}",
+        indexes
+    );
+}
+
+#[test]
+fn index_survives_a_catalog_save_and_stays_maintained() {
+    let _ws = common::TestWorkspace::new("btree", "resave");
+    let catalog = setup_table("idx_db");
+    create_index(
+        &catalog,
+        "idx_db",
+        "staff",
+        "by_salary",
+        &[String::from("salary")],
+    )
+    .expect("create_index");
+
+    // A full save rewrites every system table, sys_indexes included.
+    storage_manager::catalog::save_catalog(&load_catalog()).unwrap();
+    let catalog = load_catalog();
+    let indexes =
+        storage_manager::executor::create_index::load_table_indexes_multi("idx_db", "staff")
+            .unwrap();
+    assert_eq!(indexes.len(), 1, "{:?}", indexes);
+
+    // A row inserted after the save reaches the index.
+    assert!(
+        storage_manager::insert_single_tuple(&catalog, "idx_db", "staff", &["9", "Ida", "77777"])
+            .unwrap()
+    );
+    storage_manager::backend::cache::checkpoint();
+    let mut btree = storage_manager::backend::index::btree::BTree::open(std::path::PathBuf::from(
+        "database/base/idx_db/staff.by_salary.idx",
+    ))
+    .unwrap();
+    btree.set_key_type(DataType::Int);
+    assert!(
+        btree
+            .search(&storage_manager::types::DataValue::Int(77777))
+            .unwrap()
+            .is_some(),
+        "the new row must be in the index"
     );
 }
 
