@@ -177,6 +177,20 @@ impl Page {
         Ok(slot_id)
     }
 
+    /// Whether compaction would free space: the page has a dead slot, or
+    /// its data area holds bytes no live row uses (left behind when a
+    /// reused slot or a shrunken row gave up its old space).
+    pub fn has_garbage(&self) -> bool {
+        let mut live_rows = 0u32;
+        let mut live_bytes = 0u32;
+        for (_, t) in self.tuples() {
+            live_rows += 1;
+            live_bytes += t.len() as u32;
+        }
+        live_rows < self.slot_count()
+            || (PAGE_SIZE as u32).saturating_sub(self.upper()) > live_bytes
+    }
+
     /// Rewrite the page with only its live rows, packed and renumbered from
     /// slot 0 in their current order.
     pub fn compact(&mut self) {
@@ -421,6 +435,19 @@ mod tests {
         assert_eq!(page.tuple(0), Some(&b"hi"[..]));
         page.mark_deleted(0);
         assert!(!page.overwrite(0, b"x"));
+    }
+
+    #[test]
+    fn test_has_garbage_after_slot_reuse() {
+        let mut page = page_with(&[b"one", b"two"]);
+        assert!(!page.has_garbage());
+        page.mark_deleted(0);
+        assert!(page.has_garbage());
+        // The reused slot hides the deleted row, but its bytes remain.
+        page.insert(b"new").unwrap();
+        assert!(page.has_garbage());
+        page.compact();
+        assert!(!page.has_garbage());
     }
 
     #[test]

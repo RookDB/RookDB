@@ -14,7 +14,7 @@ use crate::backend::log::operation_log::{current_timestamp_iso, log_compaction, 
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::backend::visibility_map::{vm_clear_page, vm_is_visible, vm_set_page};
 use crate::catalog::types::Catalog;
-use crate::page::{Page, SLOT_FLAG_DELETED};
+use crate::page::Page;
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -100,7 +100,8 @@ fn compaction_log_details(pages_compacted: Option<usize>, error: Option<&str>) -
 // Compaction
 // ---------------------------------------------------------------------------
 
-/// Physically remove all soft-deleted slots from every data page in a table.
+/// Physically remove dead slots and the bytes of replaced rows from every
+/// data page in a table.
 ///
 /// Call this periodically (e.g. via menu option) rather than on every DELETE.
 /// Returns the number of pages that were actually rewritten.
@@ -129,12 +130,7 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
             let mut page = Page::new();
             file.read_page(&mut page, page_num)?;
 
-            let has_deleted = (0..page.slot_count()).any(|i| {
-                page.slot(i)
-                    .is_some_and(|s| s.flags & SLOT_FLAG_DELETED != 0)
-            });
-
-            if has_deleted {
+            if page.has_garbage() {
                 page.compact();
 
                 file.write_page(&page, page_num)?;

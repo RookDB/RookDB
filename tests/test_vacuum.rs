@@ -289,3 +289,42 @@ fn vacuum_is_safe_on_clean_and_missing_tables() {
     assert!(vacuum_table(&catalog, "cdb", "nope").is_err());
     assert!(vacuum_table(&catalog, "ghost_db", "events").is_err());
 }
+
+#[test]
+fn vacuum_reclaims_space_left_by_reused_slots() {
+    let _ws = common::TestWorkspace::new("vacuum", "reused");
+    let catalog = setup("rdb");
+
+    for i in 0..10 {
+        insert_single_tuple(&catalog, "rdb", "events", &[&i.to_string(), "old_row"]).unwrap();
+    }
+    assert_eq!(
+        exec_delete(&catalog, "rdb", "events", "id < 3").deleted_count,
+        3
+    );
+    // These inserts take over the three deleted slots, so no slot is left
+    // flagged as deleted, but the deleted rows' bytes are still on the page.
+    for i in 10..13 {
+        insert_single_tuple(&catalog, "rdb", "events", &[&i.to_string(), "new_row"]).unwrap();
+    }
+
+    let path = std::path::PathBuf::from("database/base/rdb/events.dat");
+    let free_before = storage_manager::statistics::collect_heap_statistics(&path)
+        .unwrap()
+        .total_free_bytes;
+
+    let stats = vacuum_table(&catalog, "rdb", "events").expect("vacuum failed");
+    assert_eq!(
+        stats.pages_compacted, 1,
+        "the page with stale bytes must be compacted"
+    );
+
+    let after = storage_manager::statistics::collect_heap_statistics(&path).unwrap();
+    assert!(
+        after.total_free_bytes > free_before,
+        "free space must grow: {} -> {}",
+        free_before,
+        after.total_free_bytes
+    );
+    assert_eq!(after.total_tuple_count, 10);
+}

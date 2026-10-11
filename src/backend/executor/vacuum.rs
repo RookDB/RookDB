@@ -4,12 +4,10 @@
 //! a VACUUM pass physically rewrites the affected pages. This module wires
 //! together the existing building blocks into one safe, logged operation:
 //!
-//! 1. **Cache invalidation** — compaction below rewrites pages via direct
-//!    I/O, so the shared buffer pool's entry for this file is dropped first
-//!    to prevent stale reads.
-//! 2. **Compaction** — `compaction_table()` rewrites every page containing
-//!    dead slots (renumbering surviving slots), then rebuilds the FSM and
-//!    resets `dead_tuple_count`.
+//! 1. **Counter snapshot** — `dead_tuple_count` is read for the report.
+//! 2. **Compaction** — `compaction_table()` rewrites every page holding
+//!    dead slots or bytes of replaced rows (renumbering surviving slots),
+//!    then rebuilds the FSM and resets `dead_tuple_count`.
 //! 3. **Index rebuild** — slot renumbering invalidates the `(page_id,
 //!    slot_id)` row pointers stored in B+Tree leaves. Every index on the
 //!    table is therefore bulk-rebuilt from the post-compaction heap.
