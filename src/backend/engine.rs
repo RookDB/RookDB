@@ -55,6 +55,9 @@ pub struct Engine {
     /// Scans decode every column, not only the ones a query reads. For
     /// checking that the read-column analysis changes no result.
     decode_all_columns: std::sync::atomic::AtomicBool,
+    /// The optimizer keeps joins in written order. For checking that join
+    /// ordering changes no result.
+    keep_join_order: std::sync::atomic::AtomicBool,
     /// Bytes of rows an `ORDER BY` holds in memory before it sorts on disk.
     sort_memory_budget: std::sync::atomic::AtomicUsize,
     /// Most sorted runs an `ORDER BY` on disk merges at a time.
@@ -81,6 +84,7 @@ impl Engine {
             heaps: Mutex::default(),
             btrees: Mutex::default(),
             decode_all_columns: std::sync::atomic::AtomicBool::new(false),
+            keep_join_order: std::sync::atomic::AtomicBool::new(false),
             sort_memory_budget: std::sync::atomic::AtomicUsize::new(
                 crate::backend::executor::physical::external_sort::DEFAULT_SORT_MEMORY_BYTES,
             ),
@@ -114,6 +118,22 @@ impl Engine {
     /// See [`Engine::set_decode_all_columns`].
     pub(crate) fn decodes_all_columns(&self) -> bool {
         self.decode_all_columns
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Make the optimizer join tables in the order each query writes them
+    /// instead of reordering inner joins by estimated size. Results are the
+    /// same up to row order; this exists to check that they are. Forgets
+    /// cached plans, which were made under the old setting.
+    pub fn set_keep_join_order(&self, keep: bool) {
+        self.keep_join_order
+            .store(keep, std::sync::atomic::Ordering::Relaxed);
+        lock(&self.plans).clear();
+    }
+
+    /// See [`Engine::set_keep_join_order`].
+    pub(crate) fn keeps_join_order(&self) -> bool {
+        self.keep_join_order
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 

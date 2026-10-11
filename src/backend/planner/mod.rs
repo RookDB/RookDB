@@ -116,6 +116,19 @@ fn collect_joined_tables(
     }
 }
 
+/// The optimizer for `plan`: with the statistics of the tables it joins,
+/// and the engine's join-order setting.
+fn optimizer_for(db_name: &str, catalog: &Catalog, plan: &LogicalPlan) -> optimizer::Optimizer {
+    let table_stats = load_table_statistics(db_name, catalog, plan);
+    let mut optimizer = if table_stats.is_empty() {
+        optimizer::Optimizer::new()
+    } else {
+        optimizer::Optimizer::with_statistics(table_stats)
+    };
+    optimizer.skip_join_ordering = catalog.engine().keeps_join_order();
+    optimizer
+}
+
 /// Plan an INSERT statement into a LogicalPlan.
 ///
 /// Both forms route through the same pipeline:
@@ -251,13 +264,7 @@ pub fn plan_query(
     match query {
         QueryPlan::Select(select) => {
             let plan = plan_select(select, catalog, db_name)?;
-            let table_stats = load_table_statistics(db_name, catalog, &plan);
-            let optimizer = if table_stats.is_empty() {
-                optimizer::Optimizer::new()
-            } else {
-                optimizer::Optimizer::with_statistics(table_stats)
-            };
-            Ok(optimizer.optimize(plan))
+            Ok(optimizer_for(db_name, catalog, &plan).optimize(plan))
         }
         QueryPlan::SetOperation(set_op) => {
             let left = plan_select(&set_op.left, catalog, db_name)?;
@@ -287,13 +294,7 @@ pub fn plan_query(
                     child: Box::new(plan),
                 });
             }
-            let table_stats = load_table_statistics(db_name, catalog, &plan);
-            let optimizer = if table_stats.is_empty() {
-                optimizer::Optimizer::new()
-            } else {
-                optimizer::Optimizer::with_statistics(table_stats)
-            };
-            Ok(optimizer.optimize(plan))
+            Ok(optimizer_for(db_name, catalog, &plan).optimize(plan))
         }
         QueryPlan::Insert(ins) => plan_insert(ins, catalog, db_name),
         QueryPlan::CreateTable(_)
