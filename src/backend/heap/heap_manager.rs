@@ -11,14 +11,13 @@
 //! - Encapsulates FSM complexity; FSM-driven inserts spread load across pages
 //! - Header persistence survives crashes; FSM fork is a hint (can be rebuilt)
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::MutexGuard;
+use std::sync::{Arc, MutexGuard};
 
 use crate::backend::buffer_manager::buffer_pool::BufferPool;
 use crate::backend::buffer_manager::shared_pool::{self, SharedPool};
-use crate::backend::disk::read_page;
 use crate::backend::fsm::FSM;
 use crate::backend::instrumentation::HEAP_METRICS;
 use crate::backend::page::{
@@ -68,48 +67,46 @@ fn write_header_via_pool(pool: &mut BufferPool, header: &HeaderMetadata) -> io::
 /// Memory-efficient sequential scan iterator.
 /// Lazily loads pages as needed, yielding (page_id, slot_id, tuple_data).
 ///
-/// Uses direct disk I/O (not the buffer pool) since it's a read-only
-/// sequential scan that would pollute the cache.
+/// Each page is copied out of the shared buffer pool once and its tuples are
+/// served from that copy, so no pool lock or pin is held between calls.
 pub struct HeapScanIterator {
-    file_path: PathBuf,
-    file: Option<File>,
+    pool: SharedPool,
     current_page: u32,
     current_slot: u32,
     total_pages: u32,
-    cached_page: Option<(u32, Page)>, // (page_id, page_data)
+    /// Copy of the page being scanned, reused from page to page.
+    page: Page,
+    /// Page id held in `page`, if any.
+    loaded_page: Option<u32>,
 }
 
 impl HeapScanIterator {
     /// Create a new scan iterator starting at page 1 (Page 0 is header).
-    fn new(file_path: PathBuf, total_pages: u32) -> Self {
+    fn new(pool: SharedPool, total_pages: u32) -> Self {
         log::trace!(
             "[HeapScanIterator::new] Created iterator for {} pages",
             total_pages
         );
         Self {
-            file_path,
-            file: None,
+            pool,
             current_page: 1, // Skip header page
             current_slot: 0,
             total_pages,
-            cached_page: None,
+            page: Page::new(),
+            loaded_page: None,
         }
     }
 
-    /// Load a specific page into cache.
+    /// Copy a page out of the buffer pool.
     fn load_page(&mut self, page_id: u32) -> io::Result<()> {
         log::trace!("[HeapScanIterator::load_page] Loading page {}", page_id);
 
-        if self.file.is_none() {
-            let f = OpenOptions::new().read(true).open(&self.file_path)?;
-            self.file = Some(f);
-        }
-        let file = self.file.as_mut().unwrap();
-
-        let mut page = Page::new();
-        read_page(file, &mut page, page_id)?;
-
-        self.cached_page = Some((page_id, page));
+        self.loaded_page = None;
+        let mut pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
+        let frame_id = pool.fetch_page(page_id)?;
+        self.page.data.copy_from_slice(&pool.get_page(frame_id).data);
+        pool.unpin(frame_id, false);
+        self.loaded_page = Some(page_id);
         Ok(())
     }
 }
@@ -131,17 +128,16 @@ impl Iterator for HeapScanIterator {
             // report the error ONCE and advance to the next page. Returning
             // without advancing would re-enter this branch forever, hanging
             // any consumer that skips errors (e.g. `filter_map(|r| r.ok())`).
-            if (self.cached_page.is_none()
-                || self.cached_page.as_ref().unwrap().0 != self.current_page)
+            if self.loaded_page != Some(self.current_page)
                 && let Err(e) = self.load_page(self.current_page)
             {
                 self.current_page += 1;
                 self.current_slot = 0;
-                self.cached_page = None;
                 return Some(Err(e));
             }
 
-            let (page_id, page) = self.cached_page.as_ref().unwrap();
+            let page_id = self.current_page;
+            let page = &self.page;
 
             // Get tuple count for current page
             let tuple_count = match get_tuple_count(page) {
@@ -150,7 +146,6 @@ impl Iterator for HeapScanIterator {
                     // Undecodable page header: report once, move on.
                     self.current_page += 1;
                     self.current_slot = 0;
-                    self.cached_page = None;
                     return Some(Err(e));
                 }
             };
@@ -163,7 +158,6 @@ impl Iterator for HeapScanIterator {
                 );
                 self.current_page += 1;
                 self.current_slot = 0;
-                self.cached_page = None;
                 continue;
             }
 
@@ -215,7 +209,7 @@ impl Iterator for HeapScanIterator {
 
             self.current_slot += 1;
 
-            return Some(Ok((*page_id, slot_id, data)));
+            return Some(Ok((page_id, slot_id, data)));
         }
     }
 }
@@ -233,15 +227,13 @@ impl Iterator for HeapScanIterator {
 /// an insert operator in one query — see each other's dirty pages immediately
 /// instead of holding independent caches over the same inode. The lock is held
 /// only for individual page operations; pins keep frames stable between them.
+///
+/// The file header lives only in the pool's page 0 frame. A manager keeps no
+/// copy of it, so every handle on the file reads the same counts.
 pub struct HeapManager {
-    file_path: PathBuf,
     /// Shared buffer pool (one per underlying file, process-wide).
     pub pool: SharedPool,
     fsm: FSM,
-    #[doc(hidden)]
-    pub header: HeaderMetadata,
-    /// Set when the in-memory header changed and needs persisting on flush.
-    header_dirty: bool,
 }
 
 impl HeapManager {
@@ -335,15 +327,15 @@ impl HeapManager {
         let fsm = FSM::open(fsm_path.clone(), 2)?; // 2 pages initially
 
         let mut manager = Self {
-            file_path,
             pool,
             fsm,
-            header,
-            header_dirty: true,
         };
 
         // Set heap page count to 2 (Page 0 + Page 1)
-        manager.header.page_count = 2;
+        manager.update_header(|h| {
+            *h = header;
+            h.page_count = 2;
+        })?;
         manager.fsm.set_heap_page_count(2);
 
         // Register first data page with FSM
@@ -441,11 +433,8 @@ impl HeapManager {
         log::trace!("[HeapManager::open] Successfully opened HeapManager");
 
         Ok(Self {
-            file_path,
             pool,
             fsm,
-            header,
-            header_dirty: false,
         })
     }
 
@@ -510,11 +499,11 @@ impl HeapManager {
                         // count (observed on freshly created tables under stress).
                         // Treat such hits as a miss so the normal retry logic
                         // allocates a genuine new page instead of erroring out.
-                        if pid >= self.header.page_count {
+                        if pid >= self.page_count() {
                             log::warn!(
                                 "[HeapManager::insert_tuple] FSM returned phantom page {} (page_count={}); treating as miss",
                                 pid,
-                                self.header.page_count
+                                self.page_count()
                             );
                             failed_pages.push(pid);
                             if attempt < 2 {
@@ -565,10 +554,10 @@ impl HeapManager {
             };
 
             // Verify page_id is valid
-            if page_id >= self.header.page_count {
+            if page_id >= self.page_count() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Invalid page_id: {} >= {}", page_id, self.header.page_count),
+                    format!("Invalid page_id: {} >= {}", page_id, self.page_count()),
                 ));
             }
 
@@ -630,23 +619,12 @@ impl HeapManager {
             self.fsm.fsm_set_avail(page_id, new_free, None)?;
 
             // Increment tuple counter
-            self.header.total_tuples += 1;
-            self.header_dirty = true;
-
-            // Sync updated header to disk via buffer pool
-            {
-                let mut pool = Self::lock_pool(&self.pool);
-                match write_header_via_pool(&mut pool, &self.header) {
-                    Ok(_) => log::trace!("[HeapManager::insert_tuple] Header updated on disk"),
-                    Err(e) => log::warn!("[WARN] Failed to update header on disk: {}", e),
-                }
-            }
+            self.update_header(|h| h.total_tuples += 1)?;
 
             log::trace!(
-                "[HeapManager::insert_tuple] Successfully inserted at (page={}, slot={}); total_tuples={}",
+                "[HeapManager::insert_tuple] Successfully inserted at (page={}, slot={})",
                 page_id,
-                slot_id,
-                self.header.total_tuples
+                slot_id
             );
 
             return Ok((page_id, slot_id));
@@ -669,12 +647,13 @@ impl HeapManager {
         );
 
         // Validate page_id
-        if page_id >= self.header.page_count {
+        if page_id >= self.page_count() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "Page {} out of bounds (page_count={})",
-                    page_id, self.header.page_count
+                    page_id,
+                    self.page_count()
                 ),
             ));
         }
@@ -751,12 +730,13 @@ impl HeapManager {
         );
 
         // Validate page_id
-        if page_id >= self.header.page_count {
+        if page_id >= self.page_count() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "Page {} out of bounds (page_count={})",
-                    page_id, self.header.page_count
+                    page_id,
+                    self.page_count()
                 ),
             ));
         }
@@ -772,6 +752,10 @@ impl HeapManager {
 
                 // Get the tuple data to calculate freed bytes
                 let (offset, length) = get_slot_entry(page, slot_id)?;
+                if offset == 0 && length == 0 {
+                    // Already deleted: nothing to free and nothing to count.
+                    return Ok(0);
+                }
                 let freed = length + ITEM_ID_SIZE;
 
                 log::trace!(
@@ -822,13 +806,11 @@ impl HeapManager {
                     // We DO NOT update the FSM — dead slots are hidden until compaction
 
                     // Decrement tuple counter
-                    if self.header.total_tuples > 0 {
-                        self.header.total_tuples -= 1;
-                        self.header_dirty = true;
+                    if freed > 0 {
+                        let mut header = read_header_via_pool(&mut pool)?;
+                        header.total_tuples = header.total_tuples.saturating_sub(1);
+                        write_header_via_pool(&mut pool, &header)?;
                     }
-
-                    // Sync header to disk via buffer pool
-                    write_header_via_pool(&mut pool, &self.header)?;
 
                     freed_bytes = freed;
                 }
@@ -845,21 +827,30 @@ impl HeapManager {
 
     /// Start a sequential scan iterator over all pages.
     ///
-    /// Uses direct disk I/O (read-only sequential scan doesn't benefit from caching).
-    /// Before scanning, the executor-tier caches are checkpointed so any rows
-    /// still dirty in a cached buffer pool are visible to this raw read.
+    /// Pages are read through the shared buffer pool, so the scan sees every
+    /// write made through any handle on this file without a flush. It covers
+    /// the pages that exist when it starts.
     pub fn scan(&self) -> HeapScanIterator {
         log::trace!("[HeapManager::scan] Creating scan iterator");
-        crate::backend::cache::checkpoint();
-        let total_pages = {
-            let mut pool = Self::lock_pool(&self.pool);
-            if self.header_dirty || pool.has_dirty() {
-                let _ = write_header_via_pool(&mut pool, &self.header);
-                let _ = pool.flush_all();
-            }
-            pool.total_pages().max(self.header.page_count)
-        };
-        HeapScanIterator::new(self.file_path.clone(), total_pages)
+        HeapScanIterator::new(Arc::clone(&self.pool), self.page_count())
+    }
+
+    /// Number of pages in the file, header page included.
+    pub fn page_count(&self) -> u32 {
+        Self::lock_pool(&self.pool).total_pages()
+    }
+
+    /// Read the file header from the pool's page 0.
+    pub fn header(&self) -> io::Result<HeaderMetadata> {
+        read_header_via_pool(&mut Self::lock_pool(&self.pool))
+    }
+
+    /// Change the file header in the pool's page 0.
+    pub fn update_header(&self, f: impl FnOnce(&mut HeaderMetadata)) -> io::Result<()> {
+        let mut pool = Self::lock_pool(&self.pool);
+        let mut header = read_header_via_pool(&mut pool)?;
+        f(&mut header);
+        write_header_via_pool(&mut pool, &header)
     }
 
     /// Search for a page with available space (for testing/debugging).
@@ -886,10 +877,6 @@ impl HeapManager {
         log::trace!("[HeapManager::flush] Flushing all changes");
 
         let mut pool = Self::lock_pool(&self.pool);
-        if self.header_dirty {
-            write_header_via_pool(&mut pool, &self.header)?;
-            self.header_dirty = false;
-        }
 
         // Each call is a no-op when its target is clean, so repeated
         // checkpoints stay free.
@@ -905,21 +892,6 @@ impl HeapManager {
             self.fsm.write_through()?;
         }
 
-        Ok(())
-    }
-
-    /// Refresh the in-memory header from the buffer pool.
-    ///
-    /// Used by the heap cache before reusing a resident manager so page
-    /// counts reflect allocations made through other manager instances
-    /// (they share the same underlying shared pool, so this is a cheap
-    /// cached-page read).
-    pub fn reload_header(&mut self) -> io::Result<()> {
-        let fresh = {
-            let mut pool = Self::lock_pool(&self.pool);
-            read_header_via_pool(&mut pool)?
-        };
-        self.header = fresh;
         Ok(())
     }
 
@@ -939,24 +911,22 @@ impl HeapManager {
         HEAP_METRICS
             .allocate_page_calls
             .fetch_add(1, Ordering::Relaxed);
-        let new_page_id = self.header.page_count;
-
-        {
+        let (new_page_id, page_count) = {
             let mut pool = Self::lock_pool(&self.pool);
             // Create new page via buffer pool (this writes it to disk and brings it into cache)
-            let (_page_id, frame_id) = pool.new_page()?;
+            let (page_id, frame_id) = pool.new_page()?;
             // Unpin immediately since we just need it registered, not kept in cache
             pool.unpin(frame_id, false);
-
-            // Update header
-            self.header.page_count = pool.total_pages();
-        }
-        self.fsm.set_heap_page_count(self.header.page_count);
+            (page_id, pool.total_pages())
+        };
+        self.fsm.set_heap_page_count(page_count);
 
         // Calculate FSM pages needed
-        let new_fsm_page_count = FSM::calculate_fsm_page_count(self.header.page_count);
-        self.header.fsm_page_count = new_fsm_page_count;
-        self.header_dirty = true;
+        let new_fsm_page_count = FSM::calculate_fsm_page_count(page_count);
+        self.update_header(|h| {
+            h.page_count = page_count;
+            h.fsm_page_count = new_fsm_page_count;
+        })?;
 
         // Register new page with FSM (full free space)
         let initial_free = PAGE_SIZE as u32 - PAGE_HEADER_SIZE;
@@ -965,7 +935,7 @@ impl HeapManager {
         log::trace!(
             "[HeapManager::allocate_new_page] New page_id={}, total_pages={}",
             new_page_id,
-            self.header.page_count
+            page_count
         );
 
         Ok(new_page_id)
@@ -1143,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn test_heap_scan_reused_handle_multipage() {
+    fn test_heap_scan_sees_unflushed_rows_across_pages() {
         let (path, mut manager) = setup_temp_heap("test_heap_scan_reused");
 
         // Insert enough tuples to span multiple pages (each page has ~8 KB)
@@ -1154,12 +1124,10 @@ mod tests {
             let (pid, sid) = manager.insert_tuple(&tuple_data).unwrap();
             inserted_ids.push((pid, sid));
         }
-        manager.flush().unwrap();
 
-        // Scan all tuples using HeapScanIterator with reused file handle
+        // No flush: the scan reads the pool, so unflushed rows are visible.
         let mut scanned = Vec::new();
-        let mut iter = manager.scan();
-        for res in iter.by_ref() {
+        for res in manager.scan() {
             let (pid, sid, data) = res.unwrap();
             assert_eq!(data, tuple_data);
             scanned.push((pid, sid));
@@ -1167,12 +1135,7 @@ mod tests {
 
         assert_eq!(scanned.len(), 100);
         assert_eq!(scanned, inserted_ids);
-        assert!(
-            iter.file.is_some(),
-            "File handle should be retained in iterator"
-        );
 
-        drop(iter);
         drop(manager);
         cleanup_temp_heap(&path);
     }

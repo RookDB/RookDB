@@ -183,7 +183,7 @@ impl PhysicalOperator for SeqScanOperator {
     }
 
     fn estimate_cardinality(&self) -> usize {
-        self.heap_manager.header.page_count as usize * 100
+        self.heap_manager.page_count() as usize * 100
     }
 }
 

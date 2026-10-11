@@ -132,7 +132,6 @@ pub fn with_heap<T>(
             crate::backend::buffer_manager::shared_pool::invalidate(path);
         }
         if let Some(entry) = cache.get_mut(&key) {
-            entry.manager.reload_header()?;
             let result = f(&mut entry.manager)?;
             entry.ops_since_flush += 1;
             if entry.ops_since_flush >= HEAP_FLUSH_INTERVAL {
@@ -154,7 +153,6 @@ pub fn with_heap<T>(
     }
     if let Some(entry) = cache.get_mut(&key) {
         // Raced with another opener in between; use the resident one.
-        entry.manager.reload_header()?;
         let result = f(&mut entry.manager)?;
         entry.ops_since_flush += 1;
         return Ok(result);

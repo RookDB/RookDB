@@ -105,7 +105,8 @@ fn test_update_delete_fsm_deallocation() {
 
     // After deletion, total_tuples should decrease
     assert_eq!(
-        hm.header.total_tuples, 1,
+        hm.header().unwrap().total_tuples,
+        1,
         "Total tuples should be 1 after deleting one"
     );
 

@@ -237,6 +237,8 @@ fn stamp_last_vacuum(heap_path: &str) -> Result<(), String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    manager.header.last_vacuum = now;
+    manager
+        .update_header(|h| h.last_vacuum = now)
+        .map_err(|e| e.to_string())?;
     manager.flush().map_err(|e| e.to_string())
 }

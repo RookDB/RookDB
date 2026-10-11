@@ -392,6 +392,13 @@ impl BufferPool {
         file.write_all(&header_buf[0..4])?;
         file.flush()?;
 
+        // A resident header page must agree with the file, or flushing it
+        // later would write the old count back.
+        if let Some(&header_idx) = self.frame_table.get(&0) {
+            self.frames[header_idx].page.data[0..4]
+                .copy_from_slice(&self.total_pages.to_le_bytes());
+        }
+
         // 6. Store in pool (not dirty — already written to disk)
         let frame = &mut self.frames[frame_idx];
         frame.page_id = page_id;
