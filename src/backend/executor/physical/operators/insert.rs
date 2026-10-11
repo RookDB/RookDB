@@ -2,8 +2,8 @@
 //!
 //! Used for `INSERT INTO ... SELECT` and the `VALUES` form (via the
 //! `ValuesOperator` child). The child operator produces rows, and this
-//! operator inserts each row using `insert_single_tuple_with_location`,
-//! which returns the heap pointer needed for rollback.
+//! operator inserts each row with `insert_row`, which returns the heap
+//! pointer needed for rollback.
 //!
 //! The operator returns each inserted tuple so the engine can report the count.
 //! Statement atomicity: the pointers of all rows inserted so far are tracked;
@@ -17,13 +17,14 @@ use crate::backend::error::{RookError, RookResult};
 
 /// Function signature for the insert operation.
 ///
-/// Takes the string representations of the tuple values and returns:
+/// Takes the row's values and returns:
 /// - `Ok(())` on successful insertion
 /// - `Err(String)` on failure (constraint violation or database error)
 ///
 /// Making this injectable allows unit tests to mock the insertion logic
 /// without requiring a real catalog and database files.
-pub(crate) type InsertInserter = Box<dyn FnMut(&[&str]) -> Result<(), String>>;
+pub(crate) type InsertInserter =
+    Box<dyn FnMut(&[Option<crate::types::DataValue>]) -> Result<(), String>>;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -43,7 +44,7 @@ pub struct InsertOperator {
     catalog: Option<crate::catalog::types::Catalog>,
     inserted_pointers: Rc<RefCell<Vec<(u32, u32)>>>,
     completed: bool,
-    /// Injectable insert function. Defaults to wrapping `insert_single_tuple_with_location`.
+    /// Injectable insert function. Defaults to wrapping `insert_row`.
     /// In tests, can be replaced with a mock for isolated unit testing.
     inserter: InsertInserter,
     /// Source rows, read in full before the first insert so a statement that
@@ -60,17 +61,15 @@ impl InsertOperator {
     ) -> Self {
         let child_schema = child.schema().to_vec();
 
-        // Build the default inserter that wraps insert_single_tuple_with_location.
+        // Build the default inserter that wraps insert_row.
         let cat = catalog.clone();
         let tbl = table.clone();
         let db = db_name.clone();
         let inserted_pointers = Rc::new(RefCell::new(Vec::new()));
         let ptrs_clone = inserted_pointers.clone();
         let inserter: InsertInserter = Box::new(move |vals| {
-            match crate::backend::executor::load_csv::insert_single_tuple_with_location(
-                &cat, &db, &tbl, vals,
-            ) {
-                Ok(Some(ptr)) => {
+            match crate::backend::executor::load_csv::insert_row(&cat, &db, &tbl, vals) {
+                Ok(ptr) => {
                     log::info!(
                         "[Insert] Inserted tuple into table '{}' at (page={}, slot={})",
                         tbl,
@@ -80,8 +79,7 @@ impl InsertOperator {
                     ptrs_clone.borrow_mut().push(ptr);
                     Ok(())
                 }
-                Ok(None) => Err("Constraint violation or invalid data".to_string()),
-                Err(e) => Err(format!("Insert error: {}", e)),
+                Err(e) => Err(e.to_string()),
             }
         });
 
@@ -152,20 +150,8 @@ impl PhysicalOperator for InsertOperator {
         let next: RookResult<Option<Tuple>> = Ok(self.source.as_mut().and_then(Iterator::next));
         match next {
             Ok(Some(tuple)) => {
-                // Convert tuple values to string slices for the inserter
-                let value_strs: Vec<String> = tuple
-                    .values
-                    .iter()
-                    .map(|v| match v {
-                        Some(dv) => format!("{}", dv),
-                        None => "NULL".to_string(),
-                    })
-                    .collect();
-
-                let value_refs: Vec<&str> = value_strs.iter().map(|s| s.as_str()).collect();
-
-                // Call the injectable inserter (in production, wraps insert_single_tuple_with_location)
-                if let Err(e) = (self.inserter)(&value_refs) {
+                // Call the injectable inserter (in production, wraps insert_row)
+                if let Err(e) = (self.inserter)(&tuple.values) {
                     self.rollback();
                     return Err(RookError::Internal(e));
                 }
@@ -321,6 +307,11 @@ mod tests {
         }
     }
 
+    fn value_text(v: &Option<crate::types::DataValue>) -> String {
+        v.as_ref()
+            .map_or_else(|| "NULL".to_string(), |d| d.to_string())
+    }
+
     fn int_schema() -> Vec<ColumnInfo> {
         vec![
             ColumnInfo {
@@ -369,8 +360,7 @@ mod tests {
         let mut op = InsertOperator::for_test(
             Box::new(child),
             Box::new(move |vals| {
-                ins.borrow_mut()
-                    .push(vals.iter().map(|s| s.to_string()).collect());
+                ins.borrow_mut().push(vals.iter().map(value_text).collect());
                 Ok(())
             }),
         );
@@ -398,8 +388,7 @@ mod tests {
         let mut op = InsertOperator::for_test(
             Box::new(child),
             Box::new(move |vals| {
-                ins.borrow_mut()
-                    .push(vals.iter().map(|s| s.to_string()).collect());
+                ins.borrow_mut().push(vals.iter().map(value_text).collect());
                 Ok(())
             }),
         );
@@ -498,7 +487,7 @@ mod tests {
         let mut op = InsertOperator::for_test(
             Box::new(child),
             Box::new(move |vals| {
-                let strs: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
+                let strs: Vec<String> = vals.iter().map(value_text).collect();
                 ins.borrow_mut().push(strs);
                 Ok(())
             }),
@@ -530,7 +519,7 @@ mod tests {
         let mut op = InsertOperator::for_test(
             Box::new(child),
             Box::new(move |vals| {
-                let strs: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
+                let strs: Vec<String> = vals.iter().map(value_text).collect();
                 ins.borrow_mut().push(strs);
                 Ok(())
             }),

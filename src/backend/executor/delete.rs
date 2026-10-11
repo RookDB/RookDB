@@ -21,15 +21,6 @@ use serde_json::{Value, json};
 // Public types
 // ---------------------------------------------------------------------------
 
-/// A column value that can appear on the right-hand side of a condition.
-#[derive(Debug, Clone)]
-pub enum ColumnValue {
-    Int(i32),
-    Text(String),
-    /// Used by IN / NOT IN: list of literal values.
-    List(Vec<ColumnValue>),
-}
-
 /// Result returned by the DELETE entry points.
 pub struct DeleteResult {
     /// How many rows were deleted.
@@ -46,34 +37,33 @@ use crate::types::datatype::DataType;
 use crate::types::row::deserialize_nullable_row;
 use crate::types::value::DataValue;
 
-pub(crate) fn decode_tuple(
+/// Decode a stored row of the table with `columns`.
+pub(crate) fn decode_row(
     tuple_data: &[u8],
     columns: &[crate::catalog::types::Column],
-) -> Vec<(String, ColumnValue)> {
+) -> io::Result<Vec<Option<DataValue>>> {
     let schema: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
+    deserialize_nullable_row(&schema, tuple_data).map_err(io::Error::other)
+}
 
-    let decoded = match deserialize_nullable_row(&schema, tuple_data) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut result = Vec::new();
-
-    for (col, value) in columns.iter().zip(decoded.iter()) {
-        let converted = match value {
-            Some(DataValue::Int(v)) => ColumnValue::Int(*v),
-
-            Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => ColumnValue::Text(s.clone()),
-
-            Some(other) => ColumnValue::Text(format!("{}", other)),
-
-            None => ColumnValue::Text("NULL".to_string()),
-        };
-
-        result.push((col.name.clone(), converted));
-    }
-
-    result
+/// A row as `(column, text)` pairs for RETURNING output: NULL as `NULL`,
+/// strings without quotes.
+pub(crate) fn display_row(
+    columns: &[crate::catalog::types::Column],
+    values: &[Option<DataValue>],
+) -> Vec<(String, String)> {
+    columns
+        .iter()
+        .zip(values)
+        .map(|(col, value)| {
+            let text = match value {
+                None => "NULL".to_string(),
+                Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => s.clone(),
+                Some(other) => other.to_string(),
+            };
+            (col.name.clone(), text)
+        })
+        .collect()
 }
 
 fn delete_log_details(deleted_count: Option<usize>, error: Option<&str>) -> Value {
@@ -260,7 +250,7 @@ pub fn delete_by_pointers(
             let Some(tuple_data) = page.tuple(slot_idx) else {
                 continue;
             };
-            let decoded = decode_tuple(tuple_data, columns);
+            let decoded = decode_row(tuple_data, columns)?;
             crate::backend::constraint::check_row_delete_restrictions(
                 catalog, db_name, table_name, &decoded,
             )
@@ -289,7 +279,7 @@ pub fn delete_by_pointers(
         let Some(tuple_data) = page.tuple(slot_idx).map(<[u8]>::to_vec) else {
             continue;
         };
-        let decoded = decode_tuple(&tuple_data, columns);
+        let decoded = decode_row(&tuple_data, columns)?;
 
         // FOREIGN KEY constraint check
         if let Err(e) =
@@ -328,19 +318,7 @@ pub fn delete_by_pointers(
             slot_idx
         );
 
-        returning_rows.push(
-            decoded
-                .iter()
-                .map(|(col, val)| {
-                    let s = match val {
-                        ColumnValue::Int(n) => n.to_string(),
-                        ColumnValue::Text(t) => t.clone(),
-                        ColumnValue::List(_) => String::from("[list]"),
-                    };
-                    (col.clone(), s)
-                })
-                .collect(),
-        );
+        returning_rows.push(display_row(columns, &decoded));
 
         deleted_count += 1;
     }

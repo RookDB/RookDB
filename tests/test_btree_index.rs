@@ -195,7 +195,11 @@ fn index_is_maintained_on_insert() {
     storage_manager::executor::create_index::update_index_on_insert(
         "mnt_db",
         "staff",
-        &["7", "Gus", "55000"],
+        &storage_manager::executor::parse_text_row(
+            &catalog.databases["mnt_db"].tables["staff"].columns,
+            &["7", "Gus", "55000"],
+        )
+        .unwrap(),
         page_id,
         slot_id,
     )

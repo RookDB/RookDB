@@ -14,26 +14,19 @@ use crate::backend::cache::TableMeta;
 pub(crate) fn check_not_null(
     table_name: &str,
     columns: &[Column],
-    values: &[&str],
+    values: &[Option<DataValue>],
 ) -> Result<(), RookError> {
     for (i, col) in columns.iter().enumerate() {
-        if !col.nullable {
-            let val = values.get(i).unwrap_or(&"");
-            let trimmed = val.trim();
-            if trimmed.is_empty()
-                || trimmed.eq_ignore_ascii_case("null")
-                || trimmed.eq_ignore_ascii_case("NULL")
-            {
-                return Err(RookError::constraint(
-                    ConstraintKind::NotNull,
-                    table_name,
-                    Some(&col.name),
-                    format!(
-                        "NOT NULL constraint violated: column '{}' cannot be null",
-                        col.name
-                    ),
-                ));
-            }
+        if !col.nullable && values.get(i).is_none_or(Option::is_none) {
+            return Err(RookError::constraint(
+                ConstraintKind::NotNull,
+                table_name,
+                Some(&col.name),
+                format!(
+                    "NOT NULL constraint violated: column '{}' cannot be null",
+                    col.name
+                ),
+            ));
         }
     }
     Ok(())
@@ -50,7 +43,7 @@ pub(crate) fn check_unique_insert_meta(
     db_name: &str,
     table_name: &str,
     columns: &[Column],
-    values: &[&str],
+    values: &[Option<DataValue>],
     exclude_ptrs: &[(u32, u32)],
     meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
@@ -80,19 +73,12 @@ pub(crate) fn check_unique_insert_meta(
             };
             col_positions.push(col_pos);
 
-            let raw_val = values.get(col_pos).unwrap_or(&"");
-            let trimmed = raw_val.trim();
-            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+            let Some(Some(dv)) = values.get(col_pos) else {
                 has_null = true;
                 break;
-            }
-
-            let col_type = columns[col_pos].data_type.clone();
-            let dv =
-                crate::backend::executor::create_index::parse_string_to_value(&col_type, trimmed)
-                    .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
-            key_values.push(dv);
-            key_types.push(col_type);
+            };
+            key_values.push(dv.clone());
+            key_types.push(columns[col_pos].data_type.clone());
         }
 
         // Under standard SQL UNIQUE constraint semantics, a composite key containing
@@ -146,7 +132,7 @@ pub(crate) fn check_unique_insert_meta(
             let vals_str = idx_cols
                 .iter()
                 .zip(key_values.iter())
-                .map(|(c, v)| format!("{}={}", c, v))
+                .map(|(c, v)| format!("{}={}", c, super::fk_actions::key_text(v)))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(RookError::constraint(
@@ -238,16 +224,12 @@ pub(crate) fn check_unique_insert_meta(
             continue;
         }
 
-        let raw_val = values.get(col_pos).unwrap_or(&"");
-        let trimmed = raw_val.trim();
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        let Some(Some(key_value)) = values.get(col_pos) else {
             continue;
-        }
-
+        };
+        let key_value = key_value.clone();
+        let shown = super::fk_actions::key_text(&key_value);
         let col_type = columns[col_pos].data_type.clone();
-        let key_value =
-            crate::backend::executor::create_index::parse_string_to_value(&col_type, trimmed)
-                .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
 
         let mut found_via_index = false;
         let mut checked_index = false;
@@ -293,7 +275,7 @@ pub(crate) fn check_unique_insert_meta(
                 Some(&col.name),
                 format!(
                     "UNIQUE constraint violated: value '{}' already exists for column '{}'",
-                    trimmed, col.name
+                    shown, col.name
                 ),
             ));
         }
@@ -336,7 +318,7 @@ pub(crate) fn check_unique_insert_meta(
                             Some(&col.name),
                             format!(
                                 "UNIQUE constraint violated: value '{}' already exists for column '{}'",
-                                trimmed, col.name
+                                shown, col.name
                             ),
                         ));
                     }
@@ -357,7 +339,7 @@ pub(crate) fn check_foreign_key_insert_meta(
     db_name: &str,
     table_name: &str,
     columns: &[Column],
-    values: &[&str],
+    values: &[Option<DataValue>],
     meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
     let foreign_keys: Vec<(String, String, String)> = match meta {
@@ -379,16 +361,10 @@ pub(crate) fn check_foreign_key_insert_meta(
             .position(|c| c.name.eq_ignore_ascii_case(child_col))
             .ok_or_else(|| format!("FK column '{}' not found in table schema", child_col))?;
 
-        let raw_val = values.get(col_pos).unwrap_or(&"");
-        let trimmed = raw_val.trim();
-
         // NULL values in FK columns are allowed (SQL standard)
-        if trimmed.is_empty()
-            || trimmed.eq_ignore_ascii_case("null")
-            || trimmed.eq_ignore_ascii_case("NULL")
-        {
+        let Some(Some(child_value)) = values.get(col_pos) else {
             continue;
-        }
+        };
 
         let parent_col_type = catalog
             .databases
@@ -402,20 +378,28 @@ pub(crate) fn check_foreign_key_insert_meta(
             .map(|c| c.data_type.clone())
             .unwrap_or(DataType::Varchar(255));
 
-        if !value_lookup::value_exists_in_table(
-            db_name,
-            parent_table,
-            parent_col,
-            &parent_col_type,
-            trimmed,
-        )? {
+        // A value that cannot be a parent key cannot be found among them.
+        let found = match crate::types::functions::assign_cast(child_value, &parent_col_type) {
+            Ok(key) => value_lookup::value_exists_in_table(
+                db_name,
+                parent_table,
+                parent_col,
+                &parent_col_type,
+                &key,
+            )?,
+            Err(_) => false,
+        };
+        if !found {
             return Err(RookError::constraint(
                 ConstraintKind::ForeignKey,
                 table_name,
                 Some(child_col),
                 format!(
                     "FOREIGN KEY constraint violated: value '{}' in column '{}' not found in parent table '{}' (column '{}')",
-                    trimmed, child_col, parent_table, parent_col
+                    super::fk_actions::key_text(child_value),
+                    child_col,
+                    parent_table,
+                    parent_col
                 ),
             ));
         }
@@ -440,10 +424,9 @@ pub(crate) fn check_foreign_key_insert_meta(
 /// If the table metadata was loaded before parser registration, it falls back
 /// to compiling via the registered hook.
 pub(crate) fn check_constraints_meta(
-    _db_name: &str,
     table_name: &str,
     columns: &[Column],
-    values: &[&str],
+    values: &[Option<DataValue>],
     meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
     let meta = match meta {
@@ -455,7 +438,7 @@ pub(crate) fn check_constraints_meta(
         return Ok(());
     }
 
-    let tuple = build_check_tuple(columns, values);
+    let tuple = crate::backend::executor::physical::tuple::Tuple::new(values.to_vec());
 
     let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
     let schema: Vec<crate::backend::executor::physical::tuple::ColumnInfo> = columns
@@ -543,32 +526,4 @@ pub(crate) fn check_constraints_meta(
     }
 
     Ok(())
-}
-
-/// Build a physical Tuple from raw insert/update strings, typed per column.
-///
-/// NULL (empty or literal "null", case-insensitive) becomes `None`, which
-/// makes comparisons evaluate to UNKNOWN under three-valued logic.
-fn build_check_tuple(
-    columns: &[Column],
-    values: &[&str],
-) -> crate::backend::executor::physical::tuple::Tuple {
-    use crate::backend::executor::physical::tuple::Tuple;
-
-    let mut vals: Vec<Option<crate::types::DataValue>> = Vec::with_capacity(columns.len());
-
-    for (col, raw) in columns.iter().zip(values.iter()) {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
-            vals.push(None);
-        } else {
-            vals.push(
-                DataValue::parse_and_encode(&col.data_type, trimmed)
-                    .ok()
-                    .and_then(|bytes| DataValue::from_bytes(&col.data_type, &bytes).ok()),
-            );
-        }
-    }
-
-    Tuple::new(vals)
 }

@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
-use crate::backend::executor::insert_single_tuple;
+use crate::backend::executor::{insert_row, parse_text_row, parse_text_value};
 use crate::catalog::Catalog;
 use rook_ast::QueryPlan;
 use rook_ast::logical::LogicalPlan;
@@ -454,43 +454,23 @@ impl CachedInsert {
             let row_values = &values[offset..offset + row_len];
             offset += row_len;
 
-            // The strings backing `final_refs` must outlive it, so bind them here.
-            let row_strings: Vec<String> = if self.columns.is_empty() {
-                Vec::new()
+            // Columns the statement leaves out take their DEFAULT (or NULL).
+            let row: Vec<Option<crate::types::DataValue>> = if self.columns.is_empty() {
+                parse_text_row(&table.columns, row_values)?
             } else {
-                let mut buf: Vec<String> = table
+                let mut row: Vec<_> = table
                     .columns
                     .iter()
-                    .map(|c| {
-                        c.constraints
-                            .default
-                            .as_ref()
-                            .map(|dv| match dv {
-                                crate::types::DataValue::Char(s)
-                                | crate::types::DataValue::Varchar(s) => s.clone(),
-                                other => other.to_string(),
-                            })
-                            .unwrap_or_else(|| "NULL".to_string())
-                    })
+                    .map(|c| c.constraints.default.clone())
                     .collect();
-
                 for (i, &pos) in col_positions.iter().enumerate() {
-                    buf[pos] = row_values[i].to_string();
+                    row[pos] = parse_text_value(&table.columns[pos], row_values[i])?;
                 }
-
-                buf
-            };
-            let final_refs: Vec<&str> = if self.columns.is_empty() {
-                row_values.to_vec()
-            } else {
-                row_strings.iter().map(|s| s.as_str()).collect()
+                row
             };
 
-            match insert_single_tuple(catalog, db_name, &self.table, &final_refs) {
-                Ok(true) => inserted_count += 1,
-                Ok(false) => return Err("Constraint violation or invalid data".to_string()),
-                Err(e) => return Err(format!("Insert failed: {}", e)),
-            }
+            insert_row(catalog, db_name, &self.table, &row).map_err(|e| e.to_string())?;
+            inserted_count += 1;
         }
 
         Ok(inserted_count)

@@ -8,8 +8,8 @@
 
 use std::collections::HashSet;
 
-use crate::backend::executor::create_index::parse_string_to_value;
 use crate::catalog::types::Catalog;
+use crate::types::functions::assign_cast;
 use crate::types::{DataType, DataValue};
 
 use super::loaders;
@@ -18,8 +18,8 @@ use super::loaders;
 enum ChildAction<'a> {
     Delete,
     SetNull,
-    /// Set the FK column to this value, given as text.
-    SetTo(&'a str),
+    /// Set the FK column to this value.
+    SetTo(&'a DataValue),
 }
 
 /// Apply `action` to every row of `child_table` whose `child_col` equals
@@ -33,7 +33,7 @@ fn apply_to_child_rows(
     db_name: &str,
     child_table: &str,
     child_col: &str,
-    parent_key: &str,
+    parent_key: &DataValue,
     action: ChildAction,
     label: &str,
 ) -> Result<Vec<Vec<Option<DataValue>>>, String> {
@@ -64,13 +64,15 @@ fn apply_to_child_rows(
     };
     let col_type = &columns[col_pos].data_type;
 
-    let key = match parse_string_to_value(col_type, parent_key) {
+    // The parent key in the child column's type; a key the column cannot
+    // hold matches no child row.
+    let key = match assign_cast(parent_key, col_type) {
         Ok(v) => v,
         Err(e) => {
             log::warn!(
-                "[{}] Failed to parse value '{}' for comparison: {}",
+                "[{}] Failed to convert value '{}' for comparison: {}",
                 label,
-                parent_key,
+                key_text(parent_key),
                 e
             );
             return Ok(Vec::new());
@@ -79,11 +81,17 @@ fn apply_to_child_rows(
     let new_value: Option<Option<DataValue>> = match action {
         ChildAction::Delete => None,
         ChildAction::SetNull => Some(None),
-        ChildAction::SetTo(text) => match parse_string_to_value(col_type, text) {
+        ChildAction::SetTo(value) => match assign_cast(value, col_type) {
             Ok(v) => Some(Some(v)),
             Err(e) => {
-                log::warn!("[{}] Failed to parse new value '{}': {}", label, text, e);
-                return Ok(Vec::new());
+                return Err(format!(
+                    "{}: new key '{}' does not fit column '{}.{}': {}",
+                    label,
+                    key_text(value),
+                    child_table,
+                    child_col,
+                    e
+                ));
             }
         },
     };
@@ -218,8 +226,8 @@ fn apply_to_child_rows(
     Ok(matched)
 }
 
-/// Text form of a key value, as the FK actions pass keys between tables.
-fn key_text(value: &DataValue) -> String {
+/// Text form of a key value, for messages and cycle detection.
+pub(crate) fn key_text(value: &DataValue) -> String {
     match value {
         DataValue::SmallInt(v) => v.to_string(),
         DataValue::Int(v) => v.to_string(),
@@ -227,7 +235,8 @@ fn key_text(value: &DataValue) -> String {
         DataValue::Real(r) => r.0.to_string(),
         DataValue::DoublePrecision(r) => r.0.to_string(),
         DataValue::Bool(v) => v.to_string(),
-        DataValue::Varchar(s) | DataValue::Char(s) => s.clone(),
+        DataValue::Varchar(s) => s.clone(),
+        DataValue::Char(s) => s.trim_end_matches(' ').to_string(),
         DataValue::Date(_)
         | DataValue::Time(_)
         | DataValue::Timestamp(_)
@@ -249,7 +258,7 @@ pub(crate) fn cascade_delete_child_rows(
     db_name: &str,
     child_table: &str,
     child_col: &str,
-    parent_value_str: &str,
+    parent_value: &DataValue,
     visited: &mut HashSet<(String, String)>,
 ) -> Result<(), String> {
     let deleted = apply_to_child_rows(
@@ -257,7 +266,7 @@ pub(crate) fn cascade_delete_child_rows(
         db_name,
         child_table,
         child_col,
-        parent_value_str,
+        parent_value,
         ChildAction::Delete,
         "CASCADE",
     )?;
@@ -265,7 +274,7 @@ pub(crate) fn cascade_delete_child_rows(
         "[CASCADE] Deleted {} row(s) from '{}' due to ON DELETE CASCADE on parent '{}'",
         deleted.len(),
         child_table,
-        parent_value_str
+        key_text(parent_value)
     );
     if deleted.is_empty() {
         return Ok(());
@@ -297,39 +306,42 @@ pub(crate) fn cascade_delete_child_rows(
         return Ok(());
     };
 
-    let mut targets: HashSet<(String, String, String)> = HashSet::new();
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    let mut targets: Vec<(String, String, DataValue)> = Vec::new();
     for row in &deleted {
         for (grandchild_table, grandchild_fk_col, child_ref_col) in &cascade_to_grandchildren {
             if let Some(pos) = columns
                 .iter()
                 .position(|c| c.name.eq_ignore_ascii_case(child_ref_col))
                 && let Some(Some(value)) = row.get(pos)
-            {
-                targets.insert((
+                && seen.insert((
                     grandchild_table.clone(),
                     grandchild_fk_col.clone(),
                     key_text(value),
+                ))
+            {
+                targets.push((
+                    grandchild_table.clone(),
+                    grandchild_fk_col.clone(),
+                    value.clone(),
                 ));
             }
         }
     }
 
     for (grandchild_table, grandchild_fk_col, val) in targets {
-        if val.is_empty() || val.eq_ignore_ascii_case("null") {
-            continue;
-        }
-        if !visited.insert((grandchild_table.clone(), val.clone())) {
+        if !visited.insert((grandchild_table.clone(), key_text(&val))) {
             log::info!(
                 "[CASCADE] Cycle detected: skipping '{}' with value '{}' (already cascaded)",
                 grandchild_table,
-                val
+                key_text(&val)
             );
             continue;
         }
         log::info!(
             "[CASCADE] Recursing into '{}' with value '{}' (FK col '{}')",
             grandchild_table,
-            val,
+            key_text(&val),
             grandchild_fk_col
         );
         cascade_delete_child_rows(
@@ -353,7 +365,7 @@ pub(crate) fn set_null_child_rows(
     db_name: &str,
     child_table: &str,
     child_col: &str,
-    parent_value_str: &str,
+    parent_value: &DataValue,
     visited: &mut HashSet<(String, String)>,
 ) -> Result<(), String> {
     let updated = apply_to_child_rows(
@@ -361,7 +373,7 @@ pub(crate) fn set_null_child_rows(
         db_name,
         child_table,
         child_col,
-        parent_value_str,
+        parent_value,
         ChildAction::SetNull,
         "SET NULL",
     )?;
@@ -369,12 +381,9 @@ pub(crate) fn set_null_child_rows(
         "[SET NULL] Set FK to NULL in {} row(s) from '{}' due to ON DELETE/UPDATE SET NULL on parent '{}'",
         updated.len(),
         child_table,
-        parent_value_str
+        key_text(parent_value)
     );
-    if updated.is_empty()
-        || parent_value_str.is_empty()
-        || parent_value_str.eq_ignore_ascii_case("null")
-    {
+    if updated.is_empty() {
         return Ok(());
     }
 
@@ -395,11 +404,11 @@ pub(crate) fn set_null_child_rows(
         };
 
     for (grandchild_table, grandchild_fk_col) in set_null_to_grandchildren {
-        if !visited.insert((grandchild_table.clone(), parent_value_str.to_string())) {
+        if !visited.insert((grandchild_table.clone(), key_text(parent_value))) {
             log::info!(
                 "[SET NULL] Cycle detected: skipping '{}' with value '{}' (already set to NULL)",
                 grandchild_table,
-                parent_value_str
+                key_text(parent_value)
             );
             continue;
         }
@@ -407,14 +416,14 @@ pub(crate) fn set_null_child_rows(
             "[SET NULL] Recursively setting NULL in '{}' col '{}' where value = '{}'",
             grandchild_table,
             grandchild_fk_col,
-            parent_value_str
+            key_text(parent_value)
         );
         set_null_child_rows(
             catalog,
             db_name,
             &grandchild_table,
             &grandchild_fk_col,
-            parent_value_str,
+            parent_value,
             visited,
         )?;
     }
@@ -430,8 +439,8 @@ pub(crate) fn update_child_rows_fk(
     db_name: &str,
     child_table: &str,
     child_col: &str,
-    old_parent_val: &str,
-    new_parent_val: &str,
+    old_parent_val: &DataValue,
+    new_parent_val: &DataValue,
     visited: &mut HashSet<(String, String)>,
 ) -> Result<(), String> {
     let updated = apply_to_child_rows(
@@ -445,7 +454,7 @@ pub(crate) fn update_child_rows_fk(
     )?;
     log::info!(
         "[UPDATE CASCADE] Updated FK to '{}' in {} row(s) from '{}' due to ON UPDATE CASCADE",
-        new_parent_val,
+        key_text(new_parent_val),
         updated.len(),
         child_table
     );
@@ -467,11 +476,11 @@ pub(crate) fn update_child_rows_fk(
         };
 
     for (grandchild_table, grandchild_fk_col) in &update_cascade_fks {
-        if !visited.insert((grandchild_table.clone(), old_parent_val.to_string())) {
+        if !visited.insert((grandchild_table.clone(), key_text(old_parent_val))) {
             log::info!(
                 "[UPDATE CASCADE] Cycle detected: skipping '{}' with value '{}' (already cascaded)",
                 grandchild_table,
-                old_parent_val
+                key_text(old_parent_val)
             );
             continue;
         }
@@ -479,8 +488,8 @@ pub(crate) fn update_child_rows_fk(
             "[UPDATE CASCADE] Recursively cascading into '{}': col '{}' from '{}' → '{}'",
             grandchild_table,
             grandchild_fk_col,
-            old_parent_val,
-            new_parent_val
+            key_text(old_parent_val),
+            key_text(new_parent_val)
         );
         update_child_rows_fk(
             catalog,

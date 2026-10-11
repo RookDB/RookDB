@@ -5,7 +5,7 @@
 mod tests {
     use super::super::validation;
     use crate::catalog::types::{Column, Constraints};
-    use crate::types::DataType;
+    use crate::types::{DataType, DataValue};
 
     #[test]
     fn test_check_not_null_passes_for_non_null_values() {
@@ -23,8 +23,11 @@ mod tests {
                 constraints: Constraints::default(),
             },
         ];
-        let values = &["1", "Alice"];
-        assert!(validation::check_not_null("t", &columns, values).is_ok());
+        let values = [
+            Some(DataValue::Int(1)),
+            Some(DataValue::Varchar("Alice".to_string())),
+        ];
+        assert!(validation::check_not_null("t", &columns, &values).is_ok());
     }
 
     #[test]
@@ -36,12 +39,12 @@ mod tests {
             constraints: Constraints::default(),
         }];
         assert!(
-            validation::check_not_null("t", &columns, &["null"]).is_err(),
+            validation::check_not_null("t", &columns, &[None]).is_err(),
             "Should reject NULL for NOT NULL column"
         );
         assert!(
-            validation::check_not_null("t", &columns, &[""]).is_err(),
-            "Should reject empty string for NOT NULL column"
+            validation::check_not_null("t", &columns, &[]).is_err(),
+            "Should reject a missing value for NOT NULL column"
         );
     }
 
@@ -54,7 +57,7 @@ mod tests {
             constraints: Constraints::default(),
         }];
         assert!(
-            validation::check_not_null("t", &columns, &["null"]).is_ok(),
+            validation::check_not_null("t", &columns, &[None]).is_ok(),
             "Should accept NULL for nullable column"
         );
     }

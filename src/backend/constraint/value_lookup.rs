@@ -4,7 +4,7 @@
 //! using B+ Tree index lookups (fast path) or sequential heap scans (fallback).
 
 use super::loaders;
-use crate::types::DataType;
+use crate::types::{DataType, DataValue};
 
 /// Helper: try all index files (named + legacy) for a table and search for a value.
 /// Returns `Some(true)` if found, `Some(false)` if not found (in any index),
@@ -14,11 +14,8 @@ fn try_index_for_value(
     table_name: &str,
     column_name: &str,
     col_type: &DataType,
-    value_str: &str,
+    key_value: &DataValue,
 ) -> Option<bool> {
-    let key_value =
-        crate::backend::executor::create_index::parse_string_to_value(col_type, value_str).ok()?;
-
     // Try named indexes: load all indexes from sys_indexes for this table
     if let Ok(indexes) =
         crate::backend::executor::create_index::load_table_indexes(db_name, table_name)
@@ -43,7 +40,7 @@ fn try_index_for_value(
                 },
                 |bt| {
                     bt.set_key_type(col_type.clone());
-                    bt.search(&key_value).map_err(std::io::Error::other)
+                    bt.search(key_value).map_err(std::io::Error::other)
                 },
             );
             match search_res {
@@ -70,7 +67,7 @@ fn try_index_for_value(
             },
             |bt| {
                 bt.set_key_type(col_type.clone());
-                bt.search(&key_value).map_err(std::io::Error::other)
+                bt.search(key_value).map_err(std::io::Error::other)
             },
         );
         match search_res {
@@ -88,23 +85,42 @@ fn try_index_for_value(
 
 /// Check whether a specific value exists in a table column.
 ///
-/// First tries a B+ Tree index lookup (for speed), falling back to a
-/// sequential heap scan with proper deserialization if no index is available.
+/// `key_value` must already have the column's type. First tries a B+ Tree
+/// index lookup (for speed), falling back to a sequential heap scan.
 pub(crate) fn value_exists_in_table(
     db_name: &str,
     table_name: &str,
     column_name: &str,
     col_type: &DataType,
-    value_str: &str,
+    key_value: &DataValue,
 ) -> Result<bool, String> {
     // Try all B+ Tree indexes first (named + legacy)
-    if let Some(result) = try_index_for_value(db_name, table_name, column_name, col_type, value_str)
+    if let Some(result) = try_index_for_value(db_name, table_name, column_name, col_type, key_value)
     {
         return Ok(result);
     }
 
-    // Fallback: sequential heap scan with proper deserialization
-    scan_table_for_value(db_name, table_name, column_name, col_type, value_str)
+    // Fallback: sequential heap scan
+    let schema = match loaders::load_table_schema(db_name, table_name) {
+        Ok(Some(s)) => s,
+        Ok(None) => return Ok(false),
+        Err(e) => {
+            log::warn!("[Constraint] Error loading schema: {}", e);
+            return Ok(false);
+        }
+    };
+    let Some(col_pos) = schema
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case(column_name))
+    else {
+        log::warn!(
+            "[Constraint] Column '{}' not found in table schema for FK lookup",
+            column_name
+        );
+        return Ok(false);
+    };
+    let schema_types: Vec<DataType> = schema.into_iter().map(|(_, dt)| dt).collect();
+    scan_heap_for_value(db_name, table_name, &schema_types, col_pos, key_value)
 }
 
 /// Check whether a child table has any row whose given column matches the value.
@@ -114,25 +130,19 @@ pub(crate) fn child_has_referencing_row(
     db_name: &str,
     child_table: &str,
     child_col: &str,
-    value: &str,
+    value: &DataValue,
 ) -> Result<bool, String> {
     // Load the child table's column schema from sys_columns to get the correct type
     let (schema, col_pos, col_type) =
         match loaders::load_table_schema_for_column(db_name, child_table, child_col) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                // Table not in system tables — infer type from value string
-                let _inferred_type = if value.parse::<i32>().is_ok() {
-                    DataType::Int
-                } else {
-                    DataType::Varchar(255)
-                };
-                // Fall back to string-based heap scan
+                // Table not in system tables: fall back to matching the key's text.
                 let heap_path = std::path::PathBuf::from(format!(
                     "database/base/{}/{}.dat",
                     db_name, child_table
                 ));
-                return scan_raw_heap_for_string(&heap_path, value);
+                return scan_raw_heap_for_string(&heap_path, &super::fk_actions::key_text(value));
             }
             Err(e) => {
                 log::warn!(
@@ -143,106 +153,38 @@ pub(crate) fn child_has_referencing_row(
             }
         };
 
-    // Try all B+ Tree indexes (named + legacy)
-    if let Some(result) = try_index_for_value(db_name, child_table, child_col, &col_type, value) {
-        return Ok(result);
-    }
-
-    // Fallback: proper heap scan with deserialization
-    let key_value =
-        match crate::backend::executor::create_index::parse_string_to_value(&col_type, value) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!(
-                    "[Constraint] Failed to parse value for FK child heap scan: {}",
-                    e
-                );
-                return Ok(false);
-            }
-        };
-
-    let heap_path =
-        std::path::PathBuf::from(format!("database/base/{}/{}.dat", db_name, child_table));
-    if !heap_path.exists() {
-        return Ok(false);
-    }
-
-    let heap = match crate::backend::heap::HeapManager::open(heap_path) {
-        Ok(h) => h,
+    // The parent key in the child column's type; a key the column cannot
+    // hold is referenced by no child row.
+    let key_value = match crate::types::functions::assign_cast(value, &col_type) {
+        Ok(v) => v,
         Err(e) => {
-            log::warn!("[Constraint] Failed to open child heap: {}", e);
-            return Ok(false);
-        }
-    };
-
-    for result in heap.scan() {
-        let (_page_id, _slot_id, raw_bytes) = match result {
-            Ok(triple) => triple,
-            Err(_) => continue,
-        };
-
-        let decoded = match crate::types::deserialize_nullable_row(&schema, &raw_bytes) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        if let Some(Some(dv)) = decoded.get(col_pos) {
-            use crate::types::Comparable;
-            if let Ok(cmp) = dv.compare(&key_value) {
-                use std::cmp::Ordering;
-                if cmp == Ordering::Equal {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-/// Scan a table heap with proper deserialization to find a matching value.
-fn scan_table_for_value(
-    db_name: &str,
-    table_name: &str,
-    column_name: &str,
-    col_type: &DataType,
-    value_str: &str,
-) -> Result<bool, String> {
-    // Load schema from sys_columns
-    let schema = match loaders::load_table_schema(db_name, table_name) {
-        Ok(Some(s)) => s,
-        Ok(None) => return Ok(false),
-        Err(e) => {
-            log::warn!("[Constraint] Error loading schema: {}", e);
-            return Ok(false);
-        }
-    };
-
-    // Find the column position
-    let col_pos = match schema
-        .iter()
-        .position(|(name, _)| name.eq_ignore_ascii_case(column_name))
-    {
-        Some(p) => p,
-        None => {
             log::warn!(
-                "[Constraint] Column '{}' not found in table schema for FK lookup",
-                column_name
+                "[Constraint] Failed to convert value for FK child lookup: {}",
+                e
             );
             return Ok(false);
         }
     };
 
-    let schema_types: Vec<DataType> = schema.iter().map(|(_, dt)| dt.clone()).collect();
+    // Try all B+ Tree indexes (named + legacy)
+    if let Some(result) =
+        try_index_for_value(db_name, child_table, child_col, &col_type, &key_value)
+    {
+        return Ok(result);
+    }
 
-    let key_value =
-        match crate::backend::executor::create_index::parse_string_to_value(col_type, value_str) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("[Constraint] Failed to parse value for FK heap scan: {}", e);
-                return Ok(false);
-            }
-        };
+    scan_heap_for_value(db_name, child_table, &schema, col_pos, &key_value)
+}
+
+/// Scan a table heap for a row whose column `col_pos` equals `key_value`.
+fn scan_heap_for_value(
+    db_name: &str,
+    table_name: &str,
+    schema: &[DataType],
+    col_pos: usize,
+    key_value: &DataValue,
+) -> Result<bool, String> {
+    use crate::types::Comparable;
 
     let heap_path =
         std::path::PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
@@ -259,24 +201,16 @@ fn scan_table_for_value(
     };
 
     for result in heap.scan() {
-        let (_page_id, _slot_id, raw_bytes) = match result {
-            Ok(triple) => triple,
-            Err(_) => continue,
+        let Ok((_page_id, _slot_id, raw_bytes)) = result else {
+            continue;
         };
-
-        let decoded = match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
-            Ok(d) => d,
-            Err(_) => continue,
+        let Ok(decoded) = crate::types::deserialize_nullable_row(schema, &raw_bytes) else {
+            continue;
         };
-
-        if let Some(Some(dv)) = decoded.get(col_pos) {
-            use crate::types::Comparable;
-            if let Ok(cmp) = dv.compare(&key_value) {
-                use std::cmp::Ordering;
-                if cmp == Ordering::Equal {
-                    return Ok(true);
-                }
-            }
+        if let Some(Some(dv)) = decoded.get(col_pos)
+            && matches!(dv.compare(key_value), Ok(std::cmp::Ordering::Equal))
+        {
+            return Ok(true);
         }
     }
 

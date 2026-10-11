@@ -723,7 +723,7 @@ pub fn invalidate_discovery(db_name: &str, table_name: Option<&str>) {
 pub fn update_index_on_insert(
     db_name: &str,
     table_name: &str,
-    values: &[&str],
+    values: &[Option<DataValue>],
     page_id: u32,
     slot_id: u32,
 ) -> crate::backend::error::RookResult<()> {
@@ -733,9 +733,9 @@ pub fn update_index_on_insert(
     }
 
     for (_meta_path, idx_path, meta) in indexes.iter() {
-        // Build the (possibly composite) key from the raw string values.
-        // Rows where ANY key component is NULL are not indexed.
-        let Some(key_values) = build_key_from_strings(meta, values) else {
+        // Build the (possibly composite) key; rows where ANY key component
+        // is NULL are not indexed.
+        let Some(key_values) = build_key_from_decoded(meta, values) else {
             log::trace!(
                 "[IndexInsert] Skipping NULL/partial key for {}.{}({})",
                 db_name,
@@ -778,24 +778,6 @@ pub fn update_index_on_insert(
     }
 
     Ok(())
-}
-
-/// Build a composite key from a row's raw string values using `meta`'s column
-/// layout. Returns `None` when any component is missing or NULL.
-fn build_key_from_strings(meta: &IndexMeta, values: &[&str]) -> Option<Vec<DataValue>> {
-    let types = meta.types();
-    let idxs = meta.idxs();
-    let mut key = Vec::with_capacity(idxs.len());
-    for (i, &ci) in idxs.iter().enumerate() {
-        let raw = values.get(ci)?;
-        let trimmed = raw.trim();
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
-            return None;
-        }
-        let ty: DataType = types.get(i).and_then(|t| t.parse().ok())?;
-        key.push(parse_string_to_value(&ty, trimmed).ok()?);
-    }
-    Some(key)
 }
 
 /// Build a composite key from an already-decoded row. Returns `None` when any

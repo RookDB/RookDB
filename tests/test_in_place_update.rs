@@ -221,3 +221,16 @@ fn set_expressions_read_the_row_before_the_update() {
         vec![vec!["1005".to_string(), "5".to_string()]]
     );
 }
+
+#[test]
+fn set_keeps_text_exactly_as_given() {
+    let _ws = common::TestWorkspace::new("inplace", "text");
+    let catalog = setup();
+
+    // Leading/trailing spaces and enclosing quotes are part of the value.
+    assert_eq!(update(&catalog, "id = 3", "name = '  ''x''  '"), 1);
+    assert_eq!(
+        query(&catalog, "SELECT LENGTH(name) FROM staff WHERE id = 3"),
+        vec![vec!["7".to_string()]]
+    );
+}

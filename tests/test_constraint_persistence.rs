@@ -266,7 +266,13 @@ fn violations_are_reported_as_typed_errors() {
     let catalog = load_catalog();
 
     // NOT NULL violation → structured variant.
-    let err = validate_row_insert(&catalog, "typed_db", "t9", &["NULL", "x"]).unwrap_err();
+    let err = validate_row_insert(
+        &catalog,
+        "typed_db",
+        "t9",
+        &typed(&catalog, "typed_db", "t9", &["NULL", "x"]),
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         RookError::ConstraintViolation { kind: ConstraintKind::NotNull, ref column, .. }
@@ -275,12 +281,27 @@ fn violations_are_reported_as_typed_errors() {
     assert_eq!(err.constraint_kind(), Some(ConstraintKind::NotNull));
 
     // Unknown table → NotFound, not a constraint error.
-    let err = validate_row_insert(&catalog, "typed_db", "nope", &["1", "x"]).unwrap_err();
+    let err = validate_row_insert(
+        &catalog,
+        "typed_db",
+        "nope",
+        &[
+            Some(storage_manager::types::DataValue::Int(1)),
+            Some(storage_manager::types::DataValue::Varchar("x".to_string())),
+        ],
+    )
+    .unwrap_err();
     assert!(!err.is_constraint_violation());
     assert!(matches!(err, RookError::NotFound { .. }));
 
     // Display output stays user-friendly.
-    let err = validate_row_insert(&catalog, "typed_db", "t9", &["NULL", "x"]).unwrap_err();
+    let err = validate_row_insert(
+        &catalog,
+        "typed_db",
+        "t9",
+        &typed(&catalog, "typed_db", "t9", &["NULL", "x"]),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("NOT NULL"));
 }
 
@@ -327,7 +348,7 @@ fn update_can_rewrite_row_without_self_unique_collision() {
         &catalog,
         "updb",
         "people",
-        &["1", "Ann-Marie"],
+        &typed(&catalog, "updb", "people", &["1", "Ann-Marie"]),
         Some((1, 0)),
     )
     .expect("self-update of unchanged UNIQUE key must succeed");
@@ -337,9 +358,20 @@ fn update_can_rewrite_row_without_self_unique_collision() {
         &catalog,
         "updb",
         "people",
-        &["2", "Ann-Marie"],
+        &typed(&catalog, "updb", "people", &["2", "Ann-Marie"]),
         Some((1, 0)),
     )
     .expect_err("taking another row's UNIQUE key must fail");
     assert_eq!(err.constraint_kind(), Some(ConstraintKind::Unique));
+}
+
+/// A row given as text, parsed for the table's column types.
+fn typed(
+    catalog: &storage_manager::catalog::Catalog,
+    db: &str,
+    table: &str,
+    values: &[&str],
+) -> Vec<Option<storage_manager::types::DataValue>> {
+    let columns = &catalog.databases[db].tables[table].columns;
+    storage_manager::executor::parse_text_row(columns, values).unwrap()
 }

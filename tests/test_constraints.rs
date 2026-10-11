@@ -50,9 +50,25 @@ fn not_null_rejects_missing_value() {
     let catalog = load_catalog();
 
     // NULL in the NOT NULL column is rejected...
-    assert!(validate_row_insert(&catalog, "nn", "t", &["NULL", "x"]).is_err());
+    assert!(
+        validate_row_insert(
+            &catalog,
+            "nn",
+            "t",
+            &typed(&catalog, "nn", "t", &["NULL", "x"])
+        )
+        .is_err()
+    );
     // ...while a real value passes.
-    assert!(validate_row_insert(&catalog, "nn", "t", &["1", "x"]).is_ok());
+    assert!(
+        validate_row_insert(
+            &catalog,
+            "nn",
+            "t",
+            &typed(&catalog, "nn", "t", &["1", "x"])
+        )
+        .is_ok()
+    );
 }
 
 // ── UNIQUE ────────────────────────────────────────────────────────────────────
@@ -90,10 +106,24 @@ fn unique_with_index_rejects_duplicates() {
     assert!(index.is_ok(), "index build should succeed: {:?}", index);
 
     assert!(
-        validate_row_insert(&catalog, "uq", "users", &["2", "a@x.io"]).is_err(),
+        validate_row_insert(
+            &catalog,
+            "uq",
+            "users",
+            &typed(&catalog, "uq", "users", &["2", "a@x.io"])
+        )
+        .is_err(),
         "duplicate must be rejected"
     );
-    assert!(validate_row_insert(&catalog, "uq", "users", &["2", "b@x.io"]).is_ok());
+    assert!(
+        validate_row_insert(
+            &catalog,
+            "uq",
+            "users",
+            &typed(&catalog, "uq", "users", &["2", "b@x.io"])
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -118,7 +148,15 @@ fn unique_without_index_falls_back_to_heap_scan() {
 
     // No index exists for `name` — validation must still catch duplicates
     // via the heap-scan fallback.
-    assert!(validate_row_insert(&catalog, "uq2", "people", &["2", "Zed"]).is_err());
+    assert!(
+        validate_row_insert(
+            &catalog,
+            "uq2",
+            "people",
+            &typed(&catalog, "uq2", "people", &["2", "Zed"])
+        )
+        .is_err()
+    );
 }
 
 // ── CHECK ─────────────────────────────────────────────────────────────────────
@@ -145,8 +183,24 @@ fn check_expression_is_enforced() {
     let _ = insert_constraint_metadata("ck", "items", "CHECK", "price > 0", None, None);
 
     let catalog = load_catalog();
-    assert!(validate_row_insert(&catalog, "ck", "items", &["5"]).is_ok());
-    assert!(validate_row_insert(&catalog, "ck", "items", &["-5"]).is_err());
+    assert!(
+        validate_row_insert(
+            &catalog,
+            "ck",
+            "items",
+            &typed(&catalog, "ck", "items", &["5"])
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_row_insert(
+            &catalog,
+            "ck",
+            "items",
+            &typed(&catalog, "ck", "items", &["-5"])
+        )
+        .is_err()
+    );
 }
 
 // ── FOREIGN KEY ───────────────────────────────────────────────────────────────
@@ -196,8 +250,24 @@ fn fk_rejects_orphan_insert() {
     let _ws = common::TestWorkspace::new("con", "fkorphan");
     let catalog = setup_fk("fko", "");
 
-    assert!(validate_row_insert(&catalog, "fko", "orders", &["1", "1"]).is_ok());
-    assert!(validate_row_insert(&catalog, "fko", "orders", &["2", "99"]).is_err());
+    assert!(
+        validate_row_insert(
+            &catalog,
+            "fko",
+            "orders",
+            &typed(&catalog, "fko", "orders", &["1", "1"])
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_row_insert(
+            &catalog,
+            "fko",
+            "orders",
+            &typed(&catalog, "fko", "orders", &["2", "99"])
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -277,37 +347,6 @@ fn delete_customers_by_id(
     storage_manager::executor::delete_by_pointers(catalog, db, "customers", &pointers).unwrap()
 }
 
-/// Build the decoded-row representation `validate_row_delete` expects.
-#[allow(dead_code)]
-fn decoded_row(
-    pairs: &[(&str, &str)],
-) -> Vec<(String, storage_manager::executor::delete::ColumnValue)> {
-    use storage_manager::executor::delete::ColumnValue;
-    pairs
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.to_string(),
-                match value.parse::<i32>() {
-                    Ok(n) => ColumnValue::Int(n),
-                    Err(_) => ColumnValue::Text(value.to_string()),
-                },
-            )
-        })
-        .collect()
-}
-
-#[allow(dead_code)]
-fn deleted_customer_row(id: &str) -> Vec<(String, storage_manager::executor::delete::ColumnValue)> {
-    // customers rows are (id, cname)
-    let mut row = decoded_row(&[("id", id)]);
-    row.push((
-        "cname".to_string(),
-        storage_manager::executor::delete::ColumnValue::Text("Ann".to_string()),
-    ));
-    row
-}
-
 fn count_orders(catalog: &Catalog, db: &str) -> usize {
     let logical = storage_manager::planner::plan_query(
         &rook_parser::parse_sql("SELECT oid FROM orders").unwrap(),
@@ -339,4 +378,67 @@ fn query_orders_customer_ids(catalog: &Catalog, db: &str) -> Vec<String> {
         None => "NULL".to_string(),
     })
     .collect()
+}
+
+/// A row given as text, parsed for the table's column types.
+fn typed(
+    catalog: &storage_manager::catalog::Catalog,
+    db: &str,
+    table: &str,
+    values: &[&str],
+) -> Vec<Option<storage_manager::types::DataValue>> {
+    let columns = &catalog.databases[db].tables[table].columns;
+    storage_manager::executor::parse_text_row(columns, values).unwrap()
+}
+
+/// A VARCHAR key holding the word NULL is a value, not SQL NULL. DELETE
+/// used to see the parent row as text, read 'NULL' as no key at all, and
+/// skip the RESTRICT check.
+#[test]
+fn fk_restrict_protects_a_key_spelled_null() {
+    use storage_manager::backend::executor::row_select::{
+        parse_where_text, select_matching_pointers,
+    };
+
+    let _ws = common::TestWorkspace::new("con", "fknullword");
+    init_catalog();
+    let mut catalog = load_catalog();
+    create_database(&mut catalog, "fkn");
+    let mut catalog = load_catalog();
+    let mut code = column("code", DataType::Varchar(10));
+    code.constraints.unique = true;
+    create_table(&mut catalog, "fkn", "parent", vec![code]);
+    create_table(
+        &mut catalog,
+        "fkn",
+        "child",
+        vec![
+            column("id", DataType::Int),
+            column("code", DataType::Varchar(10)),
+        ],
+    );
+    save_catalog(&catalog).unwrap();
+    let _ = insert_constraint_metadata("fkn", "parent", "PRIMARY KEY", "code", None, None);
+    let _ = insert_constraint_metadata(
+        "fkn",
+        "child",
+        "FOREIGN KEY",
+        "code",
+        Some("parent"),
+        Some("code"),
+    );
+
+    let catalog = load_catalog();
+    assert!(insert_single_tuple(&catalog, "fkn", "parent", &["'NULL'"]).unwrap());
+    assert!(insert_single_tuple(&catalog, "fkn", "child", &["1", "'NULL'"]).unwrap());
+
+    let selection = parse_where_text("code = 'NULL'").unwrap();
+    let pointers = select_matching_pointers(&catalog, "fkn", "parent", selection).unwrap();
+    assert_eq!(pointers.len(), 1);
+    let result =
+        storage_manager::executor::delete_by_pointers(&catalog, "fkn", "parent", &pointers);
+    assert!(
+        result.is_err(),
+        "the child row still references 'NULL', so the delete must fail"
+    );
 }

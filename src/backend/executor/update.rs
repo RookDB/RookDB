@@ -26,8 +26,6 @@ use super::physical::expr::{Expr, expr_from_ast};
 use super::physical::tuple::{ColumnInfo, Tuple};
 use serde_json::{Value, json};
 
-use super::delete::ColumnValue;
-
 /// (page_num, slot_index) pair that uniquely identifies a stored tuple.
 #[derive(Debug, Clone, Copy)]
 struct TuplePointer {
@@ -54,31 +52,9 @@ pub struct UpdateResult {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn values_to_column_values(
-    columns: &[crate::catalog::types::Column],
-    values: &[Option<DataValue>],
-) -> Vec<(String, ColumnValue)> {
-    columns
-        .iter()
-        .zip(values.iter())
-        .map(|(col, val)| {
-            let cv = match val {
-                Some(DataValue::Int(n)) => ColumnValue::Int(*n),
-                Some(DataValue::SmallInt(n)) => ColumnValue::Int(*n as i32),
-                Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => {
-                    ColumnValue::Text(s.clone())
-                }
-                Some(other) => ColumnValue::Text(format!("{}", other)),
-                None => ColumnValue::Text("NULL".to_string()),
-            };
-            (col.name.clone(), cv)
-        })
-        .collect()
-}
-
 /// Evaluate every SET expression against the row as it was before the
 /// statement, and store each result in its column converted to the column's
-/// type the way a cast to that type converts it.
+/// type (see [`crate::types::functions::assign_cast`]).
 fn apply_assignments(
     columns: &[crate::catalog::types::Column],
     schema: &[ColumnInfo],
@@ -92,7 +68,7 @@ fn apply_assignments(
         new_values[*idx] = match expr.evaluate(&row, schema)? {
             None => None,
             Some(v) => Some(
-                crate::types::functions::cast(&v, &column.data_type)
+                crate::types::functions::assign_cast(&v, &column.data_type)
                     .map_err(|e| format!("column '{}': {}", column.name, e))?,
             ),
         };
@@ -106,10 +82,8 @@ struct PendingUpdate {
     old_tuple_data: Vec<u8>,
     /// The raw bytes of the NEW tuple (after update).
     new_bytes: Vec<u8>,
-    /// The decoded row BEFORE the update, for FK cascade propagation.
-    old_decoded: Vec<(String, ColumnValue)>,
-    /// The decoded row AFTER the update, for FK cascade propagation.
-    updated_decoded: Vec<(String, ColumnValue)>,
+    /// The row BEFORE the update, for FK cascade propagation.
+    old_values: Vec<Option<DataValue>>,
     /// The updated typed values, used for intra-batch constraint validation.
     updated_values: Vec<Option<DataValue>>,
 }
@@ -235,23 +209,12 @@ pub fn update_by_pointers(
             }
         };
 
-        let old_decoded = values_to_column_values(columns, &decoded);
-        let updated_decoded = values_to_column_values(columns, &updated_values);
-
         // Constraint validation against disk, excluding all pointers in this batch
-        let new_strings: Vec<String> = updated_values
-            .iter()
-            .map(|val| match val {
-                Some(dv) => dv.to_string(),
-                None => "NULL".to_string(),
-            })
-            .collect();
-        let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
         if let Err(e) = crate::backend::constraint::validate_row_update_with_excludes(
             catalog,
             db_name,
             table_name,
-            &new_values,
+            &updated_values,
             pointers,
         ) {
             return Err(io::Error::new(
@@ -263,8 +226,9 @@ pub fn update_by_pointers(
         if let Err(e) = crate::backend::constraint::validate_update_restrict(
             db_name,
             table_name,
-            &old_decoded,
-            &updated_decoded,
+            columns,
+            &decoded,
+            &updated_values,
         ) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -273,10 +237,10 @@ pub fn update_by_pointers(
         }
 
         log::info!(
-            "[Update] Validated row at (page={}, slot={}): updated_decoded={:?}",
+            "[Update] Validated row at (page={}, slot={}): new values={:?}",
             page_num,
             slot_idx,
-            updated_decoded
+            updated_values
         );
 
         pending_updates.push(PendingUpdate {
@@ -286,8 +250,7 @@ pub fn update_by_pointers(
             },
             old_tuple_data: tuple_data,
             new_bytes,
-            old_decoded,
-            updated_decoded,
+            old_values: decoded,
             updated_values,
         });
 
@@ -502,20 +465,7 @@ pub fn update_by_pointers(
                 log::warn!("Failed to update index for updated tuple: {}", e);
             }
 
-            returning_rows.push(
-                update
-                    .updated_decoded
-                    .iter()
-                    .map(|(col, val)| {
-                        let s = match val {
-                            ColumnValue::Int(n) => n.to_string(),
-                            ColumnValue::Text(t) => t.clone(),
-                            ColumnValue::List(_) => String::from("[list]"),
-                        };
-                        (col.clone(), s)
-                    })
-                    .collect(),
-            );
+            returning_rows.push(super::delete::display_row(columns, &update.updated_values));
         }
     }
 
@@ -526,8 +476,9 @@ pub fn update_by_pointers(
                 catalog,
                 db_name,
                 table_name,
-                &update.old_decoded,
-                &update.updated_decoded,
+                columns,
+                &update.old_values,
+                &update.updated_values,
             ) {
                 log::warn!("[UpdateByPointers] Failed to propagate FK cascade: {}", e);
             }

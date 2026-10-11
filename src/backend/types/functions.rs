@@ -796,6 +796,42 @@ pub fn cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionE
     DataValue::from_bytes(target, &encoded).map_err(FunctionError::InvalidArgument)
 }
 
+/// Convert `value` for storage in a column of type `target`, as INSERT and
+/// UPDATE do.
+///
+/// Text going into a text column is kept exactly, only checked against the
+/// column's length (and space-padded for CHAR). [`cast`] would trim it and
+/// strip enclosing quotes, since it re-reads the value as a literal. Every
+/// other conversion is a [`cast`].
+pub fn assign_cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionError> {
+    let text = match value {
+        DataValue::Varchar(s) => s.as_str(),
+        DataValue::Char(s) => s.trim_end_matches(' '),
+        _ => return cast(value, target),
+    };
+    let too_long = |ty: String, max: u16| {
+        FunctionError::InvalidArgument(format!(
+            "{} value '{}' is out of range: maximum length is {} bytes",
+            ty, text, max
+        ))
+    };
+    match target {
+        DataType::Varchar(max) if text.len() > *max as usize => {
+            Err(too_long(format!("VARCHAR({})", max), *max))
+        }
+        DataType::Varchar(_) => Ok(DataValue::Varchar(text.to_string())),
+        DataType::Char(n) | DataType::Character(n) if text.len() > *n as usize => {
+            Err(too_long(format!("CHAR({})", n), *n))
+        }
+        DataType::Char(n) | DataType::Character(n) => Ok(DataValue::Char(format!(
+            "{:<width$}",
+            text,
+            width = *n as usize
+        ))),
+        _ => cast(value, target),
+    }
+}
+
 /// Truncate numeric types toward zero when casting to exact integer types (SQL:1999 standard).
 fn cast_numeric_to_integer(
     value: &DataValue,

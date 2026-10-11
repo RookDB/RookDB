@@ -1,52 +1,212 @@
+//! Row insertion: the typed insert path and its text edges.
+//!
+//! [`insert_row`] takes one value per column as `Option<DataValue>` and is
+//! the only way rows enter a table. Text input (CSV files, literals of a
+//! cached INSERT, tests) is parsed once by [`parse_text_row`] and then goes
+//! through the same path.
+
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 
-use crate::backend::heap::HeapManager;
-use crate::catalog::types::Catalog;
+use crate::backend::error::{RookError, RookResult};
+use crate::catalog::types::{Catalog, Column};
 use crate::types::DataValue;
-use crate::types::row::serialize_nullable_row;
-use crate::types::validation::validate_value;
+use crate::types::functions::assign_cast;
+use crate::types::row::serialize_nullable_typed_row;
 
-/// Load CSV file with full validation and error handling using HeapManager.
+/// Parse a row given as text, one string per column, the way SQL literals
+/// are parsed. Empty text and `NULL` (any case) are SQL NULL.
+pub fn parse_text_row(
+    columns: &[Column],
+    values: &[&str],
+) -> Result<Vec<Option<DataValue>>, String> {
+    if values.len() != columns.len() {
+        return Err(format!(
+            "expected {} values, got {}",
+            columns.len(),
+            values.len()
+        ));
+    }
+    columns
+        .iter()
+        .zip(values)
+        .map(|(col, text)| parse_text_value(col, text))
+        .collect()
+}
+
+/// Parse one value given as text for `column`; see [`parse_text_row`].
+pub fn parse_text_value(column: &Column, text: &str) -> Result<Option<DataValue>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
+    DataValue::parse_and_encode(&column.data_type, text)
+        .and_then(|bytes| DataValue::from_bytes(&column.data_type, &bytes))
+        .map(Some)
+        .map_err(|e| format!("column '{}': {}", column.name, e))
+}
+
+/// Insert one row: convert each value to its column's type, check the
+/// table's constraints, write the row and add it to every index.
 ///
-/// Before loading any data:
-/// 1. Validates that all column data types are supported
-/// 2. Checks that CSV file is readable
-/// 3. Performs row-by-row validation and type checking
-/// 4. Uses HeapManager for FSM-aware insertion
+/// Nothing is written when a value or constraint is rejected. If an index
+/// rejects the row after it is written, the row is deleted again and the
+/// error returned. Returns the row's heap location.
+pub fn insert_row(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    values: &[Option<DataValue>],
+) -> RookResult<(u32, u32)> {
+    let columns = table_columns(catalog, db_name, table_name)?;
+    if values.len() != columns.len() {
+        return Err(RookError::TypeMismatch(format!(
+            "table '{}' has {} columns but {} values were supplied",
+            table_name,
+            columns.len(),
+            values.len()
+        )));
+    }
+    let row: Vec<Option<DataValue>> = columns
+        .iter()
+        .zip(values)
+        .map(|(col, value)| match value {
+            None => Ok(None),
+            Some(v) => assign_cast(v, &col.data_type)
+                .map(Some)
+                .map_err(|e| RookError::TypeMismatch(format!("column '{}': {}", col.name, e))),
+        })
+        .collect::<RookResult<_>>()?;
+
+    crate::backend::constraint::validate_row_insert(catalog, db_name, table_name, &row)?;
+
+    let schema: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
+    let bytes = serialize_nullable_typed_row(&schema, &row).map_err(RookError::TypeMismatch)?;
+
+    let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+    let (page_id, slot_id) =
+        crate::backend::cache::with_heap(&table_path, |hm| hm.insert_tuple(&bytes)).map_err(
+            |e| match e.kind() {
+                // A row the heap refuses (empty or larger than a page).
+                io::ErrorKind::InvalidInput => RookError::TypeMismatch(e.to_string()),
+                _ => RookError::Io(e),
+            },
+        )?;
+
+    if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
+        db_name, table_name, &row, page_id, slot_id,
+    ) {
+        // A row the index cannot see would vanish from every index scan:
+        // take the row back out and fail the insert.
+        if let Err(undo) = crate::backend::executor::delete::delete_by_pointers(
+            catalog,
+            db_name,
+            table_name,
+            &[(page_id, slot_id)],
+        ) {
+            log::error!("Failed to undo insert after index error: {}", undo);
+        }
+        return Err(RookError::Io(io::Error::other(format!(
+            "Index update failed: {}",
+            e
+        ))));
+    }
+
+    Ok((page_id, slot_id))
+}
+
+/// Parse a row given as text with [`parse_text_row`] and insert it.
+pub fn insert_text_row(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    values: &[&str],
+) -> RookResult<(u32, u32)> {
+    let columns = table_columns(catalog, db_name, table_name)?;
+    let row = parse_text_row(columns, values).map_err(RookError::TypeMismatch)?;
+    insert_row(catalog, db_name, table_name, &row)
+}
+
+fn table_columns<'a>(
+    catalog: &'a Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> RookResult<&'a [Column]> {
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db_name.to_string(),
+        })?;
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Table",
+            name: format!("{}.{}", db_name, table_name),
+        })?;
+    Ok(&table.columns)
+}
+
+/// Insert a row given as text and return its heap location.
 ///
-/// Returns count of successfully inserted rows on success.
+/// `Ok(None)` means the row was rejected (bad value or constraint
+/// violation) and nothing was written; `Err` is a storage failure or a
+/// missing table.
+pub fn insert_single_tuple_with_location(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    values: &[&str],
+) -> io::Result<Option<(u32, u32)>> {
+    match insert_text_row(catalog, db_name, table_name, values) {
+        Ok(location) => Ok(Some(location)),
+        Err(RookError::Io(e)) => Err(e),
+        Err(e @ RookError::NotFound { .. }) => {
+            Err(io::Error::new(io::ErrorKind::NotFound, e.to_string()))
+        }
+        Err(e) => {
+            log::info!("Row rejected for '{}.{}': {}", db_name, table_name, e);
+            Ok(None)
+        }
+    }
+}
+
+/// [`insert_single_tuple_with_location`] reporting only whether the row was
+/// inserted.
+pub fn insert_single_tuple(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    values: &[&str],
+) -> io::Result<bool> {
+    insert_single_tuple_with_location(catalog, db_name, table_name, values).map(|opt| opt.is_some())
+}
+
+/// Load a CSV file into a table, one row per line.
+///
+/// A first line that names the table's columns is skipped as a header. Each
+/// row is parsed with [`parse_text_row`] and inserted with [`insert_row`];
+/// rows that fail are logged and counted, and loading continues.
+///
+/// Returns the number of rows inserted.
 pub fn load_csv(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
     csv_path: &str,
 ) -> io::Result<u32> {
-    log::info!(" Starting CSV load operation");
     log::info!(
-        " Database: '{}', Table: '{}', CSV: '{}'",
+        "Loading CSV '{}' into '{}.{}'",
+        csv_path,
         db_name,
-        table_name,
-        csv_path
+        table_name
     );
 
-    // --- 1. Fetch table schema from catalog ---
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
-        )
-    })?;
-
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
-
-    let columns = &table.columns;
+    let columns = table_columns(catalog, db_name, table_name)
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e.to_string()))?;
     if columns.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -54,46 +214,18 @@ pub fn load_csv(
         ));
     }
 
-    log::info!(" Found table with {} columns", columns.len());
+    let csv_file = File::open(csv_path).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Failed to open CSV file '{}': {}", csv_path, e),
+        )
+    })?;
+    let mut lines = BufReader::new(csv_file).lines();
 
-    // --- 2. VALIDATE ALL DATA TYPES BEFORE LOADING ---
-    log::info!(" Validating schema data types...");
-    for (idx, col) in columns.iter().enumerate() {
-        log::info!("   Column {}: '{}' → {}", idx + 1, col.name, col.data_type);
-        log::info!("   Supported data type: {:?}", col.data_type);
-    }
-    log::info!(" All data types validated successfully");
-
-    // --- 3. Open and read the CSV file ---
-    log::info!(" Opening CSV file: '{}'", csv_path);
-    let csv_file = match File::open(csv_path) {
-        Ok(f) => {
-            log::info!(" CSV file opened successfully");
-            f
-        }
-        Err(e) => {
-            log::info!(" Failed to open CSV file: {}", e);
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Failed to open CSV file '{}': {}", csv_path, e),
-            ));
-        }
-    };
-
-    let reader = BufReader::new(csv_file);
-    let mut lines = reader.lines();
-
-    // Skip header line if present
-    log::info!(" Reading CSV header...");
+    // Skip a header line if present.
     let mut first_row: Option<String> = None;
-    for line_res in lines.by_ref() {
-        let line = match line_res {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("Error reading CSV line: {}", e);
-                return Err(e);
-            }
-        };
+    for line in lines.by_ref() {
+        let line = line?;
         if line.trim().is_empty() {
             continue;
         }
@@ -103,200 +235,65 @@ pub fn load_csv(
                 .iter()
                 .zip(columns.iter())
                 .all(|(v, col)| col.name.eq_ignore_ascii_case(v.trim().trim_matches('"')));
-        if is_header {
-            log::info!(" Header detected: {}", line);
-        } else {
+        if !is_header {
             first_row = Some(line);
         }
         break;
     }
 
-    // --- 3a. Open HeapManager for FSM-aware insertion ---
-    let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
-    let mut heap_manager = match HeapManager::open(table_path.clone()) {
-        Ok(hm) => {
-            log::info!(" Opened HeapManager (FSM will be created/updated)");
-            hm
-        }
-        Err(e) => {
-            log::info!(" CRITICAL: Failed to open HeapManager: {}", e);
-            return Err(e);
-        }
-    };
-
-    let has_header = first_row.is_none();
-    let mut line_idx = if has_header { 1 } else { 0 };
-    let rows_iter = first_row.into_iter().map(Ok).chain(lines);
-
-    // --- 4. Iterate through rows with detailed validation ---
+    let mut line_idx = if first_row.is_none() { 1 } else { 0 };
     let mut inserted = 0u32;
     let mut skipped = 0u32;
     let mut failed = 0u32;
 
-    for line in rows_iter {
+    for line in first_row.into_iter().map(Ok).chain(lines) {
         line_idx += 1;
-
-        let row = match line {
-            Ok(r) => r,
+        let line = match line {
+            Ok(l) => l,
             Err(e) => {
-                log::info!(" Line {}: Error reading line: {}", line_idx, e);
+                log::warn!("Line {}: error reading line: {}", line_idx, e);
                 failed += 1;
                 continue;
             }
         };
-
-        if row.trim().is_empty() {
-            log::debug!("Line {}: Skipping empty row", line_idx);
+        if line.trim().is_empty() {
             skipped += 1;
             continue;
         }
 
-        let values: Vec<String> = parse_csv_line(&row);
-
-        if values.len() != columns.len() {
+        let fields = parse_csv_line(&line);
+        if fields.len() != columns.len() {
             log::warn!(
                 "[CSV LOADER] Line {}: Expected {} columns, found {}. Skipping row.",
                 line_idx,
                 columns.len(),
-                values.len()
+                fields.len()
             );
             skipped += 1;
             continue;
         }
+        let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
 
-        let values_ref: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
-
-        // --- 5. Validate each value before serialization ---
-        let mut validation_passed = true;
-        for (col_idx, (val, col)) in values_ref.iter().zip(columns.iter()).enumerate() {
-            let data_type = &col.data_type;
-            let trimmed = val.trim();
-            if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
-                continue;
-            }
-            if let Err(validation_err) = validate_value(data_type, val) {
-                log::warn!(
-                    "[CSV LOADER] Line {}, Column {} ('{}'): {} Value: '{}'",
-                    line_idx,
-                    col_idx + 1,
-                    col.name,
-                    validation_err,
-                    val
-                );
-                validation_passed = false;
-                break;
-            }
-        }
-
-        if !validation_passed {
-            log::error!("Line {}: Validation failed. Skipping row.", line_idx);
-            failed += 1;
-            continue;
-        }
-
-        // Constraint validation: NOT NULL, UNIQUE, FK, CHECK
-        if let Err(e) = crate::backend::constraint::validate_row_insert(
-            catalog,
-            db_name,
-            table_name,
-            &values_ref,
-        ) {
-            log::warn!("Line {}: Constraint violation: {}", line_idx, e);
-            failed += 1;
-            continue;
-        }
-
-        // --- 6. Serialize row based on schema ---
-        let mut row_ok = true;
-
-        for (val, col) in values_ref.iter().zip(columns.iter()) {
-            let data_type = &col.data_type;
-            let trimmed = val.trim();
-            if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
-                continue;
-            }
-            match DataValue::parse_and_encode(data_type, val) {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("Skipping row {}: column '{}' — {}", line_idx, col.name, e);
-                    row_ok = false;
-                    break;
-                }
-            }
-        }
-
-        if !row_ok {
-            failed += 1;
-            continue;
-        }
-
-        // Build datatype list
-        let data_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
-
-        // Build nullable value list
-        let nullable_values: Vec<Option<&str>> = values_ref
-            .iter()
-            .zip(columns.iter())
-            .map(|(v, col)| {
-                let trimmed = v.trim();
-                if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
-                    None
-                } else {
-                    Some(*v)
-                }
-            })
-            .collect();
-
-        // Serialize using tuple layout serializer
-        let tuple_bytes = match serialize_nullable_row(&data_types, &nullable_values) {
-            Ok(bytes) => bytes,
+        let result = parse_text_row(columns, &refs)
+            .map_err(RookError::TypeMismatch)
+            .and_then(|row| insert_row(catalog, db_name, table_name, &row));
+        match result {
+            Ok(_) => inserted += 1,
             Err(e) => {
-                log::error!("Line {}: Failed to serialize row: {}", line_idx, e);
-                failed += 1;
-                continue;
-            }
-        };
-
-        // --- 7. Insert tuple using HeapManager (FSM-aware) ---
-        match heap_manager.insert_tuple(&tuple_bytes) {
-            Ok((page_id, slot_id)) => {
-                // Update any existing B+ Tree index
-                if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
-                    db_name,
-                    table_name,
-                    &values_ref,
-                    page_id,
-                    slot_id,
-                ) {
-                    // Keep heap and index in step: drop the row again.
-                    log::error!("Line {}: index update failed: {}", line_idx, e);
-                    if let Err(undo) = heap_manager.delete_tuple(page_id, slot_id) {
-                        log::error!("Line {}: failed to undo insert: {}", line_idx, undo);
-                    }
-                    failed += 1;
-                    continue;
-                }
-
-                inserted += 1;
-                if inserted.is_multiple_of(100) {
-                    log::info!("Inserted {} rows so far...", inserted);
-                }
-            }
-            Err(e) => {
-                log::error!("Line {}: Failed to insert row: {}", line_idx, e);
+                log::warn!("[CSV LOADER] Line {}: {}", line_idx, e);
                 failed += 1;
             }
         }
     }
 
-    log::info!("═══════════════════════════════════");
-    log::info!(" CSV Load Summary:");
-    log::info!(" Successfully inserted: {}", inserted);
-    log::info!(" Skipped (formatting): {}", skipped);
-    log::info!(" Failed (validation/insert): {}", failed);
-    log::info!(" Total rows processed: {}", inserted + skipped + failed);
-    log::info!(" ═══════════════════════════════════\n");
-
+    log::info!(
+        "CSV load into '{}.{}': {} inserted, {} skipped, {} failed",
+        db_name,
+        table_name,
+        inserted,
+        skipped,
+        failed
+    );
     if inserted == 0 && (skipped > 0 || failed > 0) {
         log::warn!(
             "WARNING: No rows were inserted. Please check your CSV file format and data types."
@@ -304,164 +301,6 @@ pub fn load_csv(
     }
 
     Ok(inserted)
-}
-
-/// Insert a single tuple manually using HeapManager (FSM-aware)
-///
-/// Hot-path notes: the HeapManager for the table is process-cached
-/// (`backend::cache::with_heap`) so repeated calls do not re-open files, and
-/// index maintenance goes through the cached B+ Tree registry with batched
-/// fsyncs. Callers that need data on disk should hit a checkpoint
-/// (`backend::cache::checkpoint`) — heap scans do this automatically.
-pub fn insert_single_tuple_with_location(
-    catalog: &Catalog,
-    db_name: &str,
-    table_name: &str,
-    values: &[&str],
-) -> io::Result<Option<(u32, u32)>> {
-    log::info!(" Starting single tuple insertion");
-
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db_name),
-        )
-    })?;
-
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", table_name),
-        )
-    })?;
-
-    let columns = &table.columns;
-
-    if values.len() != columns.len() {
-        log::info!(" Expected {} values, got {}", columns.len(), values.len());
-        return Ok(None);
-    }
-
-    // Validate all values
-    for (val, col) in values.iter().zip(columns.iter()) {
-        let data_type = col.data_type.clone();
-        let trimmed = val.trim();
-        if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
-            continue;
-        }
-
-        if let Err(e) = validate_value(&data_type, val) {
-            log::info!("Column '{}': {}", col.name, e);
-            return Ok(None);
-        }
-    }
-
-    // Constraint validation: NOT NULL, UNIQUE, FK, CHECK
-    if let Err(e) =
-        crate::backend::constraint::validate_row_insert(catalog, db_name, table_name, values)
-    {
-        log::info!("Constraint violation: {}", e);
-        return Ok(None);
-    }
-
-    // Serialize tuple
-    let mut row_ok = true;
-
-    for (val, col) in values.iter().zip(columns.iter()) {
-        let data_type = &col.data_type;
-        let trimmed = val.trim();
-        if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
-            continue;
-        }
-
-        match DataValue::parse_and_encode(data_type, val) {
-            Ok(_) => {}
-            Err(e) => {
-                log::info!(" Failed to serialize column '{}': {}", col.name, e);
-                row_ok = false;
-                break;
-            }
-        }
-    }
-
-    if !row_ok {
-        return Ok(None);
-    }
-
-    // Build datatype list
-    let data_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
-
-    // Build nullable value list
-    let nullable_values: Vec<Option<&str>> = values
-        .iter()
-        .zip(columns.iter())
-        .map(|(v, col)| {
-            let trimmed = v.trim();
-            if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
-                None
-            } else {
-                Some(*v)
-            }
-        })
-        .collect();
-
-    // Serialize using tuple layout serializer
-    let tuple_bytes = match serialize_nullable_row(&data_types, &nullable_values) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            log::info!(" Failed to serialize tuple: {}", e);
-            return Ok(None);
-        }
-    };
-
-    // Open HeapManager and insert tuple — via the process-cached manager
-    // (no per-row file open / pool flush churn).
-    let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
-
-    let inserted =
-        crate::backend::cache::with_heap(&table_path, |hm| hm.insert_tuple(&tuple_bytes));
-
-    match inserted {
-        Ok((page_id, slot_id)) => {
-            log::info!(
-                " Successfully inserted at (page={}, slot={})",
-                page_id,
-                slot_id
-            );
-
-            // Update any existing B+ Tree index (cached handles + batched sync)
-            if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
-                db_name, table_name, values, page_id, slot_id,
-            ) {
-                // A row the index cannot see would vanish from every index
-                // scan: take the row back out and fail the insert.
-                if let Err(undo) = crate::backend::executor::delete::delete_by_pointers(
-                    catalog,
-                    db_name,
-                    table_name,
-                    &[(page_id, slot_id)],
-                ) {
-                    log::error!(" Failed to undo insert after index error: {}", undo);
-                }
-                return Err(io::Error::other(format!("Index update failed: {}", e)));
-            }
-
-            Ok(Some((page_id, slot_id)))
-        }
-        Err(e) => {
-            log::info!(" Failed to insert tuple: {}", e);
-            Ok(None)
-        }
-    }
-}
-
-pub fn insert_single_tuple(
-    catalog: &Catalog,
-    db_name: &str,
-    table_name: &str,
-    values: &[&str],
-) -> io::Result<bool> {
-    insert_single_tuple_with_location(catalog, db_name, table_name, values).map(|opt| opt.is_some())
 }
 
 /// RFC-4180 compliant CSV line parser.
