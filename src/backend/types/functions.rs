@@ -847,165 +847,51 @@ fn cast_numeric_to_integer(
     value: &DataValue,
     target: &DataType,
 ) -> Option<Result<DataValue, FunctionError>> {
-    match target {
-        DataType::Int => match value {
-            DataValue::DoublePrecision(v) => {
-                let trunc = v.0.trunc();
-                if trunc >= i32::MIN as f64 && trunc <= i32::MAX as f64 {
-                    Some(Ok(DataValue::Int(trunc as i32)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "DOUBLE value '{}' is out of range for INT",
-                        v.0
-                    ))))
-                }
-            }
-            DataValue::Real(v) => {
-                let trunc = v.0.trunc();
-                if trunc >= i32::MIN as f32 && trunc < i32::MAX as f32 {
-                    Some(Ok(DataValue::Int(trunc as i32)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "REAL value '{}' is out of range for INT",
-                        v.0
-                    ))))
-                }
-            }
-            DataValue::Numeric(v) => {
-                let trunc = if v.scale == 0 {
-                    v.unscaled
-                } else {
-                    let factor = 10_i128.pow(v.scale as u32);
-                    v.unscaled / factor
-                };
-                if trunc >= i32::MIN as i128 && trunc <= i32::MAX as i128 {
-                    Some(Ok(DataValue::Int(trunc as i32)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(
-                        "NUMERIC value is out of range for INT".to_string(),
-                    )))
-                }
-            }
-            DataValue::SmallInt(v) => Some(Ok(DataValue::Int(*v as i32))),
-            DataValue::Int(v) => Some(Ok(DataValue::Int(*v))),
-            DataValue::BigInt(v) => {
-                if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
-                    Some(Ok(DataValue::Int(*v as i32)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "BIGINT value '{}' is out of range for INT",
-                        v
-                    ))))
-                }
-            }
-            _ => None,
-        },
-        DataType::SmallInt => match value {
-            DataValue::DoublePrecision(v) => {
-                let trunc = v.0.trunc();
-                if trunc >= i16::MIN as f64 && trunc <= i16::MAX as f64 {
-                    Some(Ok(DataValue::SmallInt(trunc as i16)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "DOUBLE value '{}' is out of range for SMALLINT",
-                        v.0
-                    ))))
-                }
-            }
-            DataValue::Real(v) => {
-                let trunc = v.0.trunc();
-                if trunc >= i16::MIN as f32 && trunc <= i16::MAX as f32 {
-                    Some(Ok(DataValue::SmallInt(trunc as i16)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "REAL value '{}' is out of range for SMALLINT",
-                        v.0
-                    ))))
-                }
-            }
-            DataValue::Numeric(v) => {
-                let trunc = if v.scale == 0 {
-                    v.unscaled
-                } else {
-                    let factor = 10_i128.pow(v.scale as u32);
-                    v.unscaled / factor
-                };
-                if trunc >= i16::MIN as i128 && trunc <= i16::MAX as i128 {
-                    Some(Ok(DataValue::SmallInt(trunc as i16)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(
-                        "NUMERIC value is out of range for SMALLINT".to_string(),
-                    )))
-                }
-            }
-            DataValue::SmallInt(v) => Some(Ok(DataValue::SmallInt(*v))),
-            DataValue::Int(v) => {
-                if *v >= i16::MIN as i32 && *v <= i16::MAX as i32 {
-                    Some(Ok(DataValue::SmallInt(*v as i16)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "INT value '{}' is out of range for SMALLINT",
-                        v
-                    ))))
-                }
-            }
-            DataValue::BigInt(v) => {
-                if *v >= i16::MIN as i64 && *v <= i16::MAX as i64 {
-                    Some(Ok(DataValue::SmallInt(*v as i16)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "BIGINT value '{}' is out of range for SMALLINT",
-                        v
-                    ))))
-                }
-            }
-            _ => None,
-        },
-        DataType::BigInt => match value {
-            DataValue::DoublePrecision(v) => {
-                let trunc = v.0.trunc();
-                if trunc >= i64::MIN as f64 && trunc < i64::MAX as f64 {
-                    Some(Ok(DataValue::BigInt(trunc as i64)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "DOUBLE value '{}' is out of range for BIGINT",
-                        v.0
-                    ))))
-                }
-            }
-            DataValue::Real(v) => {
-                let trunc = v.0.trunc();
-                if trunc >= i64::MIN as f32 && trunc < i64::MAX as f32 {
-                    Some(Ok(DataValue::BigInt(trunc as i64)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(format!(
-                        "REAL value '{}' is out of range for BIGINT",
-                        v.0
-                    ))))
-                }
-            }
-            DataValue::Numeric(v) => {
-                let trunc = if v.scale == 0 {
-                    v.unscaled
-                } else {
-                    let factor = 10_i128.pow(v.scale as u32);
-                    v.unscaled / factor
-                };
-                if trunc >= i64::MIN as i128 && trunc <= i64::MAX as i128 {
-                    Some(Ok(DataValue::BigInt(trunc as i64)))
-                } else {
-                    Some(Err(FunctionError::InvalidArgument(
-                        "NUMERIC value is out of range for BIGINT".to_string(),
-                    )))
-                }
-            }
-            DataValue::SmallInt(v) => Some(Ok(DataValue::BigInt(*v as i64))),
-            DataValue::Int(v) => Some(Ok(DataValue::BigInt(*v as i64))),
-            DataValue::BigInt(v) => Some(Ok(DataValue::BigInt(*v))),
-            _ => None,
-        },
-        _ => None,
-    }
+    let (bits, name) = match target {
+        DataType::SmallInt => (16, "SMALLINT"),
+        DataType::Int => (32, "INT"),
+        DataType::BigInt => (64, "BIGINT"),
+        _ => return None,
+    };
+    // The value as a whole number (None when a float is out of range), and
+    // how an error names it.
+    let (whole, what) = match value {
+        DataValue::DoublePrecision(v) => {
+            (float_whole(v.0, bits), format!("DOUBLE value '{}'", v.0))
+        }
+        DataValue::Real(v) => (
+            float_whole(f64::from(v.0), bits),
+            format!("REAL value '{}'", v.0),
+        ),
+        DataValue::Numeric(v) => (
+            Some(v.unscaled / 10_i128.pow(v.scale as u32)),
+            "NUMERIC value".to_string(),
+        ),
+        DataValue::SmallInt(v) => (Some(i128::from(*v)), format!("SMALLINT value '{}'", v)),
+        DataValue::Int(v) => (Some(i128::from(*v)), format!("INT value '{}'", v)),
+        DataValue::BigInt(v) => (Some(i128::from(*v)), format!("BIGINT value '{}'", v)),
+        _ => return None,
+    };
+    let limit = 1_i128 << (bits - 1);
+    Some(match whole {
+        Some(n) if (-limit..limit).contains(&n) => Ok(match target {
+            DataType::SmallInt => DataValue::SmallInt(n as i16),
+            DataType::Int => DataValue::Int(n as i32),
+            _ => DataValue::BigInt(n as i64),
+        }),
+        _ => Err(FunctionError::InvalidArgument(format!(
+            "{} is out of range for {}",
+            what, name
+        ))),
+    })
+}
+
+/// `x` truncated toward zero, when that fits a signed `bits`-bit integer.
+/// The bounds are powers of two, so they are exact as floats.
+fn float_whole(x: f64, bits: u32) -> Option<i128> {
+    let t = x.trunc();
+    let limit = 2_f64.powi(bits as i32 - 1);
+    (t >= -limit && t < limit).then_some(t as i128)
 }
 
 /// Convert a value to a BIT(n) string.

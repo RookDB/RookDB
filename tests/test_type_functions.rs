@@ -130,3 +130,47 @@ fn assignment_rounds_fractions_into_integer_columns() {
         DataValue::Int(1)
     );
 }
+
+#[test]
+fn integer_casts_truncate_and_check_each_width() {
+    let double = |v: f64| DataValue::DoublePrecision(OrderedF64(v));
+    let real = |v: f32| DataValue::Real(OrderedF32(v));
+    let numeric = |unscaled: i128, scale: u8| DataValue::Numeric(NumericValue { unscaled, scale });
+    // (target, smallest, largest) for each integer width.
+    let widths: [(DataType, i128, i128); 3] = [
+        (DataType::SmallInt, i16::MIN as i128, i16::MAX as i128),
+        (DataType::Int, i32::MIN as i128, i32::MAX as i128),
+        (DataType::BigInt, i64::MIN as i128, i64::MAX as i128),
+    ];
+    let as_i128 = |v: DataValue| match v {
+        DataValue::SmallInt(n) => n as i128,
+        DataValue::Int(n) => n as i128,
+        DataValue::BigInt(n) => n as i128,
+        other => panic!("not an integer: {:?}", other),
+    };
+    for (ty, min, max) in widths {
+        // Fractions truncate toward zero from every source type.
+        for v in [double(-7.9), real(-7.9), numeric(-79, 1)] {
+            assert_eq!(as_i128(cast(&v, &ty).unwrap()), -7, "{:?} -> {:?}", v, ty);
+        }
+        // The exact limits fit; one past them does not.
+        assert_eq!(as_i128(cast(&numeric(max, 0), &ty).unwrap()), max);
+        assert_eq!(as_i128(cast(&numeric(min, 0), &ty).unwrap()), min);
+        assert!(cast(&numeric(max + 1, 0), &ty).is_err());
+        assert!(cast(&numeric(min - 1, 0), &ty).is_err());
+        // -2^(n-1) is exact as a float and fits; 2^(n-1) does not.
+        assert_eq!(as_i128(cast(&double(min as f64), &ty).unwrap()), min);
+        assert!(cast(&double(-(min as f64)), &ty).is_err());
+        assert_eq!(as_i128(cast(&real(min as f32), &ty).unwrap()), min);
+        assert!(cast(&real(-(min as f32)), &ty).is_err());
+        assert!(cast(&double(f64::NAN), &ty).is_err());
+        // Narrowing between integer types checks the range.
+        assert_eq!(as_i128(cast(&DataValue::BigInt(-5), &ty).unwrap()), -5);
+    }
+    assert!(cast(&DataValue::Int(32768), &DataType::SmallInt).is_err());
+    assert!(cast(&DataValue::BigInt(2147483648), &DataType::Int).is_err());
+    assert_eq!(
+        cast(&DataValue::BigInt(-2147483648), &DataType::Int).unwrap(),
+        DataValue::Int(i32::MIN)
+    );
+}
