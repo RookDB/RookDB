@@ -69,6 +69,8 @@ fn write_header_via_pool(pool: &mut BufferPool, header: &HeaderMetadata) -> io::
 ///
 /// Each page is copied out of the shared buffer pool once and its tuples are
 /// served from that copy, so no pool lock or pin is held between calls.
+/// [`HeapScanIterator::next_ref`] lends each row's bytes from that copy;
+/// the `Iterator` impl returns owned copies.
 pub struct HeapScanIterator {
     pool: SharedPool,
     current_page: u32,
@@ -78,6 +80,8 @@ pub struct HeapScanIterator {
     page: Page,
     /// Page id held in `page`, if any.
     loaded_page: Option<u32>,
+    /// Slot count of the loaded page, validated when it was loaded.
+    slots_on_page: u32,
 }
 
 impl HeapScanIterator {
@@ -94,42 +98,37 @@ impl HeapScanIterator {
             total_pages,
             page: Page::new(),
             loaded_page: None,
+            slots_on_page: 0,
         }
     }
 
-    /// Copy a page out of the buffer pool.
+    /// Copy a page out of the buffer pool and validate its header.
     fn load_page(&mut self, page_id: u32) -> io::Result<()> {
         log::trace!("[HeapScanIterator::load_page] Loading page {}", page_id);
 
         self.loaded_page = None;
-        let mut pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
-        let frame_id = pool.fetch_page(page_id)?;
-        self.page
-            .data
-            .copy_from_slice(&pool.get_page(frame_id).data);
-        pool.unpin(frame_id, false);
+        {
+            let mut pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
+            let frame_id = pool.fetch_page(page_id)?;
+            self.page
+                .data
+                .copy_from_slice(&pool.get_page(frame_id).data);
+            pool.unpin(frame_id, false);
+        }
+        self.slots_on_page = get_tuple_count(&self.page)?;
         self.loaded_page = Some(page_id);
         Ok(())
     }
-}
 
-impl Iterator for HeapScanIterator {
-    type Item = io::Result<(u32, u32, Vec<u8>)>; // (page_id, slot_id, data)
-
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Move to the next live row: its page, slot and byte range in `page`.
+    ///
+    /// A page that cannot be read or a slot pointing outside its page is
+    /// reported once, and the scan moves past it.
+    fn advance(&mut self) -> Option<io::Result<(u32, u32, usize, usize)>> {
         loop {
-            // Check if we've reached the end
             if self.current_page >= self.total_pages {
-                log::trace!("[HeapScanIterator::next] End of scan reached");
                 return None;
             }
-
-            // Load page if not cached or if we moved to a new page.
-            //
-            // If a page cannot be read (truncated file, garbage header, ...),
-            // report the error ONCE and advance to the next page. Returning
-            // without advancing would re-enter this branch forever, hanging
-            // any consumer that skips errors (e.g. `filter_map(|r| r.ok())`).
             if self.loaded_page != Some(self.current_page)
                 && let Err(e) = self.load_page(self.current_page)
             {
@@ -137,82 +136,54 @@ impl Iterator for HeapScanIterator {
                 self.current_slot = 0;
                 return Some(Err(e));
             }
-
-            let page_id = self.current_page;
-            let page = &self.page;
-
-            // Get tuple count for current page
-            let tuple_count = match get_tuple_count(page) {
-                Ok(count) => count,
-                Err(e) => {
-                    // Undecodable page header: report once, move on.
-                    self.current_page += 1;
-                    self.current_slot = 0;
-                    return Some(Err(e));
-                }
-            };
-
-            // Check if we've exhausted tuples in this page
-            if self.current_slot >= tuple_count {
-                log::trace!(
-                    "[HeapScanIterator::next] Page {} exhausted, moving to next",
-                    self.current_page
-                );
+            if self.current_slot >= self.slots_on_page {
                 self.current_page += 1;
                 self.current_slot = 0;
                 continue;
             }
 
-            // Extract the tuple — get_slot_entry returns (0,0) for soft-deleted slots.
+            let page_id = self.current_page;
             let slot_id = self.current_slot;
-            let (offset, length) = match get_slot_entry(page, slot_id) {
-                Ok((o, l)) => (o, l),
-                Err(e) => {
-                    // Always advance past the bad slot to avoid an infinite loop
-                    // (e.g. when filter_map silently swallows the error).
-                    self.current_slot += 1;
-                    return Some(Err(e));
-                }
+            self.current_slot += 1;
+            let Some(slot) = self.page.slot(slot_id) else {
+                continue;
             };
-
-            // (0, 0) is the sentinel for "deleted / empty slot" returned by get_slot_entry.
-            // Skip it and move on.
-            if offset == 0 && length == 0 {
-                log::trace!(
-                    "[HeapScanIterator::next] Skipping deleted/empty slot id={} on page={}",
-                    slot_id,
-                    page_id
-                );
-                self.current_slot += 1;
+            if slot.is_dead() {
                 continue;
             }
-
-            // Validate bounds (guard against other corruption)
-            if offset as usize + length as usize > PAGE_SIZE {
-                // Advance to prevent infinite loop, then surface the error.
-                self.current_slot += 1;
+            let start = slot.offset as usize;
+            let end = start + slot.length as usize;
+            if end > PAGE_SIZE {
                 return Some(Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
                         "Tuple bounds invalid: offset={}, length={}, page_size={}",
-                        offset, length, PAGE_SIZE
+                        slot.offset, slot.length, PAGE_SIZE
                     ),
                 )));
             }
-
-            let data = page.data[offset as usize..(offset + length) as usize].to_vec();
-
-            log::trace!(
-                "[HeapScanIterator::next] Yielding page={}, slot={}, data_len={}",
-                page_id,
-                slot_id,
-                data.len()
-            );
-
-            self.current_slot += 1;
-
-            return Some(Ok((page_id, slot_id, data)));
+            return Some(Ok((page_id, slot_id, start, end)));
         }
+    }
+
+    /// The next live row as `(page_id, slot_id, bytes)`, with the bytes
+    /// borrowed from the scan's page copy (valid until the next call).
+    pub fn next_ref(&mut self) -> Option<io::Result<(u32, u32, &[u8])>> {
+        match self.advance()? {
+            Ok((page_id, slot_id, start, end)) => {
+                Some(Ok((page_id, slot_id, &self.page.data[start..end])))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+impl Iterator for HeapScanIterator {
+    type Item = io::Result<(u32, u32, Vec<u8>)>; // (page_id, slot_id, data)
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_ref()
+            .map(|r| r.map(|(page, slot, bytes)| (page, slot, bytes.to_vec())))
     }
 }
 
