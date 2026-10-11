@@ -46,6 +46,9 @@ pub struct InsertOperator {
     /// Injectable insert function. Defaults to wrapping `insert_single_tuple_with_location`.
     /// In tests, can be replaced with a mock for isolated unit testing.
     inserter: InsertInserter,
+    /// Source rows, read in full before the first insert so a statement that
+    /// selects from its own target never sees the rows it is adding.
+    source: Option<std::vec::IntoIter<Tuple>>,
 }
 
 impl InsertOperator {
@@ -91,6 +94,7 @@ impl InsertOperator {
             inserted_pointers,
             completed: false,
             inserter,
+            source: None,
         }
     }
 
@@ -106,6 +110,7 @@ impl InsertOperator {
             inserted_pointers: Rc::new(RefCell::new(Vec::new())),
             completed: false,
             inserter,
+            source: None,
         }
     }
 
@@ -129,8 +134,23 @@ impl Drop for InsertOperator {
 
 impl PhysicalOperator for InsertOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        // Pull one tuple from child, insert it, return it
-        match self.child.next() {
+        if self.source.is_none() {
+            let mut rows = Vec::new();
+            loop {
+                match self.child.next() {
+                    Ok(Some(tuple)) => rows.push(tuple),
+                    Ok(None) => break,
+                    Err(e) => {
+                        self.rollback();
+                        return Err(e);
+                    }
+                }
+            }
+            self.source = Some(rows.into_iter());
+        }
+        // Take one source tuple, insert it, return it
+        let next: RookResult<Option<Tuple>> = Ok(self.source.as_mut().and_then(Iterator::next));
+        match next {
             Ok(Some(tuple)) => {
                 // Convert tuple values to string slices for the inserter
                 let value_strs: Vec<String> = tuple
@@ -170,6 +190,7 @@ impl PhysicalOperator for InsertOperator {
     fn reset(&mut self) -> RookResult<()> {
         self.rollback();
         self.completed = false;
+        self.source = None;
         self.child.reset()?;
         Ok(())
     }

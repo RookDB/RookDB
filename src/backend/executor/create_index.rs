@@ -758,12 +758,12 @@ pub fn update_index_on_insert(
         );
 
         if let Err(e) = res {
-            log::warn!(
-                "[IndexInsert] Failed to insert into index {:?}: {}, skipping",
-                idx_path,
-                e
-            );
-            continue;
+            // Report it: the caller takes the row back out, so heap and
+            // index never disagree about which rows exist.
+            return Err(crate::backend::error::RookError::Internal(format!(
+                "failed to insert into index {:?}: {}",
+                idx_path, e
+            )));
         }
 
         log::trace!(

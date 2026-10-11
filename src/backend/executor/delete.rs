@@ -47,7 +47,7 @@ use crate::types::datatype::DataType;
 use crate::types::row::deserialize_nullable_row;
 use crate::types::value::DataValue;
 
-fn decode_tuple(
+pub(crate) fn decode_tuple(
     tuple_data: &[u8],
     columns: &[crate::catalog::types::Column],
 ) -> Vec<(String, ColumnValue)> {
@@ -333,7 +333,7 @@ pub fn delete_by_pointers(
             let tuple_data = &page.data[offset as usize..(offset + length) as usize];
             let decoded = decode_tuple(tuple_data, columns);
             crate::backend::constraint::check_row_delete_restrictions(
-                db_name, table_name, &decoded,
+                catalog, db_name, table_name, &decoded,
             )
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         }

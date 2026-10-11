@@ -108,7 +108,7 @@ pub fn validate_row_delete(
 ) -> Result<(), RookError> {
     // Every restricting FK is checked before any CASCADE / SET NULL action
     // runs, so a blocked delete leaves the child tables untouched.
-    check_row_delete_restrictions(db_name, table_name, column_values)?;
+    check_row_delete_restrictions(catalog, db_name, table_name, column_values)?;
 
     // Load FK constraints where OUR table is the parent (process-cached).
     let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
@@ -197,10 +197,25 @@ fn parent_key_value(
 /// Check, without changing anything, whether a RESTRICT (default) foreign key
 /// blocks deleting this row. DELETE runs this over every target row before it
 /// deletes the first one, so a blocked statement deletes nothing.
+///
+/// The check follows ON DELETE CASCADE keys: a child row that the delete
+/// would cascade to must itself be free of restricting references.
 pub fn check_row_delete_restrictions(
+    catalog: &crate::catalog::types::Catalog,
     db_name: &str,
     table_name: &str,
     column_values: &[(String, crate::backend::executor::delete::ColumnValue)],
+) -> Result<(), RookError> {
+    let mut visited = std::collections::HashSet::new();
+    check_delete_restrictions_from(catalog, db_name, table_name, column_values, &mut visited)
+}
+
+fn check_delete_restrictions_from(
+    catalog: &crate::catalog::types::Catalog,
+    db_name: &str,
+    table_name: &str,
+    column_values: &[(String, crate::backend::executor::delete::ColumnValue)],
+    visited: &mut std::collections::HashSet<(String, String, String)>,
 ) -> Result<(), RookError> {
     let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
 
@@ -208,32 +223,98 @@ pub fn check_row_delete_restrictions(
         let child_table = &fk.0;
         let child_col = &fk.1;
         let parent_col = &fk.2;
-        if !matches!(delete_action(&fk.4), DeleteAction::Restrict) {
-            continue;
-        }
         let Some(parent_value_str) = parent_key_value(column_values, parent_col) else {
             continue;
         };
 
-        if value_lookup::child_has_referencing_row(
-            db_name,
-            child_table,
-            child_col,
-            &parent_value_str,
-        )? {
-            return Err(RookError::constraint(
-                ConstraintKind::ForeignKey,
-                table_name,
-                Some(parent_col),
-                format!(
-                    "FOREIGN KEY constraint violated: cannot delete from '{}' because value '{}' is referenced by '{}' (column '{}' referencing '{}.{}')",
-                    table_name, parent_value_str, child_table, child_col, table_name, parent_col
-                ),
-            ));
+        match delete_action(&fk.4) {
+            DeleteAction::Restrict => {
+                if value_lookup::child_has_referencing_row(
+                    db_name,
+                    child_table,
+                    child_col,
+                    &parent_value_str,
+                )? {
+                    return Err(RookError::constraint(
+                        ConstraintKind::ForeignKey,
+                        table_name,
+                        Some(parent_col),
+                        format!(
+                            "FOREIGN KEY constraint violated: cannot delete from '{}' because value '{}' is referenced by '{}' (column '{}' referencing '{}.{}')",
+                            table_name,
+                            parent_value_str,
+                            child_table,
+                            child_col,
+                            table_name,
+                            parent_col
+                        ),
+                    ));
+                }
+            }
+            DeleteAction::Cascade => {
+                // Each (table, column, value) is expanded once; this also
+                // ends the walk on a reference cycle.
+                if !visited.insert((
+                    child_table.clone(),
+                    child_col.clone(),
+                    parent_value_str.clone(),
+                )) {
+                    continue;
+                }
+                for child_row in child_rows_referencing(
+                    catalog,
+                    db_name,
+                    child_table,
+                    child_col,
+                    &parent_value_str,
+                )? {
+                    check_delete_restrictions_from(
+                        catalog,
+                        db_name,
+                        child_table,
+                        &child_row,
+                        visited,
+                    )?;
+                }
+            }
+            // SET NULL keeps the child row, so nothing below it is affected.
+            DeleteAction::SetNull => {}
         }
     }
 
     Ok(())
+}
+
+/// Decoded rows of `child_table` whose `child_col` equals `value`.
+fn child_rows_referencing(
+    catalog: &crate::catalog::types::Catalog,
+    db_name: &str,
+    child_table: &str,
+    child_col: &str,
+    value: &str,
+) -> Result<Vec<Vec<(String, crate::backend::executor::delete::ColumnValue)>>, RookError> {
+    let Some(table) = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(child_table))
+    else {
+        return Ok(Vec::new());
+    };
+    let heap_path =
+        std::path::PathBuf::from(format!("database/base/{}/{}.dat", db_name, child_table));
+    if !heap_path.exists() {
+        return Ok(Vec::new());
+    }
+    let heap = crate::backend::heap::HeapManager::open(heap_path).map_err(RookError::Io)?;
+    let mut rows = Vec::new();
+    for item in heap.scan() {
+        let (_, _, bytes) = item.map_err(RookError::Io)?;
+        let decoded = crate::backend::executor::delete::decode_tuple(&bytes, &table.columns);
+        if parent_key_value(&decoded, child_col).as_deref() == Some(value) {
+            rows.push(decoded);
+        }
+    }
+    Ok(rows)
 }
 
 /// Propagate an UPDATE to child rows via ON UPDATE CASCADE / SET NULL.

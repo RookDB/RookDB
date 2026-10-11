@@ -268,7 +268,13 @@ pub fn load_csv(
                     page_id,
                     slot_id,
                 ) {
-                    log::warn!("Failed to update index for row {}: {}", line_idx, e);
+                    // Keep heap and index in step: drop the row again.
+                    log::error!("Line {}: index update failed: {}", line_idx, e);
+                    if let Err(undo) = heap_manager.delete_tuple(page_id, slot_id) {
+                        log::error!("Line {}: failed to undo insert: {}", line_idx, undo);
+                    }
+                    failed += 1;
+                    continue;
                 }
 
                 inserted += 1;
@@ -427,7 +433,17 @@ pub fn insert_single_tuple_with_location(
             if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
                 db_name, table_name, values, page_id, slot_id,
             ) {
-                log::warn!(" Failed to update index: {}", e);
+                // A row the index cannot see would vanish from every index
+                // scan: take the row back out and fail the insert.
+                if let Err(undo) = crate::backend::executor::delete::delete_by_pointers(
+                    catalog,
+                    db_name,
+                    table_name,
+                    &[(page_id, slot_id)],
+                ) {
+                    log::error!(" Failed to undo insert after index error: {}", undo);
+                }
+                return Err(io::Error::other(format!("Index update failed: {}", e)));
             }
 
             Ok(Some((page_id, slot_id)))
