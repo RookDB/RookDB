@@ -25,6 +25,7 @@ use crate::backend::index::btree::BTree;
 pub mod helpers;
 pub mod index_scan;
 pub mod joins;
+mod read_columns;
 pub mod subqueries;
 
 /// Converts a `LogicalPlan` into an executable `PhysicalOperator` tree.
@@ -34,6 +35,9 @@ pub struct PhysicalPlanner {
     pub(crate) catalog: std::sync::Arc<Catalog>,
     /// Current database name.
     pub(crate) db_name: String,
+    /// Lower-case names of the columns the query being planned reads, or
+    /// `None` to decode every column (see `read_columns`).
+    read_columns: std::cell::RefCell<Option<std::collections::HashSet<String>>>,
 }
 
 impl PhysicalPlanner {
@@ -41,6 +45,7 @@ impl PhysicalPlanner {
         Self {
             catalog: catalog.into(),
             db_name,
+            read_columns: std::cell::RefCell::new(None),
         }
     }
 
@@ -52,6 +57,11 @@ impl PhysicalPlanner {
         // as the planner descends into LogicalCte nodes.
         let mut cte_registry: std::collections::HashMap<String, Vec<super::tuple::Tuple>> =
             std::collections::HashMap::new();
+        *self.read_columns.borrow_mut() = if self.catalog.engine().decodes_all_columns() {
+            None
+        } else {
+            read_columns::read_columns(logical_plan)
+        };
         self.plan_internal(logical_plan, &mut cte_registry)
     }
 
@@ -666,7 +676,20 @@ impl PhysicalPlanner {
             RookError::Io(e).with_context(format!("Failed to open heap for table '{}'", ts.table))
         })?;
 
-        Ok(Box::new(SeqScanOperator::new(heap_manager, column_info)))
+        // Decode only the columns the query reads.
+        let wanted: Option<Vec<usize>> = self.read_columns.borrow().as_ref().map(|names| {
+            column_info
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| names.contains(&c.name.to_ascii_lowercase()))
+                .map(|(i, _)| i)
+                .collect()
+        });
+        let scan = SeqScanOperator::new(heap_manager, column_info);
+        Ok(match wanted {
+            Some(columns) => Box::new(scan.read_only(columns)),
+            None => Box::new(scan),
+        })
     }
 }
 
@@ -943,6 +966,7 @@ mod tests {
                 crate::backend::engine::Engine::current_dir(),
             )),
             db_name: "test".to_string(),
+            read_columns: std::cell::RefCell::new(None),
         }
     }
 

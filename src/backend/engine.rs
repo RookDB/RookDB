@@ -52,6 +52,9 @@ pub struct Engine {
     pub(crate) visibility_maps: Mutex<crate::backend::visibility_map::vm::VmRegistry>,
     /// When this engine's files were last fsynced.
     pub(crate) last_sync: Mutex<Option<std::time::Instant>>,
+    /// Scans decode every column, not only the ones a query reads. For
+    /// checking that the read-column analysis changes no result.
+    decode_all_columns: std::sync::atomic::AtomicBool,
 }
 
 impl Engine {
@@ -73,6 +76,7 @@ impl Engine {
             index_discovery: Mutex::default(),
             heaps: Mutex::default(),
             btrees: Mutex::default(),
+            decode_all_columns: std::sync::atomic::AtomicBool::new(false),
             visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
@@ -87,6 +91,20 @@ impl Engine {
     /// The engine of the working directory.
     pub fn current_dir() -> Arc<Engine> {
         Engine::open(".")
+    }
+
+    /// Make this engine's scans decode every column of every row instead of
+    /// only the columns each query reads. Results are the same; this exists
+    /// to check that they are.
+    pub fn set_decode_all_columns(&self, all: bool) {
+        self.decode_all_columns
+            .store(all, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// See [`Engine::set_decode_all_columns`].
+    pub(crate) fn decodes_all_columns(&self) -> bool {
+        self.decode_all_columns
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The data directory this engine manages.
