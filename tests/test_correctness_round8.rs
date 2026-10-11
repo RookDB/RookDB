@@ -687,8 +687,9 @@ fn i_bulk_load_maps_null_literal_to_null() {
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
-    std::fs::write("i_null.csv", "1,NULL\n").expect("write csv");
-    let n = load_csv(&catalog, "db8", "t", "i_null.csv").expect("load csv");
+    let csv = common::path("i_null.csv");
+    std::fs::write(&csv, "1,NULL\n").expect("write csv");
+    let n = load_csv(&catalog, "db8", "t", csv.to_str().unwrap()).expect("load csv");
     assert_eq!(n, 1, "one row must load");
 
     let rows = run_select(&catalog, "db8", "SELECT s FROM t WHERE s IS NULL");
@@ -722,8 +723,9 @@ fn i_bulk_load_enforces_unique() {
     create_index(&catalog, "db8", "u", "idx_u_id", &["id".to_string()]).expect("create index");
     assert!(insert_single_tuple(&catalog, "db8", "u", &["1", "10"]).unwrap());
 
-    std::fs::write("i_dup.csv", "1,20\n").expect("write csv");
-    load_csv(&catalog, "db8", "u", "i_dup.csv").expect("load csv");
+    let csv = common::path("i_dup.csv");
+    std::fs::write(&csv, "1,20\n").expect("write csv");
+    load_csv(&catalog, "db8", "u", csv.to_str().unwrap()).expect("load csv");
 
     let rows = run_select(&catalog, "db8", "SELECT id FROM u");
     assert_eq!(
@@ -754,8 +756,9 @@ fn i_bulk_load_handles_quoted_comma() {
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
-    std::fs::write("i_q.csv", "\"a,b\",1\n").expect("write csv");
-    load_csv(&catalog, "db8", "q", "i_q.csv").expect("load csv");
+    let csv = common::path("i_q.csv");
+    std::fs::write(&csv, "\"a,b\",1\n").expect("write csv");
+    load_csv(&catalog, "db8", "q", csv.to_str().unwrap()).expect("load csv");
 
     let rows = run_select(&catalog, "db8", "SELECT a, b FROM q");
     assert_eq!(
