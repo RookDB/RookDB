@@ -104,8 +104,6 @@ impl HeapScanIterator {
 
     /// Copy a page out of the buffer pool and validate its header.
     fn load_page(&mut self, page_id: u32) -> io::Result<()> {
-        log::trace!("[HeapScanIterator::load_page] Loading page {}", page_id);
-
         self.loaded_page = None;
         {
             let mut pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
@@ -416,11 +414,6 @@ impl HeapManager {
             .insert_tuple_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        log::trace!(
-            "[HeapManager::insert_tuple] Inserting tuple of {} bytes",
-            tuple_data.len()
-        );
-
         // Validate input
         if tuple_data.is_empty() {
             return Err(io::Error::new(
@@ -444,19 +437,12 @@ impl HeapManager {
         let required_bytes = (tuple_data.len() as u32) + ITEM_ID_SIZE;
         let min_category = Self::bytes_to_category(required_bytes);
 
-        log::trace!(
-            "[HeapManager::insert_tuple] min_category required: {}",
-            min_category
-        );
-
         // Track pages that failed insertion to avoid retrying them
         let mut failed_pages = Vec::new();
 
         // Three FSM-guided attempts, then a fresh page: stale FSM entries must
         // never make an insert fail while the file can still grow.
         for attempt in 0..4 {
-            log::trace!("[HeapManager::insert_tuple] Attempt {}/4", attempt + 1);
-
             // Get a page to try
             let page_id = if attempt == 3 {
                 self.allocate_new_page()?
@@ -483,39 +469,19 @@ impl HeapManager {
                         }
                         // Check if this page failed before
                         else if failed_pages.contains(&pid) {
-                            log::trace!(
-                                "[HeapManager::insert_tuple] Page {} previously failed for this insert, allocating new",
-                                pid
-                            );
                             if attempt < 2 {
-                                log::trace!(
-                                    "[HeapManager::insert_tuple] Retrying with fresh search"
-                                );
                                 continue;
                             } else {
-                                log::trace!(
-                                    "[HeapManager::insert_tuple] Final attempt: allocating new page"
-                                );
                                 self.allocate_new_page()?
                             }
                         } else {
-                            log::trace!(
-                                "[HeapManager::insert_tuple] FSM search returned page: {}",
-                                pid
-                            );
                             pid
                         }
                     }
                     None => {
                         if attempt < 2 {
-                            log::trace!(
-                                "[HeapManager::insert_tuple] FSM returned None, will retry"
-                            );
                             continue;
                         } else {
-                            log::trace!(
-                                "[HeapManager::insert_tuple] Final attempt: allocating new page"
-                            );
                             self.allocate_new_page()?
                         }
                     }
@@ -549,12 +515,6 @@ impl HeapManager {
                 };
 
                 if current_free < required_bytes {
-                    log::trace!(
-                        "[HeapManager::insert_tuple] Page {} has only {} bytes free, needs {} - will retry",
-                        page_id,
-                        current_free,
-                        required_bytes
-                    );
                     // Unpin without dirty (we didn't modify)
                     pool.unpin(frame_id, false);
                     failed_pages.push(page_id);
@@ -587,12 +547,6 @@ impl HeapManager {
             // Increment tuple counter
             self.update_header(|h| h.total_tuples += 1)?;
 
-            log::trace!(
-                "[HeapManager::insert_tuple] Successfully inserted at (page={}, slot={})",
-                page_id,
-                slot_id
-            );
-
             return Ok((page_id, slot_id));
         }
 
@@ -606,11 +560,6 @@ impl HeapManager {
     /// Uses the buffer pool for page access.
     pub fn get_tuple(&mut self, page_id: u32, slot_id: u32) -> io::Result<Vec<u8>> {
         HEAP_METRICS.get_tuple_calls.fetch_add(1, Ordering::Relaxed);
-        log::trace!(
-            "[HeapManager::get_tuple] Retrieving tuple (page={}, slot={})",
-            page_id,
-            slot_id
-        );
 
         // Validate page_id
         if page_id >= self.page_count() {
@@ -675,8 +624,6 @@ impl HeapManager {
             extract_res?
         };
 
-        log::trace!("[HeapManager::get_tuple] Retrieved {} bytes", result.len());
-
         Ok(result)
     }
 
@@ -688,12 +635,6 @@ impl HeapManager {
         HEAP_METRICS
             .insert_tuple_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        log::trace!(
-            "[HeapManager::delete_tuple] Deleting tuple (page={}, slot={})",
-            page_id,
-            slot_id
-        );
 
         // Validate page_id
         if page_id >= self.page_count() {
@@ -724,12 +665,6 @@ impl HeapManager {
                 }
                 let freed = length + ITEM_ID_SIZE;
 
-                log::trace!(
-                    "[HeapManager::delete_tuple] Marked slot {} as deleted, freed {} bytes",
-                    slot_id,
-                    freed
-                );
-
                 // Update the slot directory entry to mark as deleted
                 let slot_offset = PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE;
                 page.set_slot(
@@ -750,19 +685,11 @@ impl HeapManager {
                 if offset == upper {
                     upper += length;
                     page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-                    log::trace!(
-                        "[HeapManager::delete_tuple] Reclaimed data space, upper moved to {}",
-                        upper
-                    );
                 }
 
                 if slot_id == tuple_count - 1 && lower == slot_offset + ITEM_ID_SIZE {
                     lower -= ITEM_ID_SIZE;
                     page.data[0..4].copy_from_slice(&lower.to_le_bytes());
-                    log::trace!(
-                        "[HeapManager::delete_tuple] Reclaimed slot space, lower moved to {}",
-                        lower
-                    );
                 }
 
                 Ok(freed)
@@ -901,12 +828,6 @@ impl HeapManager {
         // Register new page with FSM (full free space)
         let initial_free = PAGE_SIZE as u32 - PAGE_HEADER_SIZE;
         self.fsm.fsm_set_avail(new_page_id, initial_free, None)?;
-
-        log::trace!(
-            "[HeapManager::allocate_new_page] New page_id={}, total_pages={}",
-            new_page_id,
-            page_count
-        );
 
         Ok(new_page_id)
     }

@@ -294,7 +294,7 @@ fn test_fsm_bubble_up_recalculation() {
     fsm.fsm_set_avail(1, 1000, None).unwrap(); // Page 1
 
     let cat_1000 = (1000 / 32) as u8;
-    let root_val_1 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
+    let root_val_1 = fsm.read_fsm_page(0, 0).unwrap().root_value();
     assert_eq!(
         root_val_1, cat_1000,
         "Root should reflect the highest free space"
@@ -304,7 +304,7 @@ fn test_fsm_bubble_up_recalculation() {
     fsm.fsm_set_avail(1, 200, None).unwrap();
 
     let cat_500 = (500 / 32) as u8;
-    let root_val_2 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
+    let root_val_2 = fsm.read_fsm_page(0, 0).unwrap().root_value();
 
     assert_eq!(
         root_val_2, cat_500,
@@ -356,7 +356,7 @@ fn test_fsm_needle_in_haystack() {
         fsm.fsm_set_avail(i, 0, None).unwrap(); // 0 bytes free
     }
 
-    let root_val_1 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
+    let root_val_1 = fsm.read_fsm_page(0, 0).unwrap().root_value();
     assert_eq!(
         root_val_1, 0,
         "Root should report 0 space when all pages are full in level 0"
@@ -368,7 +368,7 @@ fn test_fsm_needle_in_haystack() {
     fsm.fsm_set_avail(target_page_id, 4000, None).unwrap();
 
     let cat_4000 = (4000 / 32) as u8;
-    let root_val_2 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
+    let root_val_2 = fsm.read_fsm_page(0, 0).unwrap().root_value();
 
     // The root should instantly know 4000 bytes opened up
     assert_eq!(

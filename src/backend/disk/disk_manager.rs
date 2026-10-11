@@ -63,8 +63,6 @@ pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result
 
 /// Update the header page (Page 0) with HeaderMetadata.
 pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> io::Result<()> {
-    log::trace!("[disk::update_header_page] Writing header metadata to page 0");
-
     // Serialize the header
     let header_bytes = header.serialize()?;
 
@@ -74,15 +72,11 @@ pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> io::Resul
     // Write the 24-byte header
     file.write_all(&header_bytes)?;
 
-    log::trace!("[disk::update_header_page] Header successfully written");
-
     Ok(())
 }
 
 /// Read and deserialize the header page (Page 0) into HeaderMetadata.
 pub fn read_header_page(file: &mut File) -> io::Result<HeaderMetadata> {
-    log::trace!("[disk::read_header_page] Reading header metadata from page 0");
-
     // Seek to page 0, offset 0
     file.seek(SeekFrom::Start(0))?;
 

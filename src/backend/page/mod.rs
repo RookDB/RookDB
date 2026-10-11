@@ -301,13 +301,6 @@ pub fn get_tuple_count(page: &Page) -> std::io::Result<u32> {
     }
 
     let tuple_count = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
-    log::trace!(
-        "[page::get_tuple_count] Computing tuple_count: ({} - {}) / {} = {}",
-        lower,
-        PAGE_HEADER_SIZE,
-        ITEM_ID_SIZE,
-        tuple_count
-    );
 
     Ok(tuple_count)
 }

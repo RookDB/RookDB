@@ -353,11 +353,6 @@ impl BufferPool {
         // 5. Update lookup table
         self.frame_table.insert(page_id, frame_idx);
 
-        log::trace!(
-            "BufferPool: fetched page {} into frame {}",
-            page_id,
-            frame_idx
-        );
         Ok(FrameId(frame_idx))
     }
 
@@ -410,7 +405,6 @@ impl BufferPool {
 
         self.frame_table.insert(page_id, frame_idx);
 
-        log::trace!("BufferPool: allocated new page {}", page_id);
         Ok((page_id, FrameId(frame_idx)))
     }
 
@@ -627,7 +621,6 @@ impl BufferPool {
                 self.frames[idx].clock_bit = false;
                 self.frames[idx].page_id = u32::MAX;
 
-                log::trace!("BufferPool: evicted frame {} (page {})", idx, page_id);
                 return Ok(idx);
             }
 
@@ -692,7 +685,6 @@ impl BufferPool {
 
         self.frames[frame_idx].is_dirty = false;
 
-        log::trace!("BufferPool: wrote page {} to disk", page_id);
         Ok(())
     }
 }

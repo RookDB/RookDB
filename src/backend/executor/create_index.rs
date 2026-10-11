@@ -402,11 +402,6 @@ pub fn create_index_with_flags(
             }
         }
         if has_null {
-            log::trace!(
-                "[CreateIndex] Skipping NULL key at (page={}, slot={})",
-                page_id,
-                slot_id
-            );
             continue;
         }
 
@@ -752,12 +747,6 @@ pub fn update_index_on_insert(
         // Build the (possibly composite) key; rows where ANY key component
         // is NULL are not indexed.
         let Some(key_values) = build_key_from_decoded(meta, values) else {
-            log::trace!(
-                "[IndexInsert] Skipping NULL/partial key for {}.{}({})",
-                db_name,
-                table_name,
-                meta.columns().join(",")
-            );
             continue;
         };
 
@@ -782,16 +771,6 @@ pub fn update_index_on_insert(
                 idx_path, e
             )));
         }
-
-        log::trace!(
-            "[IndexInsert] Inserted key {:?} → (page={}, slot={}) into index on {}.{}({})",
-            key_values,
-            page_id,
-            slot_id,
-            db_name,
-            table_name,
-            meta.columns().join(",")
-        );
     }
 
     Ok(())
@@ -861,12 +840,6 @@ pub fn update_index_on_delete(
         // Build the (possibly composite) key from the deleted row. Rows with
         // ANY NULL key component were never indexed.
         let Some(key_values) = build_key_from_decoded(meta, &decoded) else {
-            log::trace!(
-                "[IndexDelete] Skipping NULL/partial key for {}.{}({})",
-                db_name,
-                table_name,
-                meta.columns().join(",")
-            );
             continue;
         };
 
@@ -886,15 +859,6 @@ pub fn update_index_on_delete(
         match del {
             Ok(true) => {
                 any_updated = true;
-                log::trace!(
-                    "[IndexDelete] Removed key {:?} at (page={}, slot={}) from index on {}.{}({})",
-                    key_values,
-                    page_id,
-                    slot_id,
-                    db_name,
-                    table_name,
-                    meta.columns().join(",")
-                );
             }
             Ok(false) => {
                 log::warn!(
@@ -965,12 +929,6 @@ pub fn update_index_on_update(
 
         // If both keys are None (NULL / partial), skip this index
         if old_key.is_none() && new_key.is_none() {
-            log::trace!(
-                "[IndexUpdate] Both old and new keys are NULL for {}.{}({}), skipping index.",
-                db_name,
-                table_name,
-                meta.columns().join(",")
-            );
             continue;
         }
 
@@ -987,15 +945,6 @@ pub fn update_index_on_update(
                     btree
                         .delete_keys(old, old_page_id, old_slot_id)
                         .map_err(|e| format!("Failed to delete old key from index: {}", e))?;
-                    log::trace!(
-                        "[IndexUpdate] Deleted old key {:?} at (page={}, slot={}) from index on {}.{}({})",
-                        old,
-                        old_page_id,
-                        old_slot_id,
-                        db_name,
-                        table_name,
-                        meta.columns().join(",")
-                    );
                 }
 
                 // Insert new key (if it's not NULL)
@@ -1003,15 +952,6 @@ pub fn update_index_on_update(
                     btree
                         .insert_keys(new, new_page_id, new_slot_id)
                         .map_err(|e| format!("Failed to insert new key into index: {}", e))?;
-                    log::trace!(
-                        "[IndexUpdate] Inserted new key {:?} → (page={}, slot={}) into index on {}.{}({})",
-                        new,
-                        new_page_id,
-                        new_slot_id,
-                        db_name,
-                        table_name,
-                        meta.columns().join(",")
-                    );
                 }
                 Ok(())
             },

@@ -84,11 +84,6 @@ impl FSMPage {
         // Write tree array
         buf[0..FSM_NODES_PER_PAGE].copy_from_slice(&self.tree);
 
-        log::trace!(
-            "[FSMPage::serialize] Serialized FSMPage: root_value={}",
-            self.tree[0]
-        );
-
         buf
     }
 
@@ -111,11 +106,6 @@ impl FSMPage {
 
         let mut tree = [0u8; FSM_NODES_PER_PAGE];
         tree.copy_from_slice(&bytes[0..FSM_NODES_PER_PAGE]);
-
-        log::trace!(
-            "[FSMPage::deserialize] Deserialized FSMPage: root_value={}",
-            tree[0]
-        );
 
         Ok(Self { tree })
     }
@@ -391,7 +381,7 @@ impl FSM {
         // Write out our populated pages
         // The highest block needed establishes file size.
         for (&(level, log_page), page) in &in_memory_pages {
-            fsm.write_fsm_page(level, log_page, 0, page)?;
+            fsm.write_fsm_page(level, log_page, page)?;
         }
 
         fsm.sync()?;
@@ -411,7 +401,6 @@ impl FSM {
 
     /// Update heap page count (used during allocation).
     pub fn set_heap_page_count(&mut self, count: u32) {
-        log::trace!("[FSM::set_heap_page_count] Updating to {}", count);
         self.heap_page_count = count;
     }
 
@@ -476,18 +465,11 @@ impl FSM {
         }
     }
 
-    pub fn read_fsm_page(&mut self, level: u32, page_no: u32, slot: u32) -> io::Result<FSMPage> {
+    pub fn read_fsm_page(&mut self, level: u32, page_no: u32) -> io::Result<FSMPage> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_read_page_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        log::trace!(
-            "[FSM::read_fsm_page] Reading level={}, page_no={}, slot={}",
-            level,
-            page_no,
-            slot
-        );
 
         let block = self.logical_to_physical(level, page_no);
         let block_offset = block * FSM_PAGE_SIZE as u64;
@@ -501,11 +483,6 @@ impl FSM {
         let file_size = cache.file_len;
 
         if block_offset + FSM_PAGE_SIZE as u64 > file_size {
-            log::trace!(
-                "[FSM::read_fsm_page] File too small ({} < {}), returning empty page",
-                file_size,
-                block_offset + FSM_PAGE_SIZE as u64
-            );
             return Ok(FSMPage::new());
         }
 
@@ -518,33 +495,17 @@ impl FSM {
                 cache.pages.insert(block, page.clone());
                 Ok(page)
             }
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                log::trace!("[FSM::read_fsm_page] Unexpected EOF, returning empty page");
-                Ok(FSMPage::new())
-            }
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(FSMPage::new()),
             Err(e) => Err(e),
         }
     }
 
     /// Write FSM page at logical position (buffered until `sync` or drop).
-    pub fn write_fsm_page(
-        &mut self,
-        level: u32,
-        page_no: u32,
-        slot: u32,
-        page: &FSMPage,
-    ) -> io::Result<()> {
+    pub fn write_fsm_page(&mut self, level: u32, page_no: u32, page: &FSMPage) -> io::Result<()> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_write_page_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        log::trace!(
-            "[FSM::write_fsm_page] Writing level={}, page_no={}, slot={}",
-            level,
-            page_no,
-            slot
-        );
 
         // Held in the cache until `sync` or drop; the fork grows logically
         // now and physically when the block is flushed.
@@ -759,7 +720,7 @@ impl FSM {
     pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, FSMPage)>> {
         match self.search_page(min_category)? {
             Some(heap_page_id) => {
-                let page = self.read_fsm_page(0, heap_page_id / FSM_SLOTS_PER_PAGE, 0)?;
+                let page = self.read_fsm_page(0, heap_page_id / FSM_SLOTS_PER_PAGE)?;
                 Ok(Some((heap_page_id, page)))
             }
             None => Ok(None),
@@ -804,7 +765,7 @@ impl FSM {
         }
 
         if let Some(page) = cached_page {
-            *page = self.read_fsm_page(0, fsm_page_no, 0)?;
+            *page = self.read_fsm_page(0, fsm_page_no)?;
         }
         Ok(())
     }
@@ -900,7 +861,7 @@ mod tests {
 
         let mut fsm = FSM::open(path.clone(), 15).unwrap();
         let page = FSMPage::new();
-        fsm.write_fsm_page(0, 0, 0, &page).unwrap();
+        fsm.write_fsm_page(0, 0, &page).unwrap();
         fsm.sync().unwrap();
 
         let file_size = fs::metadata(&path).unwrap().len();

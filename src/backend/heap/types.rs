@@ -29,7 +29,6 @@ impl Default for HeaderMetadata {
 impl HeaderMetadata {
     /// Create a new header with initial state (1 page = Page 0 + Page 1 for data).
     pub fn new() -> Self {
-        log::trace!("[HeaderMetadata::new] Creating initial header metadata");
         Self {
             page_count: 1,     // Page 0 only initially
             fsm_page_count: 0, // Will be set by FSM::build_from_heap
@@ -51,15 +50,6 @@ impl HeaderMetadata {
         buf.write_all(&self.total_tuples.to_le_bytes())?;
         buf.write_all(&self.last_vacuum.to_le_bytes())?;
         buf.write_all(&self.dead_tuple_count.to_le_bytes())?;
-
-        log::trace!(
-            "[HeaderMetadata::serialize] Serialized: page_count={}, fsm_page_count={}, total_tuples={}, last_vacuum={}, dead_tuple_count={}",
-            self.page_count,
-            self.fsm_page_count,
-            self.total_tuples,
-            self.last_vacuum,
-            self.dead_tuple_count
-        );
 
         Ok(buf)
     }
@@ -99,15 +89,6 @@ impl HeaderMetadata {
         // dead_tuple_count
         cursor.read_exact(&mut buf)?;
         let dead_tuple_count = u32::from_le_bytes(buf);
-
-        log::trace!(
-            "[HeaderMetadata::deserialize] Deserialized: page_count={}, fsm_page_count={}, total_tuples={}, last_vacuum={}, dead_tuple_count={}",
-            page_count,
-            fsm_page_count,
-            total_tuples,
-            last_vacuum,
-            dead_tuple_count
-        );
 
         Ok(Self {
             page_count,
