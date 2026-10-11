@@ -283,8 +283,10 @@ impl Comparable for DataValue {
             (DataValue::Varchar(a), DataValue::Varchar(b)) => Ok(a.cmp(b)),
 
             // Cross-type CHAR ↔ VARCHAR: trim CHAR trailing spaces, compare as strings
-            (DataValue::Char(a), DataValue::Varchar(b)) => Ok(a.trim_end().cmp(b.as_str())),
-            (DataValue::Varchar(a), DataValue::Char(b)) => Ok(a.as_str().cmp(b.trim_end())),
+            // A CHAR comparison is blank-padded: trailing spaces on either
+            // side are not significant.
+            (DataValue::Char(a), DataValue::Varchar(b)) => Ok(a.trim_end().cmp(b.trim_end())),
+            (DataValue::Varchar(a), DataValue::Char(b)) => Ok(a.trim_end().cmp(b.trim_end())),
 
             // Temporal types: chronological ordering
             (DataValue::Date(a), DataValue::Date(b)) => Ok(a.cmp(b)),

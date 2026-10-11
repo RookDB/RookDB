@@ -788,6 +788,14 @@ fn evaluate_scalar_function(
                         _ => return Err("POWER requires numeric arguments".to_string()),
                     };
                     let res = b_f64.powf(e_f64);
+                    if !res.is_finite() {
+                        // Negative base with a fractional exponent, zero to
+                        // a negative power, or overflow.
+                        return Err(format!(
+                            "POWER({}, {}) is out of range or undefined",
+                            b_f64, e_f64
+                        ));
+                    }
                     Ok(Some(DataValue::DoublePrecision(
                         crate::types::value::OrderedF64(res),
                     )))
