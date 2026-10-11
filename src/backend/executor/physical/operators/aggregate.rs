@@ -412,16 +412,28 @@ impl AggregateOperator {
         // projections above the aggregate can still use qualified references
         // (e.g. `SELECT d.dept, COUNT(*) FROM t d GROUP BY d.dept`).
         let child_schema = child.schema();
+        // A qualified key (`GROUP BY m.name` under a join) takes the
+        // qualifier of the column it reads, not of the first `name`.
         let mut output_schema: Vec<ColumnInfo> = group_by_names
             .iter()
             .zip(group_by_types.iter())
-            .map(|(name, dt)| ColumnInfo {
+            .zip(group_by_exprs.iter())
+            .map(|((name, dt), expr)| ColumnInfo {
                 name: name.clone(),
                 data_type: dt.clone(),
-                table: child_schema
-                    .iter()
-                    .find(|ci| ci.name.eq_ignore_ascii_case(name))
-                    .and_then(|ci| ci.table.clone()),
+                table: match expr {
+                    Expr::Column { table, column } => {
+                        super::super::expr::column_position(child_schema, table.as_deref(), column)
+                            .map(|i| &child_schema[i])
+                    }
+                    _ => None,
+                }
+                .or_else(|| {
+                    child_schema
+                        .iter()
+                        .find(|ci| ci.name.eq_ignore_ascii_case(name))
+                })
+                .and_then(|ci| ci.table.clone()),
             })
             .collect();
         for agg in &aggregates {

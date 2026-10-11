@@ -319,9 +319,13 @@ impl PhysicalPlanner {
                     let name = parts.last().ok_or_else(|| {
                         RookError::Internal("Empty compound identifier".to_string())
                     })?;
-                    let idx = column_names
-                        .iter()
-                        .position(|c| c.eq_ignore_ascii_case(name))
+                    let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
+                    let idx = super::super::expr::column_position(child_schema, table, name)
+                        .or_else(|| {
+                            column_names
+                                .iter()
+                                .position(|c| c.eq_ignore_ascii_case(name))
+                        })
                         .ok_or_else(|| RookError::NotFound {
                             entity: "Column",
                             name: name.clone(),

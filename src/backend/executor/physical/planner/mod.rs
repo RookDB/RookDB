@@ -164,9 +164,14 @@ impl PhysicalPlanner {
                         }
                         rook_ast::ExprNode::Compound(parts) => {
                             let name = parts.last().cloned().unwrap_or_default();
-                            let idx = column_names
-                                .iter()
-                                .position(|n| n.eq_ignore_ascii_case(&name))
+                            // Under a join, `b.id` is b's `id`, not the first `id`.
+                            let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
+                            let idx = super::expr::column_position(&child_schema, table, &name)
+                                .or_else(|| {
+                                    column_names
+                                        .iter()
+                                        .position(|n| n.eq_ignore_ascii_case(&name))
+                                })
                                 .ok_or(RookError::NotFound {
                                     entity: "Column",
                                     name,
