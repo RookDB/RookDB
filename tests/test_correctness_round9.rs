@@ -175,7 +175,17 @@ fn a_fk_restrict_blocks_delete_of_bigint_parent_key() {
 
     // Freshly created table → the parent row lives at page 1, slot 0.
     let result = delete_by_pointers(&catalog, "db9", "parent", &[(1, 0)]);
-    let deleted = result.expect("delete should not error").deleted_count;
+    // A RESTRICT violation fails the statement; no row may be deleted.
+    let deleted = match result {
+        Ok(r) => r.deleted_count,
+        Err(e) => {
+            assert!(
+                e.to_string().contains("FOREIGN KEY"),
+                "unexpected error: {e}"
+            );
+            0
+        }
+    };
 
     assert_eq!(
         deleted, 0,
@@ -238,7 +248,17 @@ fn a_fk_restrict_blocks_delete_of_numeric_parent_key() {
     assert!(insert_single_tuple(&catalog, "db9", "child", &["5.50"]).unwrap());
 
     let result = delete_by_pointers(&catalog, "db9", "parent", &[(1, 0)]);
-    let deleted = result.expect("delete should not error").deleted_count;
+    // A RESTRICT violation fails the statement; no row may be deleted.
+    let deleted = match result {
+        Ok(r) => r.deleted_count,
+        Err(e) => {
+            assert!(
+                e.to_string().contains("FOREIGN KEY"),
+                "unexpected error: {e}"
+            );
+            0
+        }
+    };
 
     assert_eq!(
         deleted, 0,
@@ -288,7 +308,17 @@ fn control_a_fk_restrict_still_blocks_int_parent_key() {
     assert!(insert_single_tuple(&catalog, "db9", "child", &["7"]).unwrap());
 
     let result = delete_by_pointers(&catalog, "db9", "parent", &[(1, 0)]);
-    let deleted = result.expect("delete should not error").deleted_count;
+    // A RESTRICT violation fails the statement; no row may be deleted.
+    let deleted = match result {
+        Ok(r) => r.deleted_count,
+        Err(e) => {
+            assert!(
+                e.to_string().contains("FOREIGN KEY"),
+                "unexpected error: {e}"
+            );
+            0
+        }
+    };
 
     assert_eq!(
         deleted, 0,
@@ -338,11 +368,13 @@ fn a_update_restrict_blocks_bigint_parent_key_change() {
 
     // UPDATE parent SET id = 9 WHERE id = 7 (row at page 1, slot 0)
     let assignments = parse_set_clause("id = 9").expect("parse set");
-    let res = update_by_pointers(&catalog, "db9", "parent", &[(1, 0)], &assignments)
-        .expect("update should not error");
+    // A RESTRICT violation fails the statement; no row may be updated.
+    let updated = update_by_pointers(&catalog, "db9", "parent", &[(1, 0)], &assignments)
+        .map(|r| r.updated_count)
+        .unwrap_or(0);
 
     assert_eq!(
-        res.updated_count, 0,
+        updated, 0,
         "BUG A CONFIRMED: RESTRICT update succeeded although child.pid = 7 \
          references parent.id = 7 (old value decoded as 'BigInt(7)')"
     );

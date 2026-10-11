@@ -480,12 +480,21 @@ fn collect_required_columns_recursive(plan: &LogicalPlan, cols: &mut HashSet<Str
 
 /// Extract column names from a `PredicateNode` as a `Vec<String>`.
 pub fn extract_column_names(pred: &PredicateNode) -> Vec<String> {
+    extract_column_refs(pred)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// Extract column references from a `PredicateNode` as `(table qualifier,
+/// column name)` pairs, keeping the qualifier so `a.k` and `r.k` stay apart.
+pub fn extract_column_refs(pred: &PredicateNode) -> Vec<(Option<String>, String)> {
     let mut result = Vec::new();
     extract_column_names_recursive(pred, &mut result);
     result
 }
 
-fn extract_column_names_recursive(pred: &PredicateNode, names: &mut Vec<String>) {
+fn extract_column_names_recursive(pred: &PredicateNode, names: &mut Vec<(Option<String>, String)>) {
     match pred {
         PredicateNode::BinaryOp { left, right, .. } => {
             extract_column_names_recursive(left, names);
@@ -498,9 +507,13 @@ fn extract_column_names_recursive(pred: &PredicateNode, names: &mut Vec<String>)
         }
         PredicateNode::IsNull(expr)
         | PredicateNode::IsNotNull(expr)
-        | PredicateNode::Like { expr, .. }
-        | PredicateNode::Between { expr, .. } => {
+        | PredicateNode::Like { expr, .. } => {
             extract_column_names_from_expr(expr, names);
+        }
+        PredicateNode::Between { expr, low, high } => {
+            extract_column_names_from_expr(expr, names);
+            extract_column_names_from_expr(low, names);
+            extract_column_names_from_expr(high, names);
         }
         PredicateNode::InList { expr, list } => {
             extract_column_names_from_expr(expr, names);
@@ -518,12 +531,13 @@ fn extract_column_names_recursive(pred: &PredicateNode, names: &mut Vec<String>)
     }
 }
 
-fn extract_column_names_from_expr(expr: &ExprNode, names: &mut Vec<String>) {
+fn extract_column_names_from_expr(expr: &ExprNode, names: &mut Vec<(Option<String>, String)>) {
     match expr {
-        ExprNode::Column(name) => names.push(name.clone()),
+        ExprNode::Column(name) => names.push((None, name.clone())),
         ExprNode::Compound(parts) => {
             if let Some(last) = parts.last() {
-                names.push(last.clone());
+                let table = (parts.len() >= 2).then(|| parts[parts.len() - 2].clone());
+                names.push((table, last.clone()));
             }
         }
         ExprNode::Binary { left, right, .. } => {

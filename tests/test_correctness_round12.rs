@@ -189,6 +189,18 @@ fn cell(
 
 // ── Finding N: INSERT ... VALUES with NULL breaks the plan-cache path ────────
 
+/// A rejected UPDATE now fails the statement instead of reporting success
+/// with zero rows. Either way no row was updated, which is what these tests
+/// go on to check.
+fn rejected_as_zero(
+    result: std::io::Result<storage_manager::executor::UpdateResult>,
+) -> storage_manager::executor::UpdateResult {
+    result.unwrap_or_else(|_| storage_manager::executor::UpdateResult {
+        updated_count: 0,
+        returning_rows: Vec::new(),
+    })
+}
+
 #[test]
 fn n_plan_cache_insert_with_null_literal_is_rejected() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
@@ -263,8 +275,13 @@ fn o_update_unknown_set_column_silently_dropped_row_reported_updated() {
     let ptrs = select_matching_pointers(&catalog, "db12o", "emp", sel).expect("select");
     assert_eq!(ptrs.len(), 1, "control: one row matched");
 
-    let result = update_by_pointers(&catalog, "db12o", "emp", &ptrs, &assignments)
-        .expect("update must not crash");
+    let result = rejected_as_zero(update_by_pointers(
+        &catalog,
+        "db12o",
+        "emp",
+        &ptrs,
+        &assignments,
+    ));
 
     assert_eq!(
         result.updated_count, 0,
@@ -297,8 +314,13 @@ fn o2_update_mixed_valid_and_unknown_columns_reports_partial_work() {
     let sel = parse_where_text("name = 'bob'").expect("parse where");
     let ptrs = select_matching_pointers(&catalog, "db12o2", "emp", sel).expect("select");
 
-    let result = update_by_pointers(&catalog, "db12o2", "emp", &ptrs, &assignments)
-        .expect("update must not crash");
+    let result = rejected_as_zero(update_by_pointers(
+        &catalog,
+        "db12o2",
+        "emp",
+        &ptrs,
+        &assignments,
+    ));
 
     assert_eq!(
         result.updated_count, 0,
@@ -345,8 +367,13 @@ fn p_update_numeric_text_literal_parse_failure_silently_nulls() {
     let ptrs = select_matching_pointers(&catalog, "db12p", "acc", sel).expect("select");
     assert_eq!(ptrs.len(), 1, "control: row matched");
 
-    let result = update_by_pointers(&catalog, "db12p", "acc", &ptrs, &assignments)
-        .expect("update must not crash");
+    let result = rejected_as_zero(update_by_pointers(
+        &catalog,
+        "db12p",
+        "acc",
+        &ptrs,
+        &assignments,
+    ));
 
     // The update must be REJECTED (error / not applied), never silently NULL.
     let rows = try_select(&catalog, "db12p", "SELECT sal FROM acc").expect("select");
@@ -387,7 +414,13 @@ fn q_update_set_int_overflow_wraps_instead_of_erroring() {
     let sel = parse_where_text("n = 2147483647").expect("parse where");
     let ptrs = select_matching_pointers(&catalog, "db12q", "t", sel).expect("select");
 
-    update_by_pointers(&catalog, "db12q", "t", &ptrs, &assignments).expect("update must not crash");
+    let _ = rejected_as_zero(update_by_pointers(
+        &catalog,
+        "db12q",
+        "t",
+        &ptrs,
+        &assignments,
+    ));
 
     let n = try_select(&catalog, "db12q", "SELECT n FROM t").expect("select");
     assert_ne!(
@@ -423,8 +456,13 @@ fn r_update_set_division_by_zero_silently_returns_original() {
     let sel = parse_where_text("n = 10").expect("parse where");
     let ptrs = select_matching_pointers(&catalog, "db12r", "t", sel).expect("select");
 
-    let result = update_by_pointers(&catalog, "db12r", "t", &ptrs, &assignments)
-        .expect("update must not crash");
+    let result = rejected_as_zero(update_by_pointers(
+        &catalog,
+        "db12r",
+        "t",
+        &ptrs,
+        &assignments,
+    ));
 
     let n = try_select(&catalog, "db12r", "SELECT n FROM t").expect("select");
     assert!(
@@ -468,7 +506,13 @@ fn s_update_set_bigint_literal_on_int_column_silently_nulls() {
     let sel = parse_where_text("n = 5").expect("parse where");
     let ptrs = select_matching_pointers(&catalog, "db12s", "t", sel).expect("select");
 
-    update_by_pointers(&catalog, "db12s", "t", &ptrs, &assignments).expect("update must not crash");
+    let _ = rejected_as_zero(update_by_pointers(
+        &catalog,
+        "db12s",
+        "t",
+        &ptrs,
+        &assignments,
+    ));
 
     let rows = try_select(&catalog, "db12s", "SELECT n FROM t WHERE n = 5").expect("select");
     assert!(
@@ -530,8 +574,13 @@ fn x2_update_set_valid_arithmetic_still_works() {
     let sel = parse_where_text("n = 10").expect("parse where");
     let ptrs = select_matching_pointers(&catalog, "db12x2", "t", sel).expect("select");
 
-    let result = update_by_pointers(&catalog, "db12x2", "t", &ptrs, &assignments)
-        .expect("update must not crash");
+    let result = rejected_as_zero(update_by_pointers(
+        &catalog,
+        "db12x2",
+        "t",
+        &ptrs,
+        &assignments,
+    ));
     assert_eq!(result.updated_count, 1, "row updated");
     assert_eq!(
         try_select(&catalog, "db12x2", "SELECT n FROM t").expect("select"),

@@ -26,7 +26,7 @@ use rook_ast::{ExprNode, JoinType, PredicateNode};
 
 use std::collections::{HashMap, HashSet};
 
-use crate::planner::helpers::derive_schema;
+use crate::planner::helpers::{derive_qualified_schema, derive_schema};
 use crate::statistics::TableStatistics;
 
 use self::helpers::*;
@@ -382,23 +382,25 @@ impl Optimizer {
             LogicalPlan::Join(j) => {
                 // Push filter predicates through joins when the predicate
                 // references columns from only one side. This reduces the
-                // number of rows that need to be joined.
-                //
-                // Get column names from each side of the join
-                let left_schema = derive_schema(&j.left);
-                let right_schema = derive_schema(&j.right);
-                let left_cols: HashSet<String> =
-                    left_schema.columns.iter().map(|c| c.name.clone()).collect();
-                let right_cols: HashSet<String> = right_schema
-                    .columns
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect();
-
-                let pred_cols: HashSet<String> = extract_column_names(&pred).into_iter().collect();
-
-                let on_left = pred_cols.iter().all(|c| left_cols.contains(c));
-                let on_right = pred_cols.iter().all(|c| right_cols.contains(c));
+                // number of rows that need to be joined. Each AND-ed conjunct
+                // is placed on its own, and sides are decided with table
+                // qualifiers: `a.k = r.k` touches both sides even though the
+                // bare name `k` exists on the left alone.
+                let left_schema = derive_qualified_schema(&j.left);
+                let right_schema = derive_qualified_schema(&j.right);
+                let side_has =
+                    |side: &[(Option<String>, rook_ast::logical::ColumnInfo)],
+                     (table, column): &(Option<String>, String)| {
+                        side.iter().any(|(side_table, c)| {
+                            c.name.eq_ignore_ascii_case(column)
+                                && match (table, side_table) {
+                                    (Some(t), Some(st)) => st.eq_ignore_ascii_case(t),
+                                    // Unqualified reference, or a side whose columns
+                                    // carry no table: match by name.
+                                    _ => true,
+                                }
+                        })
+                    };
 
                 let can_push_left = matches!(
                     j.join_type,
@@ -408,56 +410,61 @@ impl Optimizer {
                     j.join_type,
                     JoinType::Inner | JoinType::Cross | JoinType::Natural | JoinType::Right
                 );
+                let can_merge = matches!(
+                    j.join_type,
+                    JoinType::Inner | JoinType::Cross | JoinType::Natural
+                );
 
-                if on_left && !on_right && can_push_left {
-                    // Predicate only references left-side columns and left child is preserved
-                    LogicalPlan::Join(LogicalJoin {
-                        left: Box::new(self.push_filter_down(pred, *j.left)),
-                        right: j.right,
-                        join_type: j.join_type,
-                        condition: j.condition,
-                    })
-                } else if on_right && !on_left && can_push_right {
-                    // Predicate only references right-side columns and right child is preserved
-                    LogicalPlan::Join(LogicalJoin {
-                        left: j.left,
-                        right: Box::new(self.push_filter_down(pred, *j.right)),
-                        join_type: j.join_type,
-                        condition: j.condition,
-                    })
-                } else if !pred_cols.is_empty()
-                    && matches!(
-                        j.join_type,
-                        JoinType::Inner | JoinType::Cross | JoinType::Natural
-                    )
-                {
-                    // Predicate references columns from BOTH sides of an INNER/CROSS join
-                    // (or columns exist on both sides). The earlier branches already ruled
-                    // out single-side pushdown. Merge it INTO the join condition so the
-                    // join operator can filter during execution rather than running a
-                    // separate Filter on top.
-                    let merged_condition = match j.condition {
-                        Some(existing) => PredicateNode::BinaryOp {
-                            left: Box::new(existing),
-                            op: rook_ast::BinaryOp::And,
-                            right: Box::new(pred),
-                        },
-                        None => pred,
-                    };
-                    LogicalPlan::Join(LogicalJoin {
-                        left: j.left,
-                        right: j.right,
-                        join_type: j.join_type,
-                        condition: Some(merged_condition),
-                    })
-                } else {
-                    // Predicate references columns from both sides (or neither)
-                    // but the join type is non-commutative (LEFT/RIGHT/FULL).
-                    // Keep it above the join to preserve correct semantics.
-                    LogicalPlan::Filter(LogicalFilter {
-                        predicate: pred,
-                        child: Box::new(LogicalPlan::Join(j)),
-                    })
+                let mut conjuncts = Vec::new();
+                split_conjuncts(pred, &mut conjuncts);
+
+                let mut left = *j.left;
+                let mut right = *j.right;
+                let mut condition = j.condition;
+                let mut above: Option<PredicateNode> = None;
+                let and = |acc: Option<PredicateNode>, p: PredicateNode| match acc {
+                    Some(existing) => Some(PredicateNode::BinaryOp {
+                        left: Box::new(existing),
+                        op: rook_ast::BinaryOp::And,
+                        right: Box::new(p),
+                    }),
+                    None => Some(p),
+                };
+
+                for conjunct in conjuncts {
+                    let refs = extract_column_refs(&conjunct);
+                    let on_left = refs.iter().all(|r| side_has(&left_schema, r));
+                    let on_right = refs.iter().all(|r| side_has(&right_schema, r));
+
+                    if on_left && !on_right && can_push_left {
+                        // Only left-side columns, and the left child is preserved
+                        left = self.push_filter_down(conjunct, left);
+                    } else if on_right && !on_left && can_push_right {
+                        // Only right-side columns, and the right child is preserved
+                        right = self.push_filter_down(conjunct, right);
+                    } else if !refs.is_empty() && can_merge {
+                        // Columns from both sides of an INNER/CROSS join: merge
+                        // into the join condition so the join filters as it runs.
+                        condition = and(condition, conjunct);
+                    } else {
+                        // Outer join (or no columns at all): keep it above the
+                        // join to preserve correct semantics.
+                        above = and(above, conjunct);
+                    }
+                }
+
+                let join = LogicalPlan::Join(LogicalJoin {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    join_type: j.join_type,
+                    condition,
+                });
+                match above {
+                    Some(predicate) => LogicalPlan::Filter(LogicalFilter {
+                        predicate,
+                        child: Box::new(join),
+                    }),
+                    None => join,
                 }
             }
             LogicalPlan::Limit(_)
@@ -1112,5 +1119,20 @@ fn widen_sort_hint(plan: LogicalPlan, needed: u64) -> LogicalPlan {
         // so pushing a top-k limit below Distinct prematurely drops distinct keys.
         LogicalPlan::Distinct(d) => LogicalPlan::Distinct(d),
         other => other,
+    }
+}
+
+/// Flatten a predicate into its top-level AND-ed conjuncts.
+fn split_conjuncts(pred: PredicateNode, out: &mut Vec<PredicateNode>) {
+    match pred {
+        PredicateNode::BinaryOp {
+            left,
+            op: rook_ast::BinaryOp::And,
+            right,
+        } => {
+            split_conjuncts(*left, out);
+            split_conjuncts(*right, out);
+        }
+        other => out.push(other),
     }
 }

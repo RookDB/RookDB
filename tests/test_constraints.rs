@@ -208,12 +208,19 @@ fn fk_restrict_blocks_parent_delete() {
     insert_single_tuple(&catalog, "fkr", "orders", &["1", "1"]).unwrap();
     insert_single_tuple(&catalog, "fkr", "customers", &["2", "Bob"]).unwrap();
 
-    // RESTRICT: the referenced customer row is skipped by the executor...
-    let result = delete_customers_by_id(&catalog, "fkr", 1);
-    assert_eq!(
-        result.deleted_count, 0,
-        "referenced parent must not be deletable"
-    );
+    // RESTRICT: deleting the referenced customer row fails the statement...
+    let pointers = {
+        use storage_manager::backend::executor::row_select::{
+            parse_where_text, select_matching_pointers,
+        };
+        let selection = parse_where_text("id = 1").unwrap();
+        select_matching_pointers(&catalog, "fkr", "customers", selection).unwrap()
+    };
+    let err =
+        storage_manager::executor::delete_by_pointers(&catalog, "fkr", "customers", &pointers)
+            .err()
+            .expect("referenced parent must not be deletable");
+    assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
 
     // ...while an unreferenced one deletes normally.
     let result = delete_customers_by_id(&catalog, "fkr", 2);

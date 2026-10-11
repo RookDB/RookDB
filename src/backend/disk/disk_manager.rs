@@ -37,13 +37,14 @@ pub fn create_page(file: &mut File) -> io::Result<u32> {
 pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {
     HEAP_METRICS.read_page_calls.fetch_add(1, Ordering::Relaxed);
     // Calculate byte offset for the page
-    let offset = page_num * PAGE_SIZE as u32;
+    // 64-bit arithmetic: a u32 byte offset wraps at page 524,288 (4 GiB).
+    let offset = page_num as u64 * PAGE_SIZE as u64;
 
     // Get total file size
     let file_size = file.metadata()?.len();
 
     // Validate page existence
-    if offset > file_size as u32 {
+    if offset > file_size {
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
             format!("Page {} does not exist in the file", page_num),
@@ -51,7 +52,7 @@ pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<
     }
 
     // Seek to page offset
-    file.seek(SeekFrom::Start(offset as u64))?;
+    file.seek(SeekFrom::Start(offset))?;
 
     // Read full page data
     file.read_exact(&mut page.data)?;

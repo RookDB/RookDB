@@ -1054,14 +1054,11 @@ fn test_join_ordering_reorders_inner_join() {
 
 #[test]
 fn test_push_filter_with_both_side_predicate_merged_into_inner_join_condition() {
-    // Filter: users.age > 18  AND  orders.amount > 100.0
+    // Filter: users.age > orders.amount
     // This predicate references columns from BOTH sides of the INNER JOIN.
     // It should be merged INTO the join condition, not kept as a separate Filter.
-    let pred = PredicateNode::BinaryOp {
-        left: Box::new(gt_pred(column("age"), constant_int(18))),
-        op: BinaryOp::And,
-        right: Box::new(gt_pred(column("amount"), constant_float(100.0))),
-    };
+    // One comparison that reads a column from each side.
+    let pred = gt_pred(column("age"), column("amount"));
 
     let plan = LogicalPlan::Filter(LogicalFilter {
         predicate: pred,
@@ -1108,11 +1105,8 @@ fn test_push_cross_side_predicate_stays_above_left_join() {
     // Filter on both sides of a LEFT JOIN should stay above the join.
     // LEFT JOIN is not commutative — merging the filter into the condition
     // would change semantics (the filter would affect which rows are preserved).
-    let pred = PredicateNode::BinaryOp {
-        left: Box::new(gt_pred(column("age"), constant_int(18))),
-        op: BinaryOp::And,
-        right: Box::new(gt_pred(column("amount"), constant_float(100.0))),
-    };
+    // One comparison that reads a column from each side.
+    let pred = gt_pred(column("age"), column("amount"));
 
     let plan = LogicalPlan::Filter(LogicalFilter {
         predicate: pred,
@@ -1139,11 +1133,8 @@ fn test_push_cross_side_predicate_stays_above_left_join() {
 
 #[test]
 fn test_push_cross_side_predicate_stays_above_right_join() {
-    let pred = PredicateNode::BinaryOp {
-        left: Box::new(gt_pred(column("age"), constant_int(18))),
-        op: BinaryOp::And,
-        right: Box::new(gt_pred(column("amount"), constant_float(100.0))),
-    };
+    // One comparison that reads a column from each side.
+    let pred = gt_pred(column("age"), column("amount"));
 
     let plan = LogicalPlan::Filter(LogicalFilter {
         predicate: pred,
@@ -1165,6 +1156,69 @@ fn test_push_cross_side_predicate_stays_above_right_join() {
         vec!["Filter", "Join", "TableScan", "TableScan"],
         "Cross-side predicate with RIGHT JOIN should stay above as Filter"
     );
+}
+
+#[test]
+fn test_push_conjuncts_are_placed_independently() {
+    // users.age > 18 AND orders.amount > 100.0: each conjunct reads one side,
+    // so each is pushed to its own input instead of travelling as one unit.
+    let pred = PredicateNode::BinaryOp {
+        left: Box::new(gt_pred(column("age"), constant_int(18))),
+        op: BinaryOp::And,
+        right: Box::new(gt_pred(column("amount"), constant_float(100.0))),
+    };
+    let join = |join_type| {
+        LogicalPlan::Filter(LogicalFilter {
+            predicate: pred.clone(),
+            child: Box::new(LogicalPlan::Join(LogicalJoin {
+                left: Box::new(make_table_scan("users", &["id", "name", "age"])),
+                right: Box::new(make_table_scan("orders", &["id", "user_id", "amount"])),
+                join_type,
+                condition: Some(eq_pred(column("user_id"), column("id"))),
+            })),
+        })
+    };
+    let optimizer = Optimizer::new();
+
+    assert_eq!(
+        collect_labels(&optimizer.predicate_pushdown(join(JoinType::Inner))),
+        vec!["Join", "Filter", "TableScan", "Filter", "TableScan"],
+    );
+    // LEFT JOIN: only the preserved (left) side may be filtered below the join.
+    assert_eq!(
+        collect_labels(&optimizer.predicate_pushdown(join(JoinType::Left))),
+        vec!["Filter", "Join", "Filter", "TableScan", "TableScan"],
+    );
+}
+
+#[test]
+fn test_push_qualified_predicate_is_not_single_sided() {
+    // a.k = r.k: the bare name `k` exists on both sides, and the qualifiers
+    // say it reads one column from each. It must not be pushed to one input.
+    let qualified = |t: &str, c: &str| ExprNode::Compound(vec![t.to_string(), c.to_string()]);
+    let plan = LogicalPlan::Filter(LogicalFilter {
+        predicate: PredicateNode::BinaryOp {
+            left: Box::new(eq_pred(qualified("a", "k"), qualified("r", "k"))),
+            op: BinaryOp::And,
+            right: Box::new(gt_pred(qualified("a", "id"), constant_int(2))),
+        },
+        child: Box::new(LogicalPlan::Join(LogicalJoin {
+            left: Box::new(make_table_scan("a", &["id", "x", "k"])),
+            right: Box::new(make_table_scan("r", &["k", "v"])),
+            join_type: JoinType::Cross,
+            condition: None,
+        })),
+    });
+
+    let optimized = Optimizer::new().predicate_pushdown(plan);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Join", "Filter", "TableScan", "TableScan"],
+    );
+    match &optimized {
+        LogicalPlan::Join(j) => assert!(j.condition.is_some(), "a.k = r.k joins the two sides"),
+        _ => panic!("Expected Join node"),
+    }
 }
 
 #[test]
@@ -1199,11 +1253,8 @@ fn test_push_single_side_predicate_pushed_through_join() {
 fn test_push_cross_side_predicate_merged_into_cross_join() {
     // CROSS JOIN with cross-side predicate referencing columns from BOTH sides
     // (age is left-only, amount is right-only) — should merge into condition
-    let pred = PredicateNode::BinaryOp {
-        left: Box::new(gt_pred(column("age"), constant_int(18))),
-        op: BinaryOp::And,
-        right: Box::new(gt_pred(column("amount"), constant_float(100.0))),
-    };
+    // One comparison that reads a column from each side.
+    let pred = gt_pred(column("age"), column("amount"));
 
     let plan = LogicalPlan::Filter(LogicalFilter {
         predicate: pred,

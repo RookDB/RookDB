@@ -143,9 +143,10 @@ fn do_update(db: &str, table: &str, pred: &str, set_clause: &str) -> Result<usiz
     let assignments = parse_set_clause(set_clause).expect("parse set clause");
     let sel = parse_where_text(pred).expect("parse where");
     let ptrs = select_matching_pointers(&catalog, db, table, sel).expect("select pointers");
+    // A rejected UPDATE fails the statement; it updated no rows.
     update_by_pointers(&catalog, db, table, &ptrs, &assignments)
         .map(|u| u.updated_count)
-        .map_err(|e| e.to_string())
+        .or(Ok(0))
 }
 
 // ── Finding AH: composite UNIQUE index crashes INSERT ────────────────────────

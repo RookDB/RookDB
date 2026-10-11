@@ -312,6 +312,33 @@ pub fn delete_by_pointers(
     let hold_pages = crate::backend::cache::referencing_fks(db_name, table_name).is_empty();
     let mut held: Option<HeldPage> = None;
 
+    // A row still referenced through a RESTRICT foreign key fails the whole
+    // statement: check every target row before deleting the first one.
+    if !hold_pages {
+        let mut page = Page::new();
+        let mut loaded: Option<u32> = None;
+        for &(page_num, slot_idx) in pointers {
+            if loaded != Some(page_num) {
+                read_page(&mut file, &mut page, page_num)?;
+                loaded = Some(page_num);
+            }
+            let base = (PAGE_HEADER_SIZE + slot_idx * ITEM_ID_SIZE) as usize;
+            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
+            let length =
+                u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
+            let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+            if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
+                continue;
+            }
+            let tuple_data = &page.data[offset as usize..(offset + length) as usize];
+            let decoded = decode_tuple(tuple_data, columns);
+            crate::backend::constraint::check_row_delete_restrictions(
+                db_name, table_name, &decoded,
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        }
+    }
+
     for &(page_num, slot_idx) in pointers {
         let slot_index = slot_idx as u16;
 

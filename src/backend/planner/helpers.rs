@@ -168,10 +168,14 @@ pub fn expand_projections(
                     replace_aggregates_in_expr(expr)
                 } else {
                     match expr {
-                        ExprNode::Function { name: fn_name, .. } => {
+                        ExprNode::Function {
+                            name: fn_name,
+                            args,
+                            distinct,
+                        } => {
                             let upper = fn_name.to_ascii_uppercase();
                             if is_aggregate_function(&upper) {
-                                ExprNode::Column(fn_name.clone())
+                                ExprNode::Column(aggregate_ref_name(fn_name, args, *distinct))
                             } else {
                                 expr.clone()
                             }
@@ -441,7 +445,7 @@ pub fn replace_aggregates_in_expr(expr: &ExprNode) -> ExprNode {
             if is_aggregate_function(&upper) {
                 // Replace the aggregate function call with a column reference
                 // whose name matches the alias assigned by extract_aggregates.
-                ExprNode::Column(name.clone())
+                ExprNode::Column(aggregate_ref_name(name, args, *distinct))
             } else {
                 // Non-aggregate function: recurse into arguments
                 let new_args: Vec<rook_ast::FunctionArg> = args
@@ -530,7 +534,7 @@ fn extract_aggregates_from_expr(expr: &ExprNode) -> Vec<AggregateExpr> {
                 return vec![AggregateExpr {
                     function,
                     args: ast_args,
-                    alias: Some(name.clone()),
+                    alias: Some(aggregate_ref_name(name, args, *distinct)),
                     distinct: *distinct,
                 }];
             }
@@ -590,8 +594,9 @@ pub fn extract_aggregates(projections: &[SelectExpr]) -> Vec<AggregateExpr> {
         // apply the alias to the aggregate. For nested aggregates (e.g. inside Binary),
         // the function name remains as the alias.
         if found.len() == 1
-            && matches!(item, SelectExpr::ExprWithAlias { .. })
-            && let SelectExpr::ExprWithAlias { alias, .. } = item
+            && let SelectExpr::ExprWithAlias { alias, expr } = item
+            && matches!(expr, ExprNode::Function { name, .. }
+                if is_aggregate_function(&name.to_ascii_uppercase()))
         {
             found[0].alias = Some(alias.clone());
         }
@@ -651,13 +656,29 @@ pub fn extract_aggregates_from_predicate(pred: &PredicateNode) -> Vec<AggregateE
 /// occurrences of the same expression across SELECT / HAVING.
 pub fn aggregate_identity(agg: &AggregateExpr) -> String {
     format!(
-        "{:?}({})",
+        "{:?}({}{:?})",
         agg.function,
+        if agg.distinct { "DISTINCT " } else { "" },
         agg.args
-            .iter()
-            .map(expr_to_name)
-            .collect::<Vec<_>>()
-            .join(",")
+    )
+}
+
+/// Internal output-column name of an aggregate call. It is unique per
+/// distinct call, so `SUM(a)` and `SUM(b)` in one SELECT never share a
+/// column; the display name of the result comes from the projection above.
+pub fn aggregate_ref_name(name: &str, args: &[rook_ast::FunctionArg], distinct: bool) -> String {
+    let rendered: Vec<String> = args
+        .iter()
+        .map(|a| match a {
+            rook_ast::FunctionArg::Star => "*".to_string(),
+            rook_ast::FunctionArg::Expr(e) => format!("{:?}", e),
+        })
+        .collect();
+    format!(
+        "{}({}{})",
+        name.to_ascii_uppercase(),
+        if distinct { "DISTINCT " } else { "" },
+        rendered.join(",")
     )
 }
 

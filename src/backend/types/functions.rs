@@ -791,7 +791,7 @@ fn cast_numeric_to_integer(
             }
             DataValue::Real(v) => {
                 let trunc = v.0.trunc();
-                if trunc >= i32::MIN as f32 && trunc <= i32::MAX as f32 {
+                if trunc >= i32::MIN as f32 && trunc < i32::MAX as f32 {
                     Some(Ok(DataValue::Int(trunc as i32)))
                 } else {
                     Some(Err(FunctionError::InvalidArgument(format!(
@@ -893,7 +893,7 @@ fn cast_numeric_to_integer(
         DataType::BigInt => match value {
             DataValue::DoublePrecision(v) => {
                 let trunc = v.0.trunc();
-                if trunc >= i64::MIN as f64 && trunc <= i64::MAX as f64 {
+                if trunc >= i64::MIN as f64 && trunc < i64::MAX as f64 {
                     Some(Ok(DataValue::BigInt(trunc as i64)))
                 } else {
                     Some(Err(FunctionError::InvalidArgument(format!(
@@ -904,7 +904,7 @@ fn cast_numeric_to_integer(
             }
             DataValue::Real(v) => {
                 let trunc = v.0.trunc();
-                if trunc >= i64::MIN as f32 && trunc <= i64::MAX as f32 {
+                if trunc >= i64::MIN as f32 && trunc < i64::MAX as f32 {
                     Some(Ok(DataValue::BigInt(trunc as i64)))
                 } else {
                     Some(Err(FunctionError::InvalidArgument(format!(

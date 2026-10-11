@@ -1155,9 +1155,14 @@ fn test_fk_restrict_blocks_delete() {
     assert_eq!(count_tuples(db_name, "children"), 1);
 
     // DELETE FROM parents WHERE id = 1 → should be blocked by RESTRICT
-    let result = exec_delete_where(&catalog, db_name, "parents", "id = 1");
-
-    assert_eq!(result.deleted_count, 0, "RESTRICT should block DELETE");
+    let selection = parse_where_text("id = 1").expect("parse WHERE");
+    let pointers =
+        select_matching_pointers(&catalog, db_name, "parents", selection).expect("select pointers");
+    let err =
+        storage_manager::executor::delete_by_pointers(&catalog, db_name, "parents", &pointers)
+            .err()
+            .expect("RESTRICT should block DELETE");
+    assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
     assert_eq!(
         count_tuples(db_name, "parents"),
         1,

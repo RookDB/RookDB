@@ -656,42 +656,36 @@ pub fn update_by_pointers(
             .iter()
             .any(|c| c.name.eq_ignore_ascii_case(&asgn.column))
         {
-            log::warn!(
-                "[UpdateByPointers] Assignment column '{}' not found in table '{}'",
-                asgn.column,
-                table_name
-            );
-            return Ok(UpdateResult {
-                updated_count: 0,
-                returning_rows: Vec::new(),
-            });
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Assignment column '{}' not found in table '{}'",
+                    asgn.column, table_name
+                ),
+            ));
         }
         match &asgn.expr {
             SetExpr::Column(src_col)
                 if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) =>
             {
-                log::warn!(
-                    "[UpdateByPointers] Source column '{}' not found in table '{}'",
-                    src_col,
-                    table_name
-                );
-                return Ok(UpdateResult {
-                    updated_count: 0,
-                    returning_rows: Vec::new(),
-                });
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Source column '{}' not found in table '{}'",
+                        src_col, table_name
+                    ),
+                ));
             }
             SetExpr::Expr { src_col, .. }
                 if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) =>
             {
-                log::warn!(
-                    "[UpdateByPointers] Source column '{}' not found in table '{}'",
-                    src_col,
-                    table_name
-                );
-                return Ok(UpdateResult {
-                    updated_count: 0,
-                    returning_rows: Vec::new(),
-                });
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Source column '{}' not found in table '{}'",
+                        src_col, table_name
+                    ),
+                ));
             }
             _ => {}
         }
@@ -744,27 +738,19 @@ pub fn update_by_pointers(
         let updated_values = match apply_assignments_typed(columns, decoded.clone(), assignments) {
             Ok(v) => v,
             Err(e) => {
-                log::warn!(
-                    "[UpdateByPointers] Aborting update due to assignment error: {}",
-                    e
-                );
-                return Ok(UpdateResult {
-                    updated_count: 0,
-                    returning_rows: Vec::new(),
-                });
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("assignment error: {}", e),
+                ));
             }
         };
         let new_bytes = match serialize_nullable_typed_row(&schema, &updated_values) {
             Ok(b) => b,
             Err(e) => {
-                log::warn!(
-                    "[UpdateByPointers] Aborting update due to serialization error: {}",
-                    e
-                );
-                return Ok(UpdateResult {
-                    updated_count: 0,
-                    returning_rows: Vec::new(),
-                });
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("serialization error: {}", e),
+                ));
             }
         };
 
@@ -787,14 +773,10 @@ pub fn update_by_pointers(
             &new_values,
             pointers,
         ) {
-            log::warn!(
-                "[UpdateByPointers] Aborting update due to constraint violation: {}",
-                e
-            );
-            return Ok(UpdateResult {
-                updated_count: 0,
-                returning_rows: Vec::new(),
-            });
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("constraint violation: {}", e),
+            ));
         }
 
         if let Err(e) = crate::backend::constraint::validate_update_restrict(
@@ -803,14 +785,10 @@ pub fn update_by_pointers(
             &old_decoded,
             &updated_decoded,
         ) {
-            log::warn!(
-                "[UpdateByPointers] Aborting update due to FOREIGN KEY RESTRICT constraint: {}",
-                e
-            );
-            return Ok(UpdateResult {
-                updated_count: 0,
-                returning_rows: Vec::new(),
-            });
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("FOREIGN KEY RESTRICT constraint: {}", e),
+            ));
         }
 
         log::info!(
@@ -913,10 +891,10 @@ pub fn update_by_pointers(
     }
 
     if has_intra_batch_conflict {
-        return Ok(UpdateResult {
-            updated_count: 0,
-            returning_rows: Vec::new(),
-        });
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "UNIQUE constraint violated: the update gives two rows the same key".to_string(),
+        ));
     }
 
     // Phase 2: apply every pending update.

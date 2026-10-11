@@ -58,6 +58,10 @@ pub struct NestedLoopJoinOperator {
     output_pos: usize,
     /// Whether children have been consumed.
     consumed: bool,
+    /// Equi-join keys `(left side, right side)`. When set, candidate pairs
+    /// come from a hash table on the right input instead of the full cross
+    /// product; the predicate is still evaluated on every candidate.
+    equi_keys: Option<(Vec<Expr>, Vec<Expr>)>,
 }
 
 impl NestedLoopJoinOperator {
@@ -93,7 +97,23 @@ impl NestedLoopJoinOperator {
             output_buffer: Vec::new(),
             output_pos: 0,
             consumed: false,
+            equi_keys: None,
         }
+    }
+
+    /// Outer join on equality keys: same output as the nested loop, but each
+    /// left row only meets the right rows that share its key.
+    pub fn with_equi_keys(
+        left: Box<dyn PhysicalOperator>,
+        right: Box<dyn PhysicalOperator>,
+        predicate: Option<Predicate>,
+        join_type: JoinType,
+        left_keys: Vec<Expr>,
+        right_keys: Vec<Expr>,
+    ) -> Self {
+        let mut op = Self::new(left, right, predicate, join_type);
+        op.equi_keys = Some((left_keys, right_keys));
+        op
     }
 
     /// Materialise all tuples from both children, compute the join, and buffer results.
@@ -120,6 +140,44 @@ impl NestedLoopJoinOperator {
 
         // Compute the join
         if self.join_type != JoinType::Cross
+            && let Some(pred) = &self.predicate
+            && let Some((left_keys, right_keys)) = &self.equi_keys
+        {
+            // A NULL key matches nothing, so those rows stay out of the table
+            // and surface only through the unmatched-row passes below.
+            let left_schema = self.left.schema().to_vec();
+            let right_schema = self.right.schema().to_vec();
+            let mut table: HashMap<Vec<DataValue>, Vec<usize>> = HashMap::new();
+            for (r_idx, tuple) in self.right_tuples.iter().enumerate() {
+                if let Some(key) =
+                    HashJoinOperator::make_hash_key(right_keys, tuple, &right_schema)?
+                {
+                    table.entry(key).or_default().push(r_idx);
+                }
+            }
+            for l_idx in 0..num_left {
+                let Some(key) = HashJoinOperator::make_hash_key(
+                    left_keys,
+                    &self.left_tuples[l_idx],
+                    &left_schema,
+                )?
+                else {
+                    continue;
+                };
+                let Some(candidates) = table.get(&key) else {
+                    continue;
+                };
+                for &r_idx in candidates {
+                    self.left_tuples[l_idx]
+                        .concatenate_into(&self.right_tuples[r_idx], &mut joined);
+                    if let Some(true) = evaluate_predicate(pred, &joined, &self.output_schema)? {
+                        self.output_buffer.push(joined.clone());
+                        self.left_matched[l_idx] = true;
+                        self.right_matched[r_idx] = true;
+                    }
+                }
+            }
+        } else if self.join_type != JoinType::Cross
             && let Some(pred) = &self.predicate
         {
             for l_idx in 0..num_left {
@@ -239,7 +297,11 @@ impl PhysicalOperator for NestedLoopJoinOperator {
     }
 
     fn name(&self) -> &'static str {
-        "NestedLoopJoin"
+        if self.equi_keys.is_some() {
+            "HashOuterJoin"
+        } else {
+            "NestedLoopJoin"
+        }
     }
 }
 

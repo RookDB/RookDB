@@ -106,90 +106,130 @@ pub fn validate_row_delete(
     table_name: &str,
     column_values: &[(String, crate::backend::executor::delete::ColumnValue)],
 ) -> Result<(), RookError> {
+    // Every restricting FK is checked before any CASCADE / SET NULL action
+    // runs, so a blocked delete leaves the child tables untouched.
+    check_row_delete_restrictions(db_name, table_name, column_values)?;
+
     // Load FK constraints where OUR table is the parent (process-cached).
     let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
-
-    if foreign_keys.is_empty() {
-        return Ok(());
-    }
 
     for fk in foreign_keys.iter() {
         // fk: (child_table, child_col, parent_col, parent_table, action_type)
         let child_table = &fk.0;
         let child_col = &fk.1;
+        let Some(parent_value_str) = parent_key_value(column_values, &fk.2) else {
+            continue;
+        };
+
+        match delete_action(&fk.4) {
+            DeleteAction::Cascade => {
+                // CASCADE: delete all child rows that reference this parent value
+                let mut visited: std::collections::HashSet<(String, String)> =
+                    std::collections::HashSet::new();
+                visited.insert((child_table.clone(), parent_value_str.clone()));
+                fk_actions::cascade_delete_child_rows(
+                    catalog,
+                    db_name,
+                    child_table,
+                    child_col,
+                    &parent_value_str,
+                    &mut visited,
+                )?;
+            }
+            DeleteAction::SetNull => {
+                // SET NULL: set the FK column to NULL in all referencing child rows
+                let mut visited: std::collections::HashSet<(String, String)> =
+                    std::collections::HashSet::new();
+                visited.insert((child_table.clone(), parent_value_str.clone()));
+                fk_actions::set_null_child_rows(
+                    catalog,
+                    db_name,
+                    child_table,
+                    child_col,
+                    &parent_value_str,
+                    &mut visited,
+                )?;
+            }
+            DeleteAction::Restrict => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// What a foreign key does to its child rows when the parent row is deleted.
+enum DeleteAction {
+    Cascade,
+    SetNull,
+    Restrict,
+}
+
+fn delete_action(action_type: &str) -> DeleteAction {
+    let action_upper = action_type.to_uppercase();
+    if action_upper.contains("ON DELETE CASCADE") || action_upper == "FOREIGN KEY CASCADE" {
+        DeleteAction::Cascade
+    } else if action_upper.contains("ON DELETE SET NULL") || action_upper == "FOREIGN KEY SET NULL"
+    {
+        DeleteAction::SetNull
+    } else {
+        DeleteAction::Restrict
+    }
+}
+
+/// The value of `parent_col` in a decoded row, or `None` when it is NULL (a
+/// NULL key is referenced by nothing).
+fn parent_key_value(
+    column_values: &[(String, crate::backend::executor::delete::ColumnValue)],
+    parent_col: &str,
+) -> Option<String> {
+    let value = column_values
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
+        .map(|(_, val)| match val {
+            crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
+            crate::backend::executor::delete::ColumnValue::Text(s) => s.clone(),
+            crate::backend::executor::delete::ColumnValue::List(_) => String::new(),
+        })
+        .unwrap_or_default();
+    (!value.is_empty() && !value.eq_ignore_ascii_case("null")).then_some(value)
+}
+
+/// Check, without changing anything, whether a RESTRICT (default) foreign key
+/// blocks deleting this row. DELETE runs this over every target row before it
+/// deletes the first one, so a blocked statement deletes nothing.
+pub fn check_row_delete_restrictions(
+    db_name: &str,
+    table_name: &str,
+    column_values: &[(String, crate::backend::executor::delete::ColumnValue)],
+) -> Result<(), RookError> {
+    let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
+
+    for fk in foreign_keys.iter() {
+        let child_table = &fk.0;
+        let child_col = &fk.1;
         let parent_col = &fk.2;
-        let action_type = &fk.4;
-
-        // Find the parent column value from the decoded tuple
-        let parent_value_str = column_values
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
-            .map(|(_, val)| match val {
-                crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
-                crate::backend::executor::delete::ColumnValue::Text(s) => s.clone(),
-                crate::backend::executor::delete::ColumnValue::List(_) => String::new(),
-            })
-            .unwrap_or_default();
-
-        if parent_value_str.is_empty()
-            || parent_value_str.eq_ignore_ascii_case("null")
-            || parent_value_str.eq_ignore_ascii_case("NULL")
-        {
+        if !matches!(delete_action(&fk.4), DeleteAction::Restrict) {
             continue;
         }
+        let Some(parent_value_str) = parent_key_value(column_values, parent_col) else {
+            continue;
+        };
 
-        let action_upper = action_type.to_uppercase();
-        if action_upper.contains("ON DELETE CASCADE") || action_upper == "FOREIGN KEY CASCADE" {
-            // CASCADE: delete all child rows that reference this parent value
-            let mut visited: std::collections::HashSet<(String, String)> =
-                std::collections::HashSet::new();
-            visited.insert((child_table.clone(), parent_value_str.clone()));
-            fk_actions::cascade_delete_child_rows(
-                catalog,
-                db_name,
-                child_table,
-                child_col,
-                &parent_value_str,
-                &mut visited,
-            )?;
-        } else if action_upper.contains("ON DELETE SET NULL")
-            || action_upper == "FOREIGN KEY SET NULL"
-        {
-            // SET NULL: set the FK column to NULL in all referencing child rows
-            let mut visited: std::collections::HashSet<(String, String)> =
-                std::collections::HashSet::new();
-            visited.insert((child_table.clone(), parent_value_str.clone()));
-            fk_actions::set_null_child_rows(
-                catalog,
-                db_name,
-                child_table,
-                child_col,
-                &parent_value_str,
-                &mut visited,
-            )?;
-        } else {
-            // RESTRICT (default): block the DELETE if child rows exist
-            if value_lookup::child_has_referencing_row(
-                db_name,
-                child_table,
-                child_col,
-                &parent_value_str,
-            )? {
-                return Err(RookError::constraint(
-                    ConstraintKind::ForeignKey,
-                    table_name,
-                    Some(parent_col),
-                    format!(
-                        "FOREIGN KEY constraint violated: cannot delete from '{}' because value '{}' is referenced by '{}' (column '{}' referencing '{}.{}')",
-                        table_name,
-                        parent_value_str,
-                        child_table,
-                        child_col,
-                        table_name,
-                        parent_col
-                    ),
-                ));
-            }
+        if value_lookup::child_has_referencing_row(
+            db_name,
+            child_table,
+            child_col,
+            &parent_value_str,
+        )? {
+            return Err(RookError::constraint(
+                ConstraintKind::ForeignKey,
+                table_name,
+                Some(parent_col),
+                format!(
+                    "FOREIGN KEY constraint violated: cannot delete from '{}' because value '{}' is referenced by '{}' (column '{}' referencing '{}.{}')",
+                    table_name, parent_value_str, child_table, child_col, table_name, parent_col
+                ),
+            ));
         }
     }
 

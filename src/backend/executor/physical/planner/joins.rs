@@ -96,6 +96,9 @@ impl PhysicalPlanner {
             rook_ast::JoinType::Left => PhysicalJoinType::Left,
             rook_ast::JoinType::Right => PhysicalJoinType::Right,
             rook_ast::JoinType::Full => PhysicalJoinType::Full,
+            // A cross join that picked up a condition (pushed down from WHERE)
+            // is an inner join; treating it as Cross would drop the condition.
+            rook_ast::JoinType::Cross if predicate.is_some() => PhysicalJoinType::Inner,
             rook_ast::JoinType::Cross => PhysicalJoinType::Cross,
             rook_ast::JoinType::Natural => PhysicalJoinType::Inner,
         };
@@ -118,8 +121,8 @@ impl PhysicalPlanner {
                 && build_keys.len() == 1
                 && probe_keys.len() == 1
                 && let Expr::Column {
+                    table: ref outer_table,
                     column: ref outer_col,
-                    ..
                 } = build_keys[0]
                 && let Expr::Column {
                     column: ref inner_col,
@@ -162,9 +165,8 @@ impl PhysicalPlanner {
                     ));
                     if idx_path.exists()
                         && heap_path.exists()
-                        && let Some(outer_key_idx) = left_schema
-                            .iter()
-                            .position(|c| c.name.eq_ignore_ascii_case(outer_col))
+                        && let Some(outer_key_idx) =
+                            resolve_outer_key(&left_schema, outer_table.as_deref(), outer_col)
                     {
                         crate::backend::cache::checkpoint();
                         let mut btree = crate::backend::index::btree::BTree::open(idx_path.clone())
@@ -237,6 +239,34 @@ impl PhysicalPlanner {
         }
 
         // 3. Fallback: NestedLoopJoin for all join types
+        // Outer equi-joins: hash the right input instead of comparing every
+        // pair. Limited to keys whose two sides hash alike (same type, or both
+        // integers); other key pairs keep the plain nested loop.
+        if matches!(
+            join_type,
+            PhysicalJoinType::Left | PhysicalJoinType::Right | PhysicalJoinType::Full
+        ) && let Some(pred) = &predicate
+        {
+            let left_schema = left.schema().to_vec();
+            let right_schema = right.schema().to_vec();
+            if let Some((left_keys, right_keys, _)) =
+                extract_equi_join_keys(pred, &left_schema, &right_schema)
+                && !left_keys.is_empty()
+                && left_keys
+                    .iter()
+                    .zip(right_keys.iter())
+                    .all(|(l, r)| keys_hash_alike(l, &left_schema, r, &right_schema))
+            {
+                log::info!(
+                    "[Volcano] Using HashOuterJoin: {} equi-key pair(s)",
+                    left_keys.len()
+                );
+                return Ok(Box::new(NestedLoopJoinOperator::with_equi_keys(
+                    left, right, predicate, join_type, left_keys, right_keys,
+                )));
+            }
+        }
+
         Ok(Box::new(NestedLoopJoinOperator::new(
             left, right, predicate, join_type,
         )))
@@ -464,94 +494,51 @@ impl PhysicalPlanner {
             working_table.len()
         );
 
+        // UNION (without ALL) keeps one copy of every row: one running set
+        // covers the anchor, each iteration, and everything seen before.
+        let mut seen: std::collections::HashSet<Vec<Option<crate::types::value::DataValue>>> =
+            std::collections::HashSet::new();
+        if !rc.union_all {
+            working_table.retain(|t| seen.insert(t.values.clone()));
+        }
+
         // Accumulated result: start with non-recursive term's output
         let mut all_tuples: Vec<super::super::tuple::Tuple> = working_table.clone();
 
         // 2. Fixpoint iteration
         let max_iterations = 10_000; // safety limit to prevent infinite loops
-        for iteration in 0..max_iterations {
-            if working_table.is_empty() {
-                log::info!(
-                    "[Volcano] Recursive CTE '{}' iteration {}: working table empty, done",
-                    rc.name,
-                    iteration
-                );
-                break;
+        let mut iteration = 0;
+        while !working_table.is_empty() {
+            if iteration >= max_iterations {
+                return Err(RookError::Internal(format!(
+                    "Recursive CTE '{}' did not terminate within {} iterations",
+                    rc.name, max_iterations
+                )));
             }
 
             // Register the current working table so CteScan leaves can read it
-            cte_registry.insert(cte_key.clone(), working_table.clone());
+            cte_registry.insert(cte_key.clone(), std::mem::take(&mut working_table));
 
             // Plan and execute the recursive term
             let mut rec_op = self.plan_internal(&rc.recursive, cte_registry)?;
             let mut new_tuples: Vec<super::super::tuple::Tuple> = Vec::new();
             while let Some(tuple) = rec_op.next()? {
-                new_tuples.push(tuple);
+                if rc.union_all || seen.insert(tuple.values.clone()) {
+                    new_tuples.push(tuple);
+                }
             }
 
             log::info!(
-                "[Volcano] Recursive CTE '{}' iteration {}: produced {} tuples",
+                "[Volcano] Recursive CTE '{}' iteration {}: produced {} new tuples",
                 rc.name,
                 iteration,
                 new_tuples.len()
             );
 
-            if new_tuples.is_empty() {
-                log::info!(
-                    "[Volcano] Recursive CTE '{}' iteration {}: no new tuples, done",
-                    rc.name,
-                    iteration
-                );
-                break;
-            }
-
-            // For UNION DISTINCT (not ALL), deduplicate new tuples against all_tuples
-            let deduped_new: Vec<super::super::tuple::Tuple> = if !rc.union_all {
-                let existing_set: std::collections::HashSet<String> = all_tuples
-                    .iter()
-                    .map(|t| {
-                        t.values
-                            .iter()
-                            .map(|v| match v {
-                                Some(dv) => format!("{:?}", dv),
-                                None => "\x00N\x00".to_string(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join("|")
-                    })
-                    .collect();
-                new_tuples
-                    .into_iter()
-                    .filter(|t| {
-                        let key = t
-                            .values
-                            .iter()
-                            .map(|v| match v {
-                                Some(dv) => format!("{:?}", dv),
-                                None => "\x00N\x00".to_string(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join("|");
-                        !existing_set.contains(&key)
-                    })
-                    .collect()
-            } else {
-                new_tuples
-            };
-
-            let num_appended = deduped_new.len();
-            if num_appended == 0 {
-                log::info!(
-                    "[Volcano] Recursive CTE '{}' iteration {}: no new (non-duplicate) tuples, done",
-                    rc.name,
-                    iteration
-                );
-                break;
-            }
-
-            // Append to accumulated result (clone since deduped_new becomes the next working table)
-            all_tuples.extend(deduped_new.iter().cloned());
-            working_table = deduped_new;
+            // Append to accumulated result (clone since new_tuples becomes the next working table)
+            all_tuples.extend(new_tuples.iter().cloned());
+            working_table = new_tuples;
+            iteration += 1;
         }
 
         // 3. Register all accumulated tuples and plan the outer query
@@ -564,6 +551,45 @@ impl PhysicalPlanner {
 
         // Plan the outer query which may reference the CTE via CteScan
         self.plan_internal(&rc.outer, cte_registry)
+    }
+}
+
+/// Position of the join key in the outer schema. A qualified reference must
+/// match its table; an unqualified one must be unambiguous. `None` makes the
+/// planner fall back to a join that evaluates the full predicate.
+fn resolve_outer_key(schema: &[ColumnInfo], table: Option<&str>, column: &str) -> Option<usize> {
+    let mut matches = schema.iter().enumerate().filter(|(_, c)| {
+        c.name.eq_ignore_ascii_case(column)
+            && match (table, c.table.as_deref()) {
+                (Some(t), Some(ct)) => ct.eq_ignore_ascii_case(t),
+                _ => true,
+            }
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first.0)
+}
+
+/// True when two join-key columns produce equal hash keys exactly when they
+/// compare equal: identical types, or two integer types.
+fn keys_hash_alike(
+    left: &Expr,
+    left_schema: &[ColumnInfo],
+    right: &Expr,
+    right_schema: &[ColumnInfo],
+) -> bool {
+    let column_type = |expr: &Expr, schema: &[ColumnInfo]| match expr {
+        Expr::Column { table, column } => {
+            resolve_outer_key(schema, table.as_deref(), column).map(|i| schema[i].data_type.clone())
+        }
+        _ => None,
+    };
+    let is_int = |t: &DataType| matches!(t, DataType::SmallInt | DataType::Int | DataType::BigInt);
+    match (
+        column_type(left, left_schema),
+        column_type(right, right_schema),
+    ) {
+        (Some(l), Some(r)) => l == r || (is_int(&l) && is_int(&r)),
+        _ => false,
     }
 }
 
@@ -664,10 +690,15 @@ fn rewrite_having_expr(
     use rook_ast::ExprNode as E;
 
     match expr {
-        E::Function { name, args, .. } if is_aggregate_name(name) => {
+        E::Function {
+            name,
+            args,
+            distinct,
+        } if is_aggregate_name(name) => {
             let wanted_args = render_function_args(args);
             for (i, agg) in logical_aggs.iter().enumerate() {
                 if aggregate_function_name(agg.function) == name.to_ascii_uppercase()
+                    && agg.distinct == *distinct
                     && render_agg_args(agg) == wanted_args
                 {
                     // Found the matching computed aggregate — reference it.

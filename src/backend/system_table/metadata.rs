@@ -464,6 +464,49 @@ pub fn delete_column_constraints(
     Ok(count)
 }
 
+/// Replace every occurrence of the identifier `old_name` in a SQL expression
+/// with `new_name`, leaving string literals and longer identifiers untouched.
+pub fn rename_identifier_in_expr(expr: &str, old_name: &str, new_name: &str) -> String {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(expr.len());
+    let mut chars = expr.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        if c == '\'' {
+            // Copy a string literal verbatim ('' is an escaped quote).
+            out.push(c);
+            while let Some((_, q)) = chars.next() {
+                out.push(q);
+                if q == '\'' {
+                    if matches!(chars.peek(), Some((_, '\''))) {
+                        out.push('\'');
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else if is_ident(c) {
+            let mut end = start + c.len_utf8();
+            while let Some(&(i, n)) = chars.peek() {
+                if !is_ident(n) {
+                    break;
+                }
+                end = i + n.len_utf8();
+                chars.next();
+            }
+            let word = &expr[start..end];
+            if word.eq_ignore_ascii_case(old_name) {
+                out.push_str(new_name);
+            } else {
+                out.push_str(word);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Update the column name in sys_constraints for a renamed column.
 ///
 /// Scans sys_constraints for rows matching the table_id and whose `columns`
@@ -509,25 +552,41 @@ pub fn rename_column_in_constraints(
             _ => continue,
         };
 
-        // Check if columns field contains the old name
-        let parts: Vec<&str> = row_columns.split(',').map(|s| s.trim()).collect();
-        let has_old = parts.iter().any(|c| c.eq_ignore_ascii_case(old_name));
-        if !has_old {
-            continue;
-        }
+        let is_check = matches!(
+            &decoded[2],
+            Some(crate::types::DataValue::Varchar(t)) | Some(crate::types::DataValue::Char(t))
+                if t.trim().eq_ignore_ascii_case("CHECK")
+        );
 
-        // Replace old_name with new_name (case-insensitive match, case-preserving replace)
-        let new_columns = parts
-            .iter()
-            .map(|c| {
-                if c.eq_ignore_ascii_case(old_name) {
-                    new_name.to_string()
-                } else {
-                    c.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let new_columns = if is_check {
+            // A CHECK row stores its expression here: rename the identifier
+            // inside it, or every later insert fails to compile the check.
+            let renamed = rename_identifier_in_expr(&row_columns, old_name, new_name);
+            if renamed == row_columns {
+                continue;
+            }
+            renamed
+        } else {
+            // Check if columns field contains the old name
+            let parts: Vec<&str> = row_columns.split(',').map(|s| s.trim()).collect();
+            let has_old = parts.iter().any(|c| c.eq_ignore_ascii_case(old_name));
+            if !has_old {
+                continue;
+            }
+
+            // Replace old_name with new_name (case-insensitive match, case-preserving replace)
+            parts
+                .iter()
+                .map(|c| {
+                    if c.eq_ignore_ascii_case(old_name) {
+                        new_name.to_string()
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
 
         // Reconstruct a row with the updated columns field
         let updated_row = vec![
