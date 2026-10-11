@@ -197,10 +197,13 @@ impl Expr {
                                         .unwrap_or(false)
                             })
                             .or_else(|| {
-                                // Fallback if table name not present in child schema (e.g. intermediate operator)
-                                schema
-                                    .iter()
-                                    .position(|ci| ci.name.eq_ignore_ascii_case(column))
+                                // Fallback for columns whose origin an
+                                // intermediate operator dropped. A column that
+                                // belongs to a *different* table is not a match:
+                                // `zz.id` must not read `a.id`.
+                                schema.iter().position(|ci| {
+                                    ci.name.eq_ignore_ascii_case(column) && ci.table.is_none()
+                                })
                             })
                     }
                     None => {
@@ -211,13 +214,21 @@ impl Expr {
                     }
                 }
                 .ok_or_else(|| {
+                    let wanted = match table {
+                        Some(t) => format!("{}.{}", t, column),
+                        None => column.clone(),
+                    };
+                    let available: Vec<String> = schema
+                        .iter()
+                        .map(|c| match &c.table {
+                            Some(t) => format!("{}.{}", t, c.name),
+                            None => c.name.clone(),
+                        })
+                        .collect();
                     format!(
-                        "Column '{}' not found in tuple schema ({:?})",
-                        column,
-                        schema
-                            .iter()
-                            .map(|c| format!("{:?}", c))
-                            .collect::<Vec<_>>()
+                        "Column '{}' not found (available: {})",
+                        wanted,
+                        available.join(", ")
                     )
                 })?;
                 Ok(tuple

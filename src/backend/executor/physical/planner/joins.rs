@@ -573,7 +573,7 @@ fn resolve_outer_key(schema: &[ColumnInfo], table: Option<&str>, column: &str) -
 }
 
 /// True when two join-key columns produce equal hash keys exactly when they
-/// compare equal: identical types, or two integer types.
+/// compare equal: identical types, or two numeric types.
 fn keys_hash_alike(
     left: &Expr,
     left_schema: &[ColumnInfo],
@@ -586,12 +586,24 @@ fn keys_hash_alike(
         }
         _ => None,
     };
-    let is_int = |t: &DataType| matches!(t, DataType::SmallInt | DataType::Int | DataType::BigInt);
+    // Every numeric type shares one canonical hash key.
+    let is_numeric = |t: &DataType| {
+        matches!(
+            t,
+            DataType::SmallInt
+                | DataType::Int
+                | DataType::BigInt
+                | DataType::Real
+                | DataType::DoublePrecision
+                | DataType::Numeric { .. }
+                | DataType::Decimal { .. }
+        )
+    };
     match (
         column_type(left, left_schema),
         column_type(right, right_schema),
     ) {
-        (Some(l), Some(r)) => l == r || (is_int(&l) && is_int(&r)),
+        (Some(l), Some(r)) => l == r || (is_numeric(&l) && is_numeric(&r)),
         _ => false,
     }
 }

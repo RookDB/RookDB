@@ -9,7 +9,7 @@ use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
 
 use crate::types::DataType;
-use crate::types::value::{DataValue, NumericValue, OrderedF64};
+use crate::types::value::DataValue;
 
 // ── Join Type ─────────────────────────────────────────────────────────────────
 
@@ -573,44 +573,8 @@ impl HashJoinOperator {
     }
 
     fn canonicalize_hash_key(dv: DataValue) -> DataValue {
-        match dv {
-            DataValue::SmallInt(v) => DataValue::Numeric(NumericValue {
-                unscaled: v as i128,
-                scale: 0,
-            }),
-            DataValue::Int(v) => DataValue::Numeric(NumericValue {
-                unscaled: v as i128,
-                scale: 0,
-            }),
-            DataValue::BigInt(v) => DataValue::Numeric(NumericValue {
-                unscaled: v as i128,
-                scale: 0,
-            }),
-            DataValue::Numeric(num) => DataValue::Numeric(normalize_numeric(num)),
-            DataValue::Real(v) => DataValue::DoublePrecision(OrderedF64(v.0 as f64)),
-            DataValue::DoublePrecision(v) => DataValue::DoublePrecision(v),
-            DataValue::Date(d) => match d.and_hms_opt(0, 0, 0) {
-                Some(dt) => DataValue::Timestamp(dt),
-                None => DataValue::Date(d),
-            },
-            DataValue::Char(s) => DataValue::Varchar(s.trim_end().to_string()),
-            other => other,
-        }
+        super::utils::canonical_key(dv)
     }
-}
-
-fn normalize_numeric(mut num: NumericValue) -> NumericValue {
-    if num.unscaled == 0 {
-        return NumericValue {
-            unscaled: 0,
-            scale: 0,
-        };
-    }
-    while num.scale > 0 && num.unscaled % 10 == 0 {
-        num.unscaled /= 10;
-        num.scale -= 1;
-    }
-    num
 }
 
 impl HashJoinOperator {

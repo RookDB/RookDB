@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
+use super::utils::canonical_row_key;
 use crate::backend::error::RookResult;
 use crate::types::value::DataValue;
 
@@ -81,12 +82,12 @@ impl SetOpOperator {
             (SetOpType::Union, false) => {
                 let mut seen = HashSet::new();
                 for tuple in self.left_tuples.drain(..) {
-                    if seen.insert(tuple.values.clone()) {
+                    if seen.insert(canonical_row_key(&tuple.values)) {
                         self.output_buffer.push(tuple);
                     }
                 }
                 for tuple in self.right_tuples.drain(..) {
-                    if seen.insert(tuple.values.clone()) {
+                    if seen.insert(canonical_row_key(&tuple.values)) {
                         self.output_buffer.push(tuple);
                     }
                 }
@@ -97,7 +98,7 @@ impl SetOpOperator {
                     HashMap::new();
                 let mut order: Vec<Vec<Option<DataValue>>> = Vec::new();
                 for tuple in self.left_tuples.drain(..) {
-                    let key = tuple.values.clone();
+                    let key = canonical_row_key(&tuple.values);
                     let entry = left_counts.entry(key.clone()).or_insert((0, tuple));
                     entry.0 += 1;
                     if entry.0 == 1 {
@@ -107,11 +108,14 @@ impl SetOpOperator {
 
                 let mut results: HashMap<Vec<Option<DataValue>>, Vec<Tuple>> = HashMap::new();
                 for tuple in self.right_tuples.drain(..) {
-                    if let Some((count, _)) = left_counts.get_mut(&tuple.values)
+                    if let Some((count, _)) = left_counts.get_mut(&canonical_row_key(&tuple.values))
                         && *count > 0
                     {
                         *count -= 1;
-                        results.entry(tuple.values.clone()).or_default().push(tuple);
+                        results
+                            .entry(canonical_row_key(&tuple.values))
+                            .or_default()
+                            .push(tuple);
                     }
                 }
 
@@ -123,11 +127,16 @@ impl SetOpOperator {
             }
 
             (SetOpType::Intersect, false) => {
-                let left_set: HashSet<Vec<Option<DataValue>>> =
-                    self.left_tuples.iter().map(|t| t.values.clone()).collect();
+                let left_set: HashSet<Vec<Option<DataValue>>> = self
+                    .left_tuples
+                    .iter()
+                    .map(|t| canonical_row_key(&t.values))
+                    .collect();
                 let mut seen = HashSet::new();
                 for tuple in self.right_tuples.drain(..) {
-                    if left_set.contains(&tuple.values) && seen.insert(tuple.values.clone()) {
+                    if left_set.contains(&canonical_row_key(&tuple.values))
+                        && seen.insert(canonical_row_key(&tuple.values))
+                    {
                         self.output_buffer.push(tuple);
                     }
                 }
@@ -138,7 +147,7 @@ impl SetOpOperator {
                     HashMap::new();
                 let mut order: Vec<Vec<Option<DataValue>>> = Vec::new();
                 for tuple in self.left_tuples.drain(..) {
-                    let key = tuple.values.clone();
+                    let key = canonical_row_key(&tuple.values);
                     let entry = left_counts.entry(key.clone()).or_insert((0, Vec::new()));
                     entry.0 += 1;
                     entry.1.push(tuple);
@@ -148,7 +157,7 @@ impl SetOpOperator {
                 }
 
                 for tuple in self.right_tuples.drain(..) {
-                    if let Some((count, _)) = left_counts.get_mut(&tuple.values)
+                    if let Some((count, _)) = left_counts.get_mut(&canonical_row_key(&tuple.values))
                         && *count > 0
                     {
                         *count -= 1;
@@ -165,11 +174,16 @@ impl SetOpOperator {
             }
 
             (SetOpType::Except, false) => {
-                let right_set: HashSet<Vec<Option<DataValue>>> =
-                    self.right_tuples.iter().map(|t| t.values.clone()).collect();
+                let right_set: HashSet<Vec<Option<DataValue>>> = self
+                    .right_tuples
+                    .iter()
+                    .map(|t| canonical_row_key(&t.values))
+                    .collect();
                 let mut seen = HashSet::new();
                 for tuple in self.left_tuples.drain(..) {
-                    if !right_set.contains(&tuple.values) && seen.insert(tuple.values.clone()) {
+                    if !right_set.contains(&canonical_row_key(&tuple.values))
+                        && seen.insert(canonical_row_key(&tuple.values))
+                    {
                         self.output_buffer.push(tuple);
                     }
                 }

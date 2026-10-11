@@ -764,6 +764,31 @@ pub fn cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionE
     if let Some(res) = cast_numeric_to_integer(value, target) {
         return res;
     }
+    // Temporal conversions that have no text form in common.
+    match (value, target) {
+        (DataValue::Timestamp(ts), DataType::Date) => return Ok(DataValue::Date(ts.date())),
+        (DataValue::Timestamp(ts), DataType::Time) => return Ok(DataValue::Time(ts.time())),
+        (DataValue::Date(d), DataType::Timestamp) => {
+            return d
+                .and_hms_opt(0, 0, 0)
+                .map(DataValue::Timestamp)
+                .ok_or_else(|| FunctionError::InvalidArgument("Invalid date".to_string()));
+        }
+        _ => {}
+    }
+    // A numeric value cast to NUMERIC(p, s) is rounded to s places first; the
+    // text parser below rejects extra fractional digits.
+    if let DataType::Numeric { scale, .. } | DataType::Decimal { scale, .. } = target
+        && matches!(
+            value,
+            DataValue::Numeric(_) | DataValue::Real(_) | DataValue::DoublePrecision(_)
+        )
+    {
+        let rounded = round(value, *scale as i32)?;
+        let encoded = DataValue::parse_and_encode(target, &value_to_literal(&rounded))
+            .map_err(FunctionError::InvalidArgument)?;
+        return DataValue::from_bytes(target, &encoded).map_err(FunctionError::InvalidArgument);
+    }
 
     let literal = value_to_literal(value);
     let encoded =
