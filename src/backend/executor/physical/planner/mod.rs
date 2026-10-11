@@ -31,15 +31,19 @@ pub mod subqueries;
 
 /// Converts a `LogicalPlan` into an executable `PhysicalOperator` tree.
 pub struct PhysicalPlanner {
-    /// The catalog for schema lookups.
-    pub(crate) catalog: Catalog,
+    /// The catalog for schema lookups, shared with the caller and with the
+    /// operators that need it.
+    pub(crate) catalog: std::sync::Arc<Catalog>,
     /// Current database name.
     pub(crate) db_name: String,
 }
 
 impl PhysicalPlanner {
-    pub fn new(catalog: Catalog, db_name: String) -> Self {
-        Self { catalog, db_name }
+    pub fn new(catalog: impl Into<std::sync::Arc<Catalog>>, db_name: String) -> Self {
+        Self {
+            catalog: catalog.into(),
+            db_name,
+        }
     }
 
     /// Plan a logical query plan into a physical operator tree.
@@ -400,7 +404,7 @@ impl PhysicalPlanner {
                     child,
                     inp.table.clone(),
                     self.db_name.clone(),
-                    self.catalog.clone(),
+                    std::sync::Arc::clone(&self.catalog),
                 )))
             }
 
@@ -928,9 +932,9 @@ mod tests {
     fn make_planner() -> PhysicalPlanner {
         use std::collections::HashMap;
         PhysicalPlanner {
-            catalog: Catalog {
+            catalog: std::sync::Arc::new(Catalog {
                 databases: HashMap::new(),
-            },
+            }),
             db_name: "test".to_string(),
         }
     }

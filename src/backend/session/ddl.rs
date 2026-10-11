@@ -63,7 +63,7 @@ pub(super) fn drop_database(
     // Defense-in-depth: the name is about to be used in `remove_dir_all`.
     crate::backend::name_validation::validate_database_name(db_name)?;
 
-    let catalog = &mut session.catalog;
+    let catalog = std::sync::Arc::make_mut(&mut session.catalog);
     if !catalog.databases.contains_key(db_name) {
         return Ok(StatementResult::message(if params.if_exists {
             format!(

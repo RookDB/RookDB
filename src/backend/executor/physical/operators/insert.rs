@@ -41,7 +41,7 @@ pub struct InsertOperator {
     child_schema: Vec<ColumnInfo>,
     table: Option<String>,
     db_name: Option<String>,
-    catalog: Option<crate::catalog::types::Catalog>,
+    catalog: Option<std::sync::Arc<crate::catalog::types::Catalog>>,
     inserted_pointers: Rc<RefCell<Vec<(u32, u32)>>>,
     completed: bool,
     /// Injectable insert function. Defaults to wrapping `insert_row`.
@@ -57,7 +57,7 @@ impl InsertOperator {
         child: Box<dyn PhysicalOperator>,
         table: String,
         db_name: String,
-        catalog: crate::catalog::types::Catalog,
+        catalog: std::sync::Arc<crate::catalog::types::Catalog>,
     ) -> Self {
         let child_schema = child.schema().to_vec();
 

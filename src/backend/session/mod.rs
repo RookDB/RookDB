@@ -17,6 +17,8 @@ use rook_ast::QueryPlan;
 
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::executor::physical::tuple::{ColumnInfo, Tuple};
+use std::sync::Arc;
+
 use crate::catalog::Catalog;
 
 /// What one statement produced.
@@ -49,15 +51,18 @@ impl StatementResult {
 pub const NO_DATABASE: &str = "No database selected. Use 'USE <database>' first.";
 
 /// A connection's state: the catalog and the database `USE` selected.
+///
+/// Queries share the catalog through the `Arc`; DDL changes it in place
+/// (`Arc::make_mut`), which copies only while a query still holds it.
 pub struct Session {
-    pub catalog: Catalog,
+    pub catalog: Arc<Catalog>,
     pub current_db: Option<String>,
 }
 
 impl Session {
     pub fn new(catalog: Catalog) -> Self {
         Session {
-            catalog,
+            catalog: Arc::new(catalog),
             current_db: None,
         }
     }
@@ -67,13 +72,15 @@ impl Session {
         let plan = names::resolve_table_names(plan, &self.catalog, &self.current_db);
         match &plan {
             QueryPlan::ShowDatabases => Ok(ddl::show_databases(&self.catalog)),
-            QueryPlan::CreateDatabase(p) => Ok(ddl::create_database(&mut self.catalog, p)),
+            QueryPlan::CreateDatabase(p) => {
+                Ok(ddl::create_database(Arc::make_mut(&mut self.catalog), p))
+            }
             QueryPlan::DropDatabase(p) => ddl::drop_database(self, p),
             QueryPlan::UseDatabase(name) => Ok(ddl::use_database(self, name)),
             QueryPlan::ShowTables => Ok(ddl::show_tables(&self.catalog, self.db()?)),
             QueryPlan::CreateTable(p) => {
                 let db = self.db()?.to_string();
-                ddl::create_table(&mut self.catalog, &db, p)
+                ddl::create_table(Arc::make_mut(&mut self.catalog), &db, p)
             }
             QueryPlan::Insert(_) => dml::insert(&self.catalog, self.db()?, &plan),
             QueryPlan::Select(_) | QueryPlan::SetOperation(_) => {
@@ -97,7 +104,7 @@ impl Session {
     }
 
     fn execute_ddl(&mut self, db: &str, plan: &QueryPlan) -> std::io::Result<StatementResult> {
-        let catalog = &mut self.catalog;
+        let catalog = Arc::make_mut(&mut self.catalog);
         match plan {
             QueryPlan::DropTable(p) => {
                 ddl::drop_table(catalog, db, &p.table, p.if_exists, p.cascade)

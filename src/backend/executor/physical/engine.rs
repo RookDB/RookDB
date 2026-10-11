@@ -49,7 +49,17 @@ pub fn execute_plan_collect_with_schema(
     catalog: &Catalog,
     db_name: &str,
 ) -> RookResult<(Vec<Tuple>, Vec<super::tuple::ColumnInfo>)> {
-    let planner = PhysicalPlanner::new(catalog.clone(), db_name.to_string());
+    execute_shared(plan, std::sync::Arc::new(catalog.clone()), db_name)
+}
+
+/// [`execute_plan_collect_with_schema`] for a caller that already holds the
+/// catalog in an `Arc`: the plan shares it instead of copying it.
+pub fn execute_shared(
+    plan: &LogicalPlan,
+    catalog: std::sync::Arc<Catalog>,
+    db_name: &str,
+) -> RookResult<(Vec<Tuple>, Vec<super::tuple::ColumnInfo>)> {
+    let planner = PhysicalPlanner::new(catalog, db_name.to_string());
     let mut root = planner.plan(plan)?;
     let schema = root.schema().to_vec();
 

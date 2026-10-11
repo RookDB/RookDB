@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::super::engine::execute_plan_collect;
+use super::super::engine::execute_shared;
 use super::super::expr::{ComparisonOp, Expr, Predicate, expr_from_ast, predicate_from_ast};
 use super::super::operators::{
     FilterOperator, LimitOperator, PhysicalOperator, ProjectionOperator,
@@ -182,7 +182,12 @@ impl PhysicalPlanner {
             })?;
 
         // Execute the plan and check if any tuples are produced
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
+        let tuples = execute_shared(
+            &logical_plan,
+            std::sync::Arc::clone(&self.catalog),
+            &self.db_name,
+        )?
+        .0;
         Ok(!tuples.is_empty())
     }
 
@@ -200,7 +205,12 @@ impl PhysicalPlanner {
             })?;
 
         // Execute and collect tuples
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
+        let tuples = execute_shared(
+            &logical_plan,
+            std::sync::Arc::clone(&self.catalog),
+            &self.db_name,
+        )?
+        .0;
 
         // Extract the first column value from each tuple
         let values: Vec<Option<DataValue>> = tuples
@@ -226,7 +236,12 @@ impl PhysicalPlanner {
                 RookError::Internal(e.message).with_context("Failed to plan scalar subquery")
             })?;
 
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
+        let tuples = execute_shared(
+            &logical_plan,
+            std::sync::Arc::clone(&self.catalog),
+            &self.db_name,
+        )?
+        .0;
 
         match tuples.len() {
             0 => Ok((None, DataType::Int)), // NULL → default to Int
@@ -668,7 +683,8 @@ impl PhysicalPlanner {
                             .with_context("Failed to plan CTE inner query in correlated subquery")
                     },
                 )?;
-            let inner_planner = PhysicalPlanner::new(self.catalog.clone(), self.db_name.clone());
+            let inner_planner =
+                PhysicalPlanner::new(std::sync::Arc::clone(&self.catalog), self.db_name.clone());
             let inner_base = inner_planner.plan(&logical_plan)?;
             let inner_col_names: Vec<String> =
                 inner_base.schema().iter().map(|c| c.name.clone()).collect();
