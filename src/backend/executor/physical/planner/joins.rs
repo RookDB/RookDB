@@ -241,10 +241,9 @@ impl PhysicalPlanner {
             }
         }
 
-        // 3. Fallback: NestedLoopJoin for all join types
-        // Outer equi-joins: hash the right input instead of comparing every
-        // pair. Limited to keys whose two sides hash alike (same type, or both
-        // integers); other key pairs keep the plain nested loop.
+        // 3. Outer equi-joins use the hash join too. Limited to keys whose
+        // two sides hash alike (same type, or both numeric); other key pairs
+        // keep the plain nested loop.
         if matches!(
             join_type,
             PhysicalJoinType::Left | PhysicalJoinType::Right | PhysicalJoinType::Full
@@ -252,7 +251,7 @@ impl PhysicalPlanner {
         {
             let left_schema = left.schema().to_vec();
             let right_schema = right.schema().to_vec();
-            if let Some((left_keys, right_keys, _)) =
+            if let Some((left_keys, right_keys, residual)) =
                 extract_equi_join_keys(pred, &left_schema, &right_schema)
                 && !left_keys.is_empty()
                 && left_keys
@@ -261,15 +260,18 @@ impl PhysicalPlanner {
                     .all(|(l, r)| keys_hash_alike(l, &left_schema, r, &right_schema))
             {
                 log::info!(
-                    "[Volcano] Using HashOuterJoin: {} equi-key pair(s)",
-                    left_keys.len()
+                    "[Volcano] Using HashJoin ({:?}): {} equi-key pair(s), residual predicate: {}",
+                    join_type,
+                    left_keys.len(),
+                    residual.is_some()
                 );
-                return Ok(Box::new(NestedLoopJoinOperator::with_equi_keys(
-                    left, right, predicate, join_type, left_keys, right_keys,
+                return Ok(Box::new(HashJoinOperator::with_join_type(
+                    left, right, left_keys, right_keys, residual, join_type,
                 )));
             }
         }
 
+        // 4. Fallback: NestedLoopJoin for all join types
         Ok(Box::new(NestedLoopJoinOperator::new(
             left, right, predicate, join_type,
         )))
