@@ -1,3 +1,4 @@
+use super::super::explain::PlanNode;
 use std::io;
 use std::path::PathBuf;
 
@@ -30,6 +31,10 @@ pub struct SeqScanOperator {
     /// When non-empty, deserialised values are reordered from physical order
     /// to view column order before being yielded.
     column_mapping: Vec<usize>,
+    /// How many columns the scan decodes, when not all of them.
+    read_columns: Option<usize>,
+    /// The table scanned, for `EXPLAIN`, when the planner named it.
+    table_name: Option<String>,
     /// Whether the scan has been fully consumed.
     exhausted: bool,
 }
@@ -51,6 +56,8 @@ impl SeqScanOperator {
             decoder: crate::types::RowDecoder::new(&schema_types),
             schema_types,
             column_mapping: identity,
+            read_columns: None,
+            table_name: None,
             exhausted: false,
         }
     }
@@ -78,14 +85,24 @@ impl SeqScanOperator {
             decoder: crate::types::RowDecoder::new(&schema_types),
             schema_types,
             column_mapping,
+            read_columns: None,
+            table_name: None,
             exhausted: false,
         }
+    }
+
+    /// Name the table this scan reads, for `EXPLAIN`.
+    pub fn described(mut self, table: &str) -> Self {
+        self.table_name = Some(table.to_string());
+        self
     }
 
     /// Decode only the columns at these PHYSICAL positions; the others are
     /// produced as NULL. For a query that reads only some of the columns.
     pub fn read_only(mut self, physical_columns: impl IntoIterator<Item = usize>) -> Self {
-        self.decoder = self.decoder.only(physical_columns);
+        let columns: Vec<usize> = physical_columns.into_iter().collect();
+        self.read_columns = Some(columns.len());
+        self.decoder = self.decoder.only(columns);
         self
     }
 }
@@ -189,6 +206,26 @@ impl PhysicalOperator for SeqScanOperator {
         "SeqScan"
     }
 
+    fn explain(&self) -> PlanNode {
+        let mut node = PlanNode::new("SeqScan");
+        // Columns are qualified by the alias when the query gave one.
+        let qualifier = self.column_info.first().and_then(|c| c.table.as_ref());
+        match (&self.table_name, qualifier) {
+            (Some(table), Some(alias)) if alias != table => {
+                node = node.with("table", table).with("alias", alias);
+            }
+            (Some(table), _) | (None, Some(table)) => node = node.with("table", table),
+            (None, None) => {}
+        }
+        match self.read_columns {
+            Some(n) if n < self.schema_types.len() => node.with(
+                "columns_decoded",
+                format!("{} of {}", n, self.schema_types.len()),
+            ),
+            _ => node,
+        }
+    }
+
     fn estimate_cardinality(&self) -> usize {
         self.heap_manager.page_count() as usize * 100
     }
@@ -251,6 +288,8 @@ pub struct IndexScanOperator {
     ready: std::collections::VecDeque<Tuple>,
     /// Whether the index has been queried and results loaded.
     loaded: bool,
+    /// The table and index this scan reads, for `EXPLAIN`.
+    described: Option<(String, String)>,
 }
 
 impl IndexScanOperator {
@@ -281,6 +320,7 @@ impl IndexScanOperator {
             pos: 0,
             ready: std::collections::VecDeque::new(),
             loaded: false,
+            described: None,
         }
     }
 
@@ -312,7 +352,14 @@ impl IndexScanOperator {
             pos: 0,
             ready: std::collections::VecDeque::new(),
             loaded: false,
+            described: None,
         }
+    }
+
+    /// Name the table and index this scan reads, for `EXPLAIN`.
+    pub fn described(mut self, table: &str, index: &str) -> Self {
+        self.described = Some((table.to_string(), index.to_string()));
+        self
     }
 
     /// Run this scan's lookup against `btree`.
@@ -482,6 +529,39 @@ impl PhysicalOperator for IndexScanOperator {
             IndexScanMode::CompositePointLookup(_) => "IndexScan(CompositePoint)",
             IndexScanMode::RangeLookup(..) => "IndexScan(Range)",
             IndexScanMode::FullScan => "IndexScan(Full)",
+        }
+    }
+
+    fn explain(&self) -> PlanNode {
+        let mut node = PlanNode::new("IndexScan");
+        if let Some((table, index)) = &self.described {
+            node = node.with("table", table);
+            match self.column_info.first().and_then(|c| c.table.as_ref()) {
+                Some(alias) if alias != table => node = node.with("alias", alias),
+                _ => {}
+            }
+            node = node.with("index", index);
+        }
+        let key_columns: Vec<&str> = self
+            .indexed_cols
+            .iter()
+            .filter_map(|&i| self.column_info.get(i))
+            .map(|c| c.name.as_str())
+            .collect();
+        if !key_columns.is_empty() {
+            node = node.with("key_columns", key_columns.join(", "));
+        }
+        match &self.mode {
+            IndexScanMode::PointLookup(key) => node.with("mode", "Point").with("key", key),
+            IndexScanMode::CompositePointLookup(keys) => {
+                let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+                node.with("mode", "CompositePoint")
+                    .with("key", format!("({})", keys.join(", ")))
+            }
+            IndexScanMode::RangeLookup(low, high) => node
+                .with("mode", "Range")
+                .with("range", format!("[{}, {}]", low, high)),
+            IndexScanMode::FullScan => node.with("mode", "Full"),
         }
     }
 

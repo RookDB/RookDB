@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use super::super::explain::PlanNode;
 use super::super::external_sort::{ExternalSorter, Merge, SortSpill, tuple_bytes};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
@@ -33,6 +34,8 @@ pub struct SortOperator {
     cached_schema: Vec<ColumnInfo>,
     /// Only the first `limit` rows of the sorted output are needed (top-N).
     limit: Option<usize>,
+    /// How the input was sorted, once it has been.
+    outcome: Option<&'static str>,
 }
 
 impl SortOperator {
@@ -49,6 +52,7 @@ impl SortOperator {
             merge: None,
             cached_schema,
             limit: None,
+            outcome: None,
         }
     }
 
@@ -76,6 +80,7 @@ impl SortOperator {
 
         if let Some(limit) = self.limit {
             self.buffer = self.top_n(limit)?;
+            self.outcome = Some("top-N in memory");
             self.loaded = true;
             return Ok(());
         }
@@ -95,7 +100,7 @@ impl SortOperator {
                 self.buffer.push(tuple);
                 if buffered_bytes > spill.memory_budget {
                     if sorter.is_none() {
-                        log::info!(
+                        log::debug!(
                             "[Sort] Input exceeds {} bytes, sorting on disk",
                             spill.memory_budget
                         );
@@ -119,6 +124,7 @@ impl SortOperator {
             }
             self.buffer = Vec::new();
             self.merge = Some(sorter.finish()?);
+            self.outcome = Some("on disk");
             self.loaded = true;
             return Ok(());
         }
@@ -146,6 +152,7 @@ impl SortOperator {
             self.buffer.sort_by(|a, b| compare_rows(keys, a, b));
         }
 
+        self.outcome = Some("in memory");
         self.loaded = true;
         Ok(())
     }
@@ -267,6 +274,7 @@ impl PhysicalOperator for SortOperator {
     fn reset(&mut self) -> RookResult<()> {
         self.child.reset()?;
         self.loaded = false;
+        self.outcome = None;
         self.buffer.clear();
         self.pos = 0;
         self.merge = None;
@@ -279,6 +287,33 @@ impl PhysicalOperator for SortOperator {
 
     fn name(&self) -> &'static str {
         "Sort"
+    }
+
+    fn explain(&self) -> PlanNode {
+        let keys: Vec<String> = self
+            .sort_keys
+            .iter()
+            .map(|&(idx, descending)| {
+                let name = self
+                    .cached_schema
+                    .get(idx)
+                    .map_or_else(|| format!("#{}", idx), |c| c.name.clone());
+                format!("{} {}", name, if descending { "DESC" } else { "ASC" })
+            })
+            .collect();
+        let mut node = PlanNode::new("Sort").with("keys", keys.join(", "));
+        match (self.limit, &self.spill) {
+            // A top-N sort keeps only the rows it needs and never spills.
+            (Some(limit), _) => node = node.with("top_n", limit),
+            (None, Some(spill)) => {
+                node = node.with("memory_budget", format!("{} bytes", spill.memory_budget))
+            }
+            (None, None) => {}
+        }
+        if let Some(outcome) = self.outcome {
+            node = node.with("sorted", outcome);
+        }
+        node.child(self.child.explain())
     }
 
     fn ordering(&self) -> Option<Vec<(usize, bool)>> {

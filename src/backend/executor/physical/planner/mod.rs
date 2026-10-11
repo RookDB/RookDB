@@ -6,6 +6,7 @@
 
 use rook_ast::logical::*;
 
+use super::explain::{PlanNode, PlanTrace};
 use super::expr::{Expr, Predicate, expr_from_ast};
 use super::operators::{
     CteScanOperator, DistinctOperator, FilterOperator, IndexScanMode, IndexScanOperator,
@@ -42,6 +43,9 @@ pub struct PhysicalPlanner {
     /// included), by lower-case name, so a scan of one carries the types its
     /// body produced.
     cte_types: std::cell::RefCell<std::collections::HashMap<String, Vec<DataType>>>,
+    /// Decisions that leave no operator in the tree, collected while a plan
+    /// is being explained (`plan_traced`); `None` otherwise.
+    trace: std::cell::RefCell<Option<PlanTrace>>,
 }
 
 impl PhysicalPlanner {
@@ -51,6 +55,40 @@ impl PhysicalPlanner {
             db_name,
             read_columns: std::cell::RefCell::new(None),
             cte_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+            trace: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// [`plan`](Self::plan), also returning the decisions that left no
+    /// operator in the tree. With `root.explain()` they describe the plan.
+    pub fn plan_traced(
+        &self,
+        logical_plan: &LogicalPlan,
+    ) -> RookResult<(Box<dyn PhysicalOperator>, PlanTrace)> {
+        *self.trace.borrow_mut() = Some(PlanTrace::default());
+        let root = self.plan(logical_plan);
+        let trace = self.trace.borrow_mut().take().unwrap_or_default();
+        Ok((root?, trace))
+    }
+
+    /// Record a decision that leaves no operator in the tree. The text is
+    /// only built when the plan is being explained or debug logging is on.
+    pub(crate) fn note(&self, text: impl FnOnce() -> String) {
+        let tracing = self.trace.borrow().is_some();
+        if !tracing && !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
+        let text = text();
+        log::debug!("[Planner] {}", text);
+        if let Some(trace) = self.trace.borrow_mut().as_mut() {
+            trace.notes.push(text);
+        }
+    }
+
+    /// Record the plan of a CTE evaluated while planning.
+    pub(crate) fn note_cte(&self, name: &str, plan: impl FnOnce() -> PlanNode) {
+        if let Some(trace) = self.trace.borrow_mut().as_mut() {
+            trace.ctes.push((name.to_string(), plan()));
         }
     }
 
@@ -87,10 +125,6 @@ impl PhysicalPlanner {
                     && let Some(scan_op) =
                         self.try_plan_index_scan_with_predicate(ts, &f.predicate)?
                 {
-                    log::info!(
-                        "[Volcano] Using index-accelerated scan for table '{}' (full predicate preserved on top)",
-                        ts.table
-                    );
                     // IMPORTANT: Always apply the full predicate as a FilterOperator
                     // on top of the index-accelerated scan. This guarantees correctness
                     // for compound AND predicates like `indexed_col = 5 AND other > 10`
@@ -242,10 +276,6 @@ impl PhysicalPlanner {
                     let indices: Vec<usize> = (0..column_names.len()).collect();
 
                     if let Some(limit) = s.limit {
-                        log::info!(
-                            "[Volcano] Sort has limit={}, wrapping in LimitOperator",
-                            limit
-                        );
                         let limited =
                             Box::new(LimitOperator::new(Box::new(sort_op), limit as usize, 0));
                         Ok(Box::new(ProjectionOperator::from_indices(
@@ -273,14 +303,21 @@ impl PhysicalPlanner {
                     };
 
                     if already_sorted {
-                        log::info!(
-                            "[Volcano] Child already sorted by {:?}, eliminating SortOperator",
-                            sort_keys
-                        );
+                        self.note(|| {
+                            let keys: Vec<String> = sort_keys
+                                .iter()
+                                .map(|&(idx, descending)| {
+                                    let dir = if descending { "DESC" } else { "ASC" };
+                                    format!("{} {}", column_names[idx], dir)
+                                })
+                                .collect();
+                            format!(
+                                "Sort eliminated: {} already yields rows ordered by {}",
+                                child.name(),
+                                keys.join(", ")
+                            )
+                        });
                         if let Some(limit) = s.limit {
-                            log::info!(
-                                "[Volcano] Pipelining into LimitOperator without SortOperator"
-                            );
                             Ok(Box::new(LimitOperator::new(child, limit as usize, 0)))
                         } else {
                             Ok(child)
@@ -293,10 +330,6 @@ impl PhysicalPlanner {
                         }
 
                         if let Some(limit) = s.limit {
-                            log::info!(
-                                "[Volcano] Sort has limit={}, wrapping in LimitOperator",
-                                limit
-                            );
                             Ok(Box::new(LimitOperator::new(
                                 Box::new(sort_op),
                                 limit as usize,
@@ -340,8 +373,6 @@ impl PhysicalPlanner {
                     rook_ast::logical::SetOpType::Except => PhysicalSetOpType::Except,
                 };
 
-                log::info!("[Volcano] Planning {:?} (all={})", op_type, s.all);
-
                 Ok(Box::new(SetOpOperator::new(left, right, op_type, s.all)))
             }
 
@@ -358,7 +389,6 @@ impl PhysicalPlanner {
 
                 // No alias means this is likely a scalar subquery used in an expression.
                 // Wrap it in SubqueryExecOperator in Scalar mode.
-                log::info!("[Volcano] Wrapping subquery in Scalar SubqueryExecOperator");
                 Ok(Box::new(SubqueryExecOperator::new(
                     inner,
                     PhysicalSubqueryType::Scalar,
@@ -381,11 +411,8 @@ impl PhysicalPlanner {
                 while let Some(tuple) = inner_op.next()? {
                     tuples.push(tuple);
                 }
-                log::info!(
-                    "[Volcano] CTE '{}' materialised {} tuples",
-                    c.name,
-                    tuples.len()
-                );
+                self.note_cte(&c.name, || inner_op.explain());
+                self.note(|| format!("CTE '{}' materialised: {} row(s)", c.name, tuples.len()));
 
                 // 2. Register the materialised tuples so CteScan leaves can find
                 //    them, with the column types the body declared.
@@ -436,11 +463,6 @@ impl PhysicalPlanner {
                     self.plan_internal(&inp.child, cte_registry)?
                 };
 
-                log::info!(
-                    "[Volcano] Planning Insert into '{}' with child operator '{}'",
-                    inp.table,
-                    child.name()
-                );
                 // INSERT INTO t (cols) SELECT ...: place each selected value
                 // in its listed column; the rest take their DEFAULT or NULL.
                 // (The VALUES form arrives already expanded.)
@@ -527,12 +549,6 @@ impl PhysicalPlanner {
                     })
                     .collect();
 
-                log::info!(
-                    "[Volcano] CteScan '{}': {} tuples available",
-                    cs.name,
-                    tuples.len()
-                );
-
                 Ok(Box::new(CteScanOperator::new(tuples, schema)))
             }
         }
@@ -602,12 +618,15 @@ impl PhysicalPlanner {
             let heap_manager = HeapManager::open(heap_path).map_err(|e| {
                 RookError::Io(e).with_context(format!("Failed to open system table '{}'", sys_name))
             })?;
-            return Ok(Box::new(SeqScanOperator::new_with_mapping(
-                heap_manager,
-                schema_types,
-                column_info,
-                column_mapping,
-            )));
+            return Ok(Box::new(
+                SeqScanOperator::new_with_mapping(
+                    heap_manager,
+                    schema_types,
+                    column_info,
+                    column_mapping,
+                )
+                .described(sys_name),
+            ));
         }
 
         // ── Regular user table path ───────────────────────────────────────
@@ -653,12 +672,6 @@ impl PhysicalPlanner {
                     .index(&self.db_name, &ts.table, first_idx_name);
 
             if index_path.exists() {
-                log::info!(
-                    "[Volcano] Named index '{}' file found at {:?}, using IndexScanOperator with FullScan",
-                    first_idx_name,
-                    index_path
-                );
-
                 crate::backend::cache::checkpoint();
                 let mut btree = BTree::open(index_path).map_err(|e| {
                     RookError::Io(e)
@@ -687,13 +700,16 @@ impl PhysicalPlanner {
                     .into_iter()
                     .collect();
 
-                return Ok(Box::new(IndexScanOperator::new(
-                    btree,
-                    heap_manager,
-                    IndexScanMode::FullScan,
-                    column_info,
-                    indexed_cols,
-                )));
+                return Ok(Box::new(
+                    IndexScanOperator::new(
+                        btree,
+                        heap_manager,
+                        IndexScanMode::FullScan,
+                        column_info,
+                        indexed_cols,
+                    )
+                    .described(&ts.table, first_idx_name),
+                ));
             }
         }
 
@@ -705,11 +721,6 @@ impl PhysicalPlanner {
             .legacy_index(&self.db_name, &ts.table);
 
         if legacy_index_path.exists() {
-            log::info!(
-                "[Volcano] Legacy index file found at {:?}, using IndexScanOperator with FullScan",
-                legacy_index_path
-            );
-
             crate::backend::cache::checkpoint();
             let mut btree = BTree::open(legacy_index_path).map_err(|e| {
                 RookError::Io(e).with_context(format!(
@@ -732,19 +743,17 @@ impl PhysicalPlanner {
             } else {
                 vec![0]
             };
-            return Ok(Box::new(IndexScanOperator::new(
-                btree,
-                heap_manager,
-                IndexScanMode::FullScan,
-                column_info,
-                indexed_cols,
-            )));
+            return Ok(Box::new(
+                IndexScanOperator::new(
+                    btree,
+                    heap_manager,
+                    IndexScanMode::FullScan,
+                    column_info,
+                    indexed_cols,
+                )
+                .described(&ts.table, "(legacy index file)"),
+            ));
         }
-
-        log::info!(
-            "[Volcano] No index file found for table '{}', using SeqScan",
-            ts.table
-        );
 
         let heap_manager = HeapManager::open(heap_path).map_err(|e| {
             RookError::Io(e).with_context(format!("Failed to open heap for table '{}'", ts.table))
@@ -759,7 +768,7 @@ impl PhysicalPlanner {
                 .map(|(i, _)| i)
                 .collect()
         });
-        let scan = SeqScanOperator::new(heap_manager, column_info);
+        let scan = SeqScanOperator::new(heap_manager, column_info).described(&ts.table);
         Ok(match wanted {
             Some(columns) => Box::new(scan.read_only(columns)),
             None => Box::new(scan),
@@ -1042,6 +1051,7 @@ mod tests {
             db_name: "test".to_string(),
             read_columns: std::cell::RefCell::new(None),
             cte_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+            trace: std::cell::RefCell::new(None),
         }
     }
 

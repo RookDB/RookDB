@@ -53,24 +53,7 @@ pub fn select_matching_pointers(
     table_name: &str,
     selection: Option<PredicateNode>,
 ) -> crate::backend::error::RookResult<Vec<(u32, u32)>> {
-    let select = SelectPlan {
-        ctes: Vec::new(),
-        projections: vec![SelectExpr::Wildcard],
-        from: vec![TableRef {
-            name: table_name.to_string(),
-            alias: None,
-        }],
-        joins: Vec::new(),
-        selection,
-        group_by: Vec::new(),
-        having: None,
-        order_by: Vec::new(),
-        limit: None,
-        distinct: false,
-    };
-
-    let logical = crate::planner::plan_query(&QueryPlan::Select(select), catalog, db_name)
-        .map_err(|e| e.to_string())?;
+    let logical = matching_rows_plan(catalog, db_name, table_name, selection)?;
     let tuples = crate::backend::executor::physical::engine::execute_plan_collect(
         &logical, catalog, db_name,
     )?;
@@ -87,4 +70,34 @@ pub fn select_matching_pointers(
         }
     }
     Ok(out)
+}
+
+/// The plan [`select_matching_pointers`] runs to find the rows of `db.table`
+/// that match `selection`: what an UPDATE or DELETE reads before it writes.
+pub fn matching_rows_plan(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    selection: Option<PredicateNode>,
+) -> crate::backend::error::RookResult<rook_ast::logical::LogicalPlan> {
+    let select = SelectPlan {
+        ctes: Vec::new(),
+        projections: vec![SelectExpr::Wildcard],
+        from: vec![TableRef {
+            name: table_name.to_string(),
+            alias: None,
+        }],
+        joins: Vec::new(),
+        selection,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        distinct: false,
+    };
+
+    Ok(
+        crate::planner::plan_query(&QueryPlan::Select(select), catalog, db_name)
+            .map_err(|e| e.to_string())?,
+    )
 }

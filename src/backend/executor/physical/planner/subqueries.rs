@@ -52,11 +52,13 @@ impl PhysicalPlanner {
             }
             rook_ast::PredicateNode::Exists(subquery_info) => {
                 if self.is_subquery_correlated(&subquery_info.select) {
-                    log::info!("[Planner] Building correlated EXISTS subquery");
+                    self.note(|| "Correlated EXISTS subquery: evaluated per outer row".to_string());
                     self.build_correlated_exists(subquery_info, schema)
                 } else {
-                    log::info!("[Planner] Materializing non-correlated EXISTS subquery");
                     let exists = self.materialize_exists_subquery(subquery_info.select.as_ref())?;
+                    self.note(|| {
+                        format!("EXISTS subquery evaluated once while planning: {}", exists)
+                    });
                     Ok(Predicate::ExistsResult(exists))
                 }
             }
@@ -66,11 +68,10 @@ impl PhysicalPlanner {
                 negated,
             } => {
                 if self.is_subquery_correlated(&subquery.select) {
-                    log::info!("[Planner] Building correlated IN subquery");
+                    self.note(|| "Correlated IN subquery: evaluated per outer row".to_string());
                     let lhs_expr = expr_from_ast(expr, column_names)?;
                     self.build_correlated_in_subquery(subquery, lhs_expr, *negated, schema)
                 } else {
-                    log::info!("[Planner] Materializing non-correlated IN subquery");
                     let lhs_expr = expr_from_ast(expr, column_names)?;
                     let values = self.materialize_in_subquery(subquery.select.as_ref())?;
                     Ok(Predicate::InSubqueryResult(lhs_expr, values, *negated))
@@ -218,7 +219,12 @@ impl PhysicalPlanner {
             .map(|t| t.values.into_iter().next().unwrap_or(None))
             .collect();
 
-        log::info!("[Planner] IN subquery materialized {} values", values.len());
+        self.note(|| {
+            format!(
+                "IN subquery evaluated once while planning: {} value(s)",
+                values.len()
+            )
+        });
 
         Ok(values)
     }
@@ -228,7 +234,7 @@ impl PhysicalPlanner {
         &self,
         select: &rook_ast::SelectPlan,
     ) -> RookResult<(Option<DataValue>, DataType)> {
-        log::info!("[Planner] Materializing scalar subquery");
+        self.note(|| "Scalar subquery evaluated once while planning".to_string());
         let query_plan = rook_ast::QueryPlan::Select(select.clone());
 
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
@@ -778,13 +784,6 @@ impl PhysicalPlanner {
 
             params.push(param);
             outer_indices.push(outer_col_idx);
-
-            log::info!(
-                "[Planner] Correlated EXISTS: inner col '{}' = outer.col '{}' (idx={})",
-                inner_col_name,
-                outer_col_name,
-                outer_col_idx
-            );
         }
 
         let filter_op: Box<dyn PhysicalOperator> =
@@ -864,13 +863,6 @@ impl PhysicalPlanner {
 
             params.push(param);
             outer_indices.push(outer_col_idx);
-
-            log::info!(
-                "[Planner] Correlated IN subquery: inner col '{}' = outer.col '{}' (idx={})",
-                inner_col_name,
-                outer_col_name,
-                outer_col_idx
-            );
         }
 
         let filter_op: Box<dyn PhysicalOperator> =

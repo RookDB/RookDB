@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use super::super::explain::PlanNode;
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
@@ -130,6 +131,14 @@ impl PhysicalOperator for CteScanOperator {
     fn name(&self) -> &'static str {
         "CteScan"
     }
+
+    fn explain(&self) -> PlanNode {
+        let mut node = PlanNode::new("CteScan");
+        if let Some(name) = self.schema.first().and_then(|c| c.table.as_ref()) {
+            node = node.with("cte", name);
+        }
+        node.with("rows", self.tuples.len())
+    }
 }
 
 // ── Filter Operator ───────────────────────────────────────────────────────────
@@ -221,6 +230,10 @@ impl PhysicalOperator for FilterOperator {
 
     fn name(&self) -> &'static str {
         "Filter"
+    }
+
+    fn explain(&self) -> PlanNode {
+        PlanNode::new("Filter").child(self.child.explain())
     }
 
     fn ordering(&self) -> Option<Vec<(usize, bool)>> {
@@ -474,6 +487,13 @@ impl PhysicalOperator for ProjectionOperator {
         "Project"
     }
 
+    fn explain(&self) -> PlanNode {
+        let columns: Vec<&str> = self.output_schema.iter().map(|c| c.name.as_str()).collect();
+        PlanNode::new("Project")
+            .with("columns", columns.join(", "))
+            .child(self.child.explain())
+    }
+
     fn ordering(&self) -> Option<Vec<(usize, bool)>> {
         if let Some(child_order) = self.child.ordering() {
             let mut mapped_order = Vec::new();
@@ -555,6 +575,14 @@ impl PhysicalOperator for LimitOperator {
         "Limit"
     }
 
+    fn explain(&self) -> PlanNode {
+        let mut node = PlanNode::new("Limit").with("limit", self.limit);
+        if self.offset > 0 {
+            node = node.with("offset", self.offset);
+        }
+        node.child(self.child.explain())
+    }
+
     fn ordering(&self) -> Option<Vec<(usize, bool)>> {
         self.child.ordering()
     }
@@ -618,5 +646,9 @@ impl PhysicalOperator for DistinctOperator {
 
     fn name(&self) -> &'static str {
         "Distinct"
+    }
+
+    fn explain(&self) -> PlanNode {
+        PlanNode::new("Distinct").child(self.child.explain())
     }
 }

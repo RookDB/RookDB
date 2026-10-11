@@ -177,12 +177,6 @@ impl PhysicalPlanner {
                 return Ok(None);
             }
 
-            log::info!(
-                "[Volcano] Index-accelerated scan: mode={:?}, table='{}'",
-                mode,
-                ts.table
-            );
-
             crate::backend::cache::checkpoint();
             // Key type(s) come from the INDEXED column(s) (NOT the first table
             // column). The index itself is not opened here: the scan looks keys
@@ -218,15 +212,18 @@ impl PhysicalPlanner {
                 })
                 .collect();
 
-            return Ok(Some(Box::new(IndexScanOperator::with_cached_index(
-                std::sync::Arc::clone(self.catalog.engine()),
-                idx_path,
-                key_types,
-                heap_manager,
-                mode,
-                column_info,
-                indexed_cols,
-            ))));
+            return Ok(Some(Box::new(
+                IndexScanOperator::with_cached_index(
+                    std::sync::Arc::clone(self.catalog.engine()),
+                    idx_path,
+                    key_types,
+                    heap_manager,
+                    mode,
+                    column_info,
+                    indexed_cols,
+                )
+                .described(&ts.table, &idx_name),
+            )));
         }
 
         Ok(None)

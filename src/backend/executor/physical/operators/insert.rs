@@ -10,6 +10,7 @@
 //! if any later row fails, those rows are deleted again before the error
 //! propagates.
 
+use super::super::explain::PlanNode;
 use super::super::expr::Expr;
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::PhysicalOperator;
@@ -215,6 +216,14 @@ impl PhysicalOperator for InsertOperator {
     fn name(&self) -> &'static str {
         "Insert"
     }
+
+    fn explain(&self) -> PlanNode {
+        let mut node = PlanNode::new("Insert");
+        if let Some(table) = &self.table {
+            node = node.with("table", table);
+        }
+        node.child(self.child.explain())
+    }
 }
 
 // ── ValuesOperator ────────────────────────────────────────────────────────────
@@ -268,6 +277,10 @@ impl PhysicalOperator for ValuesOperator {
 
     fn name(&self) -> &'static str {
         "Values"
+    }
+
+    fn explain(&self) -> PlanNode {
+        PlanNode::new("Values").with("rows", self.rows.len())
     }
 }
 

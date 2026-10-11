@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use super::super::explain::PlanNode;
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
@@ -21,6 +22,23 @@ pub enum JoinType {
     Right,
     Full,
     Cross,
+}
+
+impl JoinType {
+    /// The join type as `EXPLAIN` shows it.
+    pub fn label(&self) -> &'static str {
+        match self {
+            JoinType::Inner => "Inner",
+            JoinType::Left => "Left",
+            JoinType::Right => "Right",
+            JoinType::Full => "Full",
+            JoinType::Cross => "Cross",
+        }
+    }
+}
+
+fn yes_no(yes: bool) -> &'static str {
+    if yes { "yes" } else { "no" }
 }
 
 // ── NestedLoopJoin Operator ───────────────────────────────────────────────────
@@ -255,6 +273,14 @@ impl PhysicalOperator for NestedLoopJoinOperator {
     fn name(&self) -> &'static str {
         "NestedLoopJoin"
     }
+
+    fn explain(&self) -> PlanNode {
+        PlanNode::new(self.name())
+            .with("type", self.join_type.label())
+            .with("predicate", yes_no(self.predicate.is_some()))
+            .child(self.left.explain())
+            .child(self.right.explain())
+    }
 }
 
 // ── HashJoin Operator ─────────────────────────────────────────────────────────
@@ -296,6 +322,8 @@ pub struct HashJoinOperator {
     preserve_build: bool,
     /// Unmatched probe rows are emitted NULL-extended.
     preserve_probe: bool,
+    /// The join type, for `EXPLAIN`.
+    join_type: JoinType,
     /// Per-operator budget; `None` uses [`SPILL_BUDGET_BYTES`].
     budget_override: Option<usize>,
     /// Budget in force for the current run (bytes).
@@ -863,6 +891,7 @@ impl HashJoinOperator {
             build_is_left,
             preserve_build,
             preserve_probe,
+            join_type,
             budget_override: None,
             budget: 0,
             phase: HashJoinPhase::Build,
@@ -1004,7 +1033,7 @@ impl HashJoinOperator {
         let mut spill = SpillState::create()?;
         let mut writers = spill.writers(SPILL_PARTITIONS)?;
         let null_side = self.preserve_build.then_some(BUILD_SIDE);
-        log::info!(
+        log::debug!(
             "[HashJoin] build side exceeded {} bytes — spilling to {} partitions in {:?}",
             self.budget,
             SPILL_PARTITIONS,
@@ -1234,7 +1263,7 @@ impl HashJoinOperator {
     /// Split an over-budget partition with the next hash seed.
     fn repartition(&mut self, part: SpillPartition) -> RookResult<()> {
         let depth = part.depth + 1;
-        log::info!(
+        log::debug!(
             "[HashJoin] partition of {} build bytes is over budget — splitting (depth {})",
             part.build.bytes,
             depth
@@ -1402,6 +1431,31 @@ impl PhysicalOperator for HashJoinOperator {
     fn name(&self) -> &'static str {
         "HashJoin"
     }
+
+    fn explain(&self) -> PlanNode {
+        let budget = self.budget_override.unwrap_or_else(spill_budget);
+        let mut node = PlanNode::new("HashJoin")
+            .with("type", self.join_type.label())
+            .with("equi_keys", self.build_keys.len())
+            .with("residual", yes_no(self.remaining_predicate.is_some()))
+            .with(
+                "build_side",
+                if self.build_is_left { "left" } else { "right" },
+            )
+            .with("memory_budget", format!("{} bytes", budget));
+        if self.phase != HashJoinPhase::Build {
+            node = node.with(
+                "build",
+                if self.did_spill {
+                    "spilled to disk"
+                } else {
+                    "in memory"
+                },
+            );
+        }
+        // The first input is the build side, the second the probe side.
+        node.child(self.build.explain()).child(self.probe.explain())
+    }
 }
 
 // ── IndexNestedLoopJoin Operator ─────────────────────────────────────────────
@@ -1424,6 +1478,8 @@ pub struct IndexNestedLoopJoinOperator {
     output_schema: Vec<ColumnInfo>,
     residual_predicate: Option<Predicate>,
     join_type: JoinType,
+    /// The inner table and its index, for `EXPLAIN`.
+    described: Option<(String, String)>,
 
     // Runtime state
     current_outer: Option<Tuple>,
@@ -1458,12 +1514,19 @@ impl IndexNestedLoopJoinOperator {
             output_schema,
             residual_predicate,
             join_type,
+            described: None,
             current_outer: None,
             inner_matches: Vec::new(),
             match_pos: 0,
             had_match: false,
             exhausted: false,
         }
+    }
+
+    /// Name the inner table and the index probed, for `EXPLAIN`.
+    pub fn described(mut self, table: &str, index: &str) -> Self {
+        self.described = Some((table.to_string(), index.to_string()));
+        self
     }
 }
 
@@ -1599,6 +1662,18 @@ impl PhysicalOperator for IndexNestedLoopJoinOperator {
 
     fn name(&self) -> &'static str {
         "IndexNestedLoopJoin"
+    }
+
+    fn explain(&self) -> PlanNode {
+        let mut node = PlanNode::new("IndexNestedLoopJoin").with("type", self.join_type.label());
+        if let Some((table, index)) = &self.described {
+            node = node.with("inner_table", table).with("index", index);
+        }
+        if let Some(outer_key) = self.output_schema.get(self.outer_key_idx) {
+            node = node.with("outer_key", &outer_key.name);
+        }
+        node.with("residual", yes_no(self.residual_predicate.is_some()))
+            .child(self.outer.explain())
     }
 
     fn ordering(&self) -> Option<Vec<(usize, bool)>> {

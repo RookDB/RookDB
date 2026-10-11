@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use super::super::explain::PlanNode;
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
 use super::utils::canonical_row_key;
@@ -253,5 +254,11 @@ impl PhysicalOperator for SetOpOperator {
             (SetOpType::Except, true) => "ExceptAll",
             (SetOpType::Except, false) => "Except",
         }
+    }
+
+    fn explain(&self) -> PlanNode {
+        PlanNode::new(self.name())
+            .child(self.left.explain())
+            .child(self.right.explain())
     }
 }

@@ -103,12 +103,6 @@ impl PhysicalPlanner {
             rook_ast::JoinType::Natural => PhysicalJoinType::Inner,
         };
 
-        log::info!(
-            "[Volcano] Planning {:?} join with predicate={}",
-            join_type,
-            if predicate.is_some() { "yes" } else { "no" }
-        );
-
         // 1. Try IndexNestedLoopJoin when inner side is a single-table scan with an index on the join key
         // and outer side is small.
         if matches!(join_type, PhysicalJoinType::Inner | PhysicalJoinType::Left)
@@ -197,21 +191,24 @@ impl PhysicalPlanner {
                             ))
                         })?;
 
-                        log::info!(
-                            "[Volcano] Using IndexNestedLoopJoin: outer_card={}, inner table '{}', index '{}'",
-                            outer_card,
-                            inner_ts.table,
-                            idx_name
-                        );
-                        return Ok(Box::new(IndexNestedLoopJoinOperator::new(
-                            left,
-                            btree,
-                            heap_manager,
-                            outer_key_idx,
-                            right_schema,
-                            residual,
-                            join_type,
-                        )));
+                        self.note(|| {
+                            format!(
+                                "IndexNestedLoopJoin chosen: about {} outer row(s) probe index '{}' of '{}'",
+                                outer_card, idx_name, inner_ts.table
+                            )
+                        });
+                        return Ok(Box::new(
+                            IndexNestedLoopJoinOperator::new(
+                                left,
+                                btree,
+                                heap_manager,
+                                outer_key_idx,
+                                right_schema,
+                                residual,
+                                join_type,
+                            )
+                            .described(&inner_ts.table, idx_name),
+                        ));
                     }
                 }
             }
@@ -230,11 +227,6 @@ impl PhysicalPlanner {
                 extract_equi_join_keys(pred, &left_schema, &right_schema)
                 && !build_keys.is_empty()
             {
-                log::info!(
-                    "[Volcano] Using HashJoin: {} equi-key pair(s), residual predicate: {}",
-                    build_keys.len(),
-                    residual.is_some()
-                );
                 return Ok(Box::new(HashJoinOperator::new(
                     left, right, build_keys, probe_keys, residual,
                 )));
@@ -259,12 +251,6 @@ impl PhysicalPlanner {
                     .zip(right_keys.iter())
                     .all(|(l, r)| keys_hash_alike(l, &left_schema, r, &right_schema))
             {
-                log::info!(
-                    "[Volcano] Using HashJoin ({:?}): {} equi-key pair(s), residual predicate: {}",
-                    join_type,
-                    left_keys.len(),
-                    residual.is_some()
-                );
                 return Ok(Box::new(HashJoinOperator::with_join_type(
                     left, right, left_keys, right_keys, residual, join_type,
                 )));
@@ -479,7 +465,6 @@ impl PhysicalPlanner {
         rc: &LogicalRecursiveCte,
         cte_registry: &mut std::collections::HashMap<String, Vec<super::super::tuple::Tuple>>,
     ) -> RookResult<Box<dyn PhysicalOperator>> {
-        log::info!("[Volcano] Planning recursive CTE '{}'", rc.name);
         let cte_key = rc.name.to_ascii_lowercase();
         // Scans of this CTE are untyped; an outer CTE of the same name is
         // hidden until the outer query has been planned.
@@ -505,11 +490,8 @@ impl PhysicalPlanner {
         while let Some(tuple) = non_rec_op.next()? {
             working_table.push(tuple);
         }
-        log::info!(
-            "[Volcano] Recursive CTE '{}' non-recursive term produced {} tuples",
-            rc.name,
-            working_table.len()
-        );
+        self.note_cte(&rc.name, || non_rec_op.explain());
+        let anchor_rows = working_table.len();
 
         // UNION (without ALL) keeps one copy of every row: one running set
         // covers the anchor, each iteration, and everything seen before.
@@ -545,13 +527,6 @@ impl PhysicalPlanner {
                 }
             }
 
-            log::info!(
-                "[Volcano] Recursive CTE '{}' iteration {}: produced {} new tuples",
-                rc.name,
-                iteration,
-                new_tuples.len()
-            );
-
             // Append to accumulated result (clone since new_tuples becomes the next working table)
             all_tuples.extend(new_tuples.iter().cloned());
             working_table = new_tuples;
@@ -559,11 +534,15 @@ impl PhysicalPlanner {
         }
 
         // 3. Register all accumulated tuples and plan the outer query
-        log::info!(
-            "[Volcano] Recursive CTE '{}' complete: {} total tuples",
-            rc.name,
-            all_tuples.len()
-        );
+        self.note(|| {
+            format!(
+                "Recursive CTE '{}' materialised: {} anchor row(s), {} iteration(s), {} row(s) in total",
+                rc.name,
+                anchor_rows,
+                iteration,
+                all_tuples.len()
+            )
+        });
         cte_registry.insert(cte_key.clone(), all_tuples);
 
         // Plan the outer query which may reference the CTE via CteScan

@@ -6,6 +6,7 @@
 
 use rook_ast::logical::LogicalPlan;
 
+use super::explain::PlanDescription;
 use super::planner::PhysicalPlanner;
 use super::tuple::{Tuple, display_tuples};
 
@@ -16,7 +17,6 @@ use crate::backend::error::RookResult;
 ///
 /// Returns the number of tuples produced.
 pub fn execute_plan(plan: &LogicalPlan, catalog: &Catalog, db_name: &str) -> RookResult<usize> {
-    log::info!("[Volcano] Executing logical plan...");
     log::debug!("[Volcano] Plan: {:?}", plan);
 
     // 1. Create physical planner
@@ -24,10 +24,6 @@ pub fn execute_plan(plan: &LogicalPlan, catalog: &Catalog, db_name: &str) -> Roo
 
     // 2. Convert logical plan → physical operator tree
     let mut root = planner.plan(plan)?;
-    log::info!(
-        "[Volcano] Built physical operator tree: root={}",
-        root.name()
-    );
 
     // 3. Pull all tuples from the root operator
     let mut tuples: Vec<Tuple> = Vec::new();
@@ -70,6 +66,50 @@ pub fn execute_shared(
     }
 
     Ok((tuples, schema))
+}
+
+/// Plan `plan` without running it and describe the physical plan: the
+/// operator tree and the decisions made for it (what `EXPLAIN` shows).
+///
+/// CTEs and uncorrelated subqueries are evaluated while planning, as they
+/// are for execution; the statement's own operators do not run.
+pub fn explain_shared(
+    plan: &LogicalPlan,
+    catalog: std::sync::Arc<Catalog>,
+    db_name: &str,
+) -> RookResult<PlanDescription> {
+    let planner = PhysicalPlanner::new(catalog, db_name.to_string());
+    let (root, trace) = planner.plan_traced(plan)?;
+    Ok(PlanDescription {
+        root: root.explain(),
+        trace,
+    })
+}
+
+/// Run `plan` to the end, then describe the physical plan, including what
+/// only running it tells (`EXPLAIN ANALYZE`): whether a sort or a hash join
+/// went to disk. Also returns the number of rows produced.
+pub fn explain_analyze_shared(
+    plan: &LogicalPlan,
+    catalog: std::sync::Arc<Catalog>,
+    db_name: &str,
+) -> RookResult<(PlanDescription, usize)> {
+    let planner = PhysicalPlanner::new(catalog, db_name.to_string());
+    let (mut root, trace) = planner.plan_traced(plan)?;
+    let mut rows = 0;
+    let mut batch: Vec<Tuple> = Vec::with_capacity(super::operators::DEFAULT_BATCH_SIZE);
+    loop {
+        let n = root.next_batch(&mut batch)?;
+        if n == 0 {
+            break;
+        }
+        rows += n;
+    }
+    let description = PlanDescription {
+        root: root.explain(),
+        trace,
+    };
+    Ok((description, rows))
 }
 
 /// Execute a plan and collect tuples without displaying (useful for testing).

@@ -17,6 +17,7 @@ mod names;
 use rook_ast::QueryPlan;
 
 use crate::backend::error::{RookError, RookResult};
+use crate::backend::executor::physical::explain::PlanDescription;
 use crate::backend::executor::physical::tuple::{ColumnInfo, Tuple};
 use std::sync::Arc;
 
@@ -30,20 +31,23 @@ pub struct StatementResult {
     /// Lines describing what the statement did, warnings included, in the
     /// order they happened. Shown after `rows`.
     pub messages: Vec<String>,
+    /// The physical plan, for `EXPLAIN`: the operator tree and the planner's
+    /// decisions as data. `rows` holds the same plan as text.
+    pub plan: Option<PlanDescription>,
 }
 
 impl StatementResult {
     fn message(line: impl Into<String>) -> Self {
         StatementResult {
-            rows: None,
             messages: vec![line.into()],
+            ..Default::default()
         }
     }
 
     fn lines(messages: Vec<String>) -> Self {
         StatementResult {
-            rows: None,
             messages,
+            ..Default::default()
         }
     }
 }
@@ -89,6 +93,7 @@ impl Session {
             }
             QueryPlan::Update(p) => dml::update(&self.catalog, self.db()?, p),
             QueryPlan::Delete(p) => dml::delete(&self.catalog, self.db()?, p),
+            QueryPlan::Explain(p) => dml::explain(&self.catalog, self.db()?, p),
             QueryPlan::Vacuum(p) => ddl::vacuum(&self.catalog, self.db()?, &p.table),
             QueryPlan::CreateIndex(p) => ddl::create_index(&self.catalog, self.db()?, p),
             QueryPlan::Unknown(msg) => Err(RookError::Internal(format!(

@@ -31,6 +31,7 @@
 //! ```
 
 pub mod engine;
+pub mod explain;
 pub mod expr;
 pub mod external_sort;
 pub mod operators;
@@ -38,6 +39,7 @@ pub mod planner;
 pub mod tuple;
 
 pub use engine::{execute_plan, execute_plan_collect};
+pub use explain::{PlanDescription, PlanNode, PlanTrace};
 pub use expr::{ComparisonOp, Expr, Predicate, evaluate_predicate};
 pub use external_sort::SortSpill;
 pub use operators::{

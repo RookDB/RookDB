@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use super::super::explain::PlanNode;
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
@@ -601,5 +602,24 @@ impl PhysicalOperator for AggregateOperator {
 
     fn name(&self) -> &'static str {
         "Aggregate"
+    }
+
+    fn explain(&self) -> PlanNode {
+        let mut node = PlanNode::new("Aggregate");
+        if !self.group_by_names.is_empty() {
+            node = node.with("group_by", self.group_by_names.join(", "));
+        }
+        let aggregates: Vec<&str> = self
+            .aggregates
+            .iter()
+            .map(|a| a.output_name.as_str())
+            .collect();
+        if !aggregates.is_empty() {
+            node = node.with("aggregates", aggregates.join(", "));
+        }
+        if self.having.is_some() {
+            node = node.with("having", "yes");
+        }
+        node.child(self.child.explain())
     }
 }

@@ -1,3 +1,4 @@
+use super::super::explain::PlanNode;
 use super::super::tuple::{ColumnInfo, Tuple};
 use crate::backend::error::{RookError, RookResult};
 
@@ -43,6 +44,13 @@ pub trait PhysicalOperator {
 
     /// A human-readable name for the operator (for debug printing).
     fn name(&self) -> &'static str;
+
+    /// This operator and its inputs as data: what `EXPLAIN` shows. Operators
+    /// override it to report their inputs and the decisions made for them;
+    /// after the operator has run, also what happened (e.g. a sort spilled).
+    fn explain(&self) -> PlanNode {
+        PlanNode::new(self.name())
+    }
 
     /// Physical ordering of output tuples: list of (column_index, is_descending).
     /// Returns `None` if output is unordered or ordering is unknown.

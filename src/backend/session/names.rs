@@ -34,6 +34,10 @@ pub(super) fn resolve_table_names(
         QueryPlan::Vacuum(p) => resolve(&mut p.table),
         QueryPlan::CreateIndex(p) => resolve(&mut p.table_name),
         QueryPlan::DropIndex(p) => resolve(&mut p.table_name),
+        QueryPlan::Explain(p) => {
+            let inner = std::mem::replace(&mut *p.statement, QueryPlan::ShowTables);
+            *p.statement = resolve_table_names(inner, catalog, current_db);
+        }
         _ => {}
     }
     plan

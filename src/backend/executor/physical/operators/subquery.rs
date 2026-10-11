@@ -1,3 +1,4 @@
+use super::super::explain::PlanNode;
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
 use crate::backend::error::RookResult;
@@ -123,5 +124,9 @@ impl PhysicalOperator for SubqueryExecOperator {
             SubqueryType::Scalar => "SubqueryExec(Scalar)",
             SubqueryType::Exists => "SubqueryExec(Exists)",
         }
+    }
+
+    fn explain(&self) -> PlanNode {
+        PlanNode::new(self.name()).child(self.child.explain())
     }
 }
