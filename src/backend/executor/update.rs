@@ -44,7 +44,8 @@ pub use rook_ast::SetAssignment;
 pub struct UpdateResult {
     /// How many rows were modified.
     pub updated_count: usize,
-    /// The rows **after** update (only populated when `returning = true`).
+    /// The rows **after** update, as (column, value) text: filled only by
+    /// [`update_by_pointers_returning`].
     pub returning_rows: Vec<Vec<(String, String)>>,
 }
 
@@ -112,6 +113,29 @@ pub fn update_by_pointers(
     table_name: &str,
     pointers: &[(u32, u32)],
     assignments: &[SetAssignment],
+) -> RookResult<UpdateResult> {
+    update_rows(catalog, db_name, table_name, pointers, assignments, false)
+}
+
+/// [`update_by_pointers`], also returning each updated row in
+/// [`UpdateResult::returning_rows`].
+pub fn update_by_pointers_returning(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    pointers: &[(u32, u32)],
+    assignments: &[SetAssignment],
+) -> RookResult<UpdateResult> {
+    update_rows(catalog, db_name, table_name, pointers, assignments, true)
+}
+
+fn update_rows(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    pointers: &[(u32, u32)],
+    assignments: &[SetAssignment],
+    returning: bool,
 ) -> RookResult<UpdateResult> {
     let db = catalog
         .databases
@@ -454,7 +478,9 @@ pub fn update_by_pointers(
                 index_error = Some(e.to_string());
             }
 
-            returning_rows.push(super::delete::display_row(columns, &update.updated_values));
+            if returning {
+                returning_rows.push(super::delete::display_row(columns, &update.updated_values));
+            }
         }
     }
     if let Some(cause) = index_error {

@@ -27,7 +27,8 @@ use serde_json::{Value, json};
 pub struct DeleteResult {
     /// How many rows were deleted.
     pub deleted_count: usize,
-    /// The deleted rows (only populated when `returning = true`).
+    /// The deleted rows, as (column, value) text: filled only by
+    /// [`delete_by_pointers_returning`].
     pub returning_rows: Vec<Vec<(String, String)>>,
 }
 
@@ -215,6 +216,27 @@ pub fn delete_by_pointers(
     table_name: &str,
     pointers: &[(u32, u32)],
 ) -> RookResult<DeleteResult> {
+    delete_rows(catalog, db_name, table_name, pointers, false)
+}
+
+/// [`delete_by_pointers`], also returning each deleted row in
+/// [`DeleteResult::returning_rows`].
+pub fn delete_by_pointers_returning(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    pointers: &[(u32, u32)],
+) -> RookResult<DeleteResult> {
+    delete_rows(catalog, db_name, table_name, pointers, true)
+}
+
+fn delete_rows(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    pointers: &[(u32, u32)],
+    returning: bool,
+) -> RookResult<DeleteResult> {
     let db = catalog
         .databases
         .get(db_name)
@@ -333,7 +355,9 @@ pub fn delete_by_pointers(
             slot_idx
         );
 
-        returning_rows.push(display_row(columns, &decoded));
+        if returning {
+            returning_rows.push(display_row(columns, &decoded));
+        }
 
         deleted_count += 1;
     }

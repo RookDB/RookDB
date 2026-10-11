@@ -131,7 +131,10 @@ fn count_live() -> usize {
 fn exec_delete(catalog: &Catalog, where_text: &str) -> storage_manager::executor::DeleteResult {
     let selection = parse_where_text(where_text).expect("parse WHERE");
     let pointers = select_matching_pointers(catalog, DB, TBL, selection).expect("select pointers");
-    delete_by_pointers(catalog, DB, TBL, &pointers).expect("delete_by_pointers")
+    let result = delete_by_pointers(catalog, DB, TBL, &pointers).expect("delete_by_pointers");
+    // Rows are formatted for RETURNING only when asked for.
+    assert!(result.returning_rows.is_empty());
+    result
 }
 
 // ===========================================================================
@@ -262,7 +265,12 @@ fn delete_returning_star() {
     setup_table(5);
     let catalog = make_catalog();
 
-    let result = exec_delete(&catalog, "id IN (2, 4)");
+    let selection = parse_where_text("id IN (2, 4)").expect("parse WHERE");
+    let pointers = select_matching_pointers(&catalog, DB, TBL, selection).expect("select pointers");
+    let result = storage_manager::backend::executor::delete::delete_by_pointers_returning(
+        &catalog, DB, TBL, &pointers,
+    )
+    .expect("delete_by_pointers_returning");
     assert_eq!(result.deleted_count, 2);
     assert_eq!(result.returning_rows.len(), 2);
 
