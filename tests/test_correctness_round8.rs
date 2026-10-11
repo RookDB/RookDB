@@ -48,6 +48,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use rook_parser::parse_set_clause;
 use storage_manager::backend::error::RookResult;
 use storage_manager::backend::executor::physical::expr::{Expr, Predicate, evaluate_predicate};
 use storage_manager::backend::executor::physical::operators::{
@@ -59,7 +60,7 @@ use storage_manager::catalog::types::{Column, Constraints};
 use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::executor::load_csv::{insert_single_tuple, load_csv};
-use storage_manager::executor::update::{parse_set_clause, update_by_pointers};
+use storage_manager::executor::update::update_by_pointers;
 use storage_manager::planner::plan_query;
 use storage_manager::types::comparison::compare_nullable;
 use storage_manager::types::datatype::DataType;

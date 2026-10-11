@@ -4,6 +4,7 @@
 
 mod common;
 
+use rook_parser::parse_set_clause;
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::row_select::{
@@ -14,7 +15,7 @@ use storage_manager::catalog::{
     Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::executor::create_index::create_index;
-use storage_manager::executor::{parse_set_clause, update_by_pointers};
+use storage_manager::executor::update_by_pointers;
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
 
@@ -186,5 +187,37 @@ fn repeated_in_place_updates_over_many_rows() {
     assert_eq!(
         query(&catalog, "SELECT COUNT(*) FROM staff"),
         vec![vec!["50".to_string()]]
+    );
+}
+
+#[test]
+fn set_accepts_any_select_expression() {
+    let _ws = common::TestWorkspace::new("inplace", "exprs");
+    let catalog = setup();
+
+    assert_eq!(
+        update(
+            &catalog,
+            "id = 4",
+            "name = UPPER(name) || '!', salary = CASE WHEN salary > 1000 THEN salary * 2 ELSE 0 END"
+        ),
+        1
+    );
+    assert_eq!(
+        query(&catalog, "SELECT name, salary FROM staff WHERE id = 4"),
+        vec![vec!["'USER_004!'".to_string(), "2008".to_string()]]
+    );
+}
+
+#[test]
+fn set_expressions_read_the_row_before_the_update() {
+    let _ws = common::TestWorkspace::new("inplace", "swap");
+    let catalog = setup();
+
+    // Both right-hand sides see the old values, so this swaps the columns.
+    assert_eq!(update(&catalog, "id = 5", "id = salary, salary = id"), 1);
+    assert_eq!(
+        query(&catalog, "SELECT id, salary FROM staff WHERE salary = 5"),
+        vec![vec!["1005".to_string(), "5".to_string()]]
     );
 }

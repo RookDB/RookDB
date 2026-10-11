@@ -20,7 +20,10 @@ use crate::page::Page;
 use crate::types::datatype::DataType;
 use crate::types::row::deserialize_nullable_row;
 use crate::types::row::serialize_nullable_typed_row;
-use crate::types::value::{DataValue, OrderedF32, OrderedF64};
+use crate::types::value::DataValue;
+
+use super::physical::expr::{Expr, expr_from_ast};
+use super::physical::tuple::{ColumnInfo, Tuple};
 use serde_json::{Value, json};
 
 use super::delete::ColumnValue;
@@ -36,49 +39,8 @@ struct TuplePointer {
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Arithmetic operator used in a SET expression (e.g. `salary = salary * 1.10`).
-#[derive(Debug, Clone)]
-pub enum ArithOp {
-    Add, // +
-    Sub, // -
-    Mul, // *
-    Div, // /
-}
-
-/// Right-hand side of a SET assignment — either a literal or an expression
-/// that references the column's current value.
-///
-/// Examples:
-///   `age = 25`           → `SetExpr::Literal(Int(25))`
-///   `age = age + 1`      → `SetExpr::Expr { col: "age", op: Add, rhs: Int(1) }`
-///   `salary = salary * 1.10` → `SetExpr::Expr { col: "salary", op: Mul, rhs_f: 1.10 }`
-///   `tag = tag`          → `SetExpr::Column("tag")`
-///   `tag = NULL`         → `SetExpr::Null`
-#[derive(Debug, Clone)]
-pub enum SetExpr {
-    /// A constant value.
-    Literal(ColumnValue),
-    /// A reference to another column (or self) in the current row.
-    Column(String),
-    /// SQL NULL literal.
-    Null,
-    /// `<src_col> <op> <rhs>` evaluated against the current row.
-    /// `rhs_f` is used for floating-point multipliers (Mul / Div);
-    /// `rhs_i` is used for integer Add / Sub.
-    Expr {
-        src_col: String,
-        op: ArithOp,
-        rhs_i: i64, // used for Add/Sub
-        rhs_f: f64, // used for Mul/Div
-    },
-}
-
 /// One `col = <expr>` assignment from the SET clause.
-#[derive(Debug, Clone)]
-pub struct SetAssignment {
-    pub column: String,
-    pub expr: SetExpr,
-}
+pub use rook_ast::SetAssignment;
 
 /// Result returned by the UPDATE entry points.
 pub struct UpdateResult {
@@ -114,354 +76,28 @@ fn values_to_column_values(
         .collect()
 }
 
-/// Apply `assignments` directly to typed row values, preserving all types natively.
-fn apply_assignments_typed(
+/// Evaluate every SET expression against the row as it was before the
+/// statement, and store each result in its column converted to the column's
+/// type the way a cast to that type converts it.
+fn apply_assignments(
     columns: &[crate::catalog::types::Column],
-    mut values: Vec<Option<DataValue>>,
-    assignments: &[SetAssignment],
+    schema: &[ColumnInfo],
+    compiled: &[(usize, Expr)],
+    old: &[Option<DataValue>],
 ) -> Result<Vec<Option<DataValue>>, String> {
-    for asgn in assignments {
-        let target_idx = columns
-            .iter()
-            .position(|c| c.name.eq_ignore_ascii_case(&asgn.column))
-            .ok_or_else(|| format!("Column '{}' not found", asgn.column))?;
-        let target_type = &columns[target_idx].data_type;
-
-        let new_val: Option<DataValue> = match &asgn.expr {
-            SetExpr::Null => None,
-            SetExpr::Literal(cv) => match cv {
-                ColumnValue::Int(n) => match target_type {
-                    DataType::SmallInt => {
-                        let val = i16::try_from(*n)
-                            .map_err(|_| format!("Value {} out of range for SMALLINT", n))?;
-                        Some(DataValue::SmallInt(val))
-                    }
-                    DataType::Int => Some(DataValue::Int(*n)),
-                    DataType::BigInt => Some(DataValue::BigInt(*n as i64)),
-                    DataType::Real => Some(DataValue::Real(OrderedF32(*n as f32))),
-                    DataType::DoublePrecision => {
-                        Some(DataValue::DoublePrecision(OrderedF64(*n as f64)))
-                    }
-                    DataType::Numeric { scale, .. } | DataType::Decimal { scale, .. } => {
-                        let factor = 10_i128
-                            .checked_pow(*scale as u32)
-                            .ok_or_else(|| "Numeric scale overflow".to_string())?;
-                        let unscaled = (*n as i128)
-                            .checked_mul(factor)
-                            .ok_or_else(|| "Numeric overflow".to_string())?;
-                        Some(DataValue::Numeric(crate::types::value::NumericValue {
-                            unscaled,
-                            scale: *scale,
-                        }))
-                    }
-                    _ => Some(DataValue::Int(*n)),
-                },
-                ColumnValue::Text(s) => match target_type {
-                    DataType::Char(n) | DataType::Character(n) => {
-                        if s.len() > *n as usize {
-                            return Err(format!(
-                                "CHAR payload length {} exceeds declared limit {}",
-                                s.len(),
-                                n
-                            ));
-                        }
-                        let mut padded = s.clone();
-                        if padded.len() < *n as usize {
-                            padded.push_str(&" ".repeat(*n as usize - padded.len()));
-                        }
-                        Some(DataValue::Char(padded))
-                    }
-                    DataType::Varchar(max_len) => {
-                        if s.len() > *max_len as usize {
-                            return Err(format!(
-                                "VARCHAR payload length {} exceeds declared limit {}",
-                                s.len(),
-                                max_len
-                            ));
-                        }
-                        Some(DataValue::Varchar(s.clone()))
-                    }
-                    DataType::Numeric { precision, scale }
-                    | DataType::Decimal { precision, scale } => {
-                        let num = crate::types::value::parse_numeric_literal(s, *precision, *scale)
-                            .map_err(|e| format!("Invalid numeric literal '{}': {}", s, e))?;
-                        Some(DataValue::Numeric(num))
-                    }
-                    _ => {
-                        let dv = super::create_index::parse_string_to_value(target_type, s)
-                            .map_err(|e| {
-                                format!("Invalid value '{}' for type {:?}: {}", s, target_type, e)
-                            })?;
-                        Some(dv)
-                    }
-                },
-                ColumnValue::List(_) => {
-                    return Err("Cannot assign list literal to column".to_string());
-                }
-            },
-            SetExpr::Column(src_col) => {
-                let src_idx = columns
-                    .iter()
-                    .position(|c| c.name.eq_ignore_ascii_case(src_col))
-                    .ok_or_else(|| format!("Source column '{}' not found", src_col))?;
-                values[src_idx].clone()
-            }
-            SetExpr::Expr {
-                src_col,
-                op,
-                rhs_i,
-                rhs_f,
-            } => {
-                let src_idx = columns
-                    .iter()
-                    .position(|c| c.name.eq_ignore_ascii_case(src_col))
-                    .ok_or_else(|| format!("Source column '{}' not found", src_col))?;
-                let src_val = values.get(src_idx).cloned().flatten();
-
-                match src_val {
-                    None => None, // SQL semantics: arithmetic on NULL produces NULL!
-                    Some(DataValue::Int(n)) => {
-                        let result = match op {
-                            ArithOp::Add => {
-                                let rhs = i32::try_from(*rhs_i)
-                                    .map_err(|_| "Integer addition overflow".to_string())?;
-                                n.checked_add(rhs)
-                                    .ok_or_else(|| "Integer addition overflow".to_string())?
-                            }
-                            ArithOp::Sub => {
-                                let rhs = i32::try_from(*rhs_i)
-                                    .map_err(|_| "Integer subtraction overflow".to_string())?;
-                                n.checked_sub(rhs)
-                                    .ok_or_else(|| "Integer subtraction overflow".to_string())?
-                            }
-                            ArithOp::Mul => {
-                                if *rhs_f == (*rhs_i as f64) {
-                                    let rhs = i32::try_from(*rhs_i).map_err(|_| {
-                                        "Integer multiplication overflow".to_string()
-                                    })?;
-                                    n.checked_mul(rhs).ok_or_else(|| {
-                                        "Integer multiplication overflow".to_string()
-                                    })?
-                                } else {
-                                    let f = (n as f64) * rhs_f;
-                                    if f.is_nan() || f < i32::MIN as f64 || f > i32::MAX as f64 {
-                                        return Err("Integer multiplication overflow".to_string());
-                                    }
-                                    f as i32
-                                }
-                            }
-                            ArithOp::Div => {
-                                if *rhs_f == 0.0 || *rhs_i == 0 {
-                                    return Err("Division by zero".to_string());
-                                }
-                                if *rhs_f == (*rhs_i as f64) {
-                                    let rhs = i32::try_from(*rhs_i)
-                                        .map_err(|_| "Integer division overflow".to_string())?;
-                                    n.checked_div(rhs)
-                                        .ok_or_else(|| "Integer division overflow".to_string())?
-                                } else {
-                                    let f = (n as f64) / rhs_f;
-                                    if f.is_nan() || f < i32::MIN as f64 || f > i32::MAX as f64 {
-                                        return Err("Integer division overflow".to_string());
-                                    }
-                                    f as i32
-                                }
-                            }
-                        };
-                        Some(DataValue::Int(result))
-                    }
-                    Some(DataValue::SmallInt(n)) => {
-                        let result = match op {
-                            ArithOp::Add => {
-                                let rhs = i16::try_from(*rhs_i)
-                                    .map_err(|_| "SmallInt addition overflow".to_string())?;
-                                n.checked_add(rhs)
-                                    .ok_or_else(|| "SmallInt addition overflow".to_string())?
-                            }
-                            ArithOp::Sub => {
-                                let rhs = i16::try_from(*rhs_i)
-                                    .map_err(|_| "SmallInt subtraction overflow".to_string())?;
-                                n.checked_sub(rhs)
-                                    .ok_or_else(|| "SmallInt subtraction overflow".to_string())?
-                            }
-                            ArithOp::Mul => {
-                                if *rhs_f == (*rhs_i as f64) {
-                                    let rhs = i16::try_from(*rhs_i).map_err(|_| {
-                                        "SmallInt multiplication overflow".to_string()
-                                    })?;
-                                    n.checked_mul(rhs).ok_or_else(|| {
-                                        "SmallInt multiplication overflow".to_string()
-                                    })?
-                                } else {
-                                    let f = (n as f64) * rhs_f;
-                                    if f.is_nan() || f < i16::MIN as f64 || f > i16::MAX as f64 {
-                                        return Err("SmallInt multiplication overflow".to_string());
-                                    }
-                                    f as i16
-                                }
-                            }
-                            ArithOp::Div => {
-                                if *rhs_f == 0.0 || *rhs_i == 0 {
-                                    return Err("Division by zero".to_string());
-                                }
-                                if *rhs_f == (*rhs_i as f64) {
-                                    let rhs = i16::try_from(*rhs_i)
-                                        .map_err(|_| "SmallInt division overflow".to_string())?;
-                                    n.checked_div(rhs)
-                                        .ok_or_else(|| "SmallInt division overflow".to_string())?
-                                } else {
-                                    let f = (n as f64) / rhs_f;
-                                    if f.is_nan() || f < i16::MIN as f64 || f > i16::MAX as f64 {
-                                        return Err("SmallInt division overflow".to_string());
-                                    }
-                                    f as i16
-                                }
-                            }
-                        };
-                        Some(DataValue::SmallInt(result))
-                    }
-                    Some(DataValue::BigInt(n)) => {
-                        let result = match op {
-                            ArithOp::Add => n
-                                .checked_add(*rhs_i)
-                                .ok_or_else(|| "BigInt addition overflow".to_string())?,
-                            ArithOp::Sub => n
-                                .checked_sub(*rhs_i)
-                                .ok_or_else(|| "BigInt subtraction overflow".to_string())?,
-                            ArithOp::Mul => {
-                                if *rhs_f == (*rhs_i as f64) {
-                                    n.checked_mul(*rhs_i).ok_or_else(|| {
-                                        "BigInt multiplication overflow".to_string()
-                                    })?
-                                } else {
-                                    let f = (n as f64) * rhs_f;
-                                    if f.is_nan() || f < i64::MIN as f64 || f > i64::MAX as f64 {
-                                        return Err("BigInt multiplication overflow".to_string());
-                                    }
-                                    f as i64
-                                }
-                            }
-                            ArithOp::Div => {
-                                if *rhs_f == 0.0 || *rhs_i == 0 {
-                                    return Err("Division by zero".to_string());
-                                }
-                                if *rhs_f == (*rhs_i as f64) {
-                                    n.checked_div(*rhs_i)
-                                        .ok_or_else(|| "BigInt division overflow".to_string())?
-                                } else {
-                                    let f = (n as f64) / rhs_f;
-                                    if f.is_nan() || f < i64::MIN as f64 || f > i64::MAX as f64 {
-                                        return Err("BigInt division overflow".to_string());
-                                    }
-                                    f as i64
-                                }
-                            }
-                        };
-                        Some(DataValue::BigInt(result))
-                    }
-                    Some(DataValue::Real(r)) => {
-                        let cur = r.0 as f64;
-                        let result = match op {
-                            ArithOp::Add => cur + *rhs_f,
-                            ArithOp::Sub => cur - *rhs_f,
-                            ArithOp::Mul => cur * *rhs_f,
-                            ArithOp::Div => {
-                                if *rhs_f == 0.0 {
-                                    return Err("Division by zero".to_string());
-                                }
-                                cur / *rhs_f
-                            }
-                        };
-                        Some(DataValue::Real(OrderedF32(result as f32)))
-                    }
-                    Some(DataValue::DoublePrecision(d)) => {
-                        let cur = d.0;
-                        let result = match op {
-                            ArithOp::Add => cur + *rhs_f,
-                            ArithOp::Sub => cur - *rhs_f,
-                            ArithOp::Mul => cur * *rhs_f,
-                            ArithOp::Div => {
-                                if *rhs_f == 0.0 {
-                                    return Err("Division by zero".to_string());
-                                }
-                                cur / *rhs_f
-                            }
-                        };
-                        Some(DataValue::DoublePrecision(OrderedF64(result)))
-                    }
-                    Some(DataValue::Numeric(num)) => {
-                        if matches!(op, ArithOp::Div) && (*rhs_f == 0.0 || *rhs_i == 0) {
-                            return Err("Division by zero".to_string());
-                        }
-                        Some(DataValue::Numeric(num))
-                    }
-                    Some(DataValue::Varchar(s)) => {
-                        let result = match op {
-                            ArithOp::Add => format!("{}{}", s, rhs_i),
-                            ArithOp::Sub => {
-                                let total_chars = s.chars().count();
-                                let take_count = (total_chars as i64 - rhs_i).max(0) as usize;
-                                s.chars().take(take_count).collect()
-                            }
-                            _ => s.clone(),
-                        };
-                        Some(DataValue::Varchar(result))
-                    }
-                    Some(DataValue::Char(s)) => {
-                        let trimmed = s.trim_end();
-                        let result = match op {
-                            ArithOp::Add => format!("{}{}", trimmed, rhs_i),
-                            ArithOp::Sub => {
-                                let total_chars = trimmed.chars().count();
-                                let take_count = (total_chars as i64 - rhs_i).max(0) as usize;
-                                trimmed.chars().take(take_count).collect()
-                            }
-                            _ => trimmed.to_string(),
-                        };
-                        let width = if let DataType::Char(w) | DataType::Character(w) = target_type
-                        {
-                            *w as usize
-                        } else {
-                            result.len()
-                        };
-                        let mut padded = result;
-                        if padded.len() < width {
-                            padded.push_str(&" ".repeat(width - padded.len()));
-                        }
-                        Some(DataValue::Char(padded))
-                    }
-                    Some(other) => Some(other),
-                }
-            }
+    let row = Tuple::new(old.to_vec());
+    let mut new_values = old.to_vec();
+    for (idx, expr) in compiled {
+        let column = &columns[*idx];
+        new_values[*idx] = match expr.evaluate(&row, schema)? {
+            None => None,
+            Some(v) => Some(
+                crate::types::functions::cast(&v, &column.data_type)
+                    .map_err(|e| format!("column '{}': {}", column.name, e))?,
+            ),
         };
-
-        if let Some(ref dv) = new_val {
-            match (target_type, dv) {
-                (DataType::Varchar(max_len), DataValue::Varchar(s))
-                    if s.len() > *max_len as usize =>
-                {
-                    return Err(format!(
-                        "VARCHAR payload length {} exceeds declared limit {}",
-                        s.len(),
-                        max_len
-                    ));
-                }
-                (DataType::Char(n) | DataType::Character(n), DataValue::Char(s))
-                    if s.len() > *n as usize =>
-                {
-                    return Err(format!(
-                        "CHAR payload length {} exceeds declared limit {}",
-                        s.len(),
-                        n
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        values[target_idx] = new_val;
     }
-    Ok(values)
+    Ok(new_values)
 }
 
 struct PendingUpdate {
@@ -490,140 +126,6 @@ fn update_log_details(updated_count: Option<usize>, error: Option<&str>) -> Valu
 // Public API
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// SET clause parser
-// ---------------------------------------------------------------------------
-
-/// Parse a comma-separated SET clause string into `SetAssignment`s.
-///
-/// Handles literal, column-reference, and expression-based assignments:
-///   `salary = 60000`               → `Literal(Int(60000))`
-///   `name = 'Alice'`               → `Literal(Text("Alice"))`
-///   `tag = tag`                    → `Column("tag")`
-///   `tag = NULL`                   → `Null`
-///   `age = age + 1`                → `Expr { src: age, op: Add, rhs_i: 1 }`
-///   `salary = salary * 1.10`       → `Expr { src: salary, op: Mul, rhs_f: 1.10 }`
-///   `score = score - 5, age = age + 1`  → two assignments
-///
-/// Returns `None` if the string is empty or no valid assignment could be parsed.
-pub fn parse_set_clause(input: &str) -> Option<Vec<SetAssignment>> {
-    let input = input.trim();
-    if input.is_empty() {
-        return None;
-    }
-
-    let mut assignments = Vec::new();
-
-    for part in split_set_parts(input) {
-        let part = part.trim();
-        // Find the FIRST '=' (the assignment operator)
-        let eq_pos = part.find('=')?;
-        let col = part[..eq_pos].trim().to_string();
-        let rhs = part[eq_pos + 1..].trim();
-
-        if col.is_empty() || rhs.is_empty() {
-            continue;
-        }
-
-        let expr = if rhs.starts_with('\'') && rhs.ends_with('\'') && rhs.len() >= 2 {
-            let inner = &rhs[1..rhs.len() - 1];
-            SetExpr::Literal(ColumnValue::Text(inner.replace("''", "'")))
-        } else if rhs.starts_with('"') && rhs.ends_with('"') && rhs.len() >= 2 {
-            let inner = &rhs[1..rhs.len() - 1];
-            SetExpr::Literal(ColumnValue::Text(inner.replace("\"\"", "\"")))
-        } else if rhs.eq_ignore_ascii_case("null") {
-            SetExpr::Null
-        } else if let Some((src, op, rhs_str)) = try_parse_arith_expr(rhs) {
-            let rhs_f: f64 = rhs_str.parse().ok()?;
-            let rhs_i: i64 = rhs_f as i64;
-            SetExpr::Expr {
-                src_col: src,
-                op,
-                rhs_i,
-                rhs_f,
-            }
-        } else if let Ok(n) = rhs.parse::<i32>() {
-            SetExpr::Literal(ColumnValue::Int(n))
-        } else if let Ok(n) = rhs.parse::<i64>() {
-            if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
-                SetExpr::Literal(ColumnValue::Int(n as i32))
-            } else {
-                SetExpr::Literal(ColumnValue::Text(rhs.to_string()))
-            }
-        } else if rhs.parse::<f64>().is_ok() {
-            SetExpr::Literal(ColumnValue::Text(rhs.to_string()))
-        } else {
-            // Unquoted string that is not numeric or NULL: column reference!
-            SetExpr::Column(rhs.to_string())
-        };
-
-        assignments.push(SetAssignment { column: col, expr });
-    }
-
-    if assignments.is_empty() {
-        None
-    } else {
-        Some(assignments)
-    }
-}
-
-/// Split a SET clause by commas, but NOT commas inside parentheses or string literals.
-fn split_set_parts(s: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut start = 0usize;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
-            '"' if !in_single_quote => in_double_quote = !in_double_quote,
-            '(' if !in_single_quote && !in_double_quote => depth += 1,
-            ')' if !in_single_quote && !in_double_quote => depth = depth.saturating_sub(1),
-            ',' if depth == 0 && !in_single_quote && !in_double_quote => {
-                parts.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&s[start..]);
-    parts
-}
-
-/// Try to parse an arithmetic expression like `age + 1`, `age+1`, or `salary * 1.10`.
-/// Returns `(src_col, op, rhs_str)` or `None`.
-fn try_parse_arith_expr(rhs: &str) -> Option<(String, ArithOp, String)> {
-    if rhs.starts_with('\'') || rhs.starts_with('"') {
-        return None;
-    }
-
-    // .trim() on both sides makes spaced and unspaced forms identical,
-    // so we only need the bare operator symbol.
-    // pos > 0 guard prevents treating a leading sign (e.g. "-5") as an expression.
-    let ops: &[(&str, ArithOp)] = &[
-        ("+", ArithOp::Add),
-        ("-", ArithOp::Sub),
-        ("*", ArithOp::Mul),
-        ("/", ArithOp::Div),
-    ];
-
-    for (sym, op) in ops {
-        if let Some(pos) = rhs.find(sym) {
-            if pos == 0 {
-                continue;
-            } // leading sign — not an expression
-            let src = rhs[..pos].trim().trim_matches('\'').to_string();
-            let val = rhs[pos + sym.len()..].trim().trim_matches('\'').to_string();
-            // src must look like a column name (non-numeric, non-empty)
-            if !src.is_empty() && src.parse::<f64>().is_err() && !val.is_empty() {
-                return Some((src, op.clone(), val));
-            }
-        }
-    }
-    None
-}
-
 /// Update rows identified by explicit heap pointers (page_id, slot_id).
 ///
 /// This is the Volcano-aware UPDATE path: instead of scanning the heap and
@@ -651,44 +153,37 @@ pub fn update_by_pointers(
     })?;
     let columns = &table.columns;
 
+    // Bind each SET expression to the table's columns once for the statement.
+    let row_schema: Vec<ColumnInfo> = columns
+        .iter()
+        .map(|c| ColumnInfo {
+            name: c.name.clone(),
+            data_type: c.data_type.clone(),
+            table: Some(table_name.to_string()),
+        })
+        .collect();
+    let names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+    let mut compiled: Vec<(usize, Expr)> = Vec::with_capacity(assignments.len());
     for asgn in assignments {
-        if !columns
+        let idx = columns
             .iter()
-            .any(|c| c.name.eq_ignore_ascii_case(&asgn.column))
-        {
-            return Err(io::Error::new(
+            .position(|c| c.name.eq_ignore_ascii_case(&asgn.column))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Assignment column '{}' not found in table '{}'",
+                        asgn.column, table_name
+                    ),
+                )
+            })?;
+        let expr = expr_from_ast(&asgn.value, &names).map_err(|e| {
+            io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "Assignment column '{}' not found in table '{}'",
-                    asgn.column, table_name
-                ),
-            ));
-        }
-        match &asgn.expr {
-            SetExpr::Column(src_col)
-                if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) =>
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Source column '{}' not found in table '{}'",
-                        src_col, table_name
-                    ),
-                ));
-            }
-            SetExpr::Expr { src_col, .. }
-                if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) =>
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Source column '{}' not found in table '{}'",
-                        src_col, table_name
-                    ),
-                ));
-            }
-            _ => {}
-        }
+                format!("SET {}: {}", asgn.column, e),
+            )
+        })?;
+        compiled.push((idx, expr));
     }
 
     let path = format!("database/base/{}/{}.dat", db_name, table_name);
@@ -721,7 +216,7 @@ pub fn update_by_pointers(
             Ok(v) => v,
             Err(_) => continue,
         };
-        let updated_values = match apply_assignments_typed(columns, decoded.clone(), assignments) {
+        let updated_values = match apply_assignments(columns, &row_schema, &compiled, &decoded) {
             Ok(v) => v,
             Err(e) => {
                 return Err(io::Error::new(

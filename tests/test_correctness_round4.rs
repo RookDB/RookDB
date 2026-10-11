@@ -374,7 +374,9 @@ fn update_set_literal_with_arith_char_survives_end_to_end() {
     let catalog = load_catalog();
     assert!(insert_single_tuple(&catalog, "t4db", "t", &["1", "'hello'"]).unwrap());
 
-    use storage_manager::executor::{parse_set_clause, update_by_pointers};
+    use rook_parser::parse_set_clause;
+
+    use storage_manager::executor::update_by_pointers;
     let assignments = parse_set_clause("v = 'n-5'").expect("parse set");
 
     let result =

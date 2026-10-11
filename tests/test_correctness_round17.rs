@@ -51,12 +51,13 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use rook_parser::parse_set_clause;
 use storage_manager::backend::executor::create_index::create_index_with_flags;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Column, Constraints};
 use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::executor::insert_single_tuple;
-use storage_manager::executor::update::{parse_set_clause, update_by_pointers};
+use storage_manager::executor::update::update_by_pointers;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
 

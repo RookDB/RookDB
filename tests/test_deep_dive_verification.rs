@@ -5,11 +5,11 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use rook_parser::parse_set_clause;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Catalog, Column, Constraints};
 use storage_manager::catalog::{create_database, create_table, init_catalog, load_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
-use storage_manager::executor::update::parse_set_clause;
 use storage_manager::types::datatype::DataType;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -197,7 +197,7 @@ fn read_text_column(catalog: &Catalog, table: &str, column: &str) -> Vec<String>
     out
 }
 
-fn run_text_arith(tag: &str, rows: &[&str]) -> Vec<String> {
+fn run_text_arith(tag: &str, rows: &[&str]) -> Result<Vec<String>, String> {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new(tag);
     init_catalog();
@@ -231,26 +231,25 @@ fn run_text_arith(tag: &str, rows: &[&str]) -> Vec<String> {
         &ptrs,
         &assignments,
     )
-    .expect("update");
+    .map_err(|e| e.to_string())?;
 
-    read_text_column(&catalog, "u_t", "note")
+    Ok(read_text_column(&catalog, "u_t", "note"))
 }
 
-/// CONFIRMED BUG 4a: 'héllo' (5 chars, 6 bytes) - 2 → "héll", not "hél".
+/// Former BUG 4a: SET used its own arithmetic, where text minus an integer
+/// dropped trailing characters (and miscounted multi-byte ones). SET now
+/// uses the same evaluator as SELECT, which has no text-minus-integer
+/// operator, so the statement fails instead.
 #[test]
-fn verify_update_text_sub_byte_char_mismatch() {
-    let values = run_text_arith("updsub1", &["'héllo'"]);
-    assert_eq!(
-        values[0], "hél",
-        "BUG 4a CONFIRMED: byte count fed to chars().take() — got {:?}",
-        values[0]
-    );
+fn verify_update_text_minus_int_is_rejected() {
+    let err = run_text_arith("updsub1", &["'héllo'"]).expect_err("text - int must fail");
+    assert!(err.contains("Arithmetic not supported"), "got: {}", err);
 }
 
 /// Bug 4b candidate: NULL text column corrupted by arithmetic.
 #[test]
 fn verify_update_text_arith_on_null() {
-    let values = run_text_arith("updsub2", &["NULL"]);
+    let values = run_text_arith("updsub2", &["NULL"]).expect("update");
     assert_eq!(
         values[0], "NULL",
         "BUG 4b: NULL text corrupted by arithmetic — got {:?}",

@@ -12,11 +12,11 @@
 
 use std::sync::Mutex;
 
+use rook_parser::parse_set_clause;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Catalog, Column, Constraints};
 use storage_manager::catalog::{create_database, create_table, init_catalog, load_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
-use storage_manager::executor::update::parse_set_clause;
 use storage_manager::heap::HeapManager;
 use storage_manager::types::datatype::DataType;
 use storage_manager::types::row::deserialize_nullable_row;

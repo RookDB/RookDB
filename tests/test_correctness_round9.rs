@@ -40,10 +40,11 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use rook_parser::parse_set_clause;
 use storage_manager::backend::executor::create_index::create_index;
 use storage_manager::backend::executor::delete::delete_by_pointers;
 use storage_manager::backend::executor::load_csv::insert_single_tuple;
-use storage_manager::backend::executor::update::{parse_set_clause, update_by_pointers};
+use storage_manager::backend::executor::update::update_by_pointers;
 use storage_manager::backend::system_table::insert_constraint_metadata;
 use storage_manager::catalog::types::{Column, Constraints};
 use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
