@@ -10,7 +10,6 @@ pub use backend::heap;
 pub use backend::layout;
 pub use backend::operation_log;
 pub use backend::page;
-pub use backend::page_api;
 pub use backend::planner;
 pub use backend::statistics;
 pub use backend::table;

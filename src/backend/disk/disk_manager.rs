@@ -3,35 +3,8 @@ use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 
 use crate::backend::instrumentation::HEAP_METRICS;
 use crate::heap::types::HeaderMetadata;
-use crate::page::{PAGE_SIZE, Page, init_page};
-use crate::table::page_count;
+use crate::page::{PAGE_SIZE, Page};
 use std::sync::atomic::Ordering;
-
-// Create a new page on disk and return its page number
-pub fn create_page(file: &mut File) -> io::Result<u32> {
-    // Create a zeroed page buffer
-    let mut page = Page::new();
-
-    // Initialize page header (lower & upper pointers)
-    init_page(&mut page);
-
-    // Read current number of pages from table header
-    let mut page_count = page_count(file)?;
-
-    // New page ID is the current page count
-    let page_num = page_count;
-
-    // Append page at the end of the file
-    file.seek(SeekFrom::End(0))?;
-    file.write_all(&page.data)?;
-
-    // Update page count in table header (page 0)
-    page_count += 1;
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&page_count.to_le_bytes())?;
-
-    Ok(page_num)
-}
 
 // Read a page from disk into the provided page buffer
 pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {

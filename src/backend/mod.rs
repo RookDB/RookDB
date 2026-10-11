@@ -14,7 +14,6 @@ pub mod layout;
 pub mod log;
 pub mod name_validation;
 pub mod page;
-pub mod page_api;
 pub mod planner;
 pub mod statistics;
 pub mod system_table;

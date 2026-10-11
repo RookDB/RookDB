@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use storage_manager::disk::{create_page, read_page};
+use storage_manager::disk::read_page;
 use storage_manager::heap::heap_manager::HeapManager;
 use storage_manager::page::{PAGE_HEADER_SIZE, PAGE_SIZE, Page, page_free_space};
 use storage_manager::table::page_count;
@@ -20,12 +20,8 @@ fn test_page_free_space() {
         .open(file_path)
         .expect("Failed to open test file");
 
-    // --- Step 1: Create first page (reserved for table header metadata)
-    let _header_page = create_page(&mut file).expect("Failed to create header page");
-
-    // --- Step 2: Create second page (actual data page)
-    let data_page_num = create_page(&mut file).expect("Failed to create data page");
-    println!("Created data page number: {}", data_page_num);
+    // --- Step 1: HeapManager::create already allocated the first data page
+    let data_page_num = 1;
 
     // --- Step 3: Verify total page count
     let total_pages = page_count(&mut file).expect("Failed to get page count");

@@ -13,8 +13,9 @@ RookDB is a lightweight storage manager for a relational database management sys
 ## Getting Started
 
 - Install Rust: [Rust Documentation](https://www.rust-lang.org/tools/install)
-- Run the project: `cargo run`
-- Run: `RUST_LOG=trace cargo run` to view detailed trace-level logs for all operations and commands.
+- This crate is the storage and execution library. The SQL shell lives in the [`rookdb-cli`](https://github.com/RookDB/rookdb-cli) crate: run `cargo run --bin rookdb` there.
+- Run the tests: `cargo test`
+- Set `RUST_LOG=trace` to view detailed trace-level logs for all operations and commands.
 
 
 ## Contributing
