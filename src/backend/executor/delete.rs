@@ -349,12 +349,6 @@ fn delete_rows(
         page.mark_deleted(slot_idx);
         held_page.dirty = true;
 
-        log::info!(
-            "[Delete] Soft-deleted slot (page={}, slot={}), updated index and cleared VM",
-            page_num,
-            slot_idx
-        );
-
         if returning {
             returning_rows.push(display_row(columns, &decoded));
         }
@@ -381,6 +375,11 @@ fn delete_rows(
         deleted_count,
         returning_rows,
     };
+    log::debug!(
+        "[Delete] {} row(s) from '{}'",
+        result.deleted_count,
+        table_name
+    );
     let details = delete_log_details(Some(result.deleted_count), None);
     let _ = log_delete(catalog.engine(), db_name, table_name, details, "success");
 

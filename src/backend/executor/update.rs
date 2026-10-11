@@ -238,13 +238,6 @@ fn update_rows(
             &updated_values,
         )?;
 
-        log::info!(
-            "[Update] Validated row at (page={}, slot={}): new values={:?}",
-            page_num,
-            slot_idx,
-            updated_values
-        );
-
         pending_updates.push(PendingUpdate {
             pointer: TuplePointer {
                 page_id: page_num,
@@ -453,14 +446,6 @@ fn update_rows(
                 )?
             };
 
-            log::info!(
-                "[Update] Row at (page={}, slot={}) now at (page={}, slot={})",
-                update.pointer.page_id,
-                update.pointer.slot_index,
-                new_page_id,
-                new_slot_id
-            );
-
             if index_error.is_none()
                 && let Err(e) = crate::backend::executor::create_index::update_index_on_update(
                     catalog.engine(),
@@ -512,6 +497,11 @@ fn update_rows(
         updated_count,
         returning_rows,
     };
+    log::debug!(
+        "[Update] {} row(s) in '{}'",
+        result.updated_count,
+        table_name
+    );
     let details = update_log_details(Some(result.updated_count), None);
     let _ = crate::backend::log::operation_log::log_update(
         catalog.engine(),

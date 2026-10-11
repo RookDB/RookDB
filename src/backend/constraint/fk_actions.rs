@@ -305,7 +305,7 @@ pub(crate) fn cascade_delete_child_rows(
         ChildAction::Delete,
         "CASCADE",
     )?;
-    log::info!(
+    log::trace!(
         "[CASCADE] Deleted {} row(s) from '{}' due to ON DELETE CASCADE on parent '{}'",
         deleted.len(),
         child_table,
@@ -366,14 +366,14 @@ pub(crate) fn cascade_delete_child_rows(
 
     for (grandchild_table, grandchild_fk_col, val) in targets {
         if !visited.insert((grandchild_table.clone(), key_text(&val))) {
-            log::info!(
+            log::trace!(
                 "[CASCADE] Cycle detected: skipping '{}' with value '{}' (already cascaded)",
                 grandchild_table,
                 key_text(&val)
             );
             continue;
         }
-        log::info!(
+        log::trace!(
             "[CASCADE] Recursing into '{}' with value '{}' (FK col '{}')",
             grandchild_table,
             key_text(&val),
@@ -412,7 +412,7 @@ pub(crate) fn set_null_child_rows(
         ChildAction::SetNull,
         "SET NULL",
     )?;
-    log::info!(
+    log::trace!(
         "[SET NULL] Set FK to NULL in {} row(s) from '{}' due to ON DELETE/UPDATE SET NULL on parent '{}'",
         updated.len(),
         child_table,
@@ -440,14 +440,14 @@ pub(crate) fn set_null_child_rows(
 
     for (grandchild_table, grandchild_fk_col) in set_null_to_grandchildren {
         if !visited.insert((grandchild_table.clone(), key_text(parent_value))) {
-            log::info!(
+            log::trace!(
                 "[SET NULL] Cycle detected: skipping '{}' with value '{}' (already set to NULL)",
                 grandchild_table,
                 key_text(parent_value)
             );
             continue;
         }
-        log::info!(
+        log::trace!(
             "[SET NULL] Recursively setting NULL in '{}' col '{}' where value = '{}'",
             grandchild_table,
             grandchild_fk_col,
@@ -487,7 +487,7 @@ pub(crate) fn update_child_rows_fk(
         ChildAction::SetTo(new_parent_val),
         "UPDATE CASCADE",
     )?;
-    log::info!(
+    log::trace!(
         "[UPDATE CASCADE] Updated FK to '{}' in {} row(s) from '{}' due to ON UPDATE CASCADE",
         key_text(new_parent_val),
         updated.len(),
@@ -512,14 +512,14 @@ pub(crate) fn update_child_rows_fk(
 
     for (grandchild_table, grandchild_fk_col) in &update_cascade_fks {
         if !visited.insert((grandchild_table.clone(), key_text(old_parent_val))) {
-            log::info!(
+            log::trace!(
                 "[UPDATE CASCADE] Cycle detected: skipping '{}' with value '{}' (already cascaded)",
                 grandchild_table,
                 key_text(old_parent_val)
             );
             continue;
         }
-        log::info!(
+        log::trace!(
             "[UPDATE CASCADE] Recursively cascading into '{}': col '{}' from '{}' → '{}'",
             grandchild_table,
             grandchild_fk_col,

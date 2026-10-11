@@ -74,12 +74,6 @@ impl InsertOperator {
         let inserter: InsertInserter = Box::new(move |vals| {
             match crate::backend::executor::load_csv::insert_row(&cat, &db, &tbl, vals) {
                 Ok(ptr) => {
-                    log::info!(
-                        "[Insert] Inserted tuple into table '{}' at (page={}, slot={})",
-                        tbl,
-                        ptr.0,
-                        ptr.1
-                    );
                     ptrs_clone.borrow_mut().push(ptr);
                     Ok(())
                 }
@@ -185,8 +179,14 @@ impl PhysicalOperator for InsertOperator {
                 Ok(Some(tuple))
             }
             Ok(None) => {
+                let mut inserted = self.inserted_pointers.borrow_mut();
+                if !self.completed
+                    && let Some(table) = &self.table
+                {
+                    log::debug!("[Insert] {} row(s) into '{}'", inserted.len(), table);
+                }
                 self.completed = true;
-                self.inserted_pointers.borrow_mut().clear();
+                inserted.clear();
                 Ok(None)
             }
             Err(e) => {
