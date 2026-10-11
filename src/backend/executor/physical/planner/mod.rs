@@ -414,12 +414,49 @@ impl PhysicalPlanner {
                     inp.table,
                     child.name()
                 );
-                Ok(Box::new(InsertOperator::new(
+                // INSERT INTO t (cols) SELECT ...: place each selected value
+                // in its listed column; the rest take their DEFAULT or NULL.
+                // (The VALUES form arrives already expanded.)
+                let target = if inp.values_rows.is_empty() && !inp.columns.is_empty() {
+                    let table_schema = self.resolve_table_schema(&inp.table)?;
+                    if child.schema().len() != inp.columns.len() {
+                        return Err(RookError::TypeMismatch(format!(
+                            "INSERT lists {} column(s) but the SELECT returns {}",
+                            inp.columns.len(),
+                            child.schema().len()
+                        )));
+                    }
+                    let positions = inp
+                        .columns
+                        .iter()
+                        .map(|name| {
+                            table_schema
+                                .iter()
+                                .position(|c| c.name.eq_ignore_ascii_case(name))
+                                .ok_or_else(|| RookError::NotFound {
+                                    entity: "Column",
+                                    name: format!("{}.{}", inp.table, name),
+                                })
+                        })
+                        .collect::<RookResult<Vec<usize>>>()?;
+                    let defaults = table_schema
+                        .iter()
+                        .map(|c| c.constraints.default.clone())
+                        .collect();
+                    Some((positions, defaults))
+                } else {
+                    None
+                };
+                let insert = InsertOperator::new(
                     child,
                     inp.table.clone(),
                     self.db_name.clone(),
                     std::sync::Arc::clone(&self.catalog),
-                )))
+                );
+                Ok(Box::new(match target {
+                    Some((positions, defaults)) => insert.with_target_columns(positions, defaults),
+                    None => insert,
+                }))
             }
 
             LogicalPlan::CteScan(cs) => {

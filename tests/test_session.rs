@@ -214,3 +214,42 @@ fn a_session_keeps_every_file_under_its_engine_root() {
     ok(&mut again, "USE app");
     assert_eq!(rows(&mut again, "SELECT COUNT(*) FROM kids").len(), 1);
 }
+
+#[test]
+fn insert_select_with_a_column_list() {
+    let _ws = common::TestWorkspace::new("session", "insselcols");
+    let mut s = session();
+    ok(&mut s, "CREATE DATABASE app");
+    ok(&mut s, "USE app");
+    ok(&mut s, "CREATE TABLE src (a INT, b VARCHAR(5))");
+    ok(
+        &mut s,
+        "CREATE TABLE dst (id INT, note VARCHAR(5) DEFAULT 'none', qty INT)",
+    );
+    ok(&mut s, "INSERT INTO src VALUES (1, 'x'), (2, 'y')");
+
+    // Listed columns in any order; the others take DEFAULT or NULL.
+    assert_eq!(
+        ok(
+            &mut s,
+            "INSERT INTO dst (qty, id) SELECT a * 10, a FROM src"
+        ),
+        ["2 rows inserted.\n"]
+    );
+    assert_eq!(
+        rows(&mut s, "SELECT id, note, qty FROM dst ORDER BY id"),
+        vec![
+            vec![int(1), Some(DataValue::Varchar("none".into())), int(10)],
+            vec![int(2), Some(DataValue::Varchar("none".into())), int(20)],
+        ]
+    );
+
+    let unknown = run(&mut s, "INSERT INTO dst (id, nope) SELECT a, b FROM src").unwrap_err();
+    assert!(unknown.contains("nope"), "{}", unknown);
+    let arity = run(&mut s, "INSERT INTO dst (id) SELECT a, b FROM src").unwrap_err();
+    assert!(
+        arity.contains("1 column(s) but the SELECT returns 2"),
+        "{}",
+        arity
+    );
+}

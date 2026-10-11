@@ -50,6 +50,9 @@ pub struct InsertOperator {
     /// Source rows, read in full before the first insert so a statement that
     /// selects from its own target never sees the rows it is adding.
     source: Option<std::vec::IntoIter<Tuple>>,
+    /// For `INSERT INTO t (cols) SELECT ...`: the table position of each
+    /// source value, and the row of defaults the other columns take.
+    target_columns: Option<(Vec<usize>, Vec<Option<crate::types::DataValue>>)>,
 }
 
 impl InsertOperator {
@@ -93,7 +96,19 @@ impl InsertOperator {
             completed: false,
             inserter,
             source: None,
+            target_columns: None,
         }
+    }
+
+    /// Insert each source value into the table column at the same index of
+    /// `positions`; the other columns take `defaults` (one per column).
+    pub fn with_target_columns(
+        mut self,
+        positions: Vec<usize>,
+        defaults: Vec<Option<crate::types::DataValue>>,
+    ) -> Self {
+        self.target_columns = Some((positions, defaults));
+        self
     }
 
     #[cfg(test)]
@@ -109,6 +124,7 @@ impl InsertOperator {
             completed: false,
             inserter,
             source: None,
+            target_columns: None,
         }
     }
 
@@ -151,7 +167,17 @@ impl PhysicalOperator for InsertOperator {
         match next {
             Ok(Some(tuple)) => {
                 // Call the injectable inserter (in production, wraps insert_row)
-                if let Err(e) = (self.inserter)(&tuple.values) {
+                let inserted = match &self.target_columns {
+                    Some((positions, defaults)) => {
+                        let mut row = defaults.clone();
+                        for (value, &pos) in tuple.values.iter().zip(positions) {
+                            row[pos] = value.clone();
+                        }
+                        (self.inserter)(&row)
+                    }
+                    None => (self.inserter)(&tuple.values),
+                };
+                if let Err(e) = inserted {
                     self.rollback();
                     return Err(RookError::Internal(e));
                 }
@@ -718,8 +744,8 @@ mod tests {
 
         let plan = LogicalPlan::Insert(LogicalInsert {
             table: "users".to_string(),
-            columns: vec!["name".to_string()],
-            child: Box::new(project),
+            columns: Vec::new(),
+            child: Box::new(project.clone()),
             values_rows: Vec::new(),
         });
 
@@ -730,6 +756,15 @@ mod tests {
         assert!(result.is_ok(), "Insert with Project child should plan");
         let op = result.unwrap();
         assert_eq!(op.name(), "Insert");
+
+        // A column list is checked against the table at plan time.
+        let listed = LogicalPlan::Insert(LogicalInsert {
+            table: "users".to_string(),
+            columns: vec!["name".to_string()],
+            child: Box::new(project),
+            values_rows: Vec::new(),
+        });
+        assert!(planner.plan(&listed).is_err());
     }
 
     #[test]
