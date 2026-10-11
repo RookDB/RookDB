@@ -16,9 +16,8 @@
 //! 4. **Header stamping** — `last_vacuum` is recorded in the table header.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::backend::buffer_manager::shared_pool;
 use crate::backend::executor::create_index::{index_file_path, load_table_indexes_multi};
 use crate::backend::index::btree::BTree;
 use crate::catalog::Catalog;
@@ -67,14 +66,7 @@ pub fn vacuum_table(
     // 1. Snapshot the dead-tuple counter before compaction resets it.
     let dead_before = read_dead_tuple_count(&heap_path).map_err(|e| e.to_string())?;
 
-    // 2. Compaction rewrites pages underneath the buffer pool — drop any
-    //    cached view of this file first (both the shared pool and the
-    //    executor-tier cached HeapManager).
-    shared_pool::invalidate(PathBuf::from(&heap_path).as_path());
-    crate::backend::cache::evict_heap(Path::new(&heap_path))
-        .map_err(|e| format!("VACUUM: failed to flush cached heap: {}", e))?;
-
-    // 3. Compact pages with dead slots (+ FSM rebuild + counter reset).
+    // 2. Compact pages with dead slots (+ FSM rebuild + counter reset).
     let pages_compacted =
         super::delete::compaction_table(db_name, table_name).map_err(|e| e.to_string())?;
 
@@ -106,9 +98,8 @@ pub fn vacuum_table(
 
 /// Read the header's `dead_tuple_count` field (bytes 20..24 of page 0).
 fn read_dead_tuple_count(heap_path: &str) -> io::Result<u32> {
-    use std::fs::OpenOptions;
-    let mut file = OpenOptions::new().read(true).open(heap_path)?;
-    crate::table::read_dead_tuple_count(&mut file)
+    let file = crate::backend::heap::HeapFile::open(std::path::Path::new(heap_path))?;
+    Ok(file.header()?.dead_tuple_count)
 }
 
 /// Bulk-rebuild every named index on a table from current heap contents.

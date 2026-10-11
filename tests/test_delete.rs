@@ -105,6 +105,8 @@ fn setup_table(n: u32) {
 
 /// Count live (non-deleted) tuples across all data pages.
 fn count_live() -> usize {
+    // DELETE edits pages in the buffer pool; write them out before reading the file.
+    storage_manager::backend::cache::checkpoint();
     let mut file = OpenOptions::new().read(true).open(table_path()).unwrap();
     let total = page_count(&mut file).unwrap();
     let mut live = 0usize;

@@ -28,12 +28,10 @@ pub(crate) fn cascade_delete_child_rows(
     visited: &mut std::collections::HashSet<(String, String)>,
 ) -> Result<(), String> {
     use crate::backend::executor::create_index::update_index_on_delete;
+    use crate::backend::heap::HeapFile;
     use crate::catalog::types::Column;
-    use crate::disk::{read_page, write_page};
     use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, SLOT_FLAG_DELETED};
-    use crate::table::{increment_dead_tuple_count, page_count};
     use std::collections::HashSet;
-    use std::fs::OpenOptions;
 
     // Get child table schema from catalog
     let child_table_info = match catalog
@@ -77,23 +75,18 @@ pub(crate) fn cascade_delete_child_rows(
         return Ok(());
     }
 
-    crate::backend::cache::quiesce_for_direct_io(&heap_path)
-        .map_err(|e| format!("Failed to quiesce child heap for CASCADE DELETE: {}", e))?;
-
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&heap_path)
+    let file = HeapFile::open(&heap_path)
         .map_err(|e| format!("Failed to open child heap for CASCADE DELETE: {}", e))?;
 
-    let total_pages = page_count(&mut file).map_err(|e| e.to_string())?;
+    let total_pages = file.page_count();
     let mut deleted_count = 0usize;
 
     let mut recursive_values: Vec<(String, String, String)> = Vec::new();
 
     for page_num in 1..total_pages {
         let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num).map_err(|e| e.to_string())?;
+        file.read_page(&mut page, page_num)
+            .map_err(|e| e.to_string())?;
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
@@ -211,19 +204,17 @@ pub(crate) fn cascade_delete_child_rows(
                 let new_flags = flags | SLOT_FLAG_DELETED;
                 page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
             }
-            write_page(&mut file, &mut page, page_num).map_err(|e| e.to_string())?;
+            file.write_page(&page, page_num)
+                .map_err(|e| e.to_string())?;
             let _ = crate::backend::visibility_map::vm_clear_page(db_name, child_table, page_num);
         }
     }
 
     if deleted_count > 0
-        && let Err(e) = increment_dead_tuple_count(&mut file, deleted_count as u32)
+        && let Err(e) = file.record_dead_tuples(deleted_count as u32)
     {
         log::warn!("[CASCADE] Failed to increment dead tuple count: {}", e);
     }
-
-    drop(file);
-    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
 
     log::info!(
         "[CASCADE] Deleted {} row(s) from '{}' due to ON DELETE CASCADE on parent '{}'",
@@ -285,12 +276,10 @@ pub(crate) fn set_null_child_rows(
     parent_value_str: &str,
     visited: &mut std::collections::HashSet<(String, String)>,
 ) -> Result<(), String> {
+    use crate::backend::heap::HeapFile;
     use crate::catalog::types::Column;
-    use crate::disk::{read_page, write_page};
     use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, SLOT_FLAG_DELETED};
-    use crate::table::page_count;
     use std::collections::HashSet;
-    use std::fs::OpenOptions;
 
     let child_table_info = match catalog
         .databases
@@ -334,16 +323,10 @@ pub(crate) fn set_null_child_rows(
         return Ok(());
     }
 
-    crate::backend::cache::quiesce_for_direct_io(&heap_path)
-        .map_err(|e| format!("Failed to quiesce child heap for SET NULL: {}", e))?;
-
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&heap_path)
+    let file = HeapFile::open(&heap_path)
         .map_err(|e| format!("Failed to open child heap for SET NULL: {}", e))?;
 
-    let total_pages = page_count(&mut file).map_err(|e| e.to_string())?;
+    let total_pages = file.page_count();
     let mut updated_count = 0usize;
 
     let mut recursive_values: Vec<(String, String, String)> = Vec::new();
@@ -351,7 +334,8 @@ pub(crate) fn set_null_child_rows(
 
     for page_num in 1..total_pages {
         let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num).map_err(|e| e.to_string())?;
+        file.read_page(&mut page, page_num)
+            .map_err(|e| e.to_string())?;
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
@@ -493,13 +477,11 @@ pub(crate) fn set_null_child_rows(
         };
 
         if page_modified {
-            write_page(&mut file, &mut page, page_num).map_err(|e| e.to_string())?;
+            file.write_page(&page, page_num)
+                .map_err(|e| e.to_string())?;
             let _ = crate::backend::visibility_map::vm_clear_page(db_name, child_table, page_num);
         }
     }
-
-    drop(file);
-    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
 
     for (old_bytes, new_bytes, old_page, old_slot) in pending_inserts {
         match crate::backend::executor::compaction_api::insert_raw_tuple(
@@ -525,7 +507,6 @@ pub(crate) fn set_null_child_rows(
             }
         }
     }
-    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
 
     log::info!(
         "[SET NULL] Set FK to NULL in {} row(s) from '{}' due to ON DELETE/UPDATE SET NULL on parent '{}'",
@@ -588,11 +569,9 @@ pub(crate) fn update_child_rows_fk(
     new_parent_val: &str,
     visited: &mut std::collections::HashSet<(String, String)>,
 ) -> Result<(), String> {
+    use crate::backend::heap::HeapFile;
     use crate::catalog::types::Column;
-    use crate::disk::{read_page, write_page};
     use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, SLOT_FLAG_DELETED};
-    use crate::table::page_count;
-    use std::fs::OpenOptions;
 
     let child_table_info = match catalog
         .databases
@@ -617,22 +596,17 @@ pub(crate) fn update_child_rows_fk(
         return Ok(());
     }
 
-    crate::backend::cache::quiesce_for_direct_io(&heap_path)
-        .map_err(|e| format!("Failed to quiesce child heap for UPDATE CASCADE: {}", e))?;
-
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&heap_path)
+    let file = HeapFile::open(&heap_path)
         .map_err(|e| format!("Failed to open child heap for UPDATE CASCADE: {}", e))?;
 
-    let total_pages = page_count(&mut file).map_err(|e| e.to_string())?;
+    let total_pages = file.page_count();
     let mut total_updated = 0usize;
     let mut pending_inserts: Vec<(Vec<u8>, Vec<u8>, u32, u32)> = Vec::new();
 
     for page_num in 1..total_pages {
         let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num).map_err(|e| e.to_string())?;
+        file.read_page(&mut page, page_num)
+            .map_err(|e| e.to_string())?;
 
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
         let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
@@ -774,13 +748,11 @@ pub(crate) fn update_child_rows_fk(
         };
 
         if page_modified {
-            write_page(&mut file, &mut page, page_num).map_err(|e| e.to_string())?;
+            file.write_page(&page, page_num)
+                .map_err(|e| e.to_string())?;
             let _ = crate::backend::visibility_map::vm_clear_page(db_name, child_table, page_num);
         }
     }
-
-    drop(file);
-    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
 
     for (old_bytes, new_bytes, old_page, old_slot) in pending_inserts {
         match crate::backend::executor::compaction_api::insert_raw_tuple(
@@ -809,7 +781,6 @@ pub(crate) fn update_child_rows_fk(
             }
         }
     }
-    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
 
     log::info!(
         "[UPDATE CASCADE] Updated FK to '{}' in {} row(s) from '{}' due to ON UPDATE CASCADE",

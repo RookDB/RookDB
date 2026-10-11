@@ -64,6 +64,8 @@ fn setup(db: &str) -> Catalog {
 fn dead_count(db: &str, table: &str) -> u32 {
     use std::fs::OpenOptions;
     let path = format!("database/base/{}/{}.dat", db, table);
+    // The counter is kept in the pooled header page; write it out first.
+    storage_manager::backend::cache::checkpoint();
     let mut f = OpenOptions::new().read(true).open(&path).unwrap();
     storage_manager::backend::table::read_dead_tuple_count(&mut f).unwrap()
 }

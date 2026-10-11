@@ -692,16 +692,9 @@ pub fn update_by_pointers(
     }
 
     let path = format!("database/base/{}/{}.dat", db_name, table_name);
-    // UPDATE rewrites pages via direct I/O — flush/evict cached pool state
-    // first so the raw reads observe every prior insert.
-    crate::backend::cache::quiesce_for_direct_io(std::path::Path::new(&path))
-        .map_err(|e| io::Error::other(format!("Failed to flush cache: {}", e)))?;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
+    let file = crate::backend::heap::HeapFile::open(std::path::Path::new(&path))
         .map_err(|e| io::Error::other(format!("Failed to open table file: {}", e)))?;
-    let file_identity = crate::table::file_identity_from_file(&file)?;
+    let file_identity = file.identity();
 
     let mut updated_count = 0usize;
     let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
@@ -716,7 +709,7 @@ pub fn update_by_pointers(
         let slot_index = slot_idx as u16;
 
         if loaded_page != Some(page_num) {
-            crate::disk::read_page(&mut file, &mut page, page_num)?;
+            file.read_page(&mut page, page_num)?;
             loaded_page = Some(page_num);
         }
 
@@ -957,7 +950,7 @@ pub fn update_by_pointers(
 
             let _page_lock = PageWriteLock::acquire(file_identity, page_id);
             let mut page = Page::new();
-            crate::disk::read_page(&mut file, &mut page, page_id)?;
+            file.read_page(&mut page, page_id)?;
             let mut moved_on_page = false;
 
             for (i, update) in pending_updates.iter().enumerate().take(end).skip(start) {
@@ -983,14 +976,14 @@ pub fn update_by_pointers(
                 moved += 1;
             }
 
-            crate::disk::write_page(&mut file, &mut page, page_id)?;
+            file.write_page(&page, page_id)?;
             if moved_on_page {
                 let _ = crate::backend::visibility_map::vm_clear_page(db_name, table_name, page_id);
             }
             start = end;
         }
         if moved > 0 {
-            crate::table::increment_dead_tuple_count(&mut file, moved)?;
+            file.record_dead_tuples(moved)?;
         }
     }
 

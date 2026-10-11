@@ -182,19 +182,6 @@ pub fn evict_heap(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Prepare a heap file for DIRECT-I/O access (raw `disk::read_page` /
-/// `write_page` outside the buffer pool — UPDATE/DELETE/compaction paths).
-///
-/// Flushes and evicts the cached manager so every dirty page (including rows
-/// inserted through the cache) reaches the file before the raw reads/writes
-/// begin. Without this, direct I/O would observe pre-insert page images and
-/// later pool flushes would clobber the direct writes.
-pub fn quiesce_for_direct_io(path: &Path) -> io::Result<()> {
-    evict_heap(path)?;
-    crate::backend::buffer_manager::shared_pool::invalidate(path);
-    Ok(())
-}
-
 /// Flush and drop every cached heap manager.
 pub fn flush_and_clear_heaps() -> io::Result<()> {
     let mut cache = lock(heap_cache());
@@ -275,9 +262,8 @@ pub fn evict_btree(path: &Path) {
 ///
 /// Handles are KEPT — this is a flush, not an eviction — so repeated
 /// checkpoints during read-heavy workloads stay free when nothing is dirty
-/// and never trigger file-reopen churn. Callers include every heap scan
-/// (read-your-writes for raw-I/O `HeapScanIterator`), statement boundaries
-/// and process exit. Use [`flush_and_clear_heaps`] /
+/// and never trigger file-reopen churn. Callers include statement
+/// boundaries and process exit. Use [`flush_and_clear_heaps`] /
 /// [`sync_and_clear_btrees`] to actually release resources.
 pub fn checkpoint() {
     let due = {

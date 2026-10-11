@@ -41,9 +41,14 @@ fn test_heap_create() {
     assert!(manager.is_ok(), "Failed to create heap");
 
     let manager = manager.unwrap();
-    assert_eq!(manager.header().unwrap().page_count, 2, "Should have 2 pages (0 + 1)");
     assert_eq!(
-        manager.header().unwrap().total_tuples, 0,
+        manager.header().unwrap().page_count,
+        2,
+        "Should have 2 pages (0 + 1)"
+    );
+    assert_eq!(
+        manager.header().unwrap().total_tuples,
+        0,
         "Should have 0 tuples initially"
     );
 
@@ -70,7 +75,11 @@ fn test_heap_insert_single() {
     println!("[TEST] Inserted at page={}, slot={}", page_id, slot_id);
     assert!(page_id > 0, "Page ID should be > 0");
     assert_eq!(slot_id, 0, "First tuple should be at slot 0");
-    assert_eq!(manager.header().unwrap().total_tuples, 1, "Should have 1 tuple");
+    assert_eq!(
+        manager.header().unwrap().total_tuples,
+        1,
+        "Should have 1 tuple"
+    );
 
     cleanup_test_files(name);
 
@@ -101,7 +110,11 @@ fn test_heap_insert_multiple() {
         assert!(page_id > 0, "Page ID should be > 0");
     }
 
-    assert_eq!(manager.header().unwrap().total_tuples, 10, "Should have 10 tuples");
+    assert_eq!(
+        manager.header().unwrap().total_tuples,
+        10,
+        "Should have 10 tuples"
+    );
 
     cleanup_test_files(name);
 
@@ -368,7 +381,10 @@ fn test_heap_multiple_pages() {
         }
     }
 
-    assert!(manager.header().unwrap().page_count > 1, "Should have allocated pages");
+    assert!(
+        manager.header().unwrap().page_count > 1,
+        "Should have allocated pages"
+    );
     assert!(
         manager.header().unwrap().total_tuples > 0,
         "Should have inserted tuples"
@@ -381,13 +397,15 @@ fn test_heap_multiple_pages() {
     let scanned_count: usize = manager.scan().filter_map(|r| r.ok()).count();
 
     assert_eq!(
-        scanned_count, manager.header().unwrap().total_tuples as usize,
+        scanned_count,
+        manager.header().unwrap().total_tuples as usize,
         "Should scan all inserted tuples"
     );
 
     println!(
         "[TEST] Successfully handled {} tuples across {} pages",
-        manager.header().unwrap().total_tuples, manager.header().unwrap().page_count
+        manager.header().unwrap().total_tuples,
+        manager.header().unwrap().page_count
     );
 
     cleanup_test_files(name);

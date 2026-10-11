@@ -666,13 +666,6 @@ fn h_update_cascade_growing_varchar_preserves_row() {
         "test setup: grown value must exceed old slot"
     );
 
-    // Flush the child heap so the cascade's raw page scan sees the row
-    // (isolates this probe from the finding-X dirty-frame window).
-    storage_manager::backend::cache::quiesce_for_direct_io(std::path::Path::new(
-        "database/base/db8/c.dat",
-    ))
-    .expect("quiesce child heap");
-
     let assignments = parse_set_clause(&format!("k = '{}'", new_val)).expect("parse set");
     let res = update_by_pointers(&catalog, "db8", "p", &[(1, 0)], &assignments)
         .expect("parent update failed");

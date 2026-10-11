@@ -9,13 +9,12 @@ use std::io;
 
 use crate::backend::executor::compaction_api::rebuild_table_fsm;
 use crate::backend::executor::create_index::update_index_on_delete;
+use crate::backend::heap::HeapFile;
 use crate::backend::log::operation_log::{current_timestamp_iso, log_compaction, log_delete};
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::backend::visibility_map::{vm_clear_page, vm_is_visible, vm_set_page};
 use crate::catalog::types::Catalog;
-use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, SLOT_FLAG_DELETED};
-use crate::table::{increment_dead_tuple_count, page_count, write_dead_tuple_count};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -157,16 +156,12 @@ fn compact_page(page: &mut Page, num_items: usize) {
 /// Call this periodically (e.g. via menu option) rather than on every DELETE.
 /// Returns the number of pages that were actually rewritten.
 pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
-    use std::fs::OpenOptions;
-
     let result = (|| -> io::Result<usize> {
         let path = format!("database/base/{}/{}.dat", db_name, table_name);
-        // Compaction rewrites pages via direct I/O — flush cached state first.
-        crate::backend::cache::quiesce_for_direct_io(std::path::Path::new(&path))?;
-        let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
-        let file_identity = crate::table::file_identity_from_file(&file)?;
+        let file = HeapFile::open(std::path::Path::new(&path))?;
+        let file_identity = file.identity();
 
-        let total_pages = page_count(&mut file)?;
+        let total_pages = file.page_count();
         let mut pages_compacted = 0usize;
 
         for page_num in 1..total_pages {
@@ -183,7 +178,7 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
             let _page_lock = PageWriteLock::acquire(file_identity, page_num);
 
             let mut page = Page::new();
-            read_page(&mut file, &mut page, page_num)?;
+            file.read_page(&mut page, page_num)?;
 
             let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
             let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
@@ -197,7 +192,7 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
             if has_deleted {
                 compact_page(&mut page, num_items);
 
-                write_page(&mut file, &mut page, page_num)?;
+                file.write_page(&page, page_num)?;
                 pages_compacted += 1;
             }
 
@@ -212,8 +207,13 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
         // which is more accurate than per-page fsm_set_avail calls and removes the need
         // for a global fsm_manager singleton.
         if pages_compacted > 0 {
+            file.reset_dead_tuples()?;
+            drop(file);
+            // The rebuild reads the heap file and replaces the FSM fork, so
+            // the compacted pages go to the file and the cached manager,
+            // which holds the old fork, is dropped first.
+            crate::backend::cache::evict_heap(std::path::Path::new(&path))?;
             rebuild_table_fsm(db_name, table_name)?;
-            write_dead_tuple_count(&mut file, 0)?;
         }
 
         Ok(pages_compacted)
@@ -251,15 +251,15 @@ struct HeldPage {
 
 /// Write the held page back if any slot on it was deleted, then release it.
 fn flush_held_page(
-    file: &mut std::fs::File,
+    file: &HeapFile,
     held: &mut Option<HeldPage>,
     db_name: &str,
     table_name: &str,
 ) -> io::Result<()> {
-    if let Some(mut h) = held.take()
+    if let Some(h) = held.take()
         && h.dirty
     {
-        write_page(file, &mut h.page, h.page_num)?;
+        file.write_page(&h.page, h.page_num)?;
         let _ = vm_clear_page(db_name, table_name, h.page_num);
     }
     Ok(())
@@ -292,15 +292,9 @@ pub fn delete_by_pointers(
     let columns = &table.columns;
 
     let path = format!("database/base/{}/{}.dat", db_name, table_name);
-    // DELETE rewrites pages via direct I/O — flush cached state first.
-    crate::backend::cache::quiesce_for_direct_io(std::path::Path::new(&path))
-        .map_err(|e| io::Error::other(format!("Failed to flush cache: {}", e)))?;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
+    let file = HeapFile::open(std::path::Path::new(&path))
         .map_err(|e| io::Error::other(format!("Failed to open table file: {}", e)))?;
-    let file_identity = crate::table::file_identity_from_file(&file)?;
+    let file_identity = file.identity();
 
     let mut deleted_count = 0usize;
     let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
@@ -319,7 +313,7 @@ pub fn delete_by_pointers(
         let mut loaded: Option<u32> = None;
         for &(page_num, slot_idx) in pointers {
             if loaded != Some(page_num) {
-                read_page(&mut file, &mut page, page_num)?;
+                file.read_page(&mut page, page_num)?;
                 loaded = Some(page_num);
             }
             let base = (PAGE_HEADER_SIZE + slot_idx * ITEM_ID_SIZE) as usize;
@@ -343,12 +337,12 @@ pub fn delete_by_pointers(
         let slot_index = slot_idx as u16;
 
         if !hold_pages || held.as_ref().map(|h| h.page_num) != Some(page_num) {
-            flush_held_page(&mut file, &mut held, db_name, table_name)?;
+            flush_held_page(&file, &mut held, db_name, table_name)?;
 
             // Acquire exclusive write lock on this page
             let lock = PageWriteLock::acquire(file_identity, page_num);
             let mut page = Page::new();
-            read_page(&mut file, &mut page, page_num)?;
+            file.read_page(&mut page, page_num)?;
             held = Some(HeldPage {
                 page_num,
                 page,
@@ -383,7 +377,7 @@ pub fn delete_by_pointers(
         }
 
         // Re-read the page in case validate_row_delete triggered CASCADE
-        if !hold_pages && let Err(e) = read_page(&mut file, page, page_num) {
+        if !hold_pages && let Err(e) = file.read_page(page, page_num) {
             log::error!("Failed to re-read page after validation: {}", e);
         }
 
@@ -428,10 +422,10 @@ pub fn delete_by_pointers(
         deleted_count += 1;
     }
 
-    flush_held_page(&mut file, &mut held, db_name, table_name)?;
+    flush_held_page(&file, &mut held, db_name, table_name)?;
 
     if deleted_count > 0 {
-        increment_dead_tuple_count(&mut file, deleted_count as u32)?;
+        file.record_dead_tuples(deleted_count as u32)?;
     }
 
     let result = DeleteResult {

@@ -67,7 +67,5 @@ pub fn insert_raw_tuple(
     let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
 
     // Process-cached manager: avoids a full file+FSM open per tuple.
-    // Direct-I/O writers on this file quiesce the cache first (see
-    // cache::quiesce_for_direct_io), so pooled dirty state stays coherent.
     crate::backend::cache::with_heap(&table_path, |hm| hm.insert_tuple(tuple_data))
 }

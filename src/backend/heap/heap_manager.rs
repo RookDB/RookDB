@@ -104,7 +104,9 @@ impl HeapScanIterator {
         self.loaded_page = None;
         let mut pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
         let frame_id = pool.fetch_page(page_id)?;
-        self.page.data.copy_from_slice(&pool.get_page(frame_id).data);
+        self.page
+            .data
+            .copy_from_slice(&pool.get_page(frame_id).data);
         pool.unpin(frame_id, false);
         self.loaded_page = Some(page_id);
         Ok(())
@@ -326,10 +328,7 @@ impl HeapManager {
         // Create FSM fork
         let fsm = FSM::open(fsm_path.clone(), 2)?; // 2 pages initially
 
-        let mut manager = Self {
-            pool,
-            fsm,
-        };
+        let mut manager = Self { pool, fsm };
 
         // Set heap page count to 2 (Page 0 + Page 1)
         manager.update_header(|h| {
@@ -397,6 +396,8 @@ impl HeapManager {
             // For FSM rebuild, we need the file handle. Use the pool's file.
             // Temporarily take ownership of the file for FSM rebuild.
             let mut guard = pool.lock().unwrap_or_else(|p| p.into_inner());
+            // The rebuild reads the file, so pages still in the pool go out first.
+            guard.write_dirty()?;
             let mut file = guard.file.take().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no file")
             })?;
@@ -432,10 +433,7 @@ impl HeapManager {
 
         log::trace!("[HeapManager::open] Successfully opened HeapManager");
 
-        Ok(Self {
-            pool,
-            fsm,
-        })
+        Ok(Self { pool, fsm })
     }
 
     /// Insert a tuple using FSM-guided page selection.

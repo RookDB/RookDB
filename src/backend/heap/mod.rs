@@ -5,8 +5,10 @@ use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, Page};
 use crate::table::{TABLE_HEADER_SIZE, page_count};
 
+pub mod heap_file;
 pub mod heap_manager;
 pub mod types;
+pub use heap_file::HeapFile;
 pub use heap_manager::HeapManager;
 
 /// Initialize a new table file with HeaderMetadata.
