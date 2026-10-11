@@ -479,16 +479,16 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<S
         ));
     }
 
+    let indexes = crate::backend::system_table::table_indexes(catalog.engine(), db, table);
     let dat_path = catalog.engine().paths().heap(db, table);
     let mut hm = crate::heap::HeapManager::create(std::path::PathBuf::from(&dat_path))
         .map_err(|e| io::Error::other(format!("Failed to create table file: {}", e)))?;
     hm.flush()
         .map_err(|e| io::Error::other(format!("Failed to flush table file: {}", e)))?;
+    drop(hm);
 
-    // The index files are stale after truncation. Their sys_indexes rows are
-    // left: delete_table_metadata would also drop sys_columns and
-    // sys_constraints, and the next catalog save rebuilds sys_indexes.
-    remove_index_files_for_table(catalog.engine(), db, table, None);
+    // The index files point at the old rows: build them again, empty.
+    rebuild_indexes(catalog, db, table, &indexes, None)?;
 
     Ok(StatementResult::message(format!(
         "Truncated table '{}' (0 rows).",
@@ -732,6 +732,50 @@ pub(super) fn remove_index_files_for_table(
             }
         }
     }
+}
+
+/// Build the indexes `indexes` of a table again from its rows, after a change
+/// that rewrote or emptied it. An index on the column `dropped`, which no
+/// longer exists, is dropped instead; the result has a line for each.
+pub(super) fn rebuild_indexes(
+    catalog: &Catalog,
+    db: &str,
+    table: &str,
+    indexes: &[crate::backend::system_table::SavedIndex],
+    dropped: Option<&str>,
+) -> io::Result<Vec<String>> {
+    remove_index_files_for_table(catalog.engine(), db, table, None);
+    let mut lines = Vec::new();
+    for ix in indexes {
+        // The row is written again by create_index_with_flags.
+        let _ = crate::backend::system_table::delete_index_metadata(
+            catalog.engine(),
+            db,
+            table,
+            &ix.name,
+        );
+        let columns = ix.column_list();
+        if let Some(col) = dropped
+            && columns.iter().any(|c| c.eq_ignore_ascii_case(col))
+        {
+            lines.push(format!(
+                "Dropped index '{}', which used column '{}'.",
+                ix.name, col
+            ));
+            continue;
+        }
+        create_index_with_flags(
+            catalog,
+            db,
+            table,
+            &ix.name,
+            &columns,
+            ix.is_unique,
+            ix.is_primary,
+        )
+        .map_err(|e| io::Error::other(format!("Failed to rebuild index '{}': {}", ix.name, e)))?;
+    }
+    Ok(lines)
 }
 
 /// Rename all index files for a table from `old_name` to `new_name`.

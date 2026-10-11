@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use rook_ast::{AlterTableAction, AlterTablePlan};
 
 use super::StatementResult;
-use super::ddl::{remove_index_files_for_table, rename_index_files_for_table};
+use super::ddl::{rebuild_indexes, remove_index_files_for_table, rename_index_files_for_table};
 use super::names::strip_outer_parens;
 use crate::catalog::Catalog;
 use crate::catalog::types::Column;
@@ -31,6 +31,9 @@ pub(super) fn alter_table(
         )
     })?;
     let mut lines = Vec::new();
+    // The table's indexes, rebuilt or renamed below when the change touches
+    // their columns.
+    let indexes = crate::backend::system_table::table_indexes(catalog.engine(), db, &alter.table);
     let column_not_found = |column: &str| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -240,6 +243,57 @@ pub(super) fn alter_table(
             "[AlterTable] Warning: failed to save catalog after altering table '{}': {}",
             alter.table, e
         ));
+    }
+
+    match &alter.action {
+        // The rows moved: index them again.
+        AlterTableAction::AddColumn { .. } => {
+            lines.extend(rebuild_indexes(catalog, db, &alter.table, &indexes, None)?);
+        }
+        AlterTableAction::DropColumn { column } => {
+            lines.extend(rebuild_indexes(
+                catalog,
+                db,
+                &alter.table,
+                &indexes,
+                Some(column),
+            )?);
+        }
+        // The rows stay put; only the recorded key columns change.
+        AlterTableAction::RenameColumn { old_name, new_name } => {
+            for ix in &indexes {
+                let columns = ix.column_list();
+                if !columns.iter().any(|c| c.eq_ignore_ascii_case(old_name)) {
+                    continue;
+                }
+                let renamed: Vec<String> = columns
+                    .into_iter()
+                    .map(|c| {
+                        if c.eq_ignore_ascii_case(old_name) {
+                            new_name.clone()
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                crate::backend::system_table::delete_index_metadata(
+                    catalog.engine(),
+                    db,
+                    &alter.table,
+                    &ix.name,
+                )?;
+                crate::backend::system_table::insert_index_metadata(
+                    catalog.engine(),
+                    db,
+                    &alter.table,
+                    &ix.name,
+                    &renamed.join(","),
+                    ix.is_unique,
+                    ix.is_primary,
+                )?;
+            }
+        }
+        _ => {}
     }
 
     lines.push(format!(

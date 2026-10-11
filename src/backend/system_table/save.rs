@@ -392,10 +392,34 @@ pub(crate) fn populate_system_tables(
 pub(crate) struct SavedIndex {
     db: String,
     table: String,
-    name: String,
-    is_unique: bool,
-    is_primary: bool,
-    columns: String,
+    pub(crate) name: String,
+    pub(crate) is_unique: bool,
+    pub(crate) is_primary: bool,
+    /// Comma-separated key columns.
+    pub(crate) columns: String,
+}
+
+impl SavedIndex {
+    /// The key columns, in order.
+    pub(crate) fn column_list(&self) -> Vec<String> {
+        self.columns
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+}
+
+/// The `sys_indexes` rows of one table.
+pub(crate) fn table_indexes(
+    engine: &crate::backend::engine::Engine,
+    db: &str,
+    table: &str,
+) -> Vec<SavedIndex> {
+    load_saved_indexes(engine)
+        .into_iter()
+        .filter(|ix| ix.db.eq_ignore_ascii_case(db) && ix.table.eq_ignore_ascii_case(table))
+        .collect()
 }
 
 /// Read every `sys_indexes` row with its table's database and name.
