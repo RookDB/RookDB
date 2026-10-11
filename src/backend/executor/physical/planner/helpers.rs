@@ -107,28 +107,26 @@ pub fn infer_expr_type_from_ast(
 ) -> RookResult<crate::types::datatype::DataType> {
     match expr {
         rook_ast::ExprNode::Column(name) => {
-            let idx =
-                column_names
-                    .iter()
-                    .position(|c| c == name)
-                    .ok_or_else(|| RookError::NotFound {
-                        entity: "Column",
-                        name: name.clone(),
-                    })?;
+            let idx = column_names
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(name))
+                .ok_or_else(|| RookError::NotFound {
+                    entity: "Column",
+                    name: name.clone(),
+                })?;
             Ok(child_types[idx].clone())
         }
         rook_ast::ExprNode::Compound(parts) => {
             let name = parts
                 .last()
                 .ok_or_else(|| RookError::Internal("Empty compound identifier".to_string()))?;
-            let idx =
-                column_names
-                    .iter()
-                    .position(|c| c == name)
-                    .ok_or_else(|| RookError::NotFound {
-                        entity: "Column",
-                        name: name.clone(),
-                    })?;
+            let idx = column_names
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(name))
+                .ok_or_else(|| RookError::NotFound {
+                    entity: "Column",
+                    name: name.clone(),
+                })?;
             Ok(child_types[idx].clone())
         }
         rook_ast::ExprNode::Constant(cv) => match cv {

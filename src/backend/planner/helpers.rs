@@ -19,11 +19,26 @@ pub fn resolve_table_ref(
 ) -> Result<(String, Option<String>), PlanError> {
     if db.tables.contains_key(&tref.name) {
         Ok((tref.name.clone(), tref.alias.clone()))
+    } else if let Some(stored) = unique_case_insensitive(db.tables.keys(), &tref.name) {
+        // Identifiers are case-insensitive: `FROM T` finds a table created as
+        // `t`. The stored spelling is what names the heap file.
+        Ok((stored, tref.alias.clone()))
     } else {
         Err(PlanError {
             message: format!("Table '{}' not found", tref.name),
         })
     }
+}
+
+/// The one name in `names` equal to `wanted` ignoring ASCII case, if exactly
+/// one exists.
+pub fn unique_case_insensitive<'a>(
+    names: impl Iterator<Item = &'a String>,
+    wanted: &str,
+) -> Option<String> {
+    let mut matches = names.filter(|n| n.eq_ignore_ascii_case(wanted));
+    let first = matches.next()?;
+    matches.next().is_none().then(|| first.clone())
 }
 
 /// Resolve a FROM-clause item, expanding views recursively.
@@ -61,11 +76,13 @@ pub fn build_table_or_cte_scan(
         })?;
         Ok(LogicalPlan::CteScan(LogicalCteScan {
             name: cte_name.to_string(),
+            alias: tref.alias.clone(),
             schema: schema.clone(),
         }))
     } else if let Some((_inner, schema)) = cte_registry.get(&tref.name.to_ascii_lowercase()) {
         Ok(LogicalPlan::CteScan(LogicalCteScan {
             name: tref.name.clone(),
+            alias: tref.alias.clone(),
             schema: schema.clone(),
         }))
     } else if let Some(sys_name) = tref.name.strip_prefix("information_schema.") {
@@ -388,7 +405,7 @@ pub fn derive_qualified_schema(plan: &LogicalPlan) -> Vec<(Option<String>, Colum
             .schema
             .columns
             .iter()
-            .map(|c| (None, c.clone()))
+            .map(|c| (cs.alias.clone(), c.clone()))
             .collect(),
         LogicalPlan::Insert(inp) => derive_qualified_schema(&inp.child),
     }

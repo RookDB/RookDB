@@ -141,23 +141,24 @@ impl PhysicalPlanner {
                 for ob in &s.order_by {
                     match &ob.expr {
                         rook_ast::ExprNode::Column(name) => {
-                            let idx =
-                                column_names.iter().position(|n| n == name).ok_or_else(|| {
-                                    RookError::NotFound {
-                                        entity: "Column",
-                                        name: name.clone(),
-                                    }
+                            let idx = column_names
+                                .iter()
+                                .position(|n| n.eq_ignore_ascii_case(name))
+                                .ok_or_else(|| RookError::NotFound {
+                                    entity: "Column",
+                                    name: name.clone(),
                                 })?;
                             sort_keys.push((idx, !ob.ascending));
                         }
                         rook_ast::ExprNode::Compound(parts) => {
                             let name = parts.last().cloned().unwrap_or_default();
-                            let idx = column_names.iter().position(|n| n == &name).ok_or(
-                                RookError::NotFound {
+                            let idx = column_names
+                                .iter()
+                                .position(|n| n.eq_ignore_ascii_case(&name))
+                                .ok_or(RookError::NotFound {
                                     entity: "Column",
                                     name,
-                                },
-                            )?;
+                                })?;
                             sort_keys.push((idx, !ob.ascending));
                         }
                         rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Int(pos)) => {
@@ -421,7 +422,8 @@ impl PhysicalPlanner {
                 // The CTE name serves as the table qualifier so that table-qualified
                 // references (e.g. `my_cte.col`) and NATURAL JOIN disambiguation work
                 // correctly when a CTE is on the right side of a join.
-                let cte_table_name = cs.name.clone();
+                // An alias (`FROM c x`) replaces the name, as it does for tables.
+                let cte_table_name = cs.alias.clone().unwrap_or_else(|| cs.name.clone());
                 let schema: Vec<super::tuple::ColumnInfo> = cs
                     .schema
                     .columns

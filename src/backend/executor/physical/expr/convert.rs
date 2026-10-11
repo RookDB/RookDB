@@ -15,7 +15,7 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
             // Unqualified column reference — just store the column name.
             // Resolution happens at evaluation time against the tuple's schema.
             // Verify the column exists in the schema for early error detection.
-            if !column_names.iter().any(|c| c == name) {
+            if !column_names.iter().any(|c| c.eq_ignore_ascii_case(name)) {
                 return Err(RookError::NotFound {
                     entity: "Column",
                     name: name.clone(),
@@ -37,7 +37,7 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
                 None
             };
             // Verify the column exists in the schema for early error detection.
-            if !column_names.iter().any(|c| c == column) {
+            if !column_names.iter().any(|c| c.eq_ignore_ascii_case(column)) {
                 return Err(RookError::NotFound {
                     entity: "Column",
                     name: column.clone(),
