@@ -437,122 +437,85 @@ impl HeapManager {
         let required_bytes = (tuple_data.len() as u32) + ITEM_ID_SIZE;
         let min_category = Self::bytes_to_category(required_bytes);
 
-        // Track pages that failed insertion to avoid retrying them
-        let mut failed_pages = Vec::new();
-
-        // Three FSM-guided attempts, then a fresh page: stale FSM entries must
-        // never make an insert fail while the file can still grow.
-        for attempt in 0..4 {
-            // Get a page to try
-            let page_id = if attempt == 3 {
-                self.allocate_new_page()?
-            } else {
-                match self.fsm.search_page(min_category)? {
-                    Some(pid) => {
-                        // Harden against phantom FSM hits: a stale/garbage FSM
-                        // leaf can advertise a page beyond the heap's real page
-                        // count (observed on freshly created tables under stress).
-                        // Treat such hits as a miss so the normal retry logic
-                        // allocates a genuine new page instead of erroring out.
-                        if pid >= self.page_count() {
-                            log::warn!(
-                                "[HeapManager::insert_tuple] FSM returned phantom page {} (page_count={}); treating as miss",
-                                pid,
-                                self.page_count()
-                            );
-                            failed_pages.push(pid);
-                            if attempt < 2 {
-                                continue;
-                            } else {
-                                self.allocate_new_page()?
-                            }
-                        }
-                        // Check if this page failed before
-                        else if failed_pages.contains(&pid) {
-                            if attempt < 2 {
-                                continue;
-                            } else {
-                                self.allocate_new_page()?
-                            }
-                        } else {
-                            pid
-                        }
-                    }
-                    None => {
-                        if attempt < 2 {
-                            continue;
-                        } else {
-                            self.allocate_new_page()?
-                        }
-                    }
-                }
-            };
-
-            // Verify page_id is valid
-            if page_id >= self.page_count() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Invalid page_id: {} >= {}", page_id, self.page_count()),
-                ));
+        // One FSM search. A hit can be stale: a phantom page beyond the heap
+        // (seen on freshly created tables under stress) or a page that has
+        // less room than advertised (its entry is corrected). Either way the
+        // insert goes to a fresh page rather than searching again, so a stale
+        // FSM never makes it fail while the file can grow.
+        let candidate = match self.fsm.search_page(min_category)? {
+            Some(pid) if pid >= self.page_count() => {
+                log::warn!(
+                    "[HeapManager::insert_tuple] FSM returned phantom page {} (page_count={}); treating as miss",
+                    pid,
+                    self.page_count()
+                );
+                None
             }
-
-            // Read the target page via buffer pool (lock held for the whole
-            // page access; released before FSM/header updates below).
-            let slot_id = {
-                let mut pool = Self::lock_pool(&self.pool);
-                let frame_id = match pool.fetch_page(page_id) {
-                    Ok(fid) => fid,
-                    Err(e) => {
-                        log::error!("[ERROR] Failed to read page {}: {}", page_id, e);
-                        return Err(e);
-                    }
-                };
-
-                // Get current free space and verify
-                let current_free = {
-                    let page = pool.get_page(frame_id);
-                    page_free_space(page)?
-                };
-
-                if current_free < required_bytes {
-                    // Unpin without dirty (we didn't modify)
-                    pool.unpin(frame_id, false);
-                    failed_pages.push(page_id);
-                    self.fsm.fsm_set_avail(page_id, current_free, None)?;
-                    continue;
-                }
-
-                // Insert tuple into slotted page (via buffer pool)
-                let slot_id = pool.get_page_mut(frame_id).insert(tuple_data)?;
-
-                // Unpin page (dirty — modifications need to be written back)
-                pool.unpin(frame_id, true);
-                slot_id
-            };
-
-            let new_free = {
-                let mut pool = Self::lock_pool(&self.pool);
-                // Calculate new free space after insertion
-                // (re-fetch: frame stays cached, pin is transient)
-                let frame_id = pool.fetch_page(page_id)?;
-                let page = pool.get_page(frame_id);
-                let free = page_free_space(page)?;
-                pool.unpin(frame_id, false);
-                free
-            };
-
-            // Update FSM with new free space
-            self.fsm.fsm_set_avail(page_id, new_free, None)?;
-
-            // Increment tuple counter
-            self.update_header(|h| h.total_tuples += 1)?;
-
+            hit => hit,
+        };
+        if let Some(page_id) = candidate
+            && let Some(slot_id) = self.insert_into_page(page_id, tuple_data, required_bytes)?
+        {
             return Ok((page_id, slot_id));
         }
 
-        Err(io::Error::other(
-            "Could not find or allocate page with sufficient space",
-        ))
+        let page_id = self.allocate_new_page()?;
+        match self.insert_into_page(page_id, tuple_data, required_bytes)? {
+            Some(slot_id) => Ok((page_id, slot_id)),
+            None => Err(io::Error::other(
+                "Could not find or allocate page with sufficient space",
+            )),
+        }
+    }
+
+    /// Insert `tuple_data` into `page_id` if it has `required_bytes` free,
+    /// then update the FSM and the tuple count. `None` when it has not; the
+    /// FSM entry is corrected so later searches skip the page.
+    fn insert_into_page(
+        &mut self,
+        page_id: u32,
+        tuple_data: &[u8],
+        required_bytes: u32,
+    ) -> io::Result<Option<u32>> {
+        // Read the target page via buffer pool (lock held for the whole
+        // page access; released before FSM/header updates below).
+        let (slot_id, new_free) = {
+            let mut pool = Self::lock_pool(&self.pool);
+            let frame_id = match pool.fetch_page(page_id) {
+                Ok(fid) => fid,
+                Err(e) => {
+                    log::error!("[ERROR] Failed to read page {}: {}", page_id, e);
+                    return Err(e);
+                }
+            };
+
+            // Get current free space and verify
+            let current_free = page_free_space(pool.get_page(frame_id))?;
+            if current_free < required_bytes {
+                // Unpin without dirty (we didn't modify)
+                pool.unpin(frame_id, false);
+                drop(pool);
+                self.fsm.fsm_set_avail(page_id, current_free, None)?;
+                return Ok(None);
+            }
+
+            // Insert tuple into slotted page (via buffer pool)
+            let inserted = pool.get_page_mut(frame_id).insert(tuple_data);
+            let new_free = inserted
+                .is_ok()
+                .then(|| page_free_space(pool.get_page(frame_id)));
+            // Unpin page (dirty — modifications need to be written back)
+            pool.unpin(frame_id, true);
+            (inserted?, new_free.transpose()?.unwrap_or(0))
+        };
+
+        // Update FSM with new free space
+        self.fsm.fsm_set_avail(page_id, new_free, None)?;
+
+        // Increment tuple counter
+        self.update_header(|h| h.total_tuples += 1)?;
+
+        Ok(Some(slot_id))
     }
 
     /// Retrieve a tuple by page and slot coordinates.
