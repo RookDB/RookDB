@@ -48,14 +48,21 @@ impl std::error::Error for PlanError {}
 fn load_table_statistics(
     db_name: &str,
     catalog: &Catalog,
+    plan: &LogicalPlan,
 ) -> std::collections::HashMap<String, crate::statistics::TableStatistics> {
     let db = match catalog.databases.get(db_name) {
         Some(d) => d,
         None => return std::collections::HashMap::new(),
     };
 
+    // Statistics only steer join ordering, and only for the tables a join
+    // reads. Loading them for every table in the database made planning
+    // cost grow with the size of the schema.
+    let mut joined_tables = std::collections::HashSet::new();
+    collect_joined_tables(plan, false, &mut joined_tables);
+
     let mut stats = std::collections::HashMap::new();
-    for table_name in db.tables.keys() {
+    for table_name in db.tables.keys().filter(|t| joined_tables.contains(*t)) {
         // Process-cached (file-size validated): collection reads every heap
         // page and would otherwise dominate per-query planning latency.
         if let Ok(table_stats) = crate::backend::cache::table_statistics(db_name, table_name) {
@@ -64,6 +71,47 @@ fn load_table_statistics(
         }
     }
     stats
+}
+
+/// Collect the base tables scanned beneath any join in `plan`.
+fn collect_joined_tables(
+    plan: &LogicalPlan,
+    under_join: bool,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match plan {
+        LogicalPlan::TableScan(t) => {
+            if under_join && t.system_table_name.is_none() {
+                out.insert(t.table.clone());
+            }
+        }
+        LogicalPlan::Join(j) => {
+            collect_joined_tables(&j.left, true, out);
+            collect_joined_tables(&j.right, true, out);
+        }
+        LogicalPlan::Filter(f) => collect_joined_tables(&f.child, under_join, out),
+        LogicalPlan::Project(p) => collect_joined_tables(&p.child, under_join, out),
+        LogicalPlan::Aggregate(a) => collect_joined_tables(&a.child, under_join, out),
+        LogicalPlan::Sort(s) => collect_joined_tables(&s.child, under_join, out),
+        LogicalPlan::Limit(l) => collect_joined_tables(&l.child, under_join, out),
+        LogicalPlan::Distinct(d) => collect_joined_tables(&d.child, under_join, out),
+        LogicalPlan::Subquery(sq) => collect_joined_tables(&sq.subquery, under_join, out),
+        LogicalPlan::Insert(i) => collect_joined_tables(&i.child, under_join, out),
+        LogicalPlan::SetOp(s) => {
+            collect_joined_tables(&s.left, under_join, out);
+            collect_joined_tables(&s.right, under_join, out);
+        }
+        LogicalPlan::Cte(c) => {
+            collect_joined_tables(&c.inner, under_join, out);
+            collect_joined_tables(&c.outer, under_join, out);
+        }
+        LogicalPlan::RecursiveCte(rc) => {
+            collect_joined_tables(&rc.non_recursive, under_join, out);
+            collect_joined_tables(&rc.recursive, under_join, out);
+            collect_joined_tables(&rc.outer, under_join, out);
+        }
+        LogicalPlan::CteScan(_) => {}
+    }
 }
 
 /// Plan an INSERT statement into a LogicalPlan.
@@ -201,7 +249,7 @@ pub fn plan_query(
     match query {
         QueryPlan::Select(select) => {
             let plan = plan_select(select, catalog, db_name)?;
-            let table_stats = load_table_statistics(db_name, catalog);
+            let table_stats = load_table_statistics(db_name, catalog, &plan);
             let optimizer = if table_stats.is_empty() {
                 optimizer::Optimizer::new()
             } else {
@@ -237,7 +285,7 @@ pub fn plan_query(
                     child: Box::new(plan),
                 });
             }
-            let table_stats = load_table_statistics(db_name, catalog);
+            let table_stats = load_table_statistics(db_name, catalog, &plan);
             let optimizer = if table_stats.is_empty() {
                 optimizer::Optimizer::new()
             } else {

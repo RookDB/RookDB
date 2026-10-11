@@ -29,7 +29,11 @@ fn append_log(
         "status": status,
     });
 
-    writeln!(file, "{}", entry)?;
+    // One write per entry: formatting a JSON value straight into the file
+    // issues a syscall for every token.
+    let mut line = entry.to_string();
+    line.push('\n');
+    file.write_all(line.as_bytes())?;
     Ok(())
 }
 
