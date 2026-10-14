@@ -53,6 +53,11 @@ fn yes_no(yes: bool) -> &'static str {
 /// without a partner is NULL-extended (LEFT/FULL) right after its last
 /// pairing; inner rows without one (RIGHT/FULL) come out after the outer
 /// side ends. For CROSS joins (no predicate), all pairs match.
+///
+/// An inner side larger than the memory budget (the hash join's, see
+/// [`SPILL_BUDGET_BYTES`]) is written to a temp file instead, and the join
+/// becomes a block nested loop: outer rows are read in budget-sized blocks
+/// and the inner file is read once per block.
 pub struct NestedLoopJoinOperator {
     left: Box<dyn PhysicalOperator>,
     right: Box<dyn PhysicalOperator>,
@@ -79,6 +84,33 @@ pub struct NestedLoopJoinOperator {
     inner_pos: usize,
     /// Joined row the predicate is evaluated on; handed out when it matches.
     candidate: Tuple,
+    /// Bytes of inner rows held in memory before the inner side spills;
+    /// `None` uses the hash join's budget.
+    budget_override: Option<usize>,
+    /// The spilled inner side and the block being joined, past the budget.
+    spill: Option<NestedLoopSpill>,
+    did_spill: bool,
+}
+
+/// A nested-loop join whose inner side did not fit in memory: the inner rows
+/// are in a temp file, the outer rows are read in budget-sized blocks, and
+/// the file is read once per block (a block nested loop).
+struct NestedLoopSpill {
+    state: SpillState,
+    inner: SpillFile,
+    /// Which inner rows have found a match (RIGHT/FULL only).
+    inner_matched: Vec<bool>,
+    /// The current block of outer rows, and which of them have matched.
+    block: Vec<Tuple>,
+    block_matched: Vec<bool>,
+    /// Reads the inner file for the current block, or for the final pass
+    /// over unmatched inner rows.
+    reader: Option<SpillReader>,
+    inner_idx: usize,
+    /// Every outer block is done; only unmatched inner rows remain.
+    outer_done: bool,
+    /// Joined rows ready to hand out.
+    out: std::collections::VecDeque<Tuple>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +161,22 @@ impl NestedLoopJoinOperator {
             cur_outer_matched: false,
             inner_pos: 0,
             candidate: Tuple::empty(),
+            budget_override: None,
+            spill: None,
+            did_spill: false,
         }
+    }
+
+    /// Hold at most `bytes` of inner rows in memory for this join, instead
+    /// of the process-wide [`SPILL_BUDGET_BYTES`].
+    pub fn with_memory_budget(mut self, bytes: usize) -> Self {
+        self.budget_override = Some(bytes);
+        self
+    }
+
+    /// Whether this join spilled its inner side to disk (diagnostics/tests).
+    pub fn did_spill(&self) -> bool {
+        self.did_spill
     }
 
     fn preserve_outer(&self) -> bool {
@@ -140,12 +187,19 @@ impl NestedLoopJoinOperator {
         matches!(self.join_type, JoinType::Right | JoinType::Full)
     }
 
-    /// Read the inner side and pick the first phase.
+    /// Read the inner side and pick the first phase. An inner side larger
+    /// than the memory budget goes to a temp file.
     fn start(&mut self) -> RookResult<()> {
         self.inner_rows.clear();
+        let budget = self.budget_override.unwrap_or_else(spill_budget);
+        let mut bytes = 0usize;
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
         while self.right.next_batch(&mut child_batch)? > 0 {
+            bytes += child_batch.iter().map(estimate_tuple_bytes).sum::<usize>();
             self.inner_rows.append(&mut child_batch);
+            if bytes > budget {
+                return self.spill_inner();
+            }
         }
         self.inner_matched = if self.preserve_inner() {
             vec![false; self.inner_rows.len()]
@@ -162,6 +216,148 @@ impl NestedLoopJoinOperator {
             NestedLoopPhase::Outer
         };
         Ok(())
+    }
+
+    /// Write the inner rows read so far and the rest of the inner side to a
+    /// temp file, and join block by block from now on.
+    fn spill_inner(&mut self) -> RookResult<()> {
+        let mut state = SpillState::create()?;
+        let mut writer = state.writer()?;
+        for tuple in self.inner_rows.drain(..) {
+            writer.write(&tuple)?;
+        }
+        let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+        while self.right.next_batch(&mut child_batch)? > 0 {
+            for tuple in child_batch.drain(..) {
+                writer.write(&tuple)?;
+            }
+        }
+        let inner = writer.finish()?;
+        let inner_matched = if self.preserve_inner() {
+            vec![false; inner.rows]
+        } else {
+            Vec::new()
+        };
+        self.inner_rows = Vec::new();
+        self.did_spill = true;
+        self.spill = Some(NestedLoopSpill {
+            state,
+            inner,
+            inner_matched,
+            block: Vec::new(),
+            block_matched: Vec::new(),
+            reader: None,
+            inner_idx: 0,
+            outer_done: false,
+            out: std::collections::VecDeque::new(),
+        });
+        self.phase = NestedLoopPhase::Outer;
+        Ok(())
+    }
+
+    /// The next joined row once the inner side has spilled.
+    fn spilled_next(&mut self) -> RookResult<Option<Tuple>> {
+        let mut spill = self.spill.take().expect("spilled join");
+        let result = self.spilled_step(&mut spill);
+        self.spill = Some(spill);
+        result
+    }
+
+    fn spilled_step(&mut self, sp: &mut NestedLoopSpill) -> RookResult<Option<Tuple>> {
+        let preserve_outer = self.preserve_outer();
+        let preserve_inner = self.preserve_inner();
+        let budget = self.budget_override.unwrap_or_else(spill_budget);
+        let predicate = match self.join_type {
+            JoinType::Cross => None,
+            _ => self.predicate.as_ref(),
+        };
+        loop {
+            if let Some(tuple) = sp.out.pop_front() {
+                return Ok(Some(tuple));
+            }
+            if sp.outer_done {
+                // Last pass: inner rows no outer row matched, NULL-extended.
+                if !preserve_inner {
+                    return Ok(None);
+                }
+                if sp.reader.is_none() {
+                    sp.reader = Some(SpillReader::open(&sp.inner)?);
+                    sp.inner_idx = 0;
+                }
+                let reader = sp.reader.as_mut().expect("inner reader");
+                let Some(inner) = reader.next()? else {
+                    sp.inner_matched = Vec::new();
+                    return Ok(None);
+                };
+                let idx = sp.inner_idx;
+                sp.inner_idx += 1;
+                if !sp.inner_matched[idx] {
+                    let mut values = Vec::with_capacity(self.left_arity + inner.values.len());
+                    values.extend(std::iter::repeat_n(None, self.left_arity));
+                    values.extend(inner.values);
+                    return Ok(Some(Tuple::new(values)));
+                }
+                continue;
+            }
+            if sp.reader.is_none() {
+                // Read the next block of outer rows: at least one, then up
+                // to the budget.
+                sp.block.clear();
+                let mut bytes = 0usize;
+                while sp.block.is_empty() || bytes < budget {
+                    match self.left.next()? {
+                        Some(tuple) => {
+                            bytes += estimate_tuple_bytes(&tuple);
+                            sp.block.push(tuple);
+                        }
+                        None => break,
+                    }
+                }
+                if sp.block.is_empty() {
+                    sp.outer_done = true;
+                    continue;
+                }
+                sp.block_matched = vec![false; sp.block.len()];
+                sp.reader = Some(SpillReader::open(&sp.inner)?);
+                sp.inner_idx = 0;
+            }
+            let reader = sp.reader.as_mut().expect("inner reader");
+            match reader.next()? {
+                Some(inner) => {
+                    let idx = sp.inner_idx;
+                    sp.inner_idx += 1;
+                    for (o, outer) in sp.block.iter().enumerate() {
+                        outer.concatenate_into(&inner, &mut self.candidate);
+                        if let Some(pred) = predicate
+                            && evaluate_predicate(pred, &self.candidate, &self.output_schema)?
+                                != Some(true)
+                        {
+                            continue;
+                        }
+                        sp.block_matched[o] = true;
+                        if let Some(matched) = sp.inner_matched.get_mut(idx) {
+                            *matched = true;
+                        }
+                        sp.out
+                            .push_back(std::mem::replace(&mut self.candidate, Tuple::empty()));
+                    }
+                }
+                None => {
+                    // The block has met every inner row.
+                    sp.reader = None;
+                    let block = std::mem::take(&mut sp.block);
+                    if preserve_outer {
+                        for (outer, matched) in block.into_iter().zip(&sp.block_matched) {
+                            if !matched {
+                                let mut values = outer.values;
+                                values.extend(std::iter::repeat_n(None, self.right_arity));
+                                sp.out.push_back(Tuple::new(values));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Pair outer rows with inner rows until one output row is ready.
@@ -236,6 +432,16 @@ impl PhysicalOperator for NestedLoopJoinOperator {
         loop {
             match self.phase {
                 NestedLoopPhase::Start => self.start()?,
+                NestedLoopPhase::Outer if self.spill.is_some() => {
+                    let next = self.spilled_next()?;
+                    if next.is_none() {
+                        self.phase = NestedLoopPhase::Done;
+                        if let Some(spill) = self.spill.take() {
+                            spill.state.remove_dir();
+                        }
+                    }
+                    return Ok(next);
+                }
                 NestedLoopPhase::Outer => {
                     if let Some(tuple) = self.outer_step()? {
                         return Ok(Some(tuple));
@@ -266,6 +472,9 @@ impl PhysicalOperator for NestedLoopJoinOperator {
         self.cur_outer = None;
         self.inner_pos = 0;
         self.phase = NestedLoopPhase::Start;
+        if let Some(spill) = self.spill.take() {
+            spill.state.remove_dir();
+        }
         Ok(())
     }
 
@@ -285,11 +494,21 @@ impl PhysicalOperator for NestedLoopJoinOperator {
     }
 
     fn explain(&self) -> PlanNode {
-        PlanNode::new(self.name())
+        let mut node = PlanNode::new(self.name())
             .with("type", self.join_type.label())
-            .with("predicate", yes_no(self.predicate.is_some()))
-            .child(self.left.explain())
-            .child(self.right.explain())
+            .with("predicate", yes_no(self.predicate.is_some()));
+        if self.did_spill {
+            node = node.with("spilled", "yes");
+        }
+        node.child(self.left.explain()).child(self.right.explain())
+    }
+}
+
+impl Drop for NestedLoopJoinOperator {
+    fn drop(&mut self) {
+        if let Some(spill) = self.spill.take() {
+            spill.state.remove_dir();
+        }
     }
 }
 
@@ -1952,6 +2171,115 @@ mod spill_tests {
             .map(|k| (k, k))
             .collect();
         assert_eq!(out, expected);
+    }
+
+    /// `left JOIN right ON lk <op> rk` as a nested-loop join over inputs
+    /// `(lk, lv)` and `(rk, rv)`, with an optional inner-side budget.
+    fn nested_loop(
+        left: Vec<Row>,
+        right: Vec<Row>,
+        op: Option<super::super::super::expr::ComparisonOp>,
+        join_type: JoinType,
+        budget: Option<usize>,
+    ) -> NestedLoopJoinOperator {
+        let predicate = op.map(|op| {
+            Predicate::Compare(
+                Expr::Column {
+                    table: None,
+                    column: "lk".to_string(),
+                },
+                op,
+                Expr::Column {
+                    table: None,
+                    column: "rk".to_string(),
+                },
+            )
+        });
+        let nl = NestedLoopJoinOperator::new(
+            Box::new(MockChild::new(&["lk", "lv"], left)),
+            Box::new(MockChild::new(&["rk", "rv"], right)),
+            predicate,
+            join_type,
+        );
+        match budget {
+            Some(bytes) => nl.with_memory_budget(bytes),
+            None => nl,
+        }
+    }
+
+    #[test]
+    fn nested_loop_agrees_across_memory_budgets() {
+        use super::super::super::expr::ComparisonOp;
+        let left = keyed_rows(230, 0, 40, 7, 1000);
+        let right = keyed_rows(190, 25, 45, 5, 5000);
+        for join_type in [
+            JoinType::Inner,
+            JoinType::Left,
+            JoinType::Right,
+            JoinType::Full,
+        ] {
+            let want = expected(&left, &right, join_type);
+            // None: in memory. 4 KiB: a few outer blocks. 1 byte: one outer
+            // row per block.
+            for budget in [None, Some(4096), Some(1)] {
+                let mut nl = nested_loop(
+                    left.clone(),
+                    right.clone(),
+                    Some(ComparisonOp::Equals),
+                    join_type,
+                    budget,
+                );
+                assert_eq!(
+                    drain(&mut nl),
+                    want,
+                    "{:?} join, budget {:?}",
+                    join_type,
+                    budget
+                );
+                assert_eq!(nl.did_spill(), budget.is_some());
+                nl.reset().unwrap();
+                assert_eq!(drain(&mut nl), want, "{:?} join after reset", join_type);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_loop_spill_handles_inequality_and_cross_joins() {
+        use super::super::super::expr::ComparisonOp;
+        let left = keyed_rows(60, 0, 30, 9, 100);
+        let right = keyed_rows(50, 10, 25, 6, 500);
+        for (op, join_type) in [
+            (Some(ComparisonOp::LessThan), JoinType::Full),
+            (Some(ComparisonOp::GreaterOrEqual), JoinType::Left),
+            (None, JoinType::Cross),
+        ] {
+            let in_memory = drain(&mut nested_loop(
+                left.clone(),
+                right.clone(),
+                op,
+                join_type,
+                None,
+            ));
+            let mut spilled = nested_loop(left.clone(), right.clone(), op, join_type, Some(700));
+            assert_eq!(drain(&mut spilled), in_memory, "{:?}", join_type);
+            assert!(spilled.did_spill());
+        }
+    }
+
+    #[test]
+    fn nested_loop_spill_files_are_removed() {
+        let mut nl = nested_loop(
+            keyed_rows(40, 0, 10, 100, 1),
+            keyed_rows(40, 0, 10, 100, 2),
+            None,
+            JoinType::Cross,
+            Some(1),
+        );
+        assert!(nl.next().unwrap().is_some());
+        let dir = nl.spill.as_ref().expect("spilling").state.dir.clone();
+        assert!(dir.exists());
+        drop(nl);
+        assert!(!dir.exists(), "spill directory left behind");
     }
 
     #[test]
