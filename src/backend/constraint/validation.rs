@@ -147,11 +147,11 @@ pub(crate) fn check_unique_insert_meta(
         let Some(Some(key_value)) = values.get(col_pos) else {
             continue;
         };
-        let index = crate::backend::executor::create_index::ensure_column_index(
+        let (index, _) = crate::backend::executor::create_index::ensure_columns_index(
             catalog,
             db_name,
             table_name,
-            &col.name,
+            std::slice::from_ref(&col.name),
             &format!("uq_{}_{}", table_name, col.name),
             true,
         )
@@ -211,65 +211,65 @@ pub(crate) fn check_foreign_key_insert_meta(
     values: &[Option<DataValue>],
     meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
-    let foreign_keys: Vec<(String, String, String)> = match meta {
-        Some(m) => m.foreign_keys.clone(),
-        None => Vec::new(),
+    let Some(meta) = meta else {
+        return Ok(());
     };
 
-    if foreign_keys.is_empty() {
-        return Ok(());
-    }
-
-    for fk in &foreign_keys {
-        let child_col = &fk.0;
-        let parent_table = &fk.1;
-        let parent_col = &fk.2;
-
-        let col_pos = columns
-            .iter()
-            .position(|c| c.name.eq_ignore_ascii_case(child_col))
-            .ok_or_else(|| format!("FK column '{}' not found in table schema", child_col))?;
-
-        // NULL values in FK columns are allowed (SQL standard)
-        let Some(Some(child_value)) = values.get(col_pos) else {
+    for (child_cols, parent_table, parent_cols) in &meta.foreign_keys {
+        // The child's values for the FK columns.
+        let mut values_of_key = Vec::with_capacity(child_cols.len());
+        for child_col in child_cols {
+            let col_pos = columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(child_col))
+                .ok_or_else(|| format!("FK column '{}' not found in table schema", child_col))?;
+            values_of_key.push(values.get(col_pos).and_then(|v| v.as_ref()));
+        }
+        // MATCH SIMPLE: a row with a NULL in any FK column is not checked.
+        let Some(child_values) = values_of_key.into_iter().collect::<Option<Vec<_>>>() else {
             continue;
         };
 
-        let parent_col_type = catalog
+        let parent_columns = catalog
             .databases
             .get(db_name)
             .and_then(|db| db.tables.get(parent_table))
-            .and_then(|t| {
-                t.columns
-                    .iter()
-                    .find(|c| c.name.eq_ignore_ascii_case(parent_col))
-            })
-            .map(|c| c.data_type.clone())
-            .unwrap_or(DataType::Varchar(255));
+            .map(|t| t.columns.as_slice())
+            .unwrap_or_default();
 
         // A value that cannot be a parent key cannot be found among them.
-        let found = match crate::types::functions::assign_cast(child_value, &parent_col_type) {
-            Ok(key) => value_lookup::value_exists_in_table(
+        let mut key = Vec::with_capacity(child_values.len());
+        for (value, parent_col) in child_values.iter().zip(parent_cols) {
+            let parent_col_type = parent_columns
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(parent_col))
+                .map(|c| c.data_type.clone())
+                .unwrap_or(DataType::Varchar(255));
+            match crate::types::functions::assign_cast(value, &parent_col_type) {
+                Ok(v) => key.push(v),
+                Err(_) => break,
+            }
+        }
+        let found = key.len() == child_values.len()
+            && value_lookup::key_exists_in_table(
                 catalog,
                 db_name,
                 parent_table,
-                parent_col,
-                &parent_col_type,
+                parent_cols,
                 &key,
-            )?,
-            Err(_) => false,
-        };
+            )?;
         if !found {
+            let shown = |names: &[String]| names.join(", ");
             return Err(RookError::constraint(
                 ConstraintKind::ForeignKey,
                 table_name,
-                Some(child_col),
+                Some(&shown(child_cols)),
                 format!(
                     "FOREIGN KEY constraint violated: value '{}' in column '{}' not found in parent table '{}' (column '{}')",
-                    super::fk_actions::key_text(child_value),
-                    child_col,
+                    super::fk_actions::tuple_text(child_values.iter().copied()),
+                    shown(child_cols),
                     parent_table,
-                    parent_col
+                    shown(parent_cols)
                 ),
             ));
         }

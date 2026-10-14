@@ -134,6 +134,26 @@ pub(super) fn alter_table(
         }
         AlterTableAction::DropColumn { column } => {
             let pos = find(&updated_table.columns, column)?;
+            // A key that another table references cannot lose a column.
+            if let Some(fk) =
+                crate::backend::cache::referencing_fks(catalog.engine(), db, &alter.table)
+                    .iter()
+                    .find(|fk| {
+                        !fk.child_table.eq_ignore_ascii_case(&alter.table)
+                            && fk
+                                .parent_cols
+                                .iter()
+                                .any(|c| c.eq_ignore_ascii_case(column))
+                    })
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Cannot drop column '{}' of table '{}': it is referenced by a foreign key on '{}'",
+                        column, alter.table, fk.child_table
+                    ),
+                ));
+            }
             let old_schema = schema(&updated_table.columns);
             updated_table.columns.remove(pos);
             rewrite_rows(
@@ -241,6 +261,19 @@ pub(super) fn alter_table(
                     old_name, new_name, e
                 ));
             }
+            // Foreign keys of other tables name this table's column too.
+            if let Err(e) = crate::backend::system_table::rename_referenced_column_in_constraints(
+                catalog.engine(),
+                db,
+                &alter.table,
+                old_name,
+                new_name,
+            ) {
+                lines.push(format!(
+                    "[AlterTable] Warning: failed to update referencing foreign keys for column rename '{}' → '{}': {}",
+                    old_name, new_name, e
+                ));
+            }
         }
         _ => {}
     }
@@ -269,7 +302,9 @@ pub(super) fn alter_table(
                 Some(column),
             )?);
         }
-        // The rows stay put; only the recorded key columns change.
+        // The rows stay put; only the recorded key columns change. An index
+        // named after its columns by CREATE TABLE (`pk_t_a`, `fk_t_a`,
+        // `fkp_t_a`, ...) takes the new column name too.
         AlterTableAction::RenameColumn { old_name, new_name } => {
             for ix in &indexes {
                 let columns = ix.column_list();
@@ -277,31 +312,50 @@ pub(super) fn alter_table(
                     continue;
                 }
                 let renamed: Vec<String> = columns
-                    .into_iter()
+                    .iter()
                     .map(|c| {
                         if c.eq_ignore_ascii_case(old_name) {
                             new_name.clone()
                         } else {
-                            c
+                            c.clone()
                         }
                     })
                     .collect();
+                let new_index_name = ["pk", "uq", "fk", "fkp"]
+                    .iter()
+                    .find(|prefix| {
+                        ix.name == format!("{}_{}_{}", prefix, alter.table, columns.join("_"))
+                    })
+                    .map(|prefix| format!("{}_{}_{}", prefix, alter.table, renamed.join("_")))
+                    .filter(|name| !indexes.iter().any(|other| other.name == *name))
+                    .unwrap_or_else(|| ix.name.clone());
                 crate::backend::system_table::delete_index_metadata(
                     catalog.engine(),
                     db,
                     &alter.table,
                     &ix.name,
                 )?;
+                if new_index_name != ix.name {
+                    rename_index_file(
+                        catalog.engine(),
+                        db,
+                        &alter.table,
+                        &ix.name,
+                        &new_index_name,
+                    );
+                }
                 crate::backend::system_table::insert_index_metadata(
                     catalog.engine(),
                     db,
                     &alter.table,
-                    &ix.name,
+                    &new_index_name,
                     &renamed.join(","),
                     ix.is_unique,
                     ix.is_primary,
                 )?;
             }
+            // Cached constraint metadata still names the old column.
+            catalog.engine().invalidate_metadata();
         }
         _ => {}
     }
@@ -331,7 +385,7 @@ fn rename_table(
     let referencing: Vec<String> =
         crate::backend::cache::referencing_fks(catalog.engine(), db, old_name)
             .iter()
-            .map(|fk| fk.0.clone())
+            .map(|fk| fk.child_table.clone())
             .collect();
     let old_dat = catalog.engine().paths().heap(db, old_name);
     let new_dat = catalog.engine().paths().heap(db, new_name);
@@ -385,6 +439,23 @@ fn rename_table(
     catalog.engine().invalidate_metadata();
     lines.push(format!("Renamed table '{}' to '{}'.", old_name, new_name));
     Ok(StatementResult::lines(lines))
+}
+
+/// Move the files of the index `old` of `table` to the name `new`.
+fn rename_index_file(
+    engine: &crate::backend::engine::Engine,
+    db: &str,
+    table: &str,
+    old: &str,
+    new: &str,
+) {
+    let old_path = engine.paths().index(db, table, old);
+    crate::backend::cache::evict_btree(engine, &old_path);
+    let _ = std::fs::rename(&old_path, engine.paths().index(db, table, new));
+    let _ = std::fs::rename(
+        engine.paths().index_meta(db, table, old),
+        engine.paths().index_meta(db, table, new),
+    );
 }
 
 fn schema(columns: &[Column]) -> Vec<DataType> {

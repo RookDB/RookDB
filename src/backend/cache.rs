@@ -359,8 +359,8 @@ pub struct TableMeta {
     pub table_id: i32,
     /// Unique indexes as `(index_name, Vec<column_name>)`.
     pub unique_indexes: Vec<(String, Vec<String>)>,
-    /// Foreign keys as `(child_col, parent_table, parent_col)`.
-    pub foreign_keys: Vec<(String, String, String)>,
+    /// Foreign keys as `(child_cols, parent_table, parent_cols)`.
+    pub foreign_keys: Vec<(Vec<String>, String, Vec<String>)>,
     /// CHECK constraint expressions.
     pub check_exprs: Vec<String>,
     /// Precompiled CHECK constraints as `(expression_sql, AST_node)`.
@@ -375,7 +375,9 @@ fn load_meta(
     db_name: &str,
     table_name: &str,
 ) -> Option<Arc<TableMeta>> {
-    use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_INDEXES_SCHEMA};
+    use crate::backend::system_table::{
+        SYS_CONSTRAINTS_SCHEMA, SYS_INDEXES_SCHEMA, split_column_list,
+    };
 
     // One resolve pass (scans sys_databases + sys_tables).
     let (table_id, db_id) =
@@ -439,7 +441,11 @@ fn load_meta(
             let parent_table = text_at(&row, 4);
             let parent_col = text_at(&row, 5);
             if ctype.contains("FOREIGN KEY") {
-                foreign_keys.push((child_col, parent_table, parent_col));
+                foreign_keys.push((
+                    split_column_list(&child_col),
+                    parent_table,
+                    split_column_list(&parent_col),
+                ));
             } else if ctype == "CHECK" {
                 let expr = strip_check_wrapper(&child_col);
                 if !expr.is_empty() {
@@ -555,9 +561,8 @@ pub fn table_statistics(
 // ── referencing-FK cache ─────────────────────────────────────────────────────
 
 /// Foreign keys where OUR table is the parent, as returned by
-/// `load_referencing_foreign_keys`:
-/// `(child_table, child_column, parent_column, parent_table_name, action_type)`.
-pub type RefFks = Vec<(String, String, String, String, String)>;
+/// `load_referencing_foreign_keys`.
+pub type RefFks = Vec<crate::backend::constraint::loaders::ReferencingFk>;
 
 /// Memoised [`crate::backend::constraint::loaders::load_referencing_foreign_keys`].
 ///

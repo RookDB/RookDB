@@ -87,6 +87,21 @@ pub const SYS_VIEWS_SCHEMA: &[DataType] = &[
 ];
 
 // ── String helpers ────────────────────────────────────────────────────────────
+/// The columns of a stored column list (`columns` / `ref_columns` of
+/// `sys_constraints`). A lone column is just its name, so rows written for
+/// single-column keys read back unchanged.
+pub fn split_column_list(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// The stored form of a column list: names joined by `", "`.
+pub fn join_column_list(columns: &[String]) -> String {
+    columns.join(", ")
+}
+
 /// Convert a `DataValue` to its string representation for storage in system
 /// table VARCHAR columns.
 fn value_to_string(dv: &crate::types::DataValue) -> String {

@@ -74,30 +74,31 @@ pub fn validate_row_delete(
         crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
 
     for fk in foreign_keys.iter() {
-        // fk: (child_table, child_col, parent_col, parent_table, action_type)
-        let child_table = &fk.0;
-        let child_col = &fk.1;
-        let Some(parent_value) = column_value(columns, row, &fk.2) else {
+        let Some(parent_key) = row_key(columns, row, &fk.parent_cols) else {
             continue;
         };
         let mut visited = std::collections::HashSet::new();
-        visited.insert((child_table.clone(), fk_actions::key_text(parent_value)));
+        visited.insert(fk_actions::visit_key(
+            &fk.child_table,
+            &fk.child_cols,
+            &parent_key,
+        ));
 
-        match delete_action(&fk.4) {
+        match delete_action(&fk.action) {
             DeleteAction::Cascade => fk_actions::cascade_delete_child_rows(
                 catalog,
                 db_name,
-                child_table,
-                child_col,
-                parent_value,
+                &fk.child_table,
+                &fk.child_cols,
+                &parent_key,
                 &mut visited,
             )?,
             DeleteAction::SetNull => fk_actions::set_null_child_rows(
                 catalog,
                 db_name,
-                child_table,
-                child_col,
-                parent_value,
+                &fk.child_table,
+                &fk.child_cols,
+                &parent_key,
                 &mut visited,
             )?,
             DeleteAction::Restrict => {}
@@ -138,17 +139,39 @@ fn table_columns<'a>(
         .map(|t| t.columns.as_slice())
 }
 
-/// The value of column `name` in `row`, or `None` when it is NULL (a NULL key
-/// is referenced by nothing) or the column does not exist.
-fn column_value<'a>(
+/// The values of the columns `names` in `row`, or `None` when one is NULL
+/// (a key with a NULL part is referenced by nothing) or does not exist.
+fn row_key(
     columns: &[Column],
-    row: &'a [Option<DataValue>],
-    name: &str,
-) -> Option<&'a DataValue> {
-    let pos = columns
+    row: &[Option<DataValue>],
+    names: &[String],
+) -> Option<Vec<DataValue>> {
+    names
         .iter()
-        .position(|c| c.name.eq_ignore_ascii_case(name))?;
-    row.get(pos)?.as_ref()
+        .map(|name| {
+            let pos = columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(name))?;
+            row.get(pos)?.clone()
+        })
+        .collect()
+}
+
+/// The values of the columns `names` in `row`, NULLs included.
+fn row_values(
+    columns: &[Column],
+    row: &[Option<DataValue>],
+    names: &[String],
+) -> Vec<Option<DataValue>> {
+    names
+        .iter()
+        .map(|name| {
+            columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(name))
+                .and_then(|pos| row.get(pos).cloned().flatten())
+        })
+        .collect()
 }
 
 fn same_value(a: Option<&DataValue>, b: Option<&DataValue>) -> bool {
@@ -158,6 +181,15 @@ fn same_value(a: Option<&DataValue>, b: Option<&DataValue>) -> bool {
         (Some(x), Some(y)) => matches!(x.compare(y), Ok(std::cmp::Ordering::Equal)),
         _ => false,
     }
+}
+
+/// Whether `old` and `new` hold the same key, NULLs equal to each other.
+fn same_key(old: &[Option<DataValue>], new: &[Option<DataValue>]) -> bool {
+    old.len() == new.len()
+        && old
+            .iter()
+            .zip(new)
+            .all(|(a, b)| same_value(a.as_ref(), b.as_ref()))
 }
 
 /// Check, without changing anything, whether a RESTRICT (default) foreign key
@@ -181,7 +213,7 @@ fn check_delete_restrictions_from(
     db_name: &str,
     table_name: &str,
     row: &[Option<DataValue>],
-    visited: &mut std::collections::HashSet<(String, String, String)>,
+    visited: &mut std::collections::HashSet<fk_actions::Visit>,
 ) -> Result<(), RookError> {
     let Some(columns) = table_columns(catalog, db_name, table_name) else {
         return Ok(());
@@ -190,59 +222,56 @@ fn check_delete_restrictions_from(
         crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
 
     for fk in foreign_keys.iter() {
-        let child_table = &fk.0;
-        let child_col = &fk.1;
-        let parent_col = &fk.2;
-        let Some(parent_value) = column_value(columns, row, parent_col) else {
+        let Some(parent_key) = row_key(columns, row, &fk.parent_cols) else {
             continue;
         };
 
-        match delete_action(&fk.4) {
+        match delete_action(&fk.action) {
             DeleteAction::Restrict => {
                 if value_lookup::child_has_referencing_row(
                     catalog,
                     db_name,
-                    child_table,
-                    child_col,
-                    parent_value,
+                    &fk.child_table,
+                    &fk.child_cols,
+                    &parent_key,
                 )? {
                     return Err(RookError::constraint(
                         ConstraintKind::ForeignKey,
                         table_name,
-                        Some(parent_col),
+                        Some(&fk.parent_cols.join(", ")),
                         format!(
                             "FOREIGN KEY constraint violated: cannot delete from '{}' because value '{}' is referenced by '{}' (column '{}' referencing '{}.{}')",
                             table_name,
-                            fk_actions::key_text(parent_value),
-                            child_table,
-                            child_col,
+                            fk_actions::tuple_text(&parent_key),
+                            fk.child_table,
+                            fk.child_cols.join(", "),
                             table_name,
-                            parent_col
+                            fk.parent_cols.join(", ")
                         ),
                     ));
                 }
             }
             DeleteAction::Cascade => {
-                // Each (table, column, value) is expanded once; this also
+                // Each (table, columns, key) is expanded once; this also
                 // ends the walk on a reference cycle.
-                if !visited.insert((
-                    child_table.clone(),
-                    child_col.clone(),
-                    fk_actions::key_text(parent_value),
+                if !visited.insert(fk_actions::visit_key(
+                    &fk.child_table,
+                    &fk.child_cols,
+                    &parent_key,
                 )) {
                     continue;
                 }
                 for child_row in value_lookup::child_rows_referencing(
                     catalog,
                     db_name,
-                    child_table,
-                    child_col,
-                    parent_value,
+                    &fk.child_table,
+                    &fk.child_cols,
+                    &parent_key,
                 )? {
                     check_delete_restrictions_from(
                         catalog,
                         db_name,
-                        child_table,
+                        &fk.child_table,
                         &child_row,
                         visited,
                     )?;
@@ -277,52 +306,44 @@ pub fn propagate_update_to_children(
         crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
 
     for fk in foreign_keys.iter() {
-        let child_table = &fk.0;
-        let child_col = &fk.1;
-        let parent_col = &fk.2;
-        let action_upper = fk.4.to_uppercase();
+        let action_upper = fk.action.to_uppercase();
 
-        let Some(old_val) = column_value(columns, old_row, parent_col) else {
+        let Some(old_key) = row_key(columns, old_row, &fk.parent_cols) else {
             continue;
         };
-        let new_val = column_value(columns, new_row, parent_col);
-        if same_value(Some(old_val), new_val) {
+        let new_values = row_values(columns, new_row, &fk.parent_cols);
+        let old_values: Vec<Option<DataValue>> = old_key.iter().cloned().map(Some).collect();
+        if same_key(&old_values, &new_values) {
             continue;
         }
 
         let mut visited = std::collections::HashSet::new();
-        visited.insert((child_table.clone(), fk_actions::key_text(old_val)));
+        visited.insert(fk_actions::visit_key(
+            &fk.child_table,
+            &fk.child_cols,
+            &old_key,
+        ));
         if action_upper.contains("ON UPDATE CASCADE") {
-            if let Some(new_val) = new_val {
-                fk_actions::update_child_rows_fk(
-                    catalog,
-                    db_name,
-                    child_table,
-                    child_col,
-                    old_val,
-                    new_val,
-                    &mut visited,
-                )?;
-            }
+            fk_actions::update_child_rows_fk(
+                catalog,
+                db_name,
+                &fk.child_table,
+                &fk.child_cols,
+                &old_key,
+                &new_values,
+                &mut visited,
+            )?;
         } else if action_upper.contains("ON UPDATE SET NULL") {
             fk_actions::set_null_child_rows(
                 catalog,
                 db_name,
-                child_table,
-                child_col,
-                old_val,
+                &fk.child_table,
+                &fk.child_cols,
+                &old_key,
                 &mut visited,
             )?;
         } else {
-            restrict_update(
-                catalog,
-                table_name,
-                parent_col,
-                child_table,
-                child_col,
-                db_name,
-                old_val,
-            )?;
+            restrict_update(catalog, table_name, fk, db_name, &old_key)?;
         }
     }
 
@@ -331,7 +352,7 @@ pub fn propagate_update_to_children(
 
 /// Validate referencing FOREIGN KEY constraints with RESTRICT action before updating a row.
 ///
-/// Returns Err if any child table references the old value of a changed column.
+/// Returns Err if any child table references the old value of a changed key.
 pub fn validate_update_restrict(
     catalog: &Catalog,
     db_name: &str,
@@ -344,58 +365,51 @@ pub fn validate_update_restrict(
         crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
 
     for fk in foreign_keys.iter() {
-        let child_table = &fk.0;
-        let child_col = &fk.1;
-        let parent_col = &fk.2;
-
-        let action_upper = fk.4.to_uppercase();
+        let action_upper = fk.action.to_uppercase();
         if action_upper.contains("ON UPDATE CASCADE") || action_upper.contains("ON UPDATE SET NULL")
         {
             continue;
         }
 
-        let Some(old_val) = column_value(columns, old_row, parent_col) else {
+        let Some(old_key) = row_key(columns, old_row, &fk.parent_cols) else {
             continue;
         };
-        if same_value(Some(old_val), column_value(columns, new_row, parent_col)) {
+        let old_values: Vec<Option<DataValue>> = old_key.iter().cloned().map(Some).collect();
+        if same_key(&old_values, &row_values(columns, new_row, &fk.parent_cols)) {
             continue;
         }
-        restrict_update(
-            catalog,
-            table_name,
-            parent_col,
-            child_table,
-            child_col,
-            db_name,
-            old_val,
-        )?;
+        restrict_update(catalog, table_name, fk, db_name, &old_key)?;
     }
 
     Ok(())
 }
 
-/// Fail when a child row still references `old_val`, the key being changed.
+/// Fail when a child row still references `old_key`, the key being changed.
 fn restrict_update(
     catalog: &Catalog,
     table_name: &str,
-    parent_col: &str,
-    child_table: &str,
-    child_col: &str,
+    fk: &loaders::ReferencingFk,
     db_name: &str,
-    old_val: &DataValue,
+    old_key: &[DataValue],
 ) -> Result<(), RookError> {
-    if value_lookup::child_has_referencing_row(catalog, db_name, child_table, child_col, old_val)? {
+    if value_lookup::child_has_referencing_row(
+        catalog,
+        db_name,
+        &fk.child_table,
+        &fk.child_cols,
+        old_key,
+    )? {
         return Err(RookError::constraint(
             ConstraintKind::ForeignKey,
             table_name,
-            Some(parent_col),
+            Some(&fk.parent_cols.join(", ")),
             format!(
                 "FOREIGN KEY constraint violated: cannot update '{}' column '{}' because value '{}' is referenced by '{}' (column '{}')",
                 table_name,
-                parent_col,
-                fk_actions::key_text(old_val),
-                child_table,
-                child_col
+                fk.parent_cols.join(", "),
+                fk_actions::tuple_text(old_key),
+                fk.child_table,
+                fk.child_cols.join(", ")
             ),
         ));
     }

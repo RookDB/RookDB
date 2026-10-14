@@ -5,11 +5,21 @@
 //! `sys_columns`, `sys_tables`).
 
 use crate::backend::heap::HeapManager;
+use crate::backend::system_table::split_column_list;
 use crate::types::{DataType, DataValue};
 
-/// A referencing foreign key record:
-/// `(child_table_name, child_column, parent_column, parent_table_name, action_type)`.
-pub type ReferencingFk = (String, String, String, String, String);
+/// A foreign key seen from the table it references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferencingFk {
+    pub child_table: String,
+    /// The child's FK columns, in declaration order.
+    pub child_cols: Vec<String>,
+    /// The parent columns they reference, position for position.
+    pub parent_cols: Vec<String>,
+    pub parent_table: String,
+    /// The constraint type as stored, e.g. `FOREIGN KEY ON DELETE CASCADE`.
+    pub action: String,
+}
 
 /// Load FOREIGN KEY constraints where `our_table` is the **parent** (referenced table).
 ///
@@ -17,10 +27,9 @@ pub type ReferencingFk = (String, String, String, String, String);
 /// `ref_table == our_table_name`.  Since `ref_table` is stored as a name string
 /// (not an ID), we filter by name.
 ///
-/// Returns a list of `(child_table_name, child_column, parent_column, parent_table_name, action_type)`.
 pub fn load_referencing_foreign_keys(
     engine: &crate::backend::engine::Engine,
-    db_name: &str,
+    _db_name: &str,
     our_table_name: &str,
 ) -> Result<Vec<ReferencingFk>, String> {
     use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_TABLES_SCHEMA};
@@ -29,13 +38,6 @@ pub fn load_referencing_foreign_keys(
     if !constr_path.exists() {
         return Ok(Vec::new());
     }
-
-    // Resolve db_name → db_id
-    let (_, _db_id) =
-        match crate::backend::system_table::resolve_table_id(engine, db_name, our_table_name) {
-            Ok(ids) => ids,
-            Err(_) => return Ok(Vec::new()),
-        };
 
     // Load sys_tables for the db to create a table_id → table_name mapping
     let tbl_path = engine.paths().system_table("tables");
@@ -109,19 +111,25 @@ pub fn load_referencing_foreign_keys(
             .cloned()
             .unwrap_or_else(|| format!("<table_id={}>", child_table_id));
 
-        let child_col = match &decoded[3] {
-            Some(DataValue::Varchar(s)) => s.clone(),
-            Some(DataValue::Char(s)) => s.clone(),
+        let child_cols = match &decoded[3] {
+            Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => split_column_list(s),
             _ => continue,
         };
-        let parent_col = match &decoded[5] {
-            Some(DataValue::Varchar(s)) => s.clone(),
-            Some(DataValue::Char(s)) => s.clone(),
+        let parent_cols = match &decoded[5] {
+            Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => split_column_list(s),
             _ => continue,
         };
+        if child_cols.is_empty() || child_cols.len() != parent_cols.len() {
+            continue;
+        }
 
-        let action_type = constr_type.to_string();
-        referencing_fks.push((child_table, child_col, parent_col, ref_table, action_type));
+        referencing_fks.push(ReferencingFk {
+            child_table,
+            child_cols,
+            parent_cols,
+            parent_table: ref_table,
+            action: constr_type.to_string(),
+        });
     }
 
     Ok(referencing_fks)

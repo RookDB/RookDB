@@ -484,11 +484,7 @@ pub(crate) struct SavedIndex {
 impl SavedIndex {
     /// The key columns, in order.
     pub(crate) fn column_list(&self) -> Vec<String> {
-        self.columns
-            .split(',')
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty())
-            .collect()
+        super::split_column_list(&self.columns)
     }
 }
 

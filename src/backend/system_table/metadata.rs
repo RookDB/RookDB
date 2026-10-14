@@ -455,9 +455,24 @@ pub fn delete_column_constraints(
             let mentions = if is_check {
                 rename_identifier_in_expr(row_columns, column_name, "\u{0}") != *row_columns
             } else {
-                row_columns
-                    .split(',')
-                    .any(|c| c.trim().eq_ignore_ascii_case(column_name))
+                let lists = |list: &str| {
+                    split_column_list(list)
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(column_name))
+                };
+                // A self-referencing foreign key also names the column on the
+                // parent side.
+                let ref_mentions = matches!(
+                    (&decoded[2], decoded.get(4), decoded.get(5)),
+                    (
+                        Some(crate::types::DataValue::Varchar(t)) | Some(crate::types::DataValue::Char(t)),
+                        Some(Some(crate::types::DataValue::Varchar(rt)) | Some(crate::types::DataValue::Char(rt))),
+                        Some(Some(crate::types::DataValue::Varchar(rc)) | Some(crate::types::DataValue::Char(rc))),
+                    ) if t.to_uppercase().starts_with("FOREIGN KEY")
+                        && rt.eq_ignore_ascii_case(table_name)
+                        && lists(rc)
+                );
+                lists(row_columns) || ref_mentions
             };
             if mentions {
                 to_delete.push((page_id, slot_id));
@@ -706,6 +721,100 @@ pub fn rename_referenced_table_in_constraints(
     Ok(updates.len())
 }
 
+/// Point the `ref_columns` of every FOREIGN KEY that references
+/// `parent_table`'s column `old_name` at `new_name`. Called after a column
+/// rename so the children keep finding the column they reference. Returns the
+/// number of rows rewritten.
+pub fn rename_referenced_column_in_constraints(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    parent_table: &str,
+    old_name: &str,
+    new_name: &str,
+) -> std::io::Result<usize> {
+    let constr_path = sys_path(engine, "constraints");
+    if !constr_path.exists() {
+        return Ok(0);
+    }
+    let (_, db_id) = resolve_table_id(engine, db_name, parent_table)?;
+    // Only tables of this database can reference it.
+    let db_tables: std::collections::HashSet<i32> =
+        scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+            .iter()
+            .filter_map(|row| match (row.first(), row.get(1)) {
+                (
+                    Some(Some(crate::types::DataValue::Int(tid))),
+                    Some(Some(crate::types::DataValue::Int(did))),
+                ) if *did == db_id => Some(*tid),
+                _ => None,
+            })
+            .collect();
+
+    let mut heap = crate::backend::heap::HeapManager::open(constr_path)?;
+    let mut updates: Vec<(u32, u32, Vec<Option<String>>)> = Vec::new();
+
+    for result in heap.scan() {
+        let (page_id, slot_id, raw_bytes) = result?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if decoded.len() < 6 {
+            continue;
+        }
+        let text = |i: usize| match &decoded[i] {
+            Some(crate::types::DataValue::Varchar(t)) | Some(crate::types::DataValue::Char(t)) => {
+                Some(t.as_str())
+            }
+            _ => None,
+        };
+        let in_db = matches!(
+            &decoded[1],
+            Some(crate::types::DataValue::Int(id)) if db_tables.contains(id)
+        );
+        if !in_db
+            || !text(2).is_some_and(|t| t.to_uppercase().starts_with("FOREIGN KEY"))
+            || !text(4).is_some_and(|t| t.trim().eq_ignore_ascii_case(parent_table))
+        {
+            continue;
+        }
+        let Some(ref_columns) = text(5) else {
+            continue;
+        };
+        let parts = split_column_list(ref_columns);
+        if !parts.iter().any(|c| c.eq_ignore_ascii_case(old_name)) {
+            continue;
+        }
+        let renamed: Vec<String> = parts
+            .into_iter()
+            .map(|c| {
+                if c.eq_ignore_ascii_case(old_name) {
+                    new_name.to_string()
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let mut row: Vec<Option<String>> = decoded
+            .iter()
+            .map(|v| v.as_ref().map(value_to_string))
+            .collect();
+        row[5] = Some(join_column_list(&renamed));
+        updates.push((page_id, slot_id, row));
+    }
+
+    for (page_id, slot_id, _) in &updates {
+        heap.delete_tuple(*page_id, *slot_id)?;
+    }
+    for (_, _, row) in &updates {
+        let str_refs: Vec<Option<&str>> = row.iter().map(|opt| opt.as_deref()).collect();
+        let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        heap.insert_tuple(&tuple_bytes)?;
+    }
+    heap.flush()?;
+    Ok(updates.len())
+}
+
 /// Delete all system table metadata for an entire database.
 ///
 /// Deletes the database entry from `sys_databases`, all its tables from
@@ -921,7 +1030,7 @@ pub fn delete_referencing_foreign_keys(
                 Some(crate::types::DataValue::Char(t)) => t,
                 _ => continue,
             };
-            if !constraint_type.eq_ignore_ascii_case("FOREIGN KEY") {
+            if !constraint_type.to_uppercase().starts_with("FOREIGN KEY") {
                 continue;
             }
             let ref_table = match &decoded[4] {

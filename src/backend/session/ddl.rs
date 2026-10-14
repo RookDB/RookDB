@@ -196,6 +196,21 @@ pub(super) fn create_table(
         });
     }
 
+    for tc in &params.constraints {
+        if let TableConstraint::ForeignKey {
+            columns: fk_cols,
+            ref_table,
+            ref_columns,
+            ..
+        } = tc
+        {
+            check_foreign_key(catalog, db, params, fk_cols, ref_table, ref_columns)
+                .map_err(not_created)?;
+        }
+    }
+
+    check_forward_references(catalog, db, params).map_err(not_created)?;
+
     catalog_create_table(catalog, db, &params.table, columns);
     let mut lines = vec![format!("Table '{}' created successfully.", params.table)];
 
@@ -296,9 +311,7 @@ pub(super) fn create_table(
             ..
         } = tc
         {
-            for ref_col in ref_columns {
-                ensure_parent_column_index(catalog, db, ref_table, ref_col);
-            }
+            ensure_parent_column_index(catalog, db, ref_table, ref_columns);
         }
     }
 
@@ -308,6 +321,180 @@ pub(super) fn create_table(
     ensure_fk_parent_indexes(catalog, db, &params.table);
 
     Ok(StatementResult::lines(lines))
+}
+
+/// Whether `a` and `b` list the same columns, in any order.
+fn same_columns(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|x| b.iter().any(|y| x.eq_ignore_ascii_case(y)))
+}
+
+/// The column sets that are a PRIMARY KEY or UNIQUE key of the table being
+/// created.
+fn new_table_keys(params: &CreateTablePlan) -> Vec<Vec<String>> {
+    let mut sets = Vec::new();
+    for col in &params.columns {
+        if col
+            .constraints
+            .iter()
+            .any(|c| matches!(c, ColumnConstraint::PrimaryKey | ColumnConstraint::Unique))
+        {
+            sets.push(vec![col.name.clone()]);
+        }
+    }
+    for tc in &params.constraints {
+        if let TableConstraint::PrimaryKey { columns } | TableConstraint::Unique { columns } = tc {
+            sets.push(columns.clone());
+        }
+    }
+    sets
+}
+
+/// Check the foreign keys that earlier tables declared against the table
+/// being created (forward references): what they reference must exist here
+/// and be a PRIMARY KEY or UNIQUE key.
+fn check_forward_references(
+    catalog: &Catalog,
+    db: &str,
+    params: &CreateTablePlan,
+) -> Result<(), String> {
+    let referencing = crate::backend::constraint::loaders::load_referencing_foreign_keys(
+        catalog.engine(),
+        db,
+        &params.table,
+    )
+    .unwrap_or_default();
+    let keys = new_table_keys(params);
+    for fk in referencing
+        .iter()
+        .filter(|fk| !fk.child_table.eq_ignore_ascii_case(&params.table))
+    {
+        let missing = fk.parent_cols.iter().find(|c| {
+            !params
+                .columns
+                .iter()
+                .any(|col| col.name.eq_ignore_ascii_case(c))
+        });
+        if let Some(col) = missing {
+            return Err(format!(
+                "Column '{}' referenced by a foreign key of '{}' does not exist in table '{}'",
+                col, fk.child_table, params.table
+            ));
+        }
+        if !keys.iter().any(|k| same_columns(k, &fk.parent_cols)) {
+            return Err(format!(
+                "The foreign key of '{}' references '{}' ({}), which would not be a PRIMARY KEY or UNIQUE key of '{}'",
+                fk.child_table,
+                params.table,
+                fk.parent_cols.join(", "),
+                params.table
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check a FOREIGN KEY of the table being created: its columns exist, pair up
+/// with the referenced ones, and the referenced columns form a PRIMARY KEY or
+/// UNIQUE key of the parent (so a child row matches at most one parent row).
+///
+/// A parent that does not exist yet (a forward reference) cannot be checked
+/// and is accepted.
+fn check_foreign_key(
+    catalog: &Catalog,
+    db: &str,
+    params: &CreateTablePlan,
+    fk_cols: &[String],
+    ref_table: &str,
+    ref_columns: &[String],
+) -> Result<(), String> {
+    let list = |cols: &[String]| cols.join(", ");
+    if fk_cols.len() != ref_columns.len() {
+        return Err(format!(
+            "FOREIGN KEY ({}) has {} column(s) but REFERENCES {} ({}) lists {}",
+            list(fk_cols),
+            fk_cols.len(),
+            ref_table,
+            list(ref_columns),
+            ref_columns.len()
+        ));
+    }
+    for col in fk_cols {
+        if !params
+            .columns
+            .iter()
+            .any(|c| c.name.eq_ignore_ascii_case(col))
+        {
+            return Err(format!(
+                "FOREIGN KEY column '{}' does not exist in table '{}'",
+                col, params.table
+            ));
+        }
+    }
+
+    // The parent's columns and the column sets that are unique in it.
+    let (parent_columns, unique_sets): (Vec<String>, Vec<Vec<String>>) =
+        if ref_table.eq_ignore_ascii_case(&params.table) {
+            let mut sets = Vec::new();
+            for col in &params.columns {
+                if col
+                    .constraints
+                    .iter()
+                    .any(|c| matches!(c, ColumnConstraint::PrimaryKey | ColumnConstraint::Unique))
+                {
+                    sets.push(vec![col.name.clone()]);
+                }
+            }
+            for tc in &params.constraints {
+                if let TableConstraint::PrimaryKey { columns }
+                | TableConstraint::Unique { columns } = tc
+                {
+                    sets.push(columns.clone());
+                }
+            }
+            (
+                params.columns.iter().map(|c| c.name.clone()).collect(),
+                sets,
+            )
+        } else if let Some(parent) = catalog.databases[db].tables.get(ref_table) {
+            let mut sets: Vec<Vec<String>> = parent
+                .columns
+                .iter()
+                .filter(|c| c.constraints.unique)
+                .map(|c| vec![c.name.clone()])
+                .collect();
+            if let Some(meta) = crate::backend::cache::metadata(catalog.engine(), db, ref_table) {
+                sets.extend(meta.unique_indexes.iter().map(|(_, cols)| cols.clone()));
+            }
+            (
+                parent.columns.iter().map(|c| c.name.clone()).collect(),
+                sets,
+            )
+        } else {
+            return Ok(());
+        };
+
+    for col in ref_columns {
+        if !parent_columns.iter().any(|c| c.eq_ignore_ascii_case(col)) {
+            return Err(format!(
+                "Column '{}' referenced by FOREIGN KEY ({}) does not exist in table '{}'",
+                col,
+                list(fk_cols),
+                ref_table
+            ));
+        }
+    }
+    if !unique_sets.iter().any(|s| same_columns(s, ref_columns)) {
+        return Err(format!(
+            "FOREIGN KEY ({}) references '{}' ({}), which is not a PRIMARY KEY or UNIQUE key of '{}'",
+            list(fk_cols),
+            ref_table,
+            list(ref_columns),
+            ref_table
+        ));
+    }
+    Ok(())
 }
 
 /// DROP TABLE: removes the table's files, metadata and catalog entry.
@@ -366,7 +553,7 @@ pub(super) fn drop_table(
     )
     .map_err(|e| io::Error::other(format!("Failed to check referencing foreign keys: {}", e)))?;
     if !ref_fks.is_empty() && !cascade {
-        let child_tbls: Vec<String> = ref_fks.iter().map(|fk| fk.0.clone()).collect();
+        let child_tbls: Vec<String> = ref_fks.iter().map(|fk| fk.child_table.clone()).collect();
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
@@ -386,8 +573,8 @@ pub(super) fn drop_table(
     }
     if cascade && !ref_fks.is_empty() {
         // The child-side index was made for the key about to go.
-        for (child, child_col, ..) in &ref_fks {
-            drop_fk_child_index(catalog, db, child, child_col);
+        for fk in &ref_fks {
+            drop_fk_child_index(catalog, db, &fk.child_table, &fk.child_cols);
         }
         let count = crate::backend::system_table::delete_referencing_foreign_keys(
             catalog.engine(),
@@ -426,18 +613,18 @@ pub(super) fn drop_table(
     Ok(StatementResult::lines(lines))
 }
 
-/// Drop the index CREATE TABLE made for a foreign key on `child.child_col`,
-/// unless another foreign key still uses the column.
-fn drop_fk_child_index(catalog: &Catalog, db: &str, child: &str, child_col: &str) {
+/// Drop the index CREATE TABLE made for a foreign key on `child.child_cols`,
+/// unless another foreign key still uses the same columns.
+fn drop_fk_child_index(catalog: &Catalog, db: &str, child: &str, child_cols: &[String]) {
     let engine = catalog.engine();
     let still_used = crate::backend::cache::metadata(engine, db, child).is_some_and(|m| {
         m.foreign_keys
             .iter()
-            .filter(|(col, ..)| col.eq_ignore_ascii_case(child_col))
+            .filter(|(cols, ..)| same_columns(cols, child_cols))
             .count()
             > 1
     });
-    let name = format!("fk_{}_{}", child, child_col);
+    let name = format!("fk_{}_{}", child, child_cols.join("_"));
     let listed = crate::backend::system_table::table_indexes(engine, db, child)
         .iter()
         .any(|ix| ix.name == name);
@@ -466,7 +653,7 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<S
     // Emptying a referenced parent would orphan its children.
     if let Some(child) = crate::backend::cache::referencing_fks(catalog.engine(), db, table)
         .iter()
-        .map(|fk| fk.0.clone())
+        .map(|fk| fk.child_table.clone())
         .find(|child| !child.eq_ignore_ascii_case(table))
     {
         return Err(io::Error::new(

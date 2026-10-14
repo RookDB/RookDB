@@ -166,7 +166,7 @@ pub(super) fn save_table_constraint(
 ) {
     use crate::backend::system_table::insert_constraint_metadata;
 
-    let join = |cols: &[String]| cols.join(", ");
+    let join = crate::backend::system_table::join_column_list;
     let action = |keyword: &str, a: ReferentialAction| match a {
         ReferentialAction::Cascade => format!(" {} CASCADE", keyword),
         ReferentialAction::SetNull => format!(" {} SET NULL", keyword),

@@ -89,7 +89,7 @@ fn every_constraint_has_an_index() {
     let mut s = session();
     ok(
         &mut s,
-        "CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5) UNIQUE, a INT, b INT, UNIQUE (a, b))",
+        "CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5) UNIQUE, a INT UNIQUE, b INT, UNIQUE (a, b))",
     );
     ok(
         &mut s,
@@ -99,8 +99,8 @@ fn every_constraint_has_an_index() {
     assert_eq!(
         indexes("p"),
         [
-            "fkp_p_a(a)",
             "pk_p_id(id) unique",
+            "uq_p_a(a) unique",
             "uq_p_a_b(a,b) unique",
             "uq_p_code(code) unique"
         ]
@@ -112,14 +112,22 @@ fn every_constraint_has_an_index() {
 }
 
 #[test]
-fn a_composite_unique_index_is_not_a_parent_index() {
+fn a_composite_unique_index_is_not_a_parent_index_for_one_column() {
     let _ws = common::TestWorkspace::new("cidx", "composite");
     let mut s = session();
     ok(&mut s, "CREATE TABLE p (a INT, b INT, UNIQUE (a, b))");
-    ok(&mut s, "CREATE TABLE c (x INT REFERENCES p(a))");
+    // One column of the pair is no key, so it cannot be referenced alone...
+    let err = run(&mut s, "CREATE TABLE c (x INT REFERENCES p(a))").unwrap_err();
+    assert!(err.contains("PRIMARY KEY or UNIQUE"), "{err}");
+    // ...but the pair can, through that same index.
+    ok(
+        &mut s,
+        "CREATE TABLE c (x INT, y INT, FOREIGN KEY (x, y) REFERENCES p(a, b))",
+    );
+    assert_eq!(indexes("p"), ["uq_p_a_b(a,b) unique"]);
     ok(&mut s, "INSERT INTO p VALUES (1, 10), (2, 20)");
-    ok(&mut s, "INSERT INTO c VALUES (1)");
-    assert!(run(&mut s, "INSERT INTO c VALUES (3)").is_err());
+    ok(&mut s, "INSERT INTO c VALUES (1, 10)");
+    assert!(run(&mut s, "INSERT INTO c VALUES (1, 20)").is_err());
     assert!(run(&mut s, "DELETE FROM p WHERE a = 1").is_err());
     ok(&mut s, "DELETE FROM p WHERE a = 2");
 }
@@ -143,9 +151,9 @@ fn child_index_follows_renames_and_schema_changes() {
     );
     ok(&mut s, "VACUUM c");
     ok(&mut s, "ALTER TABLE c RENAME COLUMN pid TO parent_id");
-    assert!(indexes("c").contains(&"fk_c_pid(parent_id)".to_string()));
+    assert!(indexes("c").contains(&"fk_c_parent_id(parent_id)".to_string()));
     ok(&mut s, "ALTER TABLE c RENAME TO kids");
-    assert!(index_file_exists("kids", "fk_c_pid"));
+    assert!(index_file_exists("kids", "fk_c_parent_id"));
 
     ok(&mut s, "DELETE FROM p WHERE id = 1");
     assert_eq!(count(&mut s, "SELECT * FROM kids"), 1);

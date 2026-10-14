@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
 use crate::catalog::Catalog;
+use crate::catalog::types::Column;
 use crate::types::DataType;
 use crate::types::value::{DataValue, OrderedF32, OrderedF64};
 
@@ -490,43 +491,55 @@ pub(crate) fn repair_indexes(
 
 // ── Auto-indexing for constraint targets ─────────────────────────────────────
 
-/// The name of a usable index on exactly `column`: listed in `sys_indexes`
-/// (process-cached) with its file on disk. A composite index does not count,
-/// since its keys cannot answer a single-value probe.
-pub(crate) fn find_column_index(
+/// Whether `a` and `b` name the same columns, in any order.
+fn same_column_set(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|x| b.iter().any(|y| x.eq_ignore_ascii_case(y)))
+        && b.iter()
+            .all(|y| a.iter().any(|x| x.eq_ignore_ascii_case(y)))
+}
+
+/// A usable index on exactly the columns `columns` (in any order): listed in
+/// `sys_indexes` (process-cached) with its file on disk. Returns its name
+/// and its key columns in index order, which a probe key must follow. An
+/// index with extra columns does not count, since its keys cannot answer a
+/// probe on a prefix.
+pub(crate) fn find_columns_index(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-    column: &str,
-) -> Option<String> {
+    columns: &[String],
+) -> Option<(String, Vec<String>)> {
     let meta = crate::backend::cache::metadata(engine, db_name, table_name)?;
     meta.named_indexes
         .iter()
         .find(|(name, cols, _)| {
-            matches!(cols.as_slice(), [c] if c.eq_ignore_ascii_case(column))
+            same_column_set(cols, columns)
                 && index_file_path(engine, db_name, table_name, name).exists()
         })
-        .map(|(name, _, _)| name.clone())
+        .map(|(name, cols, _)| (name.clone(), cols.clone()))
 }
 
-/// Make sure `column` has an index of its own and return its name.
+/// Make sure `columns` have an index of their own and return its name and
+/// key columns in index order.
 ///
 /// Tables made before an index was created for a constraint (or whose index
 /// file was lost) are repaired on first use rather than scanned on every
 /// lookup: an index that `sys_indexes` lists without its file is built again
 /// with its flags; otherwise a new one called `new_name` is built, unique
 /// when `unique`.
-pub(crate) fn ensure_column_index(
+pub(crate) fn ensure_columns_index(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
-    column: &str,
+    columns: &[String],
     new_name: &str,
     unique: bool,
-) -> Result<String, String> {
+) -> Result<(String, Vec<String>), String> {
     let engine = catalog.engine();
-    if let Some(name) = find_column_index(engine, db_name, table_name, column) {
-        return Ok(name);
+    if let Some(found) = find_columns_index(engine, db_name, table_name, columns) {
+        return Ok(found);
     }
     // Only a table the system tables know can record an index.
     if crate::backend::cache::metadata(engine, db_name, table_name).is_none() {
@@ -538,10 +551,15 @@ pub(crate) fn ensure_column_index(
 
     let listed = crate::backend::system_table::table_indexes(engine, db_name, table_name)
         .into_iter()
-        .find(|ix| matches!(ix.column_list().as_slice(), [c] if c.eq_ignore_ascii_case(column)));
-    let (name, unique, primary) = match &listed {
-        Some(ix) => (ix.name.as_str(), ix.is_unique, ix.is_primary),
-        None => (new_name, unique, false),
+        .find(|ix| same_column_set(&ix.column_list(), columns));
+    let (name, key_columns, unique, primary) = match &listed {
+        Some(ix) => (
+            ix.name.as_str(),
+            ix.column_list(),
+            ix.is_unique,
+            ix.is_primary,
+        ),
+        None => (new_name, columns.to_vec(), unique, false),
     };
     if listed.is_some() {
         // The row is written again by create_index_with_flags.
@@ -553,19 +571,19 @@ pub(crate) fn ensure_column_index(
         name,
         db_name,
         table_name,
-        column
+        key_columns.join(",")
     );
     create_index_with_flags(
         catalog,
         db_name,
         table_name,
         name,
-        &[column.to_string()],
+        &key_columns,
         unique,
         primary,
     )
     .map_err(|e| e.to_string())?;
-    Ok(name.to_string())
+    Ok((name.to_string(), key_columns))
 }
 
 /// Build again the file of the index `name`, which `sys_indexes` lists for the
@@ -600,38 +618,41 @@ pub(crate) fn restore_index_file(
     .map_err(|e| e.to_string())
 }
 
-/// Create an index on a parent-side FK target column if it does not already
-/// have one.
+/// Create an index on a parent-side FK target (one column or several) if it
+/// does not already have one.
 ///
 /// FK enforcement checks child inserts against the PARENT table
-/// (`value_exists_in_table`). Without an index on the referenced column,
+/// (`value_exists_in_table`). Without an index on the referenced columns,
 /// every child insert pays a full parent-table heap scan — O(n) per row.
 /// The CLI calls this (a) when a child table declares `REFERENCES t(c)` and
 /// (b) after creating a table, so forward references (child created before
 /// parent) are covered too.
 ///
-/// The created index is named `fkp_{table}_{column}` and is marked unique
-/// only when the column itself declares UNIQUE/PK (otherwise a plain index:
-/// accelerating the probe must never change what the table accepts).
+/// The created index is named `fkp_{table}_{columns joined by _}` and is
+/// marked unique only when a single column itself declares UNIQUE/PK
+/// (otherwise a plain index: accelerating the probe must never change what
+/// the table accepts).
 ///
 /// Returns `true` if an index was created.
 pub fn ensure_parent_column_index(
     catalog: &Catalog,
     db_name: &str,
     parent_table: &str,
-    parent_col: &str,
+    parent_cols: &[String],
 ) -> bool {
-    // The parent must exist in the catalog with the referenced column.
-    let Some(col) = catalog
+    // The parent must exist in the catalog with every referenced column.
+    let parent_columns = catalog
         .databases
         .get(db_name)
         .and_then(|db| db.tables.get(parent_table))
-        .and_then(|t| {
-            t.columns
-                .iter()
-                .find(|c| c.name.eq_ignore_ascii_case(parent_col))
-        })
-    else {
+        .map(|t| &t.columns);
+    let resolved: Option<Vec<&Column>> = parent_columns.and_then(|columns| {
+        parent_cols
+            .iter()
+            .map(|name| columns.iter().find(|c| c.name.eq_ignore_ascii_case(name)))
+            .collect()
+    });
+    let Some(cols) = resolved.filter(|c| !c.is_empty()) else {
         // Parent table/column not present (forward reference) — the
         // deferred pass (`ensure_fk_parent_indexes`) covers it later.
         log::info!(
@@ -642,7 +663,7 @@ pub fn ensure_parent_column_index(
         return false;
     };
 
-    if find_column_index(catalog.engine(), db_name, parent_table, parent_col).is_some() {
+    if find_columns_index(catalog.engine(), db_name, parent_table, parent_cols).is_some() {
         return false; // PK/UNIQUE/user index already covers the probe
     }
 
@@ -655,29 +676,24 @@ pub fn ensure_parent_column_index(
         return false;
     }
 
-    let index_name = format!("fkp_{}_{}", parent_table, col.name);
-    match ensure_column_index(
-        catalog,
-        db_name,
-        parent_table,
-        &col.name,
-        &index_name,
-        col.constraints.unique,
-    ) {
-        Ok(name) => {
+    let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+    let index_name = format!("fkp_{}_{}", parent_table, names.join("_"));
+    let unique = cols.len() == 1 && cols[0].constraints.unique;
+    match ensure_columns_index(catalog, db_name, parent_table, &names, &index_name, unique) {
+        Ok((name, _)) => {
             log::info!(
-                "[AutoIndex] Parent-side FK index '{}' on '{}.{}' is ready",
+                "[AutoIndex] Parent-side FK index '{}' on '{}.({})' is ready",
                 name,
                 parent_table,
-                col.name
+                names.join(",")
             );
             true
         }
         Err(e) => {
             log::warn!(
-                "[AutoIndex] Parent-side FK index on '{}.{}' failed: {} (it is built on first use)",
+                "[AutoIndex] Parent-side FK index on '{}.({})' failed: {} (it is built on first use)",
                 parent_table,
-                col.name,
+                names.join(","),
                 e
             );
             false
@@ -685,14 +701,14 @@ pub fn ensure_parent_column_index(
     }
 }
 
-/// Index every column of `table_name` that other tables' FOREIGN KEYs
+/// Index the columns of `table_name` that other tables' FOREIGN KEYs
 /// reference.
 ///
 /// Called after CREATE TABLE so that a parent created AFTER its children
 /// (`CREATE TABLE orders ... REFERENCES staff(id)` before `staff` exists)
 /// still ends up with indexed FK targets — the deferred half of
 /// [`ensure_parent_column_index`]. Safe to call any time: columns that
-/// already have a leading index are skipped.
+/// already have an index are skipped.
 ///
 /// Returns the number of indexes created.
 pub fn ensure_fk_parent_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> usize {
@@ -713,14 +729,12 @@ pub fn ensure_fk_parent_indexes(catalog: &Catalog, db_name: &str, table_name: &s
         }
     };
 
-    let mut created = 0usize;
-    // ReferencingFk = (child_table, child_col, parent_col, parent_table, action)
-    for (_child_table, _child_col, parent_col, parent_table, _action) in &referencing {
-        if ensure_parent_column_index(catalog, db_name, parent_table, parent_col) {
-            created += 1;
-        }
-    }
-    created
+    referencing
+        .iter()
+        .filter(|fk| {
+            ensure_parent_column_index(catalog, db_name, &fk.parent_table, &fk.parent_cols)
+        })
+        .count()
 }
 
 // ── DML Index Update Helpers ──────────────────────────────────────────────────
