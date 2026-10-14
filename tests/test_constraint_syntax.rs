@@ -33,8 +33,8 @@ fn values(session: &mut Session, sql: &str) -> Vec<Vec<Option<DataValue>>> {
 fn check_is_enforced_with_or_without_a_space() {
     let _ws = common::TestWorkspace::new("ctsyntax", "check");
     let mut s = session();
-    // Table-level CHECK rows live only in sys_constraints and are dropped by
-    // the next catalog save, so each is tested before another table is created.
+    // Table-level CHECK rows are dropped by the next catalog save, so each
+    // is tested before another table is created.
     for sql in [
         "CREATE TABLE tight (a INT CHECK(a > 0))",
         "CREATE TABLE spaced (a INT CHECK (a > 0))",
@@ -127,4 +127,45 @@ fn keys_and_references_still_enforce() {
     assert!(run(&mut s, "INSERT INTO c VALUES (2, 2, 99)").is_err());
     ok(&mut s, "DELETE FROM p WHERE id = 1");
     assert!(values(&mut s, "SELECT * FROM c").is_empty());
+}
+
+#[test]
+fn big_defaults_keep_every_digit() {
+    let _ws = common::TestWorkspace::new("ctsyntax", "bigdef");
+    let mut s = session();
+    ok(
+        &mut s,
+        "CREATE TABLE big (id INT, v BIGINT DEFAULT 9007199254740993, m BIGINT DEFAULT -9223372036854775808, d NUMERIC(30,10) DEFAULT 123456789012345.1234567891)",
+    );
+    ok(&mut s, "INSERT INTO big (id) VALUES (1)");
+    let row = &values(&mut s, "SELECT v, m, d FROM big")[0];
+    assert_eq!(row[0], Some(DataValue::BigInt(9007199254740993)));
+    assert_eq!(row[1], Some(DataValue::BigInt(i64::MIN)));
+    let expected =
+        storage_manager::types::value::parse_numeric_literal("123456789012345.1234567891", 30, 10)
+            .unwrap();
+    assert_eq!(row[2], Some(DataValue::Numeric(expected)));
+}
+
+#[test]
+fn set_default_and_add_column_keep_every_digit() {
+    let _ws = common::TestWorkspace::new("ctsyntax", "bigset");
+    let mut s = session();
+    ok(&mut s, "CREATE TABLE t (id INT, v BIGINT)");
+    ok(
+        &mut s,
+        "ALTER TABLE t ALTER COLUMN v SET DEFAULT 9007199254740993",
+    );
+    ok(&mut s, "INSERT INTO t (id) VALUES (1)");
+    ok(
+        &mut s,
+        "ALTER TABLE t ADD COLUMN w BIGINT DEFAULT -9223372036854775808",
+    );
+    assert_eq!(
+        values(&mut s, "SELECT v, w FROM t"),
+        [vec![
+            Some(DataValue::BigInt(9007199254740993)),
+            Some(DataValue::BigInt(i64::MIN))
+        ]]
+    );
 }

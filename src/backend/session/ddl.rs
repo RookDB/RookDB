@@ -4,8 +4,8 @@ use std::io;
 use std::str::FromStr;
 
 use rook_ast::{
-    ColumnConstraint, ConstantValue, CreateDatabasePlan, CreateIndexPlan, CreateTablePlan,
-    DropDatabasePlan, ExprNode, TableConstraint,
+    ColumnConstraint, CreateDatabasePlan, CreateIndexPlan, CreateTablePlan, DefaultValue,
+    DropDatabasePlan, TableConstraint,
 };
 
 use super::names::{save_table_constraint, select_plan_references_table};
@@ -112,16 +112,16 @@ pub(super) fn use_database(session: &mut Session, db_name: &str) -> StatementRes
     })
 }
 
-/// The value of a column DEFAULT; `None` for NULL. Only constants are
-/// accepted, and the constant must be valid for the column's type.
-pub(super) fn default_value(ty: &DataType, expr: &ExprNode) -> Result<Option<DataValue>, String> {
-    let text = match expr {
-        ExprNode::Constant(ConstantValue::Null) => return Ok(None),
-        ExprNode::Constant(ConstantValue::Int(i)) => i.to_string(),
-        ExprNode::Constant(ConstantValue::Float(f)) => f.to_string(),
-        ExprNode::Constant(ConstantValue::Text(t)) => t.clone(),
-        ExprNode::Constant(ConstantValue::Boolean(b)) => b.to_string(),
-        _ => return Err("DEFAULT must be a constant".to_string()),
+/// The value of a column DEFAULT; `None` for NULL. The literal is converted
+/// from its text for the column's type, so no digits are lost on the way.
+pub(super) fn default_value(
+    ty: &DataType,
+    value: &DefaultValue,
+) -> Result<Option<DataValue>, String> {
+    let text = match value {
+        DefaultValue::Null => return Ok(None),
+        DefaultValue::Number(n) | DefaultValue::Text(n) => n.clone(),
+        DefaultValue::Boolean(b) => b.to_string(),
     };
     crate::backend::executor::create_index::parse_string_to_value(ty, &text).map(Some)
 }
