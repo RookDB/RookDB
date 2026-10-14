@@ -449,20 +449,12 @@ impl PhysicalPlanner {
         let result_schema: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
         let indices: Vec<usize> = (0..column_count).collect();
 
-        if let Some(limit) = s.limit {
-            let limited = Box::new(LimitOperator::new(Box::new(sort_op), limit as usize, 0));
-            Ok(Box::new(ProjectionOperator::from_indices(
-                limited,
-                &indices,
-                &result_schema,
-            )?))
-        } else {
-            Ok(Box::new(ProjectionOperator::from_indices(
-                Box::new(sort_op),
-                &indices,
-                &result_schema,
-            )?))
-        }
+        // A sort with a limit already yields at most that many rows.
+        Ok(Box::new(ProjectionOperator::from_indices(
+            Box::new(sort_op),
+            &indices,
+            &result_schema,
+        )?))
     }
 
     /// Sort by plain columns, or skip the sort when the child already yields that order.
@@ -507,19 +499,11 @@ impl PhysicalPlanner {
         } else {
             let mut sort_op =
                 SortOperator::new(child, sort_keys).with_spill(self.catalog.engine().sort_spill());
+            // A sort with a limit already yields at most that many rows.
             if let Some(limit) = s.limit {
                 sort_op = sort_op.with_limit(limit as usize);
             }
-
-            if let Some(limit) = s.limit {
-                Ok(Box::new(LimitOperator::new(
-                    Box::new(sort_op),
-                    limit as usize,
-                    0,
-                )))
-            } else {
-                Ok(Box::new(sort_op))
-            }
+            Ok(Box::new(sort_op))
         }
     }
 

@@ -5,8 +5,6 @@
 
 use std::io;
 
-use crate::backend::heap::HeapManager;
-
 /// Rebuild the table's Free Space Map (FSM) from scratch.
 /// Call this ONCE after a full table compaction/rewrite is completed.
 /// This avoids the need to update free space continuously during rewriting.
@@ -26,10 +24,9 @@ pub fn rebuild_table_fsm(
 
     // 2. Opening the HeapManager triggers `FSM::build_from_heap`
     // automatically when the .fsm file is missing. A cached handle holds the
-    // deleted fork, so it is dropped first, and this open stays private so it
-    // is guaranteed to be the one that rebuilds.
+    // deleted fork, so it is dropped first; the lease then opens afresh.
     crate::backend::cache::evict_heap(engine, &table_path)?;
-    let _hm = HeapManager::open(table_path)?;
+    drop(crate::backend::cache::lease_heap(engine, &table_path)?);
     log::info!("Successfully rebuilt FSM tree for table '{}'", table_name);
 
     Ok(())

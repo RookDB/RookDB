@@ -194,7 +194,8 @@ fn sort_reports_top_n_and_elimination() {
     let sort = plan.root.find("Sort").expect("sort");
     assert_eq!(sort.detail("keys"), Some("dname DESC"));
     assert_eq!(sort.detail("top_n"), Some("3"));
-    assert_eq!(plan.root.find("Limit").unwrap().detail("limit"), Some("3"));
+    // The sort yields the 3 rows itself; there is no separate Limit.
+    assert!(plan.root.find("Limit").is_none());
 
     let plan = explain(&mut s, "EXPLAIN SELECT * FROM dept ORDER BY dname");
     let sort = plan.root.find("Sort").expect("sort");
