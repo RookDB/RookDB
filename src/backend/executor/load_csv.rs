@@ -156,10 +156,10 @@ fn insert_row_resolved(
         ) {
             log::error!("Failed to undo insert after index error: {}", undo);
         }
-        return Err(RookError::Io(io::Error::other(format!(
+        return Err(RookError::IndexMaintenance(format!(
             "Index update failed: {}",
             e
-        ))));
+        )));
     }
 
     crate::backend::cache::note_modified(catalog.engine(), db_name, table_name, 1);
@@ -213,7 +213,9 @@ pub fn insert_single_tuple_with_location(
 ) -> RookResult<Option<(u32, u32)>> {
     match insert_text_row(catalog, db_name, table_name, values) {
         Ok(location) => Ok(Some(location)),
-        Err(e @ (RookError::Io(_) | RookError::NotFound { .. })) => Err(e.bare_io()),
+        Err(
+            e @ (RookError::Io(_) | RookError::IndexMaintenance(_) | RookError::NotFound { .. }),
+        ) => Err(e.bare_io()),
         Err(e) => {
             log::info!("Row rejected for '{}.{}': {}", db_name, table_name, e);
             Ok(None)

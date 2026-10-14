@@ -78,6 +78,9 @@ pub enum RookError {
     /// numeric overflow, an invalid function argument, a subquery that
     /// returned too many rows.
     Evaluation(String),
+    /// Keeping the indexes of a table in step with its rows failed, or the
+    /// repair that follows such a failure did too; the indexes may be stale.
+    IndexMaintenance(String),
     /// Underlying storage I/O failure.
     Io(std::io::Error),
     /// A storage failure whose message is shown as-is (no `I/O error:`
@@ -204,6 +207,7 @@ impl fmt::Display for RookError {
             RookError::InvalidIdentifier(message) => f.write_str(message),
             RookError::TypeMismatch(message) => f.write_str(message),
             RookError::Evaluation(message) => f.write_str(message),
+            RookError::IndexMaintenance(message) => f.write_str(message),
             RookError::Io(e) => write!(f, "I/O error: {}", e),
             RookError::Storage {
                 context: Some(context),

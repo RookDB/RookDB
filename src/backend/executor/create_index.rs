@@ -431,10 +431,10 @@ pub(crate) fn repair_indexes(
     crate::backend::session::rebuild_indexes(catalog, db_name, table_name, &indexes, None)
         .map(|_| ())
         .map_err(|e| {
-            crate::backend::error::RookError::Io(std::io::Error::other(format!(
+            RookError::IndexMaintenance(format!(
                 "{}; rebuilding the indexes of '{}' failed too ({}), so they are out of date",
                 cause, table_name, e
-            )))
+            ))
         })
 }
 
