@@ -158,3 +158,51 @@ fn outer_reference_in_order_by_is_bound() {
         &[&["1", "10"], &["2", "99"], &["3", "99"]],
     );
 }
+
+#[test]
+fn subquerys_output_alias_wins_over_an_outer_column_in_order_by() {
+    let _ws = TestWorkspace::new("n_alias");
+    setup_ab("dbn4");
+    // `y` is a.y and the subquery's alias for b.z; ORDER BY sees the alias.
+    check(
+        "dbn4",
+        "SELECT a.x, (SELECT b.z AS y FROM b WHERE b.x <= a.x ORDER BY y DESC LIMIT 1) \
+         FROM a ORDER BY a.x",
+        &[&["1", "10"], &["2", "99"], &["3", "99"]],
+    );
+    // Same through the simple-shape EXISTS / IN paths.
+    check(
+        "dbn4",
+        "SELECT a.x FROM a WHERE a.y IN (SELECT b.z AS y FROM b WHERE b.x = a.x \
+         ORDER BY y LIMIT 1) ORDER BY a.x",
+        &[&["1"], &["3"]],
+    );
+    // An inner FROM column named like the outer column still wins everywhere.
+    check(
+        "dbn4",
+        "SELECT a.x, (SELECT b.x FROM b WHERE b.x <= a.x ORDER BY x DESC LIMIT 1) \
+         FROM a ORDER BY a.x",
+        &[&["1", "1"], &["2", "2"], &["3", "3"]],
+    );
+}
+
+#[test]
+fn output_alias_in_order_by_is_not_bound_as_the_outer_column_named_elsewhere() {
+    let _ws = TestWorkspace::new("n_alias2");
+    setup_ab("dbn5");
+    // WHERE's bare `y` is a.y (aliases are not visible there); ORDER BY's is
+    // the alias for b.z. For a = (3, 30) the b rows are (1,10) (2,99) (3,30).
+    check(
+        "dbn5",
+        "SELECT a.x, (SELECT b.z AS y FROM b WHERE b.x <= a.x AND b.z <= y + 100 \
+         ORDER BY y DESC LIMIT 1) FROM a ORDER BY a.x",
+        &[&["1", "10"], &["2", "99"], &["3", "99"]],
+    );
+    // HAVING sees output aliases like an uncorrelated query does.
+    check(
+        "dbn5",
+        "SELECT a.x, (SELECT sum(b.z) AS y FROM b WHERE b.x <= a.x + 0 * y \
+         HAVING y > 0) FROM a ORDER BY a.x",
+        &[&["1", "10"], &["2", "109"], &["3", "139"]],
+    );
+}

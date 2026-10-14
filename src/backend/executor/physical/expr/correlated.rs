@@ -111,9 +111,18 @@ impl CorrelatedSubquery {
 
     fn bind_exprs(&self, values: &[ExprNode]) -> SelectPlan {
         let mut select = self.template.clone();
+        let aliases: Vec<String> = select
+            .projections
+            .iter()
+            .filter_map(|p| match p {
+                SelectExpr::ExprWithAlias { alias, .. } => Some(alias.to_lowercase()),
+                _ => None,
+            })
+            .collect();
         let mut binder = Binder {
             bindings: &self.bindings,
             values,
+            aliases: &aliases,
             depth: 0,
         };
         rewrite_select(&mut select, &mut binder);
@@ -331,12 +340,19 @@ pub fn rewrite_expr<V: Visitor + ?Sized>(node: &mut ExprNode, having: bool, f: &
 struct Binder<'a> {
     bindings: &'a [OuterBinding],
     values: &'a [ExprNode],
+    /// Lower-cased output aliases of the subquery's own SELECT list: in
+    /// HAVING and ORDER BY a bare name that is one of them is the alias, not
+    /// an outer column.
+    aliases: &'a [String],
     depth: usize,
 }
 
 impl Visitor for Binder<'_> {
-    fn expr(&mut self, node: &ExprNode, _in_having: bool) -> Option<ExprNode> {
+    fn expr(&mut self, node: &ExprNode, in_having: bool) -> Option<ExprNode> {
         let key = ref_key(node)?;
+        if in_having && self.depth == 0 && key.0.is_none() && self.aliases.contains(&key.1) {
+            return None;
+        }
         let i = if key.0.as_deref() == Some(OUTER_MARK) {
             self.bindings.iter().position(|b| {
                 format!("{}.{}", b.qualifier.as_deref().unwrap_or(""), b.name) == key.1
