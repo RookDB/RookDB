@@ -113,3 +113,21 @@ pub fn read_all_pages(file: &mut File) -> io::Result<Vec<Page>> {
 
     Ok(pages)
 }
+
+/// An identity for the open file `file`, the same for every handle on it:
+/// device and inode on Unix.
+pub fn file_identity_from_file(file: &File) -> io::Result<u64> {
+    let metadata = file.metadata()?;
+    Ok(file_identity_from_metadata(&metadata))
+}
+
+#[cfg(unix)]
+fn file_identity_from_metadata(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev() << 32) ^ metadata.ino()
+}
+
+#[cfg(not(unix))]
+fn file_identity_from_metadata(metadata: &std::fs::Metadata) -> u64 {
+    metadata.len()
+}

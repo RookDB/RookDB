@@ -11,6 +11,5 @@ pub use backend::operation_log;
 pub use backend::page;
 pub use backend::planner;
 pub use backend::statistics;
-pub use backend::table;
 pub use backend::types;
 pub use backend::visibility_map;

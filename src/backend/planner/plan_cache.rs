@@ -22,19 +22,13 @@ pub(crate) const DEFAULT_CACHE_CAPACITY: usize = 512;
 ///
 /// Tokenization is delegated to sqlparser's `Tokenizer` (GenericDialect),
 /// which understands `-- line` and `/* block */` comments, doubled-quote
-/// escapes, and identifier boundaries — the previous hand-rolled character
-/// scanner mangled digits inside comments and mis-tokenized quotes inside
-/// them. Inputs the tokenizer rejects (e.g. an unterminated string literal
-/// mid-statement) fall back to the legacy scanner so normalization never
-/// fails — the full parser will report the syntax error downstream.
+/// escapes, and identifier boundaries. Text the tokenizer rejects (e.g. an
+/// unterminated string literal) cannot parse either, so it is its own key,
+/// unnormalized; the parser reports the syntax error downstream.
 pub fn normalize_sql(sql: &str) -> (String, Vec<String>) {
     match tokenize_for_normalization(sql) {
         Ok(tokens) => normalize_from_tokens(sql, &tokens),
-        // Unterminated literals/comments or other tokenizer failures: fall
-        // back to the legacy scanner. The resulting key will not merge
-        // comment variants, but the full parser downstream still sees the
-        // original SQL and reports any genuine syntax error.
-        Err(_) => normalize_sql_legacy(sql),
+        Err(_) => (sql.trim().to_string(), Vec::new()),
     }
 }
 
@@ -256,106 +250,6 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
                 i += 1;
             }
         }
-    }
-
-    (normalized.trim().to_string(), params)
-}
-
-/// Legacy hand-rolled normalizer kept as a fallback for inputs the
-/// sqlparser tokenizer rejects (e.g. unterminated string literals).
-/// It is comment-blind: digits inside comments become parameters and a
-/// quote inside a comment opens a bogus string literal.
-fn normalize_sql_legacy(sql: &str) -> (String, Vec<String>) {
-    let mut normalized = String::with_capacity(sql.len());
-    let mut params = Vec::new();
-    let chars: Vec<char> = sql.chars().collect();
-    let n = chars.len();
-    let mut i = 0;
-    let mut param_idx = 1;
-
-    while i < n {
-        let ch = chars[i];
-
-        // Single-quoted string literal: '...'
-        if ch == '\'' {
-            i += 1;
-            let mut s = String::new();
-            while i < n {
-                if chars[i] == '\'' {
-                    if i + 1 < n && chars[i + 1] == '\'' {
-                        s.push('\'');
-                        i += 2;
-                    } else {
-                        i += 1;
-                        break;
-                    }
-                } else {
-                    s.push(chars[i]);
-                    i += 1;
-                }
-            }
-            params.push(s);
-            normalized.push('$');
-            normalized.push_str(&param_idx.to_string());
-            param_idx += 1;
-            continue;
-        }
-
-        // Numeric literal:
-        let is_digit = ch.is_ascii_digit();
-        let is_negative_number = ch == '-'
-            && i + 1 < n
-            && chars[i + 1].is_ascii_digit()
-            && (i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_'));
-
-        let prev_is_ident = if i > 0 {
-            chars[i - 1].is_alphanumeric() || chars[i - 1] == '_'
-        } else {
-            false
-        };
-
-        if (is_digit || is_negative_number) && !prev_is_ident {
-            let mut num_str = String::new();
-            if is_negative_number {
-                num_str.push('-');
-                i += 1;
-            }
-            while i < n
-                && (chars[i].is_ascii_digit()
-                    || chars[i] == '.'
-                    || chars[i] == 'e'
-                    || chars[i] == 'E'
-                    || ((chars[i] == '+' || chars[i] == '-')
-                        && i > 0
-                        && (chars[i - 1] == 'e' || chars[i - 1] == 'E')))
-            {
-                num_str.push(chars[i]);
-                i += 1;
-            }
-            params.push(num_str);
-            normalized.push('$');
-            normalized.push_str(&param_idx.to_string());
-            param_idx += 1;
-            continue;
-        }
-
-        // Collapse multiple whitespaces
-        if ch.is_whitespace() {
-            if !normalized.ends_with(' ') && !normalized.is_empty() {
-                normalized.push(' ');
-            }
-            i += 1;
-            continue;
-        }
-
-        // Strip trailing semicolon
-        if ch == ';' && i == n - 1 {
-            i += 1;
-            continue;
-        }
-
-        normalized.push(ch);
-        i += 1;
     }
 
     (normalized.trim().to_string(), params)
@@ -962,8 +856,8 @@ mod tests {
 
     #[test]
     fn test_normalize_sql_unterminated_string_falls_back() {
-        // Tokenizer rejects the unterminated literal → legacy scanner runs;
-        // result must still be a sane key, not a panic.
+        // The tokenizer rejects the unterminated literal: the text is its
+        // own key, not a panic.
         let (norm, _params) = normalize_sql("SELECT 'oops FROM t");
         assert!(norm.starts_with("SELECT"));
     }

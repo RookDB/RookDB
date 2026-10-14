@@ -23,6 +23,7 @@ mod common;
 use std::collections::HashMap;
 use std::fs::{OpenOptions, remove_file};
 
+use common::page_count;
 use storage_manager::backend::executor::delete_by_pointers;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Catalog, Column, Database, Table};
@@ -30,7 +31,6 @@ use storage_manager::disk::read_page;
 use storage_manager::heap::HeapManager;
 use storage_manager::page::Page;
 use storage_manager::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, SLOT_FLAG_DELETED};
-use storage_manager::table::page_count;
 
 // ---------------------------------------------------------------------------
 // Helpers

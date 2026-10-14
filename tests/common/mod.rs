@@ -146,3 +146,21 @@ pub fn init_catalog() {
 pub fn path(relative: impl AsRef<std::path::Path>) -> PathBuf {
     engine().root().join(relative)
 }
+
+/// The page count stored in a heap file's header (bytes 0..4).
+pub fn page_count(file: &mut std::fs::File) -> std::io::Result<u32> {
+    header_u32(file, 0)
+}
+
+/// The dead-tuple count stored in a heap file's header (bytes 20..24).
+pub fn read_dead_tuple_count(file: &mut std::fs::File) -> std::io::Result<u32> {
+    header_u32(file, 20)
+}
+
+fn header_u32(file: &mut std::fs::File, offset: u64) -> std::io::Result<u32> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = [0u8; 4];
+    file.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}

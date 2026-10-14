@@ -2,7 +2,15 @@ use std::fs::OpenOptions;
 use storage_manager::disk::read_page;
 use storage_manager::heap::heap_manager::HeapManager;
 use storage_manager::page::{PAGE_HEADER_SIZE, PAGE_SIZE, Page, page_free_space};
-use storage_manager::table::page_count;
+
+/// The heap file's page count: the first four bytes of its header.
+fn page_count(file: &mut std::fs::File) -> std::io::Result<u32> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = [0u8; 4];
+    file.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
 
 #[test]
 fn test_page_free_space() {

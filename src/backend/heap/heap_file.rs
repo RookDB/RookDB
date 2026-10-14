@@ -30,7 +30,7 @@ impl HeapFile {
             let file = guard.file.as_ref().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no file")
             })?;
-            crate::table::file_identity_from_file(file)?
+            crate::backend::disk::file_identity_from_file(file)?
         };
         Ok(Self { pool, identity })
     }

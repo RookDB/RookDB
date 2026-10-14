@@ -3,9 +3,10 @@ use std::io::{Read, Seek, SeekFrom};
 
 use storage_manager::heap::heap_manager::HeapManager;
 use storage_manager::page::PAGE_SIZE;
-use storage_manager::table::TABLE_HEADER_SIZE;
 
 const TEST_FILE: &str = "tests/test_table_file.bin";
+/// The table header is page 0, one page long.
+const TABLE_HEADER_SIZE: u32 = PAGE_SIZE as u32;
 
 #[test]
 fn test_init_table() {

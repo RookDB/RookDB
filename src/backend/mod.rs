@@ -19,7 +19,6 @@ pub mod planner;
 pub mod session;
 pub mod statistics;
 pub mod system_table;
-pub mod table;
 pub mod types;
 pub mod visibility_map;
 

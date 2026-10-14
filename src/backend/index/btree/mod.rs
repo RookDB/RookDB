@@ -48,8 +48,8 @@ pub use node::BTreeNode;
 use node::{NodeView, int_from_le};
 
 use crate::backend::buffer_manager::buffer_pool::BufferPool;
+use crate::backend::disk::file_identity_from_file;
 use crate::backend::page::page_lock::PageWriteLock;
-use crate::backend::table::table_file::file_identity_from_file;
 use crate::types::Comparable;
 use crate::types::DataType;
 use crate::types::value::DataValue;
