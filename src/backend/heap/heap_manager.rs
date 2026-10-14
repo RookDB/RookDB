@@ -907,4 +907,48 @@ mod tests {
         drop(manager);
         cleanup_temp_heap(&path);
     }
+
+    /// After a stale FSM hit (a full page advertised as free, or a page
+    /// beyond the file) the row goes to a fresh page, and a full page's
+    /// entry is corrected.
+    #[test]
+    fn test_insert_after_stale_fsm_hit_uses_a_fresh_page() {
+        let (path, mut manager) = setup_temp_heap("test_insert_stale_fsm");
+        let tuple_data = vec![7u8; 200];
+        let (first_page, _) = manager.insert_tuple(&tuple_data).unwrap();
+        while manager.insert_tuple(&tuple_data).unwrap().0 == first_page {}
+        let category = HeapManager::bytes_to_category(200 + ITEM_ID_SIZE);
+
+        // Only the full first page advertises room.
+        for page in 1..manager.page_count() {
+            manager.fsm.fsm_set_avail(page, 0, None).unwrap();
+        }
+        manager
+            .fsm
+            .fsm_set_avail(first_page, PAGE_SIZE as u32 / 2, None)
+            .unwrap();
+        let pages = manager.page_count();
+        let (page, _) = manager.insert_tuple(&tuple_data).unwrap();
+        assert_eq!(page, pages, "row goes to a fresh page");
+        assert_ne!(
+            manager.fsm_search_for_page(category).unwrap(),
+            Some(first_page)
+        );
+
+        // A page beyond the file.
+        for page in 1..manager.page_count() {
+            manager.fsm.fsm_set_avail(page, 0, None).unwrap();
+        }
+        let phantom = manager.page_count() + 5;
+        manager
+            .fsm
+            .fsm_set_avail(phantom, PAGE_SIZE as u32 / 2, None)
+            .unwrap();
+        let pages = manager.page_count();
+        let (page, _) = manager.insert_tuple(&tuple_data).unwrap();
+        assert_eq!(page, pages);
+
+        drop(manager);
+        cleanup_temp_heap(&path);
+    }
 }
