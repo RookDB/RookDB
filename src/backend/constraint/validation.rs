@@ -108,7 +108,7 @@ pub(crate) fn check_unique_insert_meta(
                 bt.search_all_keys(&key_values)
             },
         )
-        .map_err(|e| unique_lookup_error(table_name, idx_name, e.to_string()))?;
+        .map_err(|e| unique_lookup_error(table_name, idx_name, RookError::storage_bare(e)))?;
 
         if tids.iter().any(|tid| !exclude_ptrs.contains(tid)) {
             let vals_str = idx_cols
@@ -173,7 +173,7 @@ pub(crate) fn check_unique_insert_meta(
                 bt.search_all(key_value)
             },
         )
-        .map_err(|e| unique_lookup_error(table_name, &index, e.to_string()))?;
+        .map_err(|e| unique_lookup_error(table_name, &index, RookError::storage_bare(e)))?;
 
         if tids.iter().any(|tid| !exclude_ptrs.contains(tid)) {
             return Err(RookError::constraint(
@@ -192,10 +192,10 @@ pub(crate) fn check_unique_insert_meta(
     Ok(())
 }
 
-fn unique_lookup_error(table_name: &str, what: &str, cause: String) -> RookError {
-    RookError::Internal(format!(
-        "cannot check UNIQUE on '{}' ({}): {}",
-        table_name, what, cause
+fn unique_lookup_error(table_name: &str, what: &str, cause: RookError) -> RookError {
+    cause.with_context(format!(
+        "cannot check UNIQUE on '{}' ({})",
+        table_name, what
     ))
 }
 

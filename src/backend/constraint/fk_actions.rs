@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 
+use crate::backend::error::{RookError, RookResult};
 use crate::catalog::types::Catalog;
 use crate::types::functions::assign_cast;
 use crate::types::{DataType, DataValue};
@@ -54,7 +55,7 @@ fn apply_to_child_rows(
     parent_key: &[DataValue],
     action: ChildAction,
     label: &str,
-) -> Result<Vec<Vec<Option<DataValue>>>, String> {
+) -> RookResult<Vec<Vec<Option<DataValue>>>> {
     use crate::backend::executor::compaction_api::insert_raw_tuple;
     use crate::backend::executor::create_index::{update_index_on_delete, update_index_on_update};
     use crate::backend::heap::HeapFile;
@@ -97,14 +98,14 @@ fn apply_to_child_rows(
                 converted.push(match value {
                     None => None,
                     Some(v) => Some(assign_cast(v, &columns[pos].data_type).map_err(|e| {
-                        format!(
+                        RookError::TypeMismatch(format!(
                             "{}: new key '{}' does not fit column '{}.{}': {}",
                             label,
                             key_text(v),
                             child_table,
                             columns[pos].name,
                             e
-                        )
+                        ))
                     })?),
                 });
             }
@@ -117,7 +118,7 @@ fn apply_to_child_rows(
         return Ok(Vec::new());
     }
     let file = HeapFile::open(catalog.engine(), &heap_path)
-        .map_err(|e| format!("Failed to open child heap for {}: {}", label, e))?;
+        .map_err(|e| RookError::storage(format!("Failed to open child heap for {}", label), e))?;
     let schema: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
 
     let pointers = super::value_lookup::child_row_pointers(
@@ -140,7 +141,7 @@ fn apply_to_child_rows(
         let page_num = page_pointers[0].0;
         let mut page = Page::new();
         file.read_page(&mut page, page_num)
-            .map_err(|e| e.to_string())?;
+            .map_err(RookError::storage_bare)?;
         let mut modified = false;
 
         for &(_, slot) in page_pointers {
@@ -218,7 +219,7 @@ fn apply_to_child_rows(
 
         if modified {
             file.write_page(&page, page_num)
-                .map_err(|e| e.to_string())?;
+                .map_err(RookError::storage_bare)?;
             let _ = crate::backend::visibility_map::vm_clear_page(
                 catalog.engine(),
                 db_name,
@@ -257,9 +258,12 @@ fn apply_to_child_rows(
             // The old image is already marked deleted: the row is lost
             // unless the statement fails loudly.
             Err(e) => {
-                return Err(format!(
-                    "[{}] Failed to write back a grown row of '{}': {}",
-                    label, child_table, e
+                return Err(RookError::storage(
+                    format!(
+                        "[{}] Failed to write back a grown row of '{}'",
+                        label, child_table
+                    ),
+                    e,
                 ));
             }
         }
@@ -274,8 +278,7 @@ fn apply_to_child_rows(
                 "[{}] Index maintenance failed for a child row: {}",
                 label, cause
             ),
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     }
 
     Ok(matched)
@@ -352,7 +355,7 @@ pub(crate) fn cascade_delete_child_rows(
     child_cols: &[String],
     parent_key: &[DataValue],
     visited: &mut HashSet<Visit>,
-) -> Result<(), String> {
+) -> RookResult<()> {
     let deleted = apply_to_child_rows(
         catalog,
         db_name,
@@ -431,7 +434,7 @@ pub(crate) fn set_null_child_rows(
     child_cols: &[String],
     parent_key: &[DataValue],
     visited: &mut HashSet<Visit>,
-) -> Result<(), String> {
+) -> RookResult<()> {
     let updated = apply_to_child_rows(
         catalog,
         db_name,
@@ -512,7 +515,7 @@ pub(crate) fn update_child_rows_fk(
     old_key: &[DataValue],
     new_key: &[Option<DataValue>],
     visited: &mut HashSet<Visit>,
-) -> Result<(), String> {
+) -> RookResult<()> {
     let updated = apply_to_child_rows(
         catalog,
         db_name,

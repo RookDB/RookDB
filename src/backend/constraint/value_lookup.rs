@@ -6,6 +6,7 @@
 //! ever scans a table.
 
 use crate::backend::engine::Engine;
+use crate::backend::error::{RookError, RookResult};
 use crate::backend::executor::create_index::ensure_columns_index;
 use crate::catalog::types::{Catalog, Column};
 use crate::types::functions::assign_cast;
@@ -58,7 +59,7 @@ fn index_search(
     index_name: &str,
     key_types: &[DataType],
     key: &[DataValue],
-) -> Result<Vec<(u32, u32)>, String> {
+) -> RookResult<Vec<(u32, u32)>> {
     let idx_path = engine.paths().index(db_name, table_name, index_name);
     crate::backend::cache::with_btree(
         engine,
@@ -74,9 +75,12 @@ fn index_search(
         },
     )
     .map_err(|e| {
-        format!(
-            "index '{}' of '{}.{}' cannot be searched: {}",
-            index_name, db_name, table_name, e
+        RookError::storage(
+            format!(
+                "index '{}' of '{}.{}' cannot be searched",
+                index_name, db_name, table_name
+            ),
+            e,
         )
     })
 }
@@ -92,7 +96,7 @@ fn rows_with_key(
     key: &[DataValue],
     new_name: &str,
     unique: bool,
-) -> Result<Vec<(u32, u32)>, String> {
+) -> RookResult<Vec<(u32, u32)>> {
     let (index, index_cols) =
         ensure_columns_index(catalog, db_name, table_name, names, new_name, unique)?;
     // The index may list the same columns in another order than the key.
@@ -102,7 +106,9 @@ fn rows_with_key(
         let at = names
             .iter()
             .position(|n| n.eq_ignore_ascii_case(index_col))
-            .ok_or_else(|| format!("index '{}' does not match its columns", index))?;
+            .ok_or_else(|| {
+                RookError::Internal(format!("index '{}' does not match its columns", index))
+            })?;
         let col = find_columns(
             catalog,
             db_name,
@@ -110,7 +116,12 @@ fn rows_with_key(
             std::slice::from_ref(index_col),
         )
         .and_then(|c| c.first().map(|c| c.data_type.clone()))
-        .ok_or_else(|| format!("column '{}' of '{}' not found", index_col, table_name))?;
+        .ok_or_else(|| {
+            RookError::Internal(format!(
+                "column '{}' of '{}' not found",
+                index_col, table_name
+            ))
+        })?;
         types.push(col);
         ordered.push(key[at].clone());
     }
@@ -133,7 +144,7 @@ pub(crate) fn key_exists_in_table(
     table_name: &str,
     columns: &[String],
     key: &[DataValue],
-) -> Result<bool, String> {
+) -> RookResult<bool> {
     let unique = matches!(
         find_columns(catalog, db_name, table_name, columns).as_deref(),
         Some([c]) if c.constraints.unique
@@ -161,7 +172,7 @@ pub(crate) fn child_row_pointers(
     child_table: &str,
     child_cols: &[String],
     parent_key: &[DataValue],
-) -> Result<Vec<(u32, u32)>, String> {
+) -> RookResult<Vec<(u32, u32)>> {
     let Some(cols) = find_columns(catalog, db_name, child_table, child_cols) else {
         return Ok(Vec::new());
     };
@@ -204,7 +215,7 @@ pub(crate) fn child_has_referencing_row(
     child_table: &str,
     child_cols: &[String],
     key: &[DataValue],
-) -> Result<bool, String> {
+) -> RookResult<bool> {
     child_row_pointers(catalog, db_name, child_table, child_cols, key)
         .map(|pointers| !pointers.is_empty())
 }
@@ -231,8 +242,9 @@ pub(crate) fn child_rows_referencing(
     };
     let schema: Vec<DataType> = table.columns.iter().map(|c| c.data_type.clone()).collect();
     let heap_path = catalog.engine().paths().heap(db_name, child_table);
-    let file = crate::backend::heap::HeapFile::open(catalog.engine(), &heap_path)
-        .map_err(|e| format!("Failed to open child heap '{}': {}", child_table, e))?;
+    let file = crate::backend::heap::HeapFile::open(catalog.engine(), &heap_path).map_err(|e| {
+        RookError::storage(format!("Failed to open child heap '{}'", child_table), e)
+    })?;
 
     let mut rows = Vec::with_capacity(pointers.len());
     let mut page = crate::page::Page::new();
@@ -240,7 +252,7 @@ pub(crate) fn child_rows_referencing(
     for (page_num, slot) in pointers {
         if loaded != Some(page_num) {
             file.read_page(&mut page, page_num)
-                .map_err(|e| e.to_string())?;
+                .map_err(RookError::storage_bare)?;
             loaded = Some(page_num);
         }
         if let Some(bytes) = page.tuple(slot)

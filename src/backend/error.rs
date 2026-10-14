@@ -66,6 +66,17 @@ pub enum RookError {
     TypeMismatch(String),
     /// Underlying storage I/O failure.
     Io(std::io::Error),
+    /// A storage failure whose message is shown as-is (no `I/O error:`
+    /// prefix), optionally led by a context phrase: `"context: source"`.
+    ///
+    /// Used where a layer above the disk manager already rendered an
+    /// `io::Error` into its own user-facing sentence; unlike [`RookError::Io`]
+    /// plus [`RookError::with_context`], the text stays exactly that sentence,
+    /// while `is_io()` and `source()` still reach the original `io::Error`.
+    Storage {
+        context: Option<String>,
+        source: std::io::Error,
+    },
     /// An error with additional human-readable context attached.
     ///
     /// Produced by [`RookError::with_context`]; the inner error keeps its
@@ -96,6 +107,22 @@ impl RookError {
         }
     }
 
+    /// A storage failure rendered as `"context: source"`.
+    pub fn storage(context: impl Into<String>, source: std::io::Error) -> Self {
+        RookError::Storage {
+            context: Some(context.into()),
+            source,
+        }
+    }
+
+    /// A storage failure rendered as the bare `io::Error` text.
+    pub fn storage_bare(source: std::io::Error) -> Self {
+        RookError::Storage {
+            context: None,
+            source,
+        }
+    }
+
     /// `true` when this error represents any constraint violation.
     pub fn is_constraint_violation(&self) -> bool {
         matches!(self, RookError::ConstraintViolation { .. })
@@ -112,7 +139,7 @@ impl RookError {
     /// `true` when the failure came from the storage layer.
     pub fn is_io(&self) -> bool {
         match self {
-            RookError::Io(_) => true,
+            RookError::Io(_) | RookError::Storage { .. } => true,
             RookError::Contextual { source, .. } => source.is_io(),
             _ => false,
         }
@@ -142,6 +169,14 @@ impl fmt::Display for RookError {
             RookError::InvalidIdentifier(message) => f.write_str(message),
             RookError::TypeMismatch(message) => f.write_str(message),
             RookError::Io(e) => write!(f, "I/O error: {}", e),
+            RookError::Storage {
+                context: Some(context),
+                source,
+            } => write!(f, "{}: {}", context, source),
+            RookError::Storage {
+                context: None,
+                source,
+            } => write!(f, "{}", source),
             RookError::Contextual { context, source } => write!(f, "{}: {}", context, source),
             RookError::Internal(message) => f.write_str(message),
         }
@@ -152,6 +187,7 @@ impl std::error::Error for RookError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RookError::Io(e) => Some(e),
+            RookError::Storage { source, .. } => Some(source),
             RookError::Contextual { source, .. } => Some(source.as_ref()),
             _ => None,
         }
@@ -214,6 +250,17 @@ mod tests {
         let io = RookError::from(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
         assert!(io.is_io());
         assert_eq!(io.constraint_kind(), None);
+    }
+
+    #[test]
+    fn storage_renders_without_io_prefix_and_keeps_kind() {
+        let src = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let e = RookError::storage("Failed to open heap", src);
+        assert_eq!(e.to_string(), "Failed to open heap: gone");
+        assert!(e.is_io());
+        assert!(std::error::Error::source(&e).is_some());
+        let bare = RookError::storage_bare(std::io::Error::other("boom"));
+        assert_eq!(bare.to_string(), "boom");
     }
 
     #[test]

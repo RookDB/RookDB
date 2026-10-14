@@ -103,7 +103,7 @@ pub fn load_table_indexes(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-) -> Result<Vec<(String, String, bool)>, String> {
+) -> RookResult<Vec<(String, String, bool)>> {
     Ok(load_table_indexes_multi(engine, db_name, table_name)?
         .into_iter()
         .map(|(name, mut cols, unique)| {
@@ -123,7 +123,7 @@ pub fn load_table_indexes_multi(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-) -> Result<Vec<(String, Vec<String>, bool)>, String> {
+) -> RookResult<Vec<(String, Vec<String>, bool)>> {
     // Hot path: serve from the process-cached table metadata (populated once
     // per (db, table), invalidated on DDL). Physical planning calls this for
     // every query — a full sys_indexes scan per SELECT was the dominant
@@ -146,14 +146,14 @@ pub fn load_table_indexes_multi(
     }
 
     let heap = crate::backend::cache::lease_heap(engine, &idx_path)
-        .map_err(|e| format!("Failed to open sys_indexes: {}", e))?;
+        .map_err(|e| RookError::storage("Failed to open sys_indexes", e))?;
 
     let mut indexes = Vec::new();
     for result in heap.scan() {
         let (_page_id, _slot_id, raw_bytes) =
-            result.map_err(|e| format!("Error scanning sys_indexes: {}", e))?;
+            result.map_err(|e| RookError::storage("Error scanning sys_indexes", e))?;
         let decoded = crate::types::deserialize_nullable_row(SYS_INDEXES_SCHEMA, &raw_bytes)
-            .map_err(|e| format!("Error deserializing sys_indexes: {}", e))?;
+            .map_err(|e| e.with_context("Error deserializing sys_indexes"))?;
 
         // SYS_INDEXES_SCHEMA: index_id, table_id, name, is_unique, is_primary, columns
         if decoded.len() < 6 {
@@ -219,7 +219,7 @@ pub fn create_index(
     table_name: &str,
     index_name: &str,
     column_names: &[String],
-) -> crate::backend::error::RookResult<usize> {
+) -> RookResult<usize> {
     create_index_with_flags(
         catalog,
         db_name,
@@ -250,7 +250,7 @@ pub fn create_index_with_flags(
     column_names: &[String],
     is_unique: bool,
     is_primary: bool,
-) -> crate::backend::error::RookResult<usize> {
+) -> RookResult<usize> {
     log::info!(
         "[CreateIndex] Creating index '{}.{}.{}' on columns {:?} (unique={}, primary={})",
         db_name,
@@ -321,7 +321,7 @@ pub fn create_index_with_flags(
 
     // 6. Create the B+ Tree index file (composite-aware)
     let mut btree = BTree::create_composite(idx_path.clone(), key_types.clone())
-        .map_err(|e| format!("Failed to create index file: {}", e))?;
+        .map_err(|e| RookError::storage("Failed to create index file", e))?;
 
     // 7. Scan all tuples and insert into the B+ Tree
     let mut inserted_count = 0usize;
@@ -329,12 +329,12 @@ pub fn create_index_with_flags(
     for result in scan_iter {
         let (page_id, slot_id, raw_bytes) = match result {
             Ok(triple) => triple,
-            Err(e) => return Err(format!("Scan error: {}", e).into()),
+            Err(e) => return Err(RookError::storage("Scan error", e)),
         };
 
         // Deserialize the tuple
         let values = crate::types::deserialize_nullable_row(&schema_types, &raw_bytes)
-            .map_err(|e| format!("Failed to deserialize tuple: {}", e))?;
+            .map_err(|e| e.with_context("Failed to deserialize tuple"))?;
 
         // Assemble the key from every indexed column; skip rows where ANY
         // component is NULL (NULLs are not indexed).
@@ -355,11 +355,13 @@ pub fn create_index_with_flags(
 
         // Insert into the B+ Tree: key=column values, value=(page_id, slot_id)
         if let Err(e) = btree.insert_keys(&key_values, page_id, slot_id) {
-            return Err(format!(
-                "Failed to insert into index at (page={}, slot={}): {}",
-                page_id, slot_id, e
-            )
-            .into());
+            return Err(RookError::storage(
+                format!(
+                    "Failed to insert into index at (page={}, slot={})",
+                    page_id, slot_id
+                ),
+                e,
+            ));
         }
 
         inserted_count += 1;
@@ -368,7 +370,7 @@ pub fn create_index_with_flags(
     // 8. Sync the index to disk
     btree
         .sync()
-        .map_err(|e| format!("Failed to sync index: {}", e))?;
+        .map_err(|e| RookError::storage("Failed to sync index", e))?;
 
     // 9. Save index metadata to sys_indexes system table (comma-separated
     //     column list for composite indexes)
@@ -417,7 +419,7 @@ pub(crate) fn repair_indexes(
     db_name: &str,
     table_name: &str,
     cause: &str,
-) -> crate::backend::error::RookResult<()> {
+) -> RookResult<()> {
     log::warn!(
         "[Index] {}; rebuilding the indexes of '{}.{}'",
         cause,
@@ -483,17 +485,17 @@ pub(crate) fn ensure_columns_index(
     columns: &[String],
     new_name: &str,
     unique: bool,
-) -> Result<(String, Vec<String>), String> {
+) -> RookResult<(String, Vec<String>)> {
     let engine = catalog.engine();
     if let Some(found) = find_columns_index(engine, db_name, table_name, columns) {
         return Ok(found);
     }
     // Only a table the system tables know can record an index.
     if crate::backend::cache::metadata(engine, db_name, table_name).is_none() {
-        return Err(format!(
+        return Err(RookError::Internal(format!(
             "table '{}.{}' is not in the system tables, so it cannot be indexed",
             db_name, table_name
-        ));
+        )));
     }
 
     let listed = crate::backend::system_table::table_indexes(engine, db_name, table_name)
@@ -535,8 +537,7 @@ pub(crate) fn ensure_columns_index(
         &key_columns,
         unique,
         primary,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     Ok((name.to_string(), key_columns))
 }
 
@@ -547,16 +548,16 @@ pub(crate) fn restore_index_file(
     db_name: &str,
     table_name: &str,
     name: &str,
-) -> Result<(), String> {
+) -> RookResult<()> {
     let engine = catalog.engine();
     let Some(ix) = crate::backend::system_table::table_indexes(engine, db_name, table_name)
         .into_iter()
         .find(|ix| ix.name.eq_ignore_ascii_case(name))
     else {
-        return Err(format!(
+        return Err(RookError::Internal(format!(
             "index '{}' is not listed for '{}'",
             name, table_name
-        ));
+        )));
     };
     let _ = crate::backend::system_table::delete_index_metadata(engine, db_name, table_name, name);
     create_index_with_flags(
@@ -569,7 +570,6 @@ pub(crate) fn restore_index_file(
         ix.is_primary,
     )
     .map(|_| ())
-    .map_err(|e| e.to_string())
 }
 
 /// Create an index on a parent-side FK target (one column or several) if it
@@ -802,7 +802,7 @@ pub fn update_index_on_insert(
     values: &[Option<DataValue>],
     page_id: u32,
     slot_id: u32,
-) -> crate::backend::error::RookResult<()> {
+) -> RookResult<()> {
     let indexes = discover_cached(engine, db_name, table_name);
     if indexes.is_empty() {
         return Ok(()); // No indexes to update
@@ -819,22 +819,20 @@ pub fn update_index_on_insert(
             engine,
             idx_path,
             || {
-                open_btree_for_meta(idx_path, meta)
-                    .ok_or_else(|| format!("Failed to open index {:?}", idx_path))
+                open_btree_for_meta(idx_path, meta).ok_or_else(|| {
+                    RookError::Internal(format!("Failed to open index {:?}", idx_path))
+                })
             },
             |bt| {
                 bt.insert_keys(&key_values, page_id, slot_id)
-                    .map_err(|e| format!("{}", e))
+                    .map_err(RookError::storage_bare)
             },
         );
 
         if let Err(e) = res {
             // Report it: the caller takes the row back out, so heap and
             // index never disagree about which rows exist.
-            return Err(crate::backend::error::RookError::Internal(format!(
-                "failed to insert into index {:?}: {}",
-                idx_path, e
-            )));
+            return Err(e.with_context(format!("failed to insert into index {:?}", idx_path)));
         }
     }
 
@@ -888,7 +886,7 @@ pub fn update_index_on_delete(
     tuple_data: &[u8],
     page_id: u32,
     slot_id: u32,
-) -> crate::backend::error::RookResult<bool> {
+) -> RookResult<bool> {
     let indexes = discover_cached(engine, db_name, table_name);
     if indexes.is_empty() {
         return Ok(false); // No indexes to update
@@ -897,7 +895,7 @@ pub fn update_index_on_delete(
     // Pre-deserialize the tuple once for all indexes
     let schema_types: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
     let decoded = crate::types::deserialize_nullable_row(&schema_types, tuple_data)
-        .map_err(|e| format!("Failed to deserialize tuple for index update: {}", e))?;
+        .map_err(|e| e.with_context("Failed to deserialize tuple for index update"))?;
 
     let mut any_updated = false;
 
@@ -912,12 +910,13 @@ pub fn update_index_on_delete(
             engine,
             idx_path,
             || {
-                open_btree_for_meta(idx_path, meta)
-                    .ok_or_else(|| format!("Failed to open index {:?}", idx_path))
+                open_btree_for_meta(idx_path, meta).ok_or_else(|| {
+                    RookError::Internal(format!("Failed to open index {:?}", idx_path))
+                })
             },
             |bt| {
                 bt.delete_keys(&key_values, page_id, slot_id)
-                    .map_err(|e| format!("{}", e))
+                    .map_err(RookError::storage_bare)
             },
         );
 
@@ -937,7 +936,7 @@ pub fn update_index_on_delete(
                 );
             }
             Err(e) => {
-                return Err(format!("Failed to delete from index {:?}: {}", idx_path, e).into());
+                return Err(e.with_context(format!("Failed to delete from index {:?}", idx_path)));
             }
         }
     }
@@ -963,7 +962,7 @@ pub fn update_index_on_update(
     old_slot_id: u32,
     new_page_id: u32,
     new_slot_id: u32,
-) -> crate::backend::error::RookResult<()> {
+) -> RookResult<()> {
     let indexes = discover_cached(engine, db_name, table_name);
     if indexes.is_empty() {
         return Ok(()); // No indexes to update
@@ -973,9 +972,9 @@ pub fn update_index_on_update(
     let schema_types: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
 
     let old_decoded = crate::types::deserialize_nullable_row(&schema_types, old_tuple_data)
-        .map_err(|e| format!("Failed to deserialize old tuple: {}", e))?;
+        .map_err(|e| e.with_context("Failed to deserialize old tuple"))?;
     let new_decoded = crate::types::deserialize_nullable_row(&schema_types, new_tuple_data)
-        .map_err(|e| format!("Failed to deserialize new tuple: {}", e))?;
+        .map_err(|e| e.with_context("Failed to deserialize new tuple"))?;
 
     for (idx_path, meta) in indexes.iter() {
         let old_key = build_key_from_decoded(meta, &old_decoded);
@@ -996,29 +995,34 @@ pub fn update_index_on_update(
             engine,
             idx_path,
             || {
-                open_btree_for_meta(idx_path, meta)
-                    .ok_or_else(|| format!("Failed to open index {:?}", idx_path))
+                open_btree_for_meta(idx_path, meta).ok_or_else(|| {
+                    RookError::Internal(format!("Failed to open index {:?}", idx_path))
+                })
             },
-            |btree| -> Result<(), String> {
+            |btree| -> RookResult<()> {
                 // Delete old key (if it was indexed), matching by the OLD heap location
                 if let Some(ref old) = old_key {
                     btree
                         .delete_keys(old, old_page_id, old_slot_id)
-                        .map_err(|e| format!("Failed to delete old key from index: {}", e))?;
+                        .map_err(|e| {
+                            RookError::storage("Failed to delete old key from index", e)
+                        })?;
                 }
 
                 // Insert new key (if it's not NULL)
                 if let Some(ref new) = new_key {
                     btree
                         .insert_keys(new, new_page_id, new_slot_id)
-                        .map_err(|e| format!("Failed to insert new key into index: {}", e))?;
+                        .map_err(|e| {
+                            RookError::storage("Failed to insert new key into index", e)
+                        })?;
                 }
                 Ok(())
             },
         );
 
         if let Err(e) = res {
-            return Err(format!("Failed to update index {:?}: {}", idx_path, e).into());
+            return Err(e.with_context(format!("Failed to update index {:?}", idx_path)));
         }
     }
 
