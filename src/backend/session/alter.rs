@@ -343,6 +343,17 @@ fn rename_table(
     rename_index_files_for_table(catalog.engine(), db, old_name, new_name);
 
     let mut lines = Vec::new();
+    if let Err(e) = crate::backend::system_table::rename_table_in_system(
+        catalog.engine(),
+        db,
+        old_name,
+        new_name,
+    ) {
+        lines.push(format!(
+            "[AlterTable] Warning: failed to rename '{}' in the system tables: {}",
+            old_name, e
+        ));
+    }
     if let Some(d) = catalog.databases.get_mut(db) {
         d.tables.remove(old_name);
         d.tables.insert(new_name.to_string(), table);

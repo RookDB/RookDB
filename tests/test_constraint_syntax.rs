@@ -33,8 +33,6 @@ fn values(session: &mut Session, sql: &str) -> Vec<Vec<Option<DataValue>>> {
 fn check_is_enforced_with_or_without_a_space() {
     let _ws = common::TestWorkspace::new("ctsyntax", "check");
     let mut s = session();
-    // Table-level CHECK rows are dropped by the next catalog save, so each
-    // is tested before another table is created.
     for sql in [
         "CREATE TABLE tight (a INT CHECK(a > 0))",
         "CREATE TABLE spaced (a INT CHECK (a > 0))",
@@ -42,11 +40,12 @@ fn check_is_enforced_with_or_without_a_space() {
         "CREATE TABLE tbl_spaced (a INT, CHECK (a > 0))",
     ] {
         ok(&mut s, sql);
-        let t = sql.split_whitespace().nth(2).unwrap();
+    }
+    for t in ["tight", "spaced", "tbl_tight", "tbl_spaced"] {
         ok(&mut s, &format!("INSERT INTO {t} VALUES (1)"));
         assert!(
             run(&mut s, &format!("INSERT INTO {t} VALUES (-1)")).is_err(),
-            "{sql}: CHECK not enforced"
+            "{t}: CHECK not enforced"
         );
     }
 }

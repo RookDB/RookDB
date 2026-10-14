@@ -446,10 +446,20 @@ pub fn delete_column_constraints(
                 Some(crate::types::DataValue::Char(c)) => c,
                 _ => continue,
             };
-            // Check if the columns field references the dropped column
-            // (could be exact match or comma-separated)
-            let col_refs: Vec<&str> = row_columns.split(',').map(|s| s.trim()).collect();
-            if col_refs.iter().any(|c| c.eq_ignore_ascii_case(column_name)) {
+            let is_check = matches!(
+                &decoded[2],
+                Some(crate::types::DataValue::Varchar(t)) | Some(crate::types::DataValue::Char(t))
+                    if t.trim().eq_ignore_ascii_case("CHECK")
+            );
+            // A CHECK row stores its expression: it goes if it mentions the column.
+            let mentions = if is_check {
+                rename_identifier_in_expr(row_columns, column_name, "\u{0}") != *row_columns
+            } else {
+                row_columns
+                    .split(',')
+                    .any(|c| c.trim().eq_ignore_ascii_case(column_name))
+            };
+            if mentions {
                 to_delete.push((page_id, slot_id));
             }
         }
@@ -934,6 +944,51 @@ pub fn delete_referencing_foreign_keys(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+/// Rename a table's row in `sys_tables`.
+///
+/// A catalog save carries constraint rows over by table name, read from
+/// `sys_tables`; renaming the row first lets a renamed table keep its own
+/// PRIMARY KEY, UNIQUE, CHECK and FOREIGN KEY rows.
+pub fn rename_table_in_system(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    old_name: &str,
+    new_name: &str,
+) -> std::io::Result<()> {
+    let (table_id, _db_id) = resolve_table_id(engine, db_name, old_name)?;
+    let path = sys_path(engine, "tables");
+    let mut heap = crate::backend::heap::HeapManager::open(path)?;
+    let mut found = None;
+    for result in heap.scan() {
+        let (page_id, slot_id, raw_bytes) = result?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if matches!(decoded.first(), Some(Some(crate::types::DataValue::Int(id))) if *id == table_id)
+        {
+            found = Some((page_id, slot_id, decoded));
+            break;
+        }
+    }
+    let Some((page_id, slot_id, decoded)) = found else {
+        return Ok(());
+    };
+    heap.delete_tuple(page_id, slot_id)?;
+    let file_path = crate::backend::paths::relative_heap(db_name, new_name);
+    let row = [
+        decoded
+            .first()
+            .and_then(|v| v.as_ref().map(value_to_string)),
+        decoded.get(1).and_then(|v| v.as_ref().map(value_to_string)),
+        Some(new_name.to_string()),
+        Some(file_path),
+    ];
+    let refs: Vec<Option<&str>> = row.iter().map(|o| o.as_deref()).collect();
+    let bytes = crate::types::serialize_nullable_row(SYS_TABLES_SCHEMA, &refs)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    heap.insert_tuple(&bytes)?;
+    heap.flush()
+}
 
 #[cfg(test)]
 mod tests {

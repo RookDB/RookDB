@@ -22,6 +22,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
         // Also load sys_tables to resolve table_id → table_name
         let mut tbl_id_to_name: std::collections::HashMap<i32, String> =
             std::collections::HashMap::new();
+        let db_id_to_name = load_database_names(catalog.engine());
         let tbl_path = sys_path(catalog.engine(), "tables");
         if tbl_path.exists()
             && let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path)
@@ -38,8 +39,12 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
                         Some(Some(crate::types::DataValue::Char(name))) => Some(name.clone()),
                         _ => None,
                     };
-                    if let Some(name) = name_opt {
-                        tbl_id_to_name.insert(*tid, name);
+                    let db_name = match decoded.get(1) {
+                        Some(Some(crate::types::DataValue::Int(id))) => db_id_to_name.get(id),
+                        _ => None,
+                    };
+                    if let (Some(name), Some(db_name)) = (name_opt, db_name) {
+                        tbl_id_to_name.insert(*tid, table_key(db_name, &name));
                     }
                 }
             }
@@ -57,7 +62,14 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
                         Some(crate::types::DataValue::Char(s)) => s.as_str(),
                         _ => "",
                     };
-                    if constr_type.to_uppercase().contains("FOREIGN KEY") {
+                    // Rows the catalog cannot regenerate: foreign keys, and
+                    // the table-level PRIMARY KEY / UNIQUE / CHECK ones
+                    // (column-level NOT NULL / UNIQUE / CHECK are re-emitted
+                    // from the in-memory columns below).
+                    let constr_upper = constr_type.to_uppercase();
+                    if constr_upper.contains("FOREIGN KEY")
+                        || matches!(constr_upper.as_str(), "PRIMARY KEY" | "UNIQUE" | "CHECK")
+                    {
                         // Resolve numeric table_id → table name for the CHILD table
                         let old_table_id = match &decoded[1] {
                             Some(crate::types::DataValue::Int(id)) => *id,
@@ -73,7 +85,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
                         let ref_table = decoded[4].as_ref().map(value_to_string);
                         let ref_columns = decoded[5].as_ref().map(value_to_string);
 
-                        // Store CHILD TABLE NAME as the "table_id" field.
+                        // Store the owning table's key as the "table_id" field.
                         // After rebuilding, populate_system_tables will resolve
                         // this name back to a numeric table_id. We use a special
                         // "NAME:" prefix to distinguish name-based entries from
@@ -123,6 +135,42 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Identifies a table across databases when constraint rows are carried over
+/// a rebuild, by name, since table_ids are reassigned.
+fn table_key(db: &str, table: &str) -> String {
+    format!("{}\u{1f}{}", db, table)
+}
+
+fn load_database_names(
+    engine: &crate::backend::engine::Engine,
+) -> std::collections::HashMap<i32, String> {
+    let mut names = std::collections::HashMap::new();
+    let path = sys_path(engine, "databases");
+    if path.exists()
+        && let Ok(heap) = crate::backend::heap::HeapManager::open(path)
+    {
+        for result in heap.scan() {
+            if let Ok((_, _, raw)) = result
+                && let Ok(row) = crate::types::deserialize_nullable_row(SYS_DATABASES_SCHEMA, &raw)
+                && let (Some(Some(crate::types::DataValue::Int(id))), Some(Some(name))) =
+                    (row.first(), row.get(1))
+            {
+                names.insert(*id, value_to_string(name));
+            }
+        }
+    }
+    names
+}
+
+/// A CHECK row's expression, whether stored bare or as `CHECK(expr)`.
+fn check_expr(field: &str) -> &str {
+    field
+        .strip_prefix("CHECK(")
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(field)
+        .trim()
+}
+
 /// Populate all system tables from an in-memory Catalog.
 ///
 /// Writes databases, tables, columns, constraints, and (where possible)
@@ -154,12 +202,12 @@ pub(crate) fn populate_system_tables(
     // that db_id/table_id assignment is stable across processes.  HashMap
     // iteration order is randomised per process, which previously produced
     // nondeterministic IDs (breaking FK resolution and reproducibility).
-    for (_db_name, database) in sorted_databases(catalog) {
+    for (db_name, database) in sorted_databases(catalog) {
         let mut tbl_names: Vec<&String> = database.tables.keys().collect();
         tbl_names.sort();
         for tbl_name in tbl_names {
             let table_id = next_table_id;
-            table_name_to_new_id.insert(tbl_name.clone(), table_id);
+            table_name_to_new_id.insert(table_key(db_name, tbl_name), table_id);
             next_table_id += 1;
         }
     }
@@ -185,6 +233,26 @@ pub(crate) fn populate_system_tables(
             next_constr_id += 1;
         }
     }
+
+    // Carried-over UNIQUE / CHECK rows, so the same constraint is not also
+    // re-emitted from the column that carries it in memory.
+    let kept: std::collections::HashSet<(String, String, String)> = constr_rows
+        .iter()
+        .filter_map(|row| {
+            let table = row.get(1)?.as_deref()?.strip_prefix("TABLE_NAME:")?;
+            let kind = row.get(2)?.as_deref()?;
+            let cols = row.get(3)?.as_deref()?;
+            match kind {
+                "UNIQUE" => Some((table.to_string(), kind.to_string(), cols.to_lowercase())),
+                "CHECK" => Some((
+                    table.to_string(),
+                    kind.to_string(),
+                    check_expr(cols).to_string(),
+                )),
+                _ => None,
+            }
+        })
+        .collect();
 
     // Batch collections per system table
     let mut db_rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -251,7 +319,10 @@ pub(crate) fn populate_system_tables(
                     ]);
                     next_constr_id += 1;
                 }
-                if col.constraints.unique {
+                let key = table_key(db_name, tbl_name);
+                if col.constraints.unique
+                    && !kept.contains(&(key.clone(), "UNIQUE".into(), col.name.to_lowercase()))
+                {
                     constr_rows.push(vec![
                         Some(next_constr_id.to_string()),
                         Some(table_id.to_string()),
@@ -262,7 +333,9 @@ pub(crate) fn populate_system_tables(
                     ]);
                     next_constr_id += 1;
                 }
-                if let Some(ref check_expr) = col.constraints.check {
+                if let Some(ref check_expr) = col.constraints.check
+                    && !kept.contains(&(key.clone(), "CHECK".into(), check_expr.trim().to_string()))
+                {
                     constr_rows.push(vec![
                         Some(next_constr_id.to_string()),
                         Some(table_id.to_string()),
@@ -289,6 +362,13 @@ pub(crate) fn populate_system_tables(
             && let Some(table_name) = table_id_str.strip_prefix("TABLE_NAME:")
         {
             let resolved_id = table_name_to_new_id.get(table_name).cloned().unwrap_or(0);
+            // A carried-over PRIMARY KEY / UNIQUE / CHECK row of a table that
+            // no longer exists is dropped, not parked under table_id 0.
+            let is_fk = row[2].as_deref().is_some_and(|t| t.contains("FOREIGN KEY"));
+            if resolved_id == 0 && !is_fk {
+                row.clear();
+                continue;
+            }
             row[1] = if resolved_id != 0 {
                 Some(resolved_id.to_string())
             } else {
@@ -300,6 +380,8 @@ pub(crate) fn populate_system_tables(
             };
         }
     }
+
+    constr_rows.retain(|row| !row.is_empty());
 
     // Batch-write each system table
     if let Err(e) = insert_system_rows(
