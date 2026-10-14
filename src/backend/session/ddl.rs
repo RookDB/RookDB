@@ -3,9 +3,12 @@
 use std::io;
 use std::str::FromStr;
 
-use rook_ast::{CreateDatabasePlan, CreateIndexPlan, CreateTablePlan, DropDatabasePlan};
+use rook_ast::{
+    ColumnConstraint, ConstantValue, CreateDatabasePlan, CreateIndexPlan, CreateTablePlan,
+    DropDatabasePlan, ExprNode, TableConstraint,
+};
 
-use super::names::{save_table_constraint, select_plan_references_table, strip_outer_parens};
+use super::names::{save_table_constraint, select_plan_references_table};
 use super::{Session, StatementResult};
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::executor::create_index::{
@@ -13,7 +16,7 @@ use crate::backend::executor::create_index::{
 };
 use crate::catalog::types::{Column, Constraints};
 use crate::catalog::{Catalog, create_table as catalog_create_table};
-use crate::types::DataType;
+use crate::types::{DataType, DataValue};
 
 pub(super) fn show_databases(catalog: &Catalog) -> StatementResult {
     if catalog.databases.is_empty() {
@@ -109,29 +112,18 @@ pub(super) fn use_database(session: &mut Session, db_name: &str) -> StatementRes
     })
 }
 
-/// A DEFAULT given as text for a column of type `ty`; `None` for NULL.
-fn parse_default(ty: &DataType, raw: &str) -> Result<Option<crate::types::DataValue>, String> {
-    let raw = strip_outer_parens(raw);
-    if raw.eq_ignore_ascii_case("NULL") {
-        return Ok(None);
-    }
-    crate::backend::executor::create_index::parse_string_to_value(ty, raw).map(Some)
-}
-
-/// The column list of a `PRIMARY KEY (..)`, `UNIQUE (..)` or
-/// `FOREIGN KEY (..)` table constraint.
-fn constraint_columns(definition: &str) -> Vec<String> {
-    definition
-        .split('(')
-        .nth(1)
-        .and_then(|s| s.split(')').next())
-        .map(|cols| {
-            cols.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
+/// The value of a column DEFAULT; `None` for NULL. Only constants are
+/// accepted, and the constant must be valid for the column's type.
+pub(super) fn default_value(ty: &DataType, expr: &ExprNode) -> Result<Option<DataValue>, String> {
+    let text = match expr {
+        ExprNode::Constant(ConstantValue::Null) => return Ok(None),
+        ExprNode::Constant(ConstantValue::Int(i)) => i.to_string(),
+        ExprNode::Constant(ConstantValue::Float(f)) => f.to_string(),
+        ExprNode::Constant(ConstantValue::Text(t)) => t.clone(),
+        ExprNode::Constant(ConstantValue::Boolean(b)) => b.to_string(),
+        _ => return Err("DEFAULT must be a constant".to_string()),
+    };
+    crate::backend::executor::create_index::parse_string_to_value(ty, &text).map(Some)
 }
 
 pub(super) fn create_table(
@@ -168,37 +160,27 @@ pub(super) fn create_table(
             ))
         })?;
 
-        let has = |name: &str| col.constraints.iter().any(|c| c.eq_ignore_ascii_case(name));
-        let not_null = has("NOT NULL") || has("PRIMARY KEY");
-        let unique = has("UNIQUE") || has("PRIMARY KEY");
+        let has = |c: &ColumnConstraint| col.constraints.contains(c);
+        let primary_key = has(&ColumnConstraint::PrimaryKey);
+        let not_null = has(&ColumnConstraint::NotNull) || primary_key;
+        let unique = has(&ColumnConstraint::Unique) || primary_key;
 
         let mut default = None;
-        for c in &col.constraints {
-            let upper = c.to_ascii_uppercase();
-            if upper.starts_with("DEFAULT ") || upper.starts_with("DEFAULT(") {
-                let raw = c["DEFAULT".len()..].trim();
-                default = parse_default(&data_type, raw).map_err(|e| {
-                    not_created(format!(
-                        "Invalid DEFAULT {} for column '{}' of type {}: {}",
-                        strip_outer_parens(raw),
-                        col.name,
-                        col.data_type,
-                        e
-                    ))
-                })?;
-                break;
-            }
+        if let Some(expr) = col.constraints.iter().find_map(|c| match c {
+            ColumnConstraint::Default(e) => Some(e),
+            _ => None,
+        }) {
+            default = default_value(&data_type, expr).map_err(|e| {
+                not_created(format!(
+                    "Invalid DEFAULT for column '{}' of type {}: {}",
+                    col.name, col.data_type, e
+                ))
+            })?;
         }
 
-        // The parser renders a column constraint as `CHECK (expr)`.
-        let check = col.constraints.iter().find_map(|c| {
-            let upper = c.to_ascii_uppercase();
-            if upper.starts_with("CHECK (") || upper.starts_with("CHECK(") {
-                let expr = c.get(c.find('(')? + 1..c.rfind(')')?)?.trim();
-                (!expr.is_empty()).then(|| expr.to_string())
-            } else {
-                None
-            }
+        let check = col.constraints.iter().find_map(|c| match c {
+            ColumnConstraint::Check(expr) => Some(expr.clone()),
+            _ => None,
         });
 
         columns.push(Column {
@@ -218,7 +200,7 @@ pub(super) fn create_table(
     let mut lines = vec![format!("Table '{}' created successfully.", params.table)];
 
     for tc in &params.constraints {
-        save_table_constraint(catalog.engine(), db, &params.table, &tc.definition);
+        save_table_constraint(catalog.engine(), db, &params.table, tc);
     }
 
     // Auto-create B+ Tree indexes on PRIMARY KEY, UNIQUE, and REFERENCES columns.
@@ -231,9 +213,9 @@ pub(super) fn create_table(
         create_index_with_flags(catalog, db, &params.table, &name, cols, unique, primary)
     };
     for col in &params.columns {
-        let has = |name: &str| col.constraints.iter().any(|c| c.eq_ignore_ascii_case(name));
+        let has = |c: &ColumnConstraint| col.constraints.contains(c);
         let cols = std::slice::from_ref(&col.name);
-        if has("PRIMARY KEY") {
+        if has(&ColumnConstraint::PrimaryKey) {
             if let Err(e) = index(
                 format!("pk_{}_{}", params.table, col.name),
                 cols,
@@ -245,7 +227,7 @@ pub(super) fn create_table(
                     e
                 ));
             }
-        } else if has("UNIQUE")
+        } else if has(&ColumnConstraint::Unique)
             && let Err(e) = index(
                 format!("uq_{}_{}", params.table, col.name),
                 cols,
@@ -258,35 +240,22 @@ pub(super) fn create_table(
                 e
             ));
         }
-        if col
-            .constraints
-            .iter()
-            .any(|c| c.to_uppercase().starts_with("REFERENCES"))
-        {
-            let _ = index(
-                format!("fk_{}_{}", params.table, col.name),
-                cols,
-                false,
-                false,
-            );
-        }
     }
 
-    // Auto-create indexes for table-level constraints
+    // Auto-create indexes for table-level constraints. An inline REFERENCES
+    // arrives here as a table-level foreign key too.
     for tc in &params.constraints {
-        let def_upper = tc.definition.to_uppercase();
-        let cols = constraint_columns(&tc.definition);
+        let (prefix, cols, unique, primary) = match tc {
+            TableConstraint::PrimaryKey { columns } => ("pk", columns, true, true),
+            TableConstraint::Unique { columns } => ("uq", columns, true, false),
+            TableConstraint::ForeignKey { columns, .. } => ("fk", columns, false, false),
+            TableConstraint::Check(_) => continue,
+        };
         if cols.is_empty() {
             continue;
         }
-        let name = |prefix: &str| format!("{}_{}_{}", prefix, params.table, cols.join("_"));
-        if def_upper.starts_with("PRIMARY KEY") {
-            let _ = index(name("pk"), &cols, true, true);
-        } else if def_upper.starts_with("UNIQUE") {
-            let _ = index(name("uq"), &cols, true, false);
-        } else if def_upper.starts_with("FOREIGN KEY") {
-            let _ = index(name("fk"), &cols, false, false);
-        }
+        let name = format!("{}_{}_{}", prefix, params.table, cols.join("_"));
+        let _ = index(name, cols, unique, primary);
     }
 
     // Auto-create parent-side FK indexes.
@@ -300,30 +269,13 @@ pub(super) fn create_table(
     // 2. Deferred: if the parent is created LATER, `ensure_fk_parent_indexes`
     //    (run after every CREATE TABLE) indexes its referenced columns then.
     for tc in &params.constraints {
-        let def_upper = tc.definition.to_ascii_uppercase();
-        let Some(rest_u) = def_upper.strip_prefix("FOREIGN KEY (") else {
-            continue;
-        };
-        let Some(end_paren) = rest_u.find(')') else {
-            continue;
-        };
-        let Some(ref_rest_u) = rest_u[end_paren + 1..]
-            .trim_start()
-            .strip_prefix("REFERENCES ")
-        else {
-            continue;
-        };
-        let Some(ref_start) = ref_rest_u.find('(') else {
-            continue;
-        };
-        let ref_table = ref_rest_u[..ref_start].trim();
-        let ref_cols_rest = &ref_rest_u[ref_start + 1..];
-        let Some(ref_end) = ref_cols_rest.rfind(')') else {
-            continue;
-        };
-        for ref_col in ref_cols_rest[..ref_end].split(',') {
-            let ref_col = ref_col.trim();
-            if !ref_col.is_empty() {
+        if let TableConstraint::ForeignKey {
+            ref_table,
+            ref_columns,
+            ..
+        } = tc
+        {
+            for ref_col in ref_columns {
                 ensure_parent_column_index(catalog, db, ref_table, ref_col);
             }
         }

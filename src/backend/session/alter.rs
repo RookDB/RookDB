@@ -3,11 +3,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rook_ast::{AlterTableAction, AlterTablePlan};
+use rook_ast::{AlterTableAction, AlterTablePlan, ColumnConstraint};
 
 use super::StatementResult;
-use super::ddl::{rebuild_indexes, remove_index_files_for_table, rename_index_files_for_table};
-use super::names::strip_outer_parens;
+use super::ddl::{
+    default_value, rebuild_indexes, remove_index_files_for_table, rename_index_files_for_table,
+};
 use crate::catalog::Catalog;
 use crate::catalog::types::Column;
 use crate::heap::HeapManager;
@@ -64,23 +65,31 @@ pub(super) fn alter_table(
             // Apply the column's constraints; refuse the ones this path cannot
             // honour rather than dropping them.
             for constraint in &column_def.constraints {
-                let upper = constraint.to_ascii_uppercase();
-                if upper == "NOT NULL" {
-                    col.nullable = false;
-                    col.constraints.not_null = true;
-                } else if upper == "NULL" {
+                match constraint {
+                    ColumnConstraint::NotNull => {
+                        col.nullable = false;
+                        col.constraints.not_null = true;
+                    }
                     // Explicitly nullable: the default.
-                } else if upper.starts_with("DEFAULT ") || upper.starts_with("DEFAULT(") {
-                    col.constraints.default =
-                        parse_default(&col.data_type, &constraint["DEFAULT".len()..], &col.name)?;
-                } else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "ALTER TABLE ADD COLUMN does not support the constraint '{}'",
-                            constraint
-                        ),
-                    ));
+                    ColumnConstraint::Null => {}
+                    ColumnConstraint::Default(expr) => {
+                        col.constraints.default = default_value(&col.data_type, expr)
+                            .map_err(|e| invalid_default(&col.name, e))?;
+                    }
+                    unsupported => {
+                        let name = match unsupported {
+                            ColumnConstraint::PrimaryKey => "PRIMARY KEY",
+                            ColumnConstraint::Unique => "UNIQUE",
+                            _ => "CHECK",
+                        };
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "ALTER TABLE ADD COLUMN does not support the constraint '{}'",
+                                name
+                            ),
+                        ));
+                    }
                 }
             }
             if updated_table
@@ -158,7 +167,8 @@ pub(super) fn alter_table(
         } => {
             let pos = find(&updated_table.columns, column)?;
             let col = &mut updated_table.columns[pos];
-            col.constraints.default = parse_default(&col.data_type, default_expr, column)?;
+            col.constraints.default = default_value(&col.data_type, default_expr)
+                .map_err(|e| invalid_default(column, e))?;
         }
         AlterTableAction::DropDefault { column } => {
             let pos = find(&updated_table.columns, column)?;
@@ -370,20 +380,11 @@ fn schema(columns: &[Column]) -> Vec<DataType> {
     columns.iter().map(|c| c.data_type.clone()).collect()
 }
 
-/// A DEFAULT given as text; `None` for NULL.
-fn parse_default(ty: &DataType, raw: &str, column: &str) -> io::Result<Option<DataValue>> {
-    let raw = strip_outer_parens(raw);
-    if raw.eq_ignore_ascii_case("NULL") {
-        return Ok(None);
-    }
-    crate::backend::executor::create_index::parse_string_to_value(ty, raw)
-        .map(Some)
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Invalid DEFAULT {} for column '{}': {}", raw, column, e),
-            )
-        })
+fn invalid_default(column: &str, err: String) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("Invalid DEFAULT for column '{}': {}", column, err),
+    )
 }
 
 /// Rewrite every row of a table for a new schema: each row is decoded with

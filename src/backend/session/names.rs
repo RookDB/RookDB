@@ -1,7 +1,7 @@
 //! Name handling for statements: table-name resolution, table references in
-//! stored views, and table-level constraint definitions.
+//! stored views, and table-level constraints.
 
-use rook_ast::QueryPlan;
+use rook_ast::{QueryPlan, ReferentialAction, TableConstraint};
 
 use crate::catalog::Catalog;
 
@@ -157,158 +157,52 @@ fn predicate_node_references_table(pred: &rook_ast::PredicateNode, table: &str) 
     }
 }
 
-/// Parse a table-level constraint definition string and save it to `sys_constraints`.
-///
-/// Handles definitions produced by sqlparser such as:
-///   "PRIMARY KEY (id)", "UNIQUE (name)", "UNIQUE",
-///   "FOREIGN KEY (user_id) REFERENCES users(id)",
-///   "CHECK (age > 0)"
+/// Save a table-level constraint to `sys_constraints`.
 pub(super) fn save_table_constraint(
     engine: &crate::backend::engine::Engine,
     db: &str,
     table: &str,
-    definition: &str,
+    constraint: &TableConstraint,
 ) {
     use crate::backend::system_table::insert_constraint_metadata;
 
-    // ASCII-only folding: keyword matching needs nothing beyond A-Z, and it
-    // guarantees `upper.len() == definition.len()` so offsets into the
-    // original string stay valid (see the FOREIGN KEY arm below).
-    let upper = definition.to_ascii_uppercase();
-
-    // PRIMARY KEY (cols...)
-    if let Some(rest) = upper.strip_prefix("PRIMARY KEY (") {
-        if let Some(end) = rest.rfind(')') {
-            let cols = rest[..end].to_string();
-            let _ = insert_constraint_metadata(engine, db, table, "PRIMARY KEY", &cols, None, None);
+    let join = |cols: &[String]| cols.join(", ");
+    let action = |keyword: &str, a: ReferentialAction| match a {
+        ReferentialAction::Cascade => format!(" {} CASCADE", keyword),
+        ReferentialAction::SetNull => format!(" {} SET NULL", keyword),
+        ReferentialAction::NoAction | ReferentialAction::Restrict => String::new(),
+    };
+    let _ = match constraint {
+        TableConstraint::PrimaryKey { columns } => {
+            insert_constraint_metadata(engine, db, table, "PRIMARY KEY", &join(columns), None, None)
         }
-    }
-    // UNIQUE (cols...)
-    else if let Some(rest) = upper.strip_prefix("UNIQUE (") {
-        if let Some(end) = rest.rfind(')') {
-            let cols = rest[..end].to_string();
-            let _ = insert_constraint_metadata(engine, db, table, "UNIQUE", &cols, None, None);
+        TableConstraint::Unique { columns } => {
+            insert_constraint_metadata(engine, db, table, "UNIQUE", &join(columns), None, None)
         }
-    }
-    // UNIQUE without columns (table-level shorthand)
-    else if upper == "UNIQUE" {
-        let _ = insert_constraint_metadata(engine, db, table, "UNIQUE", "", None, None);
-    }
-    // FOREIGN KEY (cols) REFERENCES ref_table(ref_cols) [ON DELETE CASCADE|RESTRICT]
-    //
-    // Keywords are matched on an ASCII-uppercased copy, but identifiers are
-    // sliced from the ORIGINAL definition: ref_table/ref_cols feed
-    // case-sensitive file and catalog lookups during enforcement, so their
-    // letter-case must survive verbatim.
-    else if upper.starts_with("FOREIGN KEY (") {
-        // to_ascii_uppercase is length-preserving by construction, so
-        // offsets from `upper` always address the same characters in
-        // `definition` (plain to_uppercase is NOT: 'ß' → "SS" would shift
-        // every later offset).
-        let off = "FOREIGN KEY (".len();
-        let rest_u = &upper[off..];
-        if let Some(end_paren) = rest_u.find(')') {
-            let cols = definition[off..off + end_paren].to_string();
-            let after_paren = definition[off + end_paren + 1..].trim_start();
-            if let Some(ref_rest) = after_paren.strip_prefix("REFERENCES ") {
-                if let Some(ref_start) = ref_rest.find('(') {
-                    let ref_table_name = ref_rest[..ref_start].trim().to_string();
-                    let ref_cols_rest = &ref_rest[ref_start + 1..];
-                    if let Some(ref_end) = ref_cols_rest.rfind(')') {
-                        let ref_cols = ref_cols_rest[..ref_end].to_string();
-                        let remaining_after_ref = ref_cols_rest[ref_end + 1..].trim();
-                        let mut delete_action = "";
-                        let mut update_action = "";
-                        let mut rem = remaining_after_ref.to_uppercase();
-                        if let Some(after) = rem.strip_prefix("ON DELETE ") {
-                            if after.starts_with("CASCADE") {
-                                delete_action = " ON DELETE CASCADE";
-                            } else if after.starts_with("SET NULL") {
-                                delete_action = " ON DELETE SET NULL";
-                            }
-                            let skip_to = after
-                                .find(|c: char| c.is_whitespace())
-                                .unwrap_or(after.len());
-                            rem = after[skip_to..].trim().to_string();
-                        }
-                        if let Some(after) = rem.strip_prefix("ON UPDATE ") {
-                            if after.starts_with("CASCADE") {
-                                update_action = " ON UPDATE CASCADE";
-                            } else if after.starts_with("SET NULL") {
-                                update_action = " ON UPDATE SET NULL";
-                            }
-                        }
-                        let constr_type = format!("FOREIGN KEY{}{}", delete_action, update_action);
-                        let _ = insert_constraint_metadata(
-                            engine,
-                            db,
-                            table,
-                            &constr_type,
-                            &cols,
-                            Some(&ref_table_name),
-                            Some(&ref_cols),
-                        );
-                    }
-                } else {
-                    let ref_table_name = ref_rest
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or(ref_rest)
-                        .to_string();
-                    let _ = insert_constraint_metadata(
-                        engine,
-                        db,
-                        table,
-                        "FOREIGN KEY",
-                        &cols,
-                        Some(&ref_table_name),
-                        Some(""),
-                    );
-                }
-            }
+        TableConstraint::ForeignKey {
+            columns,
+            ref_table,
+            ref_columns,
+            on_delete,
+            on_update,
+        } => {
+            let kind = format!(
+                "FOREIGN KEY{}{}",
+                action("ON DELETE", *on_delete),
+                action("ON UPDATE", *on_update)
+            );
+            insert_constraint_metadata(
+                engine,
+                db,
+                table,
+                &kind,
+                &join(columns),
+                Some(ref_table),
+                Some(&join(ref_columns)),
+            )
         }
-    }
-    // CHECK (expr)
-    else if upper.starts_with("CHECK (") || upper.starts_with("CHECK(") {
-        // Offset of the opening paren: `find_matching_paren` needs it.
-        let check_start = if upper.starts_with("CHECK(") { 5 } else { 6 };
-        let remaining = &definition[check_start..];
-        if let Some(end) = find_matching_paren(remaining) {
-            let expr = remaining[1..end].trim();
-            if !expr.is_empty() {
-                let _ = insert_constraint_metadata(engine, db, table, "CHECK", expr, None, None);
-            }
+        TableConstraint::Check(expr) => {
+            insert_constraint_metadata(engine, db, table, "CHECK", expr, None, None)
         }
-    }
-}
-
-/// Find the index of the matching close-paren for a string that starts with `(...)`.
-/// Properly handles nested parentheses by counting depth.
-fn find_matching_paren(s: &str) -> Option<usize> {
-    if !s.starts_with('(') {
-        return None;
-    }
-    let mut depth: i32 = 0;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Strip redundant parentheses wrapping a whole expression: `('abc')` -> `'abc'`.
-pub(super) fn strip_outer_parens(expr: &str) -> &str {
-    let mut expr = expr.trim();
-    while expr.starts_with('(') && find_matching_paren(expr) == Some(expr.len() - 1) {
-        expr = expr[1..expr.len() - 1].trim();
-    }
-    expr
+    };
 }
