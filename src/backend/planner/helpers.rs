@@ -163,15 +163,8 @@ pub fn expand_projections(
     for item in projections {
         match item {
             SelectExpr::Wildcard => {
-                for (table, col) in &qualified_schema {
-                    let expr = match table {
-                        Some(tbl) => ExprNode::Compound(vec![tbl.clone(), col.name.clone()]),
-                        None => ExprNode::Column(col.name.clone()),
-                    };
-                    result.push(NamedExpr {
-                        name: col.name.clone(),
-                        expr,
-                    });
+                for (expr, name) in star_items(current_plan) {
+                    result.push(NamedExpr { name, expr });
                 }
             }
             SelectExpr::QualifiedWildcard(prefix) => {
@@ -257,6 +250,79 @@ pub fn expand_projections(
         }
     }
     Ok(result)
+}
+
+/// The columns `SELECT *` shows, each as the expression that reads it.
+///
+/// A `USING` / `NATURAL` join shows each shared column once, first: the left
+/// copy, the right copy for a RIGHT join, or `COALESCE(left, right)` for a
+/// FULL join. The rest follow in table order.
+fn star_items(plan: &LogicalPlan) -> Vec<(ExprNode, String)> {
+    match plan {
+        LogicalPlan::Filter(f) => star_items(&f.child),
+        LogicalPlan::Sort(s) => star_items(&s.child),
+        LogicalPlan::Limit(l) => star_items(&l.child),
+        LogicalPlan::Distinct(d) => star_items(&d.child),
+        LogicalPlan::Join(j) => {
+            let left = star_items(&j.left);
+            let right = star_items(&j.right);
+            let has = |items: &[(ExprNode, String)], n: &str| {
+                items.iter().any(|(_, name)| name.eq_ignore_ascii_case(n))
+            };
+            let names: Vec<String> = match j.join_type {
+                JoinType::Natural => left
+                    .iter()
+                    .filter(|(_, n)| has(&right, n))
+                    .map(|(_, n)| n.clone())
+                    .collect(),
+                _ => j
+                    .using
+                    .iter()
+                    .filter(|n| has(&left, n) && has(&right, n))
+                    .cloned()
+                    .collect(),
+            };
+            let find = |items: &[(ExprNode, String)], n: &str| {
+                items
+                    .iter()
+                    .find(|(_, name)| name.eq_ignore_ascii_case(n))
+                    .map(|(e, _)| e.clone())
+            };
+            let mut out = Vec::new();
+            for n in &names {
+                let (Some(l), Some(r)) = (find(&left, n), find(&right, n)) else {
+                    continue;
+                };
+                let expr = match j.join_type {
+                    JoinType::Right => r,
+                    JoinType::Full => ExprNode::Function {
+                        name: "COALESCE".to_string(),
+                        args: vec![
+                            FunctionArg::Expr(Box::new(l)),
+                            FunctionArg::Expr(Box::new(r)),
+                        ],
+                        distinct: false,
+                    },
+                    _ => l,
+                };
+                out.push((expr, n.clone()));
+            }
+            let shared = |name: &str| names.iter().any(|n| n.eq_ignore_ascii_case(name));
+            out.extend(left.into_iter().filter(|(_, n)| !shared(n)));
+            out.extend(right.into_iter().filter(|(_, n)| !shared(n)));
+            out
+        }
+        other => derive_qualified_schema(other)
+            .into_iter()
+            .map(|(table, col)| {
+                let expr = match table {
+                    Some(tbl) => ExprNode::Compound(vec![tbl, col.name.clone()]),
+                    None => ExprNode::Column(col.name.clone()),
+                };
+                (expr, col.name)
+            })
+            .collect(),
+    }
 }
 
 // ── Schema Derivation ─────────────────────────────────────────────────────────

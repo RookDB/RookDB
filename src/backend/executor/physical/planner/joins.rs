@@ -59,7 +59,12 @@ impl PhysicalPlanner {
             if merged_names.is_empty() {
                 op
             } else {
-                Box::new(MergedColumnsOperator::new(op, &merged_names, keep_right))
+                Box::new(MergedColumnsOperator::new(
+                    op,
+                    &merged_names,
+                    keep_right,
+                    j.join_type == rook_ast::JoinType::Full,
+                ))
             }
         };
 
@@ -123,6 +128,13 @@ impl PhysicalPlanner {
             _ => match &j.condition {
                 Some(pred_node) => {
                     let column_names = binding_names(&combined_schema);
+                    let qualified;
+                    let pred_node = if j.using.is_empty() {
+                        pred_node
+                    } else {
+                        qualified = qualify_using_keys(pred_node, left.schema(), &j.using);
+                        &qualified
+                    };
                     Some(predicate_from_ast(pred_node, &column_names)?)
                 }
                 None => None,
@@ -608,6 +620,53 @@ fn resolve_outer_key(schema: &[ColumnInfo], table: Option<&str>, column: &str) -
     });
     let first = matches.next()?;
     matches.next().is_none().then_some(first.0)
+}
+
+/// In a chain, `USING (k)` compares the merged `k` of everything on the
+/// left (written bare) with the new table's. Qualify that bare name with
+/// the table the left side's `k` comes from, so the key still separates the
+/// two sides and the join can hash. A coalesced column has no table and
+/// stays bare.
+fn qualify_using_keys(
+    node: &rook_ast::PredicateNode,
+    left: &[ColumnInfo],
+    names: &[String],
+) -> rook_ast::PredicateNode {
+    use rook_ast::{ExprNode, PredicateNode};
+    match node {
+        PredicateNode::BinaryOp {
+            left: l,
+            op,
+            right: r,
+        } => PredicateNode::BinaryOp {
+            left: Box::new(qualify_using_keys(l, left, names)),
+            op: *op,
+            right: Box::new(qualify_using_keys(r, left, names)),
+        },
+        PredicateNode::Compare {
+            left: l,
+            op,
+            right: r,
+        } => {
+            let table = match &**l {
+                ExprNode::Column(c) if names.iter().any(|n| n.eq_ignore_ascii_case(c)) => {
+                    super::super::expr::column_position(left, None, c)
+                        .and_then(|i| left[i].table.clone())
+                        .map(|t| (t, c.clone()))
+                }
+                _ => None,
+            };
+            PredicateNode::Compare {
+                left: match table {
+                    Some((t, c)) => Box::new(ExprNode::Compound(vec![t, c])),
+                    None => l.clone(),
+                },
+                op: *op,
+                right: r.clone(),
+            }
+        }
+        other => other.clone(),
+    }
 }
 
 /// True when two join-key columns produce equal hash keys exactly when they

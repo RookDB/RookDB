@@ -5,11 +5,16 @@ use super::super::tuple::{ColumnInfo, Tuple};
 use super::PhysicalOperator;
 use crate::backend::error::RookResult;
 
-/// Passes a join's rows through unchanged, relabelling its schema so a bare
-/// reference to a merged column finds one column, not two. No row is copied.
+/// Passes a join's rows through, relabelling its schema so a bare reference
+/// to a merged column finds one column, not two. For a FULL join the one
+/// column is a new last column holding `COALESCE(left, right)` (neither copy
+/// alone is the SQL value); otherwise no row changes.
 pub struct MergedColumnsOperator {
     child: Box<dyn PhysicalOperator>,
     schema: Vec<ColumnInfo>,
+    /// For each FULL-join merged column, the positions of the copies it
+    /// coalesces. Empty for the other join types.
+    coalesce: Vec<Vec<usize>>,
 }
 
 /// Mark the duplicate copies of the shared columns `names` in a join's
@@ -38,20 +43,70 @@ pub fn mark_merged(schema: &mut [ColumnInfo], names: &[String], keep_right: bool
 }
 
 impl MergedColumnsOperator {
-    pub fn new(child: Box<dyn PhysicalOperator>, names: &[String], keep_right: bool) -> Self {
+    pub fn new(
+        child: Box<dyn PhysicalOperator>,
+        names: &[String],
+        keep_right: bool,
+        full: bool,
+    ) -> Self {
         let mut schema = child.schema().to_vec();
-        mark_merged(&mut schema, names, keep_right);
-        Self { child, schema }
+        let mut coalesce = Vec::new();
+        if full {
+            for name in names {
+                let copies: Vec<usize> = schema
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| !c.merged && c.name.eq_ignore_ascii_case(name))
+                    .map(|(i, _)| i)
+                    .collect();
+                if copies.len() < 2 {
+                    continue;
+                }
+                let mut merged_col = schema[copies[0]].clone();
+                merged_col.table = None;
+                for &i in &copies {
+                    schema[i].merged = true;
+                }
+                schema.push(merged_col);
+                coalesce.push(copies);
+            }
+        } else {
+            mark_merged(&mut schema, names, keep_right);
+        }
+        Self {
+            child,
+            schema,
+            coalesce,
+        }
+    }
+
+    fn add_coalesced(&self, tuple: &mut Tuple) {
+        for copies in &self.coalesce {
+            let value = copies
+                .iter()
+                .find_map(|&i| tuple.values.get(i).and_then(|v| v.clone()));
+            tuple.values.push(value);
+        }
     }
 }
 
 impl PhysicalOperator for MergedColumnsOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        self.child.next()
+        let mut tuple = self.child.next()?;
+        if let Some(t) = tuple.as_mut() {
+            self.add_coalesced(t);
+        }
+        Ok(tuple)
     }
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
-        self.child.next_batch(batch)
+        let n = self.child.next_batch(batch)?;
+        if !self.coalesce.is_empty() {
+            for t in batch.iter_mut() {
+                self.add_coalesced(t);
+            }
+        }
+        Ok(n)
     }
 
     fn schema(&self) -> &[ColumnInfo] {

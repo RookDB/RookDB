@@ -7,7 +7,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::super::engine::execute_shared;
-use super::super::expr::{ComparisonOp, Expr, Predicate, expr_from_ast, predicate_from_ast};
+use super::super::expr::{
+    ComparisonOp, Expr, Predicate, expr_from_ast, predicate_from_ast, resolve_column,
+};
+
+/// An outer column a correlated subquery names: its qualifier, if written, and name.
+type OuterRef = (Option<String>, String);
 use super::super::operators::{
     FilterOperator, LimitOperator, PhysicalOperator, ProjectionOperator,
 };
@@ -750,13 +755,12 @@ impl PhysicalPlanner {
         let mut filter_predicate: Option<Predicate> = None;
 
         for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
-            let outer_col_idx = outer_schema
-                .iter()
-                .position(|c| c.name.eq_ignore_ascii_case(outer_col_name))
-                .ok_or_else(|| RookError::NotFound {
-                    entity: "Column",
-                    name: outer_col_name.clone(),
-                })?;
+            let outer_col_idx =
+                resolve_column(outer_schema, outer_col_name.0.as_deref(), &outer_col_name.1)?
+                    .ok_or_else(|| RookError::NotFound {
+                        entity: "Column",
+                        name: outer_col_name.1.clone(),
+                    })?;
 
             let param = Rc::new(RefCell::new(None));
             let phys_comparison = match comp_op {
@@ -829,13 +833,12 @@ impl PhysicalPlanner {
         let mut filter_predicate: Option<Predicate> = None;
 
         for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
-            let outer_col_idx = outer_schema
-                .iter()
-                .position(|c| c.name.eq_ignore_ascii_case(outer_col_name))
-                .ok_or_else(|| RookError::NotFound {
-                    entity: "Column",
-                    name: outer_col_name.clone(),
-                })?;
+            let outer_col_idx =
+                resolve_column(outer_schema, outer_col_name.0.as_deref(), &outer_col_name.1)?
+                    .ok_or_else(|| RookError::NotFound {
+                        entity: "Column",
+                        name: outer_col_name.1.clone(),
+                    })?;
 
             let param = Rc::new(RefCell::new(None));
             let phys_comparison = match comp_op {
@@ -902,13 +905,12 @@ impl PhysicalPlanner {
         let mut filter_predicate: Option<Predicate> = None;
 
         for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
-            let outer_col_idx = outer_schema
-                .iter()
-                .position(|c| c.name.eq_ignore_ascii_case(outer_col_name))
-                .ok_or_else(|| RookError::NotFound {
-                    entity: "Column",
-                    name: outer_col_name.clone(),
-                })?;
+            let outer_col_idx =
+                resolve_column(outer_schema, outer_col_name.0.as_deref(), &outer_col_name.1)?
+                    .ok_or_else(|| RookError::NotFound {
+                        entity: "Column",
+                        name: outer_col_name.1.clone(),
+                    })?;
 
             let param = Rc::new(RefCell::new(None));
             let phys_comparison = match comp_op {
@@ -1028,7 +1030,7 @@ impl PhysicalPlanner {
         node: &rook_ast::PredicateNode,
         inner_table_name: &str,
         inner_col_names: &[String],
-    ) -> RookResult<Vec<(String, String, rook_ast::ComparisonOp)>> {
+    ) -> RookResult<Vec<(String, OuterRef, rook_ast::ComparisonOp)>> {
         let mut pairs = Vec::new();
         self.collect_correlations(node, inner_table_name, inner_col_names, &mut pairs)?;
         if pairs.is_empty() {
@@ -1045,7 +1047,7 @@ impl PhysicalPlanner {
         node: &rook_ast::PredicateNode,
         inner_table_name: &str,
         inner_col_names: &[String],
-        pairs: &mut Vec<(String, String, rook_ast::ComparisonOp)>,
+        pairs: &mut Vec<(String, OuterRef, rook_ast::ComparisonOp)>,
     ) -> RookResult<()> {
         match node {
             rook_ast::PredicateNode::Compare { left, op, right } => {
@@ -1095,7 +1097,7 @@ impl PhysicalPlanner {
         node: &rook_ast::PredicateNode,
         inner_table_name: &str,
         inner_col_names: &[String],
-    ) -> RookResult<(String, String, rook_ast::ComparisonOp)> {
+    ) -> RookResult<(String, OuterRef, rook_ast::ComparisonOp)> {
         let pairs = self.extract_all_correlations(node, inner_table_name, inner_col_names)?;
         if pairs.is_empty() {
             return Err(RookError::Internal(
@@ -1113,7 +1115,7 @@ impl PhysicalPlanner {
         right: &rook_ast::ExprNode,
         inner_table_name: &str,
         inner_col_names: &[String],
-    ) -> RookResult<(String, String)> {
+    ) -> RookResult<(String, OuterRef)> {
         // Check (left = inner, right = outer)
         if let Some(inner_name) =
             self.extract_column_name_if_inner(left, inner_table_name, inner_col_names)
@@ -1168,14 +1170,14 @@ impl PhysicalPlanner {
         }
     }
 
-    /// If `expr` references an outer table column, return the column name
-    /// (the last component of a Compound, or the Column name itself).
+    /// If `expr` references an outer table column, return its qualifier (if
+    /// written) and name.
     fn extract_column_name_if_outer(
         &self,
         expr: &rook_ast::ExprNode,
         inner_table_name: &str,
         inner_col_names: &[String],
-    ) -> Option<String> {
+    ) -> Option<OuterRef> {
         let stripped = inner_table_name
             .strip_prefix("__cte__:")
             .unwrap_or(inner_table_name);
@@ -1185,7 +1187,10 @@ impl PhysicalPlanner {
                 if !parts[0].eq_ignore_ascii_case(inner_table_name)
                     && !parts[0].eq_ignore_ascii_case(stripped)
                 {
-                    Some(parts[parts.len() - 1].clone())
+                    Some((
+                        Some(parts[parts.len() - 2].clone()),
+                        parts[parts.len() - 1].clone(),
+                    ))
                 } else {
                     None
                 }
@@ -1193,7 +1198,7 @@ impl PhysicalPlanner {
             rook_ast::ExprNode::Column(name) => {
                 // Unqualified column — outer if it's NOT in the inner table
                 if !inner_col_names.iter().any(|c| c.eq_ignore_ascii_case(name)) {
-                    Some(name.clone())
+                    Some((None, name.clone()))
                 } else {
                     None
                 }

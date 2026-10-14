@@ -260,3 +260,252 @@ fn aliases_subqueries_and_ctes_bind_by_their_own_names() {
         "SELECT id FROM (SELECT l.id, r.id FROM l JOIN r ON l.k = r.k) x",
     );
 }
+
+// ── USING: the merged column means what SQL says it means ───────────────────
+
+type Row = Vec<Option<i64>>;
+
+/// Rows of integers (NULL as `None`), sorted so no ORDER BY is needed.
+fn sorted(rows: Vec<Vec<Option<DataValue>>>) -> Vec<Row> {
+    let mut out: Vec<Row> = rows
+        .into_iter()
+        .map(|r| {
+            r.into_iter()
+                .map(|v| {
+                    v.map(|v| match v {
+                        DataValue::Int(i) => i as i64,
+                        DataValue::BigInt(i) => i,
+                        other => panic!("not an integer: {:?}", other),
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn n(v: i64) -> Option<i64> {
+    Some(v)
+}
+
+/// `l` and `r` each have rows without a partner and a NULL key.
+fn using_tables(tag: &str) -> (common::TestWorkspace, Session) {
+    let (ws, mut s) = setup(tag);
+    ok(&mut s, "CREATE TABLE l (k INT, a INT)");
+    ok(&mut s, "CREATE TABLE r (k INT, b INT)");
+    ok(&mut s, "INSERT INTO l VALUES (1, 10), (2, 20), (NULL, 30)");
+    ok(
+        &mut s,
+        "INSERT INTO r VALUES (2, 200), (3, 300), (NULL, 400)",
+    );
+    (ws, s)
+}
+
+fn query(s: &mut Session, sql: &str) -> Vec<Row> {
+    sorted(ok(s, sql))
+}
+
+#[test]
+fn using_merged_column_per_join_type() {
+    let (_ws, mut s) = using_tables("using_types");
+    let none = None;
+    let cases: [(&str, Vec<Row>); 4] = [
+        ("INNER", vec![vec![n(2), n(20), n(200)]]),
+        (
+            "LEFT",
+            vec![
+                vec![none, n(30), none],
+                vec![n(1), n(10), none],
+                vec![n(2), n(20), n(200)],
+            ],
+        ),
+        (
+            "RIGHT",
+            vec![
+                vec![none, none, n(400)],
+                vec![n(2), n(20), n(200)],
+                vec![n(3), none, n(300)],
+            ],
+        ),
+        (
+            "FULL",
+            vec![
+                vec![none, none, n(400)],
+                vec![none, n(30), none],
+                vec![n(1), n(10), none],
+                vec![n(2), n(20), n(200)],
+                vec![n(3), none, n(300)],
+            ],
+        ),
+    ];
+    for (jt, expected) in &cases {
+        let sql = format!("SELECT k, a, b FROM l {} JOIN r USING (k)", jt);
+        assert_eq!(&query(&mut s, &sql), expected, "{}", sql);
+        // SELECT * shows the merged column once, first.
+        let star = format!("SELECT * FROM l {} JOIN r USING (k)", jt);
+        assert_eq!(&query(&mut s, &star), expected, "{}", star);
+    }
+}
+
+#[test]
+fn using_merged_column_in_where_group_and_order() {
+    let (_ws, mut s) = using_tables("using_clauses");
+    let none = None;
+    // WHERE reads the merged column: a right row with no partner is found
+    // through a RIGHT or FULL join, never through a LEFT join.
+    for (jt, want) in [("RIGHT", true), ("FULL", true), ("LEFT", false)] {
+        let sql = format!("SELECT k, a, b FROM l {} JOIN r USING (k) WHERE k = 3", jt);
+        let expected = if want {
+            vec![vec![n(3), none, n(300)]]
+        } else {
+            vec![]
+        };
+        assert_eq!(query(&mut s, &sql), expected, "{}", sql);
+    }
+    for (jt, want) in [("LEFT", true), ("FULL", true), ("RIGHT", false)] {
+        let sql = format!("SELECT k, a, b FROM l {} JOIN r USING (k) WHERE k = 1", jt);
+        let expected = if want {
+            vec![vec![n(1), n(10), none]]
+        } else {
+            vec![]
+        };
+        assert_eq!(query(&mut s, &sql), expected, "{}", sql);
+    }
+    assert_eq!(
+        query(
+            &mut s,
+            "SELECT a, b FROM l FULL JOIN r USING (k) WHERE k IS NULL"
+        ),
+        vec![vec![none, n(400)], vec![n(30), none]]
+    );
+    assert_eq!(
+        query(
+            &mut s,
+            "SELECT a, b FROM l RIGHT JOIN r USING (k) WHERE k IS NULL"
+        ),
+        vec![vec![none, n(400)]]
+    );
+    // GROUP BY and ORDER BY on the merged column.
+    assert_eq!(
+        query(
+            &mut s,
+            "SELECT k, COUNT(*) FROM l FULL JOIN r USING (k) GROUP BY k"
+        ),
+        vec![
+            vec![none, n(2)],
+            vec![n(1), n(1)],
+            vec![n(2), n(1)],
+            vec![n(3), n(1)]
+        ]
+    );
+    assert_eq!(
+        ints_opt(ok(
+            &mut s,
+            "SELECT k FROM l FULL JOIN r USING (k) WHERE k IS NOT NULL ORDER BY k DESC"
+        )),
+        vec![n(3), n(2), n(1)]
+    );
+    // ORDER BY a merged column that is not in the select list.
+    assert_eq!(
+        ints_opt(ok(
+            &mut s,
+            "SELECT b FROM l RIGHT JOIN r USING (k) WHERE k IS NOT NULL ORDER BY k DESC"
+        )),
+        vec![n(300), n(200)]
+    );
+    assert_eq!(
+        ints_opt(ok(
+            &mut s,
+            "SELECT COALESCE(a, 0) FROM l FULL JOIN r USING (k) WHERE k IS NOT NULL ORDER BY k"
+        )),
+        vec![n(10), n(20), n(0)]
+    );
+}
+
+fn ints_opt(rows: Vec<Vec<Option<DataValue>>>) -> Vec<Option<i64>> {
+    rows.into_iter()
+        .map(|mut r| match r.remove(0) {
+            Some(DataValue::Int(i)) => Some(i as i64),
+            None => None,
+            other => panic!("not an INT: {:?}", other),
+        })
+        .collect()
+}
+
+#[test]
+fn using_chain_compares_the_merged_column_of_everything_before() {
+    let (_ws, mut s) = setup("using_chain");
+    ok(&mut s, "CREATE TABLE a (k INT, x INT)");
+    ok(&mut s, "CREATE TABLE b (k INT, y INT)");
+    ok(&mut s, "CREATE TABLE c (k INT, z INT)");
+    ok(&mut s, "INSERT INTO a VALUES (1, 1), (2, 2), (NULL, 3)");
+    ok(&mut s, "INSERT INTO b VALUES (2, 20), (3, 30)");
+    ok(&mut s, "INSERT INTO c VALUES (2, 200), (3, 300), (1, 100)");
+    let none = None;
+    let cases: [(&str, Vec<Row>); 4] = [
+        ("JOIN", vec![vec![n(2), n(2), n(20), n(200)]]),
+        (
+            "LEFT JOIN",
+            vec![
+                vec![n(1), n(1), none, n(100)],
+                vec![n(2), n(2), n(20), n(200)],
+            ],
+        ),
+        (
+            "RIGHT JOIN",
+            vec![
+                vec![n(2), n(2), n(20), n(200)],
+                vec![n(3), none, n(30), n(300)],
+            ],
+        ),
+        (
+            "FULL JOIN",
+            vec![
+                vec![n(1), n(1), none, n(100)],
+                vec![n(2), n(2), n(20), n(200)],
+                vec![n(3), none, n(30), n(300)],
+            ],
+        ),
+    ];
+    for (jt, expected) in &cases {
+        let sql = format!(
+            "SELECT k, x, y, z FROM a {} b USING (k) JOIN c USING (k)",
+            jt
+        );
+        assert_eq!(&query(&mut s, &sql), expected, "{}", sql);
+        let star = format!("SELECT * FROM a {} b USING (k) JOIN c USING (k)", jt);
+        assert_eq!(&query(&mut s, &star), expected, "{}", star);
+    }
+    // The chain's second join still hashes: its keys name different tables.
+    let plan = rook_parser::parse_sql("EXPLAIN SELECT k FROM a JOIN b USING (k) JOIN c USING (k)")
+        .unwrap();
+    let result = s.execute(plan).unwrap();
+    assert!(result.plan.unwrap().root.contains("HashJoin"));
+}
+
+#[test]
+fn correlated_subquery_outer_reference_is_checked_for_ambiguity() {
+    let (_ws, mut s) = two_tables("correlated");
+    ok(&mut s, "CREATE TABLE t (x INT, y INT)");
+    ok(&mut s, "INSERT INTO t VALUES (1, 1), (8, 8)");
+    // `id` is in both l and r: an outer reference to it must be qualified.
+    assert_ambiguous(
+        &mut s,
+        "SELECT l.k FROM l JOIN r ON l.k = r.k WHERE EXISTS (SELECT 1 FROM t WHERE t.x = id)",
+    );
+    assert_eq!(
+        ints(ok(
+            &mut s,
+            "SELECT l.id FROM l JOIN r ON l.k = r.k WHERE EXISTS (SELECT 1 FROM t WHERE t.x = l.id)"
+        )),
+        [[1]]
+    );
+    assert_eq!(
+        ints(ok(
+            &mut s,
+            "SELECT r.id FROM l JOIN r ON l.k = r.k WHERE EXISTS (SELECT 1 FROM t WHERE t.x = r.id)"
+        )),
+        [[8]]
+    );
+}
