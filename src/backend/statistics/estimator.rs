@@ -111,7 +111,10 @@ impl<'a> Estimator<'a> {
             LogicalPlan::Join(j) => self.join_rows(j),
             LogicalPlan::Aggregate(a) => self.aggregate_rows(a),
             LogicalPlan::Distinct(d) => self.distinct_rows(&d.child),
-            LogicalPlan::Sort(s) => self.rows(&s.child),
+            LogicalPlan::Sort(s) => {
+                let child = self.rows(&s.child);
+                s.limit.map_or(child, |limit| child.min(limit as f64))
+            }
             LogicalPlan::Limit(l) => {
                 let child = self.rows(&l.child);
                 (child - l.offset as f64).max(0.0).min(l.limit as f64)
