@@ -45,9 +45,10 @@ const HEAP_FLUSH_INTERVAL: u32 = 10_000;
 /// fsync a cached B+ Tree after this many unflushed key mutations.
 const BTREE_SYNC_INTERVAL: u32 = 4_096;
 
-/// Longest a statement's writes stay un-fsynced while statements keep coming.
-/// A power loss can cost at most this window; a process crash costs nothing,
-/// because every statement boundary writes its pages to the OS.
+/// Longest a statement's writes stay un-fsynced while statements keep coming;
+/// once they stop, the caller's idle [`checkpoint_durable`] syncs the rest.
+/// A process crash costs nothing, because every statement boundary writes
+/// its pages to the OS.
 const SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Resolved paths remembered per `(cwd, path)`.
@@ -244,8 +245,13 @@ pub fn evict_btree(engine: &Engine, path: &Path) {
 
 // ── checkpoints ──────────────────────────────────────────────────────────────
 
-/// Make all prior writes visible to direct-I/O readers, and durable at most
-/// [`SYNC_INTERVAL`] later.
+/// Make all prior writes visible to direct-I/O readers, and fsync them when
+/// the last fsync is at least [`SYNC_INTERVAL`] old.
+///
+/// Nothing fsyncs on a timer: writes that skipped the fsync stay un-synced
+/// until a later checkpoint is due or [`checkpoint_durable`] runs. A caller
+/// that goes idle (the shell waiting for input) calls `checkpoint_durable`
+/// first; it costs no fsync when nothing is pending.
 ///
 /// * writes every cached heap manager (buffer pool + FSM + header) and every
 ///   cached B+ Tree through to its file
