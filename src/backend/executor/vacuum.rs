@@ -16,6 +16,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use crate::backend::error::{ResultContext, RookError, RookResult};
 use crate::backend::executor::create_index::{index_file_path, load_table_indexes_multi};
 use crate::backend::index::btree::BTree;
 use crate::catalog::Catalog;
@@ -37,36 +38,41 @@ pub struct VacuumStats {
 /// Safe to call at any time: tables with zero dead rows compact zero pages
 /// (the visibility map short-circuits clean pages) and index rebuilds are
 /// skipped entirely when no compaction happened.
-pub fn vacuum_table(
-    catalog: &Catalog,
-    db_name: &str,
-    table_name: &str,
-) -> Result<VacuumStats, String> {
+pub fn vacuum_table(catalog: &Catalog, db_name: &str, table_name: &str) -> RookResult<VacuumStats> {
     // Path-safety before touching the filesystem.
-    crate::backend::name_validation::validate_database_name(db_name).map_err(|e| e.to_string())?;
-    crate::backend::name_validation::validate_table_name(table_name).map_err(|e| e.to_string())?;
+    crate::backend::name_validation::validate_database_name(db_name)?;
+    crate::backend::name_validation::validate_table_name(table_name)?;
 
     // Table must exist in the catalog.
     catalog
         .databases
         .get(db_name)
-        .ok_or_else(|| format!("Database '{}' not found", db_name))?
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db_name.to_string(),
+        })?
         .tables
         .get(table_name)
-        .ok_or_else(|| format!("Table '{}.{}' not found", db_name, table_name))?;
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Table",
+            name: format!("{}.{}", db_name, table_name),
+        })?;
 
     let heap_path = catalog.engine().paths().heap(db_name, table_name);
     if !PathBuf::from(&heap_path).exists() {
-        return Err(format!("Heap file not found: {}", heap_path.display()));
+        return Err(RookError::Internal(format!(
+            "Heap file not found: {}",
+            heap_path.display()
+        )));
     }
 
     // 1. Snapshot the dead-tuple counter before compaction resets it.
     let dead_before =
-        read_dead_tuple_count(catalog.engine(), &heap_path).map_err(|e| e.to_string())?;
+        read_dead_tuple_count(catalog.engine(), &heap_path).map_err(RookError::storage_bare)?;
 
     // 2. Compact pages with dead slots (+ FSM rebuild + counter reset).
     let pages_compacted = super::delete::compaction_table(catalog.engine(), db_name, table_name)
-        .map_err(|e| e.to_string())?;
+        .map_err(RookError::storage_bare)?;
 
     let mut indexes_rebuilt = 0usize;
     if pages_compacted > 0 {
@@ -106,7 +112,7 @@ fn read_dead_tuple_count(
 /// Bulk-rebuild every named index on a table from current heap contents.
 ///
 /// Only the `.idx` B+Tree files are regenerated; `sys_indexes` is untouched.
-fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result<usize, String> {
+fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> RookResult<usize> {
     let engine = catalog.engine();
     let indexes = load_table_indexes_multi(engine, db_name, table_name)?;
     if indexes.is_empty() {
@@ -118,11 +124,16 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
         .get(db_name)
         .and_then(|db| db.tables.get(table_name))
         .map(|t| t.columns.iter().map(|c| c.data_type.clone()).collect())
-        .ok_or_else(|| format!("Table '{}.{}' not found in catalog", db_name, table_name))?;
+        .ok_or_else(|| {
+            RookError::Internal(format!(
+                "Table '{}.{}' not found in catalog",
+                db_name, table_name
+            ))
+        })?;
 
     let heap_path = engine.paths().heap(db_name, table_name);
-    let heap_manager = crate::backend::cache::lease_heap(engine, &heap_path)
-        .map_err(|e| format!("Failed to open heap: {}", e))?;
+    let heap_manager =
+        crate::backend::cache::lease_heap(engine, &heap_path).context("Failed to open heap")?;
 
     let mut rebuilt = 0usize;
     for (idx_name, col_names, _is_unique) in &indexes {
@@ -134,10 +145,10 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
             .get(db_name)
             .and_then(|db| db.tables.get(table_name));
         let Some(t) = catalog_table else {
-            return Err(format!(
+            return Err(RookError::Internal(format!(
                 "Table '{}.{}' not found in catalog",
                 db_name, table_name
-            ));
+            )));
         };
         for cname in col_names {
             match t
@@ -173,17 +184,23 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
         crate::backend::cache::evict_btree(catalog.engine(), &idx_path);
 
         // Fresh tree over the post-compaction heap.
-        let mut btree = BTree::create_composite(idx_path.clone(), key_types)
-            .map_err(|e| format!("Failed to recreate index '{}': {}", idx_name, e))?;
+        let mut btree = BTree::create_composite(idx_path.clone(), key_types).map_err(|e| {
+            RookError::storage(format!("Failed to recreate index '{}'", idx_name), e)
+        })?;
 
         let mut entries = 0usize;
         for result in heap_manager.scan() {
             let (page_id, slot_id, raw_bytes) = match result {
                 Ok(t) => t,
-                Err(e) => return Err(format!("Heap scan failed during index rebuild: {}", e)),
+                Err(e) => {
+                    return Err(RookError::storage(
+                        "Heap scan failed during index rebuild",
+                        e,
+                    ));
+                }
             };
             let values = deserialize_nullable_row(&schema_types, &raw_bytes)
-                .map_err(|e| format!("Tuple decode failed during index rebuild: {}", e))?;
+                .context("Tuple decode failed during index rebuild")?;
             // Composite key: gather every component; skip rows with any NULL.
             let mut key: Vec<crate::types::DataValue> = Vec::with_capacity(col_positions.len());
             let mut has_null = false;
@@ -199,13 +216,13 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
             if !has_null {
                 btree
                     .insert_keys(&key, page_id, slot_id)
-                    .map_err(|e| format!("Failed to insert into rebuilt index: {}", e))?;
+                    .context("Failed to insert into rebuilt index")?;
                 entries += 1;
             }
         }
-        btree
-            .sync()
-            .map_err(|e| format!("Failed to sync rebuilt index '{}': {}", idx_name, e))?;
+        btree.sync().map_err(|e| {
+            RookError::storage(format!("Failed to sync rebuilt index '{}'", idx_name), e)
+        })?;
         crate::backend::cache::evict_btree(catalog.engine(), &idx_path);
         log::info!(
             "[Vacuum] Rebuilt index '{}' with {} entries",
@@ -225,15 +242,15 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
 fn stamp_last_vacuum(
     engine: &crate::backend::engine::Engine,
     heap_path: &std::path::Path,
-) -> Result<(), String> {
+) -> RookResult<()> {
     let mut manager =
-        crate::backend::cache::lease_heap(engine, heap_path).map_err(|e| e.to_string())?;
+        crate::backend::cache::lease_heap(engine, heap_path).map_err(RookError::storage_bare)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
     manager
         .update_header(|h| h.last_vacuum = now)
-        .map_err(|e| e.to_string())?;
-    manager.flush().map_err(|e| e.to_string())
+        .map_err(RookError::storage_bare)?;
+    manager.flush().map_err(RookError::storage_bare)
 }

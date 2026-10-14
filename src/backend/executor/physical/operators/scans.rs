@@ -118,9 +118,10 @@ impl PhysicalOperator for SeqScanOperator {
         match self.scan_iter.next_ref() {
             Some(Ok((page_id, slot_id, raw_bytes))) => {
                 // Deserialise the raw tuple bytes using PHYSICAL column schema
-                let phys_values = self.decoder.decode(raw_bytes).map_err(|e| {
-                    RookError::Internal(format!("Failed to deserialise tuple: {}", e))
-                })?;
+                let phys_values = self
+                    .decoder
+                    .decode(raw_bytes)
+                    .map_err(|e| e.with_context("Failed to deserialise tuple"))?;
 
                 // Reorder values from physical order to view column order
                 let values: Vec<Option<DataValue>> = if self.column_mapping.len()
@@ -166,9 +167,10 @@ impl PhysicalOperator for SeqScanOperator {
         while batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
             match self.scan_iter.next_ref() {
                 Some(Ok((page_id, slot_id, raw_bytes))) => {
-                    let phys_values = self.decoder.decode(raw_bytes).map_err(|e| {
-                        RookError::Internal(format!("Failed to deserialise tuple: {}", e))
-                    })?;
+                    let phys_values = self
+                        .decoder
+                        .decode(raw_bytes)
+                        .map_err(|e| e.with_context("Failed to deserialise tuple"))?;
 
                     let values = if is_identity {
                         phys_values
@@ -422,7 +424,7 @@ impl IndexScanOperator {
         };
         let tids = self
             .search_index()
-            .map_err(|e| RookError::Internal(format!("Index scan {} error: {}", what, e)))?;
+            .map_err(|e| RookError::storage(format!("Index scan {} error", what), e))?;
 
         if matches!(self.mode, IndexScanMode::FullScan) {
             let mut tid_set: std::collections::HashSet<(u32, u32)> = tids.iter().cloned().collect();
@@ -478,10 +480,10 @@ impl IndexScanOperator {
                     Ok(())
                 })
                 .map_err(|e| {
-                    RookError::Internal(format!(
-                        "Failed to fetch heap tuples on page {}: {}",
-                        page_id, e
-                    ))
+                    RookError::storage(
+                        format!("Failed to fetch heap tuples on page {}", page_id),
+                        e,
+                    )
                 })?;
             start = stop;
         }

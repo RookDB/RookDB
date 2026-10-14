@@ -906,7 +906,7 @@ pub(super) fn create_index(
 /// VACUUM: reclaim space from soft-deleted rows and rebuild indexes.
 pub(super) fn vacuum(catalog: &Catalog, db: &str, table: &str) -> RookResult<StatementResult> {
     let stats = crate::backend::executor::vacuum::vacuum_table(catalog, db, table)
-        .map_err(|e| RookError::Internal(e).with_context("VACUUM failed"))?;
+        .map_err(|e| e.with_context("VACUUM failed"))?;
     let mut lines = vec![format!(
         "VACUUM '{}.{}' complete: {} page(s) compacted, {} dead tuple(s) reclaimed, {} index(es) rebuilt.",
         db, table, stats.pages_compacted, stats.dead_tuples_before, stats.indexes_rebuilt
@@ -916,7 +916,7 @@ pub(super) fn vacuum(catalog: &Catalog, db: &str, table: &str) -> RookResult<Sta
     }
     // The rows moved; what the planner knows of them is gathered anew.
     crate::backend::cache::analyze_table(catalog, db, table)
-        .map_err(|e| RookError::Io(e).with_context("VACUUM statistics failed"))?;
+        .map_err(|e| e.with_context("VACUUM statistics failed"))?;
     Ok(StatementResult::lines(lines))
 }
 
@@ -945,7 +945,7 @@ pub(super) fn analyze(
     let mut lines = Vec::new();
     for t in tables {
         let stats = crate::backend::cache::analyze_table(catalog, db, t)
-            .map_err(|e| RookError::Io(e).with_context(format!("ANALYZE '{}' failed", t)))?;
+            .map_err(|e| e.with_context(format!("ANALYZE '{}' failed", t)))?;
         lines.push(format!(
             "ANALYZE '{}.{}' complete: {} row(s), {} column(s).",
             db,

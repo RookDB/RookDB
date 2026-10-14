@@ -210,13 +210,10 @@ pub fn insert_single_tuple_with_location(
     db_name: &str,
     table_name: &str,
     values: &[&str],
-) -> io::Result<Option<(u32, u32)>> {
+) -> RookResult<Option<(u32, u32)>> {
     match insert_text_row(catalog, db_name, table_name, values) {
         Ok(location) => Ok(Some(location)),
-        Err(RookError::Io(e)) => Err(e),
-        Err(e @ RookError::NotFound { .. }) => {
-            Err(io::Error::new(io::ErrorKind::NotFound, e.to_string()))
-        }
+        Err(e @ (RookError::Io(_) | RookError::NotFound { .. })) => Err(e.bare_io()),
         Err(e) => {
             log::info!("Row rejected for '{}.{}': {}", db_name, table_name, e);
             Ok(None)
@@ -231,7 +228,7 @@ pub fn insert_single_tuple(
     db_name: &str,
     table_name: &str,
     values: &[&str],
-) -> io::Result<bool> {
+) -> RookResult<bool> {
     insert_single_tuple_with_location(catalog, db_name, table_name, values).map(|opt| opt.is_some())
 }
 
@@ -247,7 +244,7 @@ pub fn load_csv(
     db_name: &str,
     table_name: &str,
     csv_path: &str,
-) -> io::Result<u32> {
+) -> RookResult<u32> {
     log::info!(
         "Loading CSV '{}' into '{}.{}'",
         csv_path,
@@ -255,27 +252,19 @@ pub fn load_csv(
         table_name
     );
 
-    let columns = table_columns(catalog, db_name, table_name)
-        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e.to_string()))?;
+    let columns = table_columns(catalog, db_name, table_name)?;
     if columns.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Table has no columns",
-        ));
+        return Err(RookError::Internal("Table has no columns".to_string()));
     }
 
-    let csv_file = File::open(csv_path).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Failed to open CSV file '{}': {}", csv_path, e),
-        )
-    })?;
+    let csv_file = File::open(csv_path)
+        .map_err(|e| RookError::storage(format!("Failed to open CSV file '{}'", csv_path), e))?;
     let mut lines = BufReader::new(csv_file).lines();
 
     // Skip a header line if present.
     let mut first_row: Option<String> = None;
     for line in lines.by_ref() {
-        let line = line?;
+        let line = line.map_err(RookError::storage_bare)?;
         if line.trim().is_empty() {
             continue;
         }
@@ -296,8 +285,7 @@ pub fn load_csv(
     let mut skipped = 0u32;
     let mut failed = 0u32;
 
-    let target = InsertTarget::new(catalog, db_name, table_name)
-        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e.to_string()))?;
+    let target = InsertTarget::new(catalog, db_name, table_name)?;
     for line in first_row.into_iter().map(Ok).chain(lines) {
         line_idx += 1;
         let line = match line {

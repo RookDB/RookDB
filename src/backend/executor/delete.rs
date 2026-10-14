@@ -44,9 +44,9 @@ use crate::types::value::DataValue;
 pub(crate) fn decode_row(
     tuple_data: &[u8],
     columns: &[crate::catalog::types::Column],
-) -> io::Result<Vec<Option<DataValue>>> {
+) -> RookResult<Vec<Option<DataValue>>> {
     let schema: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
-    deserialize_nullable_row(&schema, tuple_data).map_err(io::Error::other)
+    deserialize_nullable_row(&schema, tuple_data)
 }
 
 /// A row as `(column, text)` pairs for RETURNING output: NULL as `NULL`,

@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::backend::engine::Engine;
+use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::heap_manager::HeapManager;
 
 // ── tuning knobs ─────────────────────────────────────────────────────────────
@@ -700,7 +701,7 @@ pub fn table_statistics(
     catalog: &crate::catalog::Catalog,
     db_name: &str,
     table_name: &str,
-) -> io::Result<Arc<crate::statistics::TableStatistics>> {
+) -> RookResult<Arc<crate::statistics::TableStatistics>> {
     match known_statistics(catalog, db_name, table_name) {
         Some(stats) => Ok(stats),
         None => analyze_table(catalog, db_name, table_name),
@@ -713,17 +714,15 @@ pub fn analyze_table(
     catalog: &crate::catalog::Catalog,
     db_name: &str,
     table_name: &str,
-) -> io::Result<Arc<crate::statistics::TableStatistics>> {
+) -> RookResult<Arc<crate::statistics::TableStatistics>> {
     let engine = catalog.engine();
     let columns = &catalog
         .databases
         .get(db_name)
         .and_then(|db| db.tables.get(table_name))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Table '{}.{}' not found", db_name, table_name),
-            )
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Table",
+            name: format!("{}.{}", db_name, table_name),
         })?
         .columns;
     let path = engine.paths().heap(db_name, table_name);
