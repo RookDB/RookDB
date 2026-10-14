@@ -706,6 +706,7 @@ impl PhysicalPlanner {
                 ci.table = Some(sys_table_name.clone());
             }
             let schema_types: Vec<DataType> = sys_schema.to_vec();
+            // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
             let heap_manager = HeapManager::open(heap_path).map_err(|e| {
                 RookError::Io(e).with_context(format!("Failed to open system table '{}'", sys_name))
             })?;
@@ -781,6 +782,7 @@ impl PhysicalPlanner {
                     btree.set_key_type(first_col.data_type.clone());
                 }
 
+                // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
                 let heap_manager = HeapManager::open(heap_path).map_err(|e| {
                     RookError::Io(e)
                         .with_context(format!("Failed to open heap for table '{}'", ts.table))
@@ -825,6 +827,7 @@ impl PhysicalPlanner {
                 btree.set_key_type(first_col.data_type.clone());
             }
 
+            // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
             let heap_manager = HeapManager::open(heap_path).map_err(|e| {
                 RookError::Io(e)
                     .with_context(format!("Failed to open heap for table '{}'", ts.table))
@@ -847,6 +850,7 @@ impl PhysicalPlanner {
             ));
         }
 
+        // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
         let heap_manager = HeapManager::open(heap_path).map_err(|e| {
             RookError::Io(e).with_context(format!("Failed to open heap for table '{}'", ts.table))
         })?;

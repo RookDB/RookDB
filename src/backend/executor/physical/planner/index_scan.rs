@@ -196,6 +196,7 @@ impl PhysicalPlanner {
                 vec![DataType::Int]
             };
 
+            // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
             let heap_manager = HeapManager::open(heap_path.clone()).map_err(|e| {
                 RookError::Io(e).with_context(format!(
                     "opening heap {} for table '{}'",

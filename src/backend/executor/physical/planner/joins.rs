@@ -242,6 +242,7 @@ impl PhysicalPlanner {
                         {
                             btree.set_key_type(idx_col.data_type.clone());
                         }
+                        // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
                         let heap_manager = crate::backend::heap::heap_manager::HeapManager::open(
                             heap_path.clone(),
                         )
