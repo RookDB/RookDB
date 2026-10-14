@@ -1,263 +1,203 @@
 //! Value lookup helpers for constraint checking.
 //!
-//! Provides functions to look up whether a value exists in a table column,
-//! using B+ Tree index lookups (fast path) or sequential heap scans (fallback).
+//! Every lookup goes through a B+ Tree index on the column. CREATE TABLE
+//! builds the indexes a constraint needs; a table that lacks one (older data,
+//! or an index file that was lost) gets it built on first use, so no check
+//! ever scans a table.
 
-use super::loaders;
+use crate::backend::engine::Engine;
+use crate::backend::executor::create_index::ensure_column_index;
+use crate::catalog::types::{Catalog, Column};
 use crate::types::{DataType, DataValue};
 
-/// Helper: try all index files (named + legacy) for a table and search for a value.
-/// Returns `Some(true)` if found, `Some(false)` if not found (in any index),
-/// or `None` if no indexes exist (caller should fall back to heap scan).
-fn try_index_for_value(
-    engine: &crate::backend::engine::Engine,
+/// Name of the index on a foreign key's child column, as CREATE TABLE gives it.
+fn child_index_name(child_table: &str, child_col: &str) -> String {
+    format!("fk_{}_{}", child_table, child_col)
+}
+
+/// Name of the index on a foreign key's parent column when none exists.
+fn parent_index_name(parent_table: &str, parent_col: &str) -> String {
+    format!("fkp_{}_{}", parent_table, parent_col)
+}
+
+fn find_column<'a>(
+    catalog: &'a Catalog,
     db_name: &str,
     table_name: &str,
-    column_name: &str,
+    column: &str,
+) -> Option<&'a Column> {
+    catalog
+        .databases
+        .get(db_name)?
+        .tables
+        .get(table_name)?
+        .columns
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case(column))
+}
+
+/// Heap locations of every entry of the index `index_name` equal to `key`.
+fn index_search(
+    engine: &Engine,
+    db_name: &str,
+    table_name: &str,
+    index_name: &str,
     col_type: &DataType,
-    key_value: &DataValue,
-) -> Option<bool> {
-    // Try named indexes: load all indexes from sys_indexes for this table
-    if let Ok(indexes) =
-        crate::backend::executor::create_index::load_table_indexes(engine, db_name, table_name)
-    {
-        for (idx_name, idx_col, _is_unique) in &indexes {
-            if !idx_col.eq_ignore_ascii_case(column_name) {
-                continue;
-            }
-            let idx_path = engine.paths().index(db_name, table_name, idx_name);
-            if !idx_path.exists() {
-                continue;
-            }
-            let search_res = crate::backend::cache::with_btree(
-                engine,
-                &idx_path,
-                || -> std::io::Result<crate::backend::index::btree::BTree> {
-                    let mut bt = crate::backend::index::btree::BTree::open(idx_path.clone())?;
-                    bt.set_key_type(col_type.clone());
-                    Ok(bt)
-                },
-                |bt| {
-                    bt.set_key_type(col_type.clone());
-                    bt.search(key_value).map_err(std::io::Error::other)
-                },
-            );
-            match search_res {
-                Ok(Some(_)) => return Some(true),
-                Ok(None) => return Some(false),
-                Err(e) => log::warn!(
-                    "[Constraint] Cached BTree search error for FK lookup: {}",
-                    e
-                ),
-            }
-        }
-    }
-
-    // Fallback to legacy single-index file
-    let legacy_idx = engine.paths().legacy_index(db_name, table_name);
-    if legacy_idx.exists() {
-        let search_res = crate::backend::cache::with_btree(
-            engine,
-            &legacy_idx,
-            || -> std::io::Result<crate::backend::index::btree::BTree> {
-                let mut bt = crate::backend::index::btree::BTree::open(legacy_idx.clone())?;
-                bt.set_key_type(col_type.clone());
-                Ok(bt)
-            },
-            |bt| {
-                bt.set_key_type(col_type.clone());
-                bt.search(key_value).map_err(std::io::Error::other)
-            },
-        );
-        match search_res {
-            Ok(Some(_)) => return Some(true),
-            Ok(None) => return Some(false),
-            Err(e) => log::warn!(
-                "[Constraint] Cached legacy BTree search error for FK lookup: {}",
-                e
-            ),
-        }
-    }
-
-    None // No index found — caller should fall back to heap scan
+    key: &DataValue,
+) -> Result<Vec<(u32, u32)>, String> {
+    let idx_path = engine.paths().index(db_name, table_name, index_name);
+    crate::backend::cache::with_btree(
+        engine,
+        &idx_path,
+        || -> std::io::Result<crate::backend::index::btree::BTree> {
+            let mut bt = crate::backend::index::btree::BTree::open(idx_path.clone())?;
+            bt.set_key_type(col_type.clone());
+            Ok(bt)
+        },
+        |bt| {
+            bt.set_key_type(col_type.clone());
+            bt.search_all(key)
+        },
+    )
+    .map_err(|e| {
+        format!(
+            "index '{}' of '{}.{}' cannot be searched: {}",
+            index_name, db_name, table_name, e
+        )
+    })
 }
 
 /// Check whether a specific value exists in a table column.
 ///
-/// `key_value` must already have the column's type. First tries a B+ Tree
-/// index lookup (for speed), falling back to a sequential heap scan.
+/// `key_value` must already have the column's type.
 pub(crate) fn value_exists_in_table(
-    engine: &crate::backend::engine::Engine,
+    catalog: &Catalog,
     db_name: &str,
     table_name: &str,
     column_name: &str,
     col_type: &DataType,
     key_value: &DataValue,
 ) -> Result<bool, String> {
-    // Try all B+ Tree indexes first (named + legacy)
-    if let Some(result) = try_index_for_value(
-        engine,
+    let unique = find_column(catalog, db_name, table_name, column_name)
+        .is_some_and(|c| c.constraints.unique);
+    let index = ensure_column_index(
+        catalog,
         db_name,
         table_name,
         column_name,
-        col_type,
-        key_value,
-    ) {
-        return Ok(result);
-    }
-
-    // Fallback: sequential heap scan
-    let schema = match loaders::load_table_schema(engine, db_name, table_name) {
-        Ok(Some(s)) => s,
-        Ok(None) => return Ok(false),
-        Err(e) => {
-            log::warn!("[Constraint] Error loading schema: {}", e);
-            return Ok(false);
-        }
-    };
-    let Some(col_pos) = schema
-        .iter()
-        .position(|(name, _)| name.eq_ignore_ascii_case(column_name))
-    else {
-        log::warn!(
-            "[Constraint] Column '{}' not found in table schema for FK lookup",
-            column_name
-        );
-        return Ok(false);
-    };
-    let schema_types: Vec<DataType> = schema.into_iter().map(|(_, dt)| dt).collect();
-    scan_heap_for_value(
-        engine,
+        &parent_index_name(table_name, column_name),
+        unique,
+    )?;
+    index_search(
+        catalog.engine(),
         db_name,
         table_name,
-        &schema_types,
-        col_pos,
+        &index,
+        col_type,
         key_value,
     )
+    .map(|found| !found.is_empty())
 }
 
-/// Check whether a child table has any row whose given column matches the value.
+/// Heap locations of the rows of `child_table` whose `child_col` equals
+/// `parent_key`, in heap order, found through the child column's index.
 ///
-/// Used by parent DELETE validation to detect referencing rows.
-pub(crate) fn child_has_referencing_row(
-    engine: &crate::backend::engine::Engine,
+/// `parent_key` is converted to the column's type first; a key the column
+/// cannot hold matches no row.
+pub(crate) fn child_row_pointers(
+    catalog: &Catalog,
     db_name: &str,
     child_table: &str,
     child_col: &str,
-    value: &DataValue,
-) -> Result<bool, String> {
-    // Load the child table's column schema from sys_columns to get the correct type
-    let (schema, col_pos, col_type) =
-        match loaders::load_table_schema_for_column(engine, db_name, child_table, child_col) {
-            Ok(Some(result)) => result,
-            Ok(None) => {
-                // Table not in system tables: fall back to matching the key's text.
-                let heap_path = engine.paths().heap(db_name, child_table);
-                return scan_raw_heap_for_string(&heap_path, &super::fk_actions::key_text(value));
-            }
-            Err(e) => {
-                log::warn!(
-                    "[Constraint] Error loading schema for child table FK lookup: {}",
-                    e
-                );
-                return Ok(false);
-            }
-        };
-
-    // The parent key in the child column's type; a key the column cannot
-    // hold is referenced by no child row.
-    let key_value = match crate::types::functions::assign_cast(value, &col_type) {
+    parent_key: &DataValue,
+) -> Result<Vec<(u32, u32)>, String> {
+    let Some(col) = find_column(catalog, db_name, child_table, child_col) else {
+        return Ok(Vec::new());
+    };
+    let key = match crate::types::functions::assign_cast(parent_key, &col.data_type) {
         Ok(v) => v,
         Err(e) => {
             log::warn!(
                 "[Constraint] Failed to convert value for FK child lookup: {}",
                 e
             );
-            return Ok(false);
+            return Ok(Vec::new());
         }
     };
-
-    // Try all B+ Tree indexes (named + legacy)
-    if let Some(result) = try_index_for_value(
-        engine,
+    let index = ensure_column_index(
+        catalog,
         db_name,
         child_table,
         child_col,
-        &col_type,
-        &key_value,
-    ) {
-        return Ok(result);
-    }
-
-    scan_heap_for_value(engine, db_name, child_table, &schema, col_pos, &key_value)
+        &child_index_name(child_table, child_col),
+        false,
+    )?;
+    let mut pointers = index_search(
+        catalog.engine(),
+        db_name,
+        child_table,
+        &index,
+        &col.data_type,
+        &key,
+    )?;
+    pointers.sort_unstable();
+    pointers.dedup();
+    Ok(pointers)
 }
 
-/// Scan a table heap for a row whose column `col_pos` equals `key_value`.
-fn scan_heap_for_value(
-    engine: &crate::backend::engine::Engine,
+/// Check whether a child table has any row whose given column matches the value.
+///
+/// Used by parent DELETE and UPDATE validation to detect referencing rows.
+pub(crate) fn child_has_referencing_row(
+    catalog: &Catalog,
     db_name: &str,
-    table_name: &str,
-    schema: &[DataType],
-    col_pos: usize,
-    key_value: &DataValue,
+    child_table: &str,
+    child_col: &str,
+    value: &DataValue,
 ) -> Result<bool, String> {
-    use crate::types::Comparable;
-
-    let heap_path = engine.paths().heap(db_name, table_name);
-    if !heap_path.exists() {
-        return Ok(false);
-    }
-
-    let heap = match crate::backend::heap::HeapManager::open(heap_path) {
-        Ok(h) => h,
-        Err(e) => {
-            log::warn!("[Constraint] Failed to open heap for FK scan: {}", e);
-            return Ok(false);
-        }
-    };
-
-    for result in heap.scan() {
-        let Ok((_page_id, _slot_id, raw_bytes)) = result else {
-            continue;
-        };
-        let Ok(decoded) = crate::types::deserialize_nullable_row(schema, &raw_bytes) else {
-            continue;
-        };
-        if let Some(Some(dv)) = decoded.get(col_pos)
-            && matches!(dv.compare(key_value), Ok(std::cmp::Ordering::Equal))
-        {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    child_row_pointers(catalog, db_name, child_table, child_col, value)
+        .map(|pointers| !pointers.is_empty())
 }
 
-/// Fallback raw heap scan using string matching (for tables not in system catalog).
-fn scan_raw_heap_for_string(heap_path: &std::path::Path, value: &str) -> Result<bool, String> {
-    if !heap_path.exists() {
-        return Ok(false);
+/// Decoded rows of `child_table` whose `child_col` equals `value`, read by
+/// way of the column's index; each page is read once.
+pub(crate) fn child_rows_referencing(
+    catalog: &Catalog,
+    db_name: &str,
+    child_table: &str,
+    child_col: &str,
+    value: &DataValue,
+) -> Result<Vec<Vec<Option<DataValue>>>, String> {
+    let pointers = child_row_pointers(catalog, db_name, child_table, child_col, value)?;
+    if pointers.is_empty() {
+        return Ok(Vec::new());
     }
-
-    let heap = match crate::backend::heap::HeapManager::open(heap_path.to_path_buf()) {
-        Ok(h) => h,
-        Err(e) => {
-            log::warn!("[Constraint] Failed to open heap for raw scan: {}", e);
-            return Ok(false);
-        }
+    let Some(table) = catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(child_table))
+    else {
+        return Ok(Vec::new());
     };
+    let schema: Vec<DataType> = table.columns.iter().map(|c| c.data_type.clone()).collect();
+    let heap_path = catalog.engine().paths().heap(db_name, child_table);
+    let file = crate::backend::heap::HeapFile::open(catalog.engine(), &heap_path)
+        .map_err(|e| format!("Failed to open child heap '{}': {}", child_table, e))?;
 
-    for result in heap.scan() {
-        let (_page_id, _slot_id, raw_bytes) = match result {
-            Ok(triple) => triple,
-            Err(_) => continue,
-        };
-
-        let raw_str = String::from_utf8_lossy(&raw_bytes);
-        if raw_str.contains(value) {
-            return Ok(true);
+    let mut rows = Vec::with_capacity(pointers.len());
+    let mut page = crate::page::Page::new();
+    let mut loaded: Option<u32> = None;
+    for (page_num, slot) in pointers {
+        if loaded != Some(page_num) {
+            file.read_page(&mut page, page_num)
+                .map_err(|e| e.to_string())?;
+            loaded = Some(page_num);
+        }
+        if let Some(bytes) = page.tuple(slot)
+            && let Ok(row) = crate::types::deserialize_nullable_row(&schema, bytes)
+        {
+            rows.push(row);
         }
     }
-
-    Ok(false)
+    Ok(rows)
 }

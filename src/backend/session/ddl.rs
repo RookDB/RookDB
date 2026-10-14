@@ -254,6 +254,27 @@ pub(super) fn create_table(
         if cols.is_empty() {
             continue;
         }
+        // A column list that an index already covers (the same column
+        // declared UNIQUE inline and at table level, an FK column that is
+        // the PRIMARY KEY) needs no second one.
+        let covered = crate::backend::executor::create_index::load_table_indexes_multi(
+            catalog.engine(),
+            db,
+            &params.table,
+        )
+        .unwrap_or_default()
+        .iter()
+        .any(|(_, ix_cols, ix_unique)| {
+            ix_cols.len() == cols.len()
+                && ix_cols
+                    .iter()
+                    .zip(cols)
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                && (*ix_unique || !unique)
+        });
+        if covered {
+            continue;
+        }
         let name = format!("{}_{}_{}", prefix, params.table, cols.join("_"));
         let _ = index(name, cols, unique, primary);
     }
@@ -364,6 +385,10 @@ pub(super) fn drop_table(
         }
     }
     if cascade && !ref_fks.is_empty() {
+        // The child-side index was made for the key about to go.
+        for (child, child_col, ..) in &ref_fks {
+            drop_fk_child_index(catalog, db, child, child_col);
+        }
         let count = crate::backend::system_table::delete_referencing_foreign_keys(
             catalog.engine(),
             db,
@@ -399,6 +424,28 @@ pub(super) fn drop_table(
 
     lines.push(format!("Dropped table '{}' from database '{}'.", table, db));
     Ok(StatementResult::lines(lines))
+}
+
+/// Drop the index CREATE TABLE made for a foreign key on `child.child_col`,
+/// unless another foreign key still uses the column.
+fn drop_fk_child_index(catalog: &Catalog, db: &str, child: &str, child_col: &str) {
+    let engine = catalog.engine();
+    let still_used = crate::backend::cache::metadata(engine, db, child).is_some_and(|m| {
+        m.foreign_keys
+            .iter()
+            .filter(|(col, ..)| col.eq_ignore_ascii_case(child_col))
+            .count()
+            > 1
+    });
+    let name = format!("fk_{}_{}", child, child_col);
+    let listed = crate::backend::system_table::table_indexes(engine, db, child)
+        .iter()
+        .any(|ix| ix.name == name);
+    if still_used || !listed {
+        return;
+    }
+    remove_index_files_for_table(engine, db, child, Some(&name));
+    let _ = crate::backend::system_table::delete_index_metadata(engine, db, child, &name);
 }
 
 /// TRUNCATE: replaces the table's heap with an empty one.

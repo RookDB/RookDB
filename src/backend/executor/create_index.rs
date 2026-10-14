@@ -490,23 +490,114 @@ pub(crate) fn repair_indexes(
 
 // ── Auto-indexing for constraint targets ─────────────────────────────────────
 
-/// True when some index on `(db, table)` has `column` as its FIRST key
-/// column — the only position usable by single-key equality probes
-/// (FK existence checks, per-column UNIQUE checks).
-fn column_is_indexed(
+/// The name of a usable index on exactly `column`: listed in `sys_indexes`
+/// (process-cached) with its file on disk. A composite index does not count,
+/// since its keys cannot answer a single-value probe.
+pub(crate) fn find_column_index(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
     column: &str,
-) -> bool {
-    load_table_indexes_multi(engine, db_name, table_name)
-        .unwrap_or_default()
+) -> Option<String> {
+    let meta = crate::backend::cache::metadata(engine, db_name, table_name)?;
+    meta.named_indexes
         .iter()
-        .any(|(_name, cols, _u)| {
-            cols.first()
-                .map(|c| c.eq_ignore_ascii_case(column))
-                .unwrap_or(false)
+        .find(|(name, cols, _)| {
+            matches!(cols.as_slice(), [c] if c.eq_ignore_ascii_case(column))
+                && index_file_path(engine, db_name, table_name, name).exists()
         })
+        .map(|(name, _, _)| name.clone())
+}
+
+/// Make sure `column` has an index of its own and return its name.
+///
+/// Tables made before an index was created for a constraint (or whose index
+/// file was lost) are repaired on first use rather than scanned on every
+/// lookup: an index that `sys_indexes` lists without its file is built again
+/// with its flags; otherwise a new one called `new_name` is built, unique
+/// when `unique`.
+pub(crate) fn ensure_column_index(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    column: &str,
+    new_name: &str,
+    unique: bool,
+) -> Result<String, String> {
+    let engine = catalog.engine();
+    if let Some(name) = find_column_index(engine, db_name, table_name, column) {
+        return Ok(name);
+    }
+    // Only a table the system tables know can record an index.
+    if crate::backend::cache::metadata(engine, db_name, table_name).is_none() {
+        return Err(format!(
+            "table '{}.{}' is not in the system tables, so it cannot be indexed",
+            db_name, table_name
+        ));
+    }
+
+    let listed = crate::backend::system_table::table_indexes(engine, db_name, table_name)
+        .into_iter()
+        .find(|ix| matches!(ix.column_list().as_slice(), [c] if c.eq_ignore_ascii_case(column)));
+    let (name, unique, primary) = match &listed {
+        Some(ix) => (ix.name.as_str(), ix.is_unique, ix.is_primary),
+        None => (new_name, unique, false),
+    };
+    if listed.is_some() {
+        // The row is written again by create_index_with_flags.
+        let _ =
+            crate::backend::system_table::delete_index_metadata(engine, db_name, table_name, name);
+    }
+    log::info!(
+        "[AutoIndex] Building index '{}' on {}.{}({}) on first use",
+        name,
+        db_name,
+        table_name,
+        column
+    );
+    create_index_with_flags(
+        catalog,
+        db_name,
+        table_name,
+        name,
+        &[column.to_string()],
+        unique,
+        primary,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(name.to_string())
+}
+
+/// Build again the file of the index `name`, which `sys_indexes` lists for the
+/// table but which is gone from disk.
+pub(crate) fn restore_index_file(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    name: &str,
+) -> Result<(), String> {
+    let engine = catalog.engine();
+    let Some(ix) = crate::backend::system_table::table_indexes(engine, db_name, table_name)
+        .into_iter()
+        .find(|ix| ix.name.eq_ignore_ascii_case(name))
+    else {
+        return Err(format!(
+            "index '{}' is not listed for '{}'",
+            name, table_name
+        ));
+    };
+    let _ = crate::backend::system_table::delete_index_metadata(engine, db_name, table_name, name);
+    create_index_with_flags(
+        catalog,
+        db_name,
+        table_name,
+        &ix.name,
+        &ix.column_list(),
+        ix.is_unique,
+        ix.is_primary,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Create an index on a parent-side FK target column if it does not already
@@ -551,7 +642,7 @@ pub fn ensure_parent_column_index(
         return false;
     };
 
-    if column_is_indexed(catalog.engine(), db_name, parent_table, parent_col) {
+    if find_column_index(catalog.engine(), db_name, parent_table, parent_col).is_some() {
         return false; // PK/UNIQUE/user index already covers the probe
     }
 
@@ -565,28 +656,26 @@ pub fn ensure_parent_column_index(
     }
 
     let index_name = format!("fkp_{}_{}", parent_table, col.name);
-    let is_unique = col.constraints.unique;
-    match create_index_with_flags(
+    match ensure_column_index(
         catalog,
         db_name,
         parent_table,
+        &col.name,
         &index_name,
-        std::slice::from_ref(&col.name),
-        is_unique,
-        false,
+        col.constraints.unique,
     ) {
-        Ok(count) => {
+        Ok(name) => {
             log::info!(
-                "[AutoIndex] Created parent-side FK index '{}.{}' ({} entries)",
+                "[AutoIndex] Parent-side FK index '{}' on '{}.{}' is ready",
+                name,
                 parent_table,
-                col.name,
-                count
+                col.name
             );
             true
         }
         Err(e) => {
             log::warn!(
-                "[AutoIndex] Parent-side FK index on '{}.{}' failed: {} (FK checks fall back to heap scan)",
+                "[AutoIndex] Parent-side FK index on '{}.{}' failed: {} (it is built on first use)",
                 parent_table,
                 col.name,
                 e

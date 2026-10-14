@@ -231,7 +231,7 @@ fn update_rows(
         )?;
 
         crate::backend::constraint::validate_update_restrict(
-            catalog.engine(),
+            catalog,
             db_name,
             table_name,
             columns,

@@ -2,9 +2,10 @@
 //!
 //! Implements `ON DELETE CASCADE`, `ON DELETE SET NULL`, `ON UPDATE CASCADE`,
 //! and recursive propagation into grandchild tables with cycle detection.
-//! All three actions share one scan of the child heap,
-//! [`apply_to_child_rows`]; they differ only in what they do to a matching
-//! row and where they recurse next.
+//! All three actions share one pass over the child rows,
+//! [`apply_to_child_rows`], which finds them through the child column's
+//! index; they differ only in what they do to a matching row and where they
+//! recurse next.
 
 use std::collections::HashSet;
 
@@ -25,9 +26,11 @@ enum ChildAction<'a> {
 /// Apply `action` to every row of `child_table` whose `child_col` equals
 /// `parent_key`, and return those rows as they were before the change.
 ///
-/// Rows are changed in place when they still fit their slot. A row that
-/// grows is marked deleted and inserted again after the scan, with its
-/// index entries moved to the new location.
+/// The rows come from the index on `child_col` (built on first use if the
+/// table lacks it), so the cost follows the number of matches, not the size
+/// of the child table. Rows are changed in place when they still fit their
+/// slot. A row that grows is marked deleted and inserted again after the
+/// pass, with its index entries moved to the new location.
 fn apply_to_child_rows(
     catalog: &Catalog,
     db_name: &str,
@@ -41,8 +44,6 @@ fn apply_to_child_rows(
     use crate::backend::executor::create_index::{update_index_on_delete, update_index_on_update};
     use crate::backend::heap::HeapFile;
     use crate::page::Page;
-    use crate::types::Comparable;
-
     // The first index failure; the child's indexes are rebuilt once its rows
     // are written, rather than maintained row by row after that.
     let mut index_error: Option<String> = None;
@@ -108,30 +109,31 @@ fn apply_to_child_rows(
         .map_err(|e| format!("Failed to open child heap for {}: {}", label, e))?;
     let schema: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
 
+    let pointers =
+        super::value_lookup::child_row_pointers(catalog, db_name, child_table, child_col, &key)?;
+    if pointers.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let mut matched = Vec::new();
     let mut dead = 0u32;
     let mut relocations: Vec<(Vec<u8>, Vec<u8>, u32, u32)> = Vec::new();
 
-    for page_num in 1..file.page_count() {
+    // Pointers are sorted, so each page is read and written once.
+    for page_pointers in pointers.chunk_by(|a, b| a.0 == b.0) {
+        let page_num = page_pointers[0].0;
         let mut page = Page::new();
         file.read_page(&mut page, page_num)
             .map_err(|e| e.to_string())?;
         let mut modified = false;
 
-        for slot in 0..page.slot_count() {
+        for &(_, slot) in page_pointers {
             let Some(old_bytes) = page.tuple(slot).map(<[u8]>::to_vec) else {
                 continue;
             };
             let Ok(row) = crate::types::deserialize_nullable_row(&schema, &old_bytes) else {
                 continue;
             };
-            let is_match = matches!(
-                row.get(col_pos),
-                Some(Some(v)) if matches!(v.compare(&key), Ok(std::cmp::Ordering::Equal))
-            );
-            if !is_match {
-                continue;
-            }
 
             match &new_value {
                 None => {

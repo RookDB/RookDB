@@ -200,7 +200,7 @@ fn check_delete_restrictions_from(
         match delete_action(&fk.4) {
             DeleteAction::Restrict => {
                 if value_lookup::child_has_referencing_row(
-                    catalog.engine(),
+                    catalog,
                     db_name,
                     child_table,
                     child_col,
@@ -232,9 +232,13 @@ fn check_delete_restrictions_from(
                 )) {
                     continue;
                 }
-                for child_row in
-                    child_rows_referencing(catalog, db_name, child_table, child_col, parent_value)?
-                {
+                for child_row in value_lookup::child_rows_referencing(
+                    catalog,
+                    db_name,
+                    child_table,
+                    child_col,
+                    parent_value,
+                )? {
                     check_delete_restrictions_from(
                         catalog,
                         db_name,
@@ -250,36 +254,6 @@ fn check_delete_restrictions_from(
     }
 
     Ok(())
-}
-
-/// Decoded rows of `child_table` whose `child_col` equals `value`.
-fn child_rows_referencing(
-    catalog: &Catalog,
-    db_name: &str,
-    child_table: &str,
-    child_col: &str,
-    value: &DataValue,
-) -> Result<Vec<Vec<Option<DataValue>>>, RookError> {
-    let Some(columns) = table_columns(catalog, db_name, child_table) else {
-        return Ok(Vec::new());
-    };
-    let heap_path = catalog.engine().paths().heap(db_name, child_table);
-    if !heap_path.exists() {
-        return Ok(Vec::new());
-    }
-    let schema: Vec<crate::types::DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
-    let heap = crate::backend::heap::HeapManager::open(heap_path).map_err(RookError::Io)?;
-    let mut rows = Vec::new();
-    for item in heap.scan() {
-        let (_, _, bytes) = item.map_err(RookError::Io)?;
-        let Ok(row) = crate::types::deserialize_nullable_row(&schema, &bytes) else {
-            continue;
-        };
-        if same_value(column_value(columns, &row, child_col), Some(value)) {
-            rows.push(row);
-        }
-    }
-    Ok(rows)
 }
 
 /// Propagate an UPDATE to child rows via ON UPDATE CASCADE / SET NULL.
@@ -341,7 +315,7 @@ pub fn propagate_update_to_children(
             )?;
         } else {
             restrict_update(
-                catalog.engine(),
+                catalog,
                 table_name,
                 parent_col,
                 child_table,
@@ -359,14 +333,15 @@ pub fn propagate_update_to_children(
 ///
 /// Returns Err if any child table references the old value of a changed column.
 pub fn validate_update_restrict(
-    engine: &crate::backend::engine::Engine,
+    catalog: &Catalog,
     db_name: &str,
     table_name: &str,
     columns: &[Column],
     old_row: &[Option<DataValue>],
     new_row: &[Option<DataValue>],
 ) -> Result<(), RookError> {
-    let foreign_keys = crate::backend::cache::referencing_fks(engine, db_name, table_name);
+    let foreign_keys =
+        crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
 
     for fk in foreign_keys.iter() {
         let child_table = &fk.0;
@@ -386,7 +361,7 @@ pub fn validate_update_restrict(
             continue;
         }
         restrict_update(
-            engine,
+            catalog,
             table_name,
             parent_col,
             child_table,
@@ -401,7 +376,7 @@ pub fn validate_update_restrict(
 
 /// Fail when a child row still references `old_val`, the key being changed.
 fn restrict_update(
-    engine: &crate::backend::engine::Engine,
+    catalog: &Catalog,
     table_name: &str,
     parent_col: &str,
     child_table: &str,
@@ -409,7 +384,7 @@ fn restrict_update(
     db_name: &str,
     old_val: &DataValue,
 ) -> Result<(), RookError> {
-    if value_lookup::child_has_referencing_row(engine, db_name, child_table, child_col, old_val)? {
+    if value_lookup::child_has_referencing_row(catalog, db_name, child_table, child_col, old_val)? {
         return Err(RookError::constraint(
             ConstraintKind::ForeignKey,
             table_name,
@@ -484,7 +459,7 @@ pub fn validate_row_update_with_excludes(
 
     // 2. UNIQUE — self/batch matches excluded via `exclude_ptrs`
     validation::check_unique_insert_meta(
-        catalog.engine(),
+        catalog,
         db_name,
         table_name,
         columns,

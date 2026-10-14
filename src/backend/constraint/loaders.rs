@@ -195,32 +195,3 @@ pub(crate) fn load_table_schema(
         schema.into_iter().map(|(_, name, dt)| (name, dt)).collect(),
     ))
 }
-
-/// Load the schema for a table AND find the position and type of a specific column.
-///
-/// Returns `(full_schema_types, column_position, column_type)`.
-pub(crate) fn load_table_schema_for_column(
-    engine: &crate::backend::engine::Engine,
-    db_name: &str,
-    table_name: &str,
-    column_name: &str,
-) -> Result<Option<(Vec<DataType>, usize, DataType)>, String> {
-    let schema_names = match load_table_schema(engine, db_name, table_name) {
-        Ok(Some(s)) => s,
-        Ok(None) => return Ok(None),
-        Err(e) => return Err(e),
-    };
-
-    let col_pos = match schema_names
-        .iter()
-        .position(|(name, _)| name.eq_ignore_ascii_case(column_name))
-    {
-        Some(p) => p,
-        None => return Ok(None),
-    };
-
-    let col_type = schema_names[col_pos].1.clone();
-    let schema_types: Vec<DataType> = schema_names.into_iter().map(|(_, dt)| dt).collect();
-
-    Ok(Some((schema_types, col_pos, col_type)))
-}
