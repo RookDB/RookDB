@@ -118,8 +118,8 @@ pub(crate) type HeapCacheMap = HashMap<PathBuf, CachedHeap>;
 pub fn with_heap<T>(
     engine: &Engine,
     path: &Path,
-    f: impl FnOnce(&mut HeapManager) -> io::Result<T>,
-) -> io::Result<T> {
+    f: impl FnOnce(&mut HeapManager) -> RookResult<T>,
+) -> RookResult<T> {
     let key = canonical(path);
 
     // Fast path: existing entry.
@@ -235,7 +235,7 @@ impl From<HeapManager> for HeapHandle {
 
 /// Take the engine's cached manager for `path` out of the cache, opening it
 /// on a miss.
-fn check_out(engine: &Engine, path: &Path) -> io::Result<(PathBuf, CachedHeap)> {
+fn check_out(engine: &Engine, path: &Path) -> RookResult<(PathBuf, CachedHeap)> {
     let key = canonical(path);
     let cached = { lock(&engine.heaps).remove(&key) };
     let entry = match cached {
@@ -260,7 +260,7 @@ fn check_in(engine: &Engine, key: PathBuf, mut entry: CachedHeap) {
 
 /// Check the engine's cached `HeapManager` for `path` out of the cache,
 /// opening it on a miss.
-pub fn lease_heap<'a>(engine: &'a Engine, path: &Path) -> io::Result<HeapLease<'a>> {
+pub fn lease_heap<'a>(engine: &'a Engine, path: &Path) -> RookResult<HeapLease<'a>> {
     let (key, entry) = check_out(engine, path)?;
     Ok(HeapLease {
         engine,
@@ -271,7 +271,7 @@ pub fn lease_heap<'a>(engine: &'a Engine, path: &Path) -> io::Result<HeapLease<'
 
 /// [`lease_heap`] for a holder that keeps the manager past the catalog
 /// borrow, such as a query operator.
-pub fn lease_heap_owned(engine: &Arc<Engine>, path: &Path) -> io::Result<HeapHandle> {
+pub fn lease_heap_owned(engine: &Arc<Engine>, path: &Path) -> RookResult<HeapHandle> {
     let (key, entry) = check_out(engine, path)?;
     Ok(HeapHandle {
         engine: Some(Arc::clone(engine)),
@@ -285,7 +285,7 @@ pub fn lease_heap_owned(engine: &Arc<Engine>, path: &Path) -> io::Result<HeapHan
 /// Called when the underlying file is replaced or externally rewritten:
 /// `HeapManager::create` truncates the file and registers a fresh shared
 /// pool, and VACUUM's direct-I/O compaction leaves stale frames behind.
-pub fn evict_heap(engine: &Engine, path: &Path) -> io::Result<()> {
+pub fn evict_heap(engine: &Engine, path: &Path) -> RookResult<()> {
     let key = canonical(path);
     let removed = lock(&engine.heaps).remove(&key);
     if let Some(mut entry) = removed {
@@ -295,7 +295,7 @@ pub fn evict_heap(engine: &Engine, path: &Path) -> io::Result<()> {
 }
 
 /// Flush and drop every cached heap manager.
-pub fn flush_and_clear_heaps(engine: &Engine) -> io::Result<()> {
+pub fn flush_and_clear_heaps(engine: &Engine) -> RookResult<()> {
     let mut cache = lock(&engine.heaps);
     for (_, mut entry) in cache.drain() {
         entry.manager.flush()?;
@@ -375,9 +375,9 @@ impl CachedIndex {
     /// private handle instead.
     pub fn read<T>(
         &self,
-        f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> io::Result<T>,
-    ) -> io::Result<T> {
-        let open = || -> io::Result<crate::backend::index::btree::BTree> {
+        f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> RookResult<T>,
+    ) -> RookResult<T> {
+        let open = || -> RookResult<crate::backend::index::btree::BTree> {
             let mut btree = crate::backend::index::btree::BTree::open(self.path.clone())?;
             btree.set_key_types(self.key_types.clone());
             Ok(btree)
@@ -488,7 +488,7 @@ pub fn checkpoint_engine(engine: &Engine) {
 /// Whoever renames, removes or replaces a table or index file calls this,
 /// before or after the move: the caches never check the disk themselves, so
 /// a handle left behind would keep reading and writing the old file.
-pub fn release_file(path: &Path) -> io::Result<()> {
+pub fn release_file(path: &Path) -> RookResult<()> {
     for engine in crate::backend::engine::open_engines() {
         evict_heap(&engine, path)?;
         flush_and_evict_btree(&engine, path);
@@ -501,7 +501,7 @@ pub fn release_file(path: &Path) -> io::Result<()> {
 ///
 /// For code that replaces a heap file without knowing which engine, if any,
 /// has it open.
-pub fn evict_heap_everywhere(path: &Path) -> io::Result<()> {
+pub fn evict_heap_everywhere(path: &Path) -> RookResult<()> {
     for engine in crate::backend::engine::open_engines() {
         evict_heap(&engine, path)?;
     }
@@ -861,11 +861,11 @@ fn store_statistics(
     db_name: &str,
     table_name: &str,
     stats: &crate::statistics::TableStatistics,
-) -> io::Result<()> {
+) -> RookResult<()> {
     let path = engine.paths().statistics(db_name, table_name);
     let tmp = crate::backend::paths::with_suffix(&path, ".tmp");
     std::fs::write(&tmp, serde_json::to_vec(stats).map_err(io::Error::other)?)?;
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, &path).map_err(RookError::from)
 }
 
 /// The statistics stored for `db.table`, if they exist and describe the

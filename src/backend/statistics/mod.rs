@@ -9,7 +9,7 @@
 pub mod column;
 pub mod estimator;
 
-use std::io::{self};
+use crate::backend::error::RookResult;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -115,7 +115,7 @@ pub fn collect_table_statistics(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-) -> io::Result<TableStatistics> {
+) -> RookResult<TableStatistics> {
     let table_path = engine.paths().heap(db_name, table_name);
     collect_heap_statistics(engine, Path::new(&table_path))
 }
@@ -125,7 +125,7 @@ pub fn collect_table_statistics(
 pub fn collect_heap_statistics(
     engine: &crate::backend::engine::Engine,
     path: &Path,
-) -> io::Result<TableStatistics> {
+) -> RookResult<TableStatistics> {
     collect_heap_statistics_for(engine, path, &[])
 }
 
@@ -135,7 +135,7 @@ pub fn collect_heap_statistics_for(
     engine: &crate::backend::engine::Engine,
     path: &Path,
     columns: &[Column],
-) -> io::Result<TableStatistics> {
+) -> RookResult<TableStatistics> {
     let file = HeapFile::open(engine, path)?;
     let mut collector = (!columns.is_empty()).then(|| ColumnCollector::new(columns));
     let total_pages = file.page_count();

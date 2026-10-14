@@ -40,6 +40,7 @@
 //! held across the disk read/write of a miss or an eviction). The engine is
 //! single-user, so this costs an uncontended lock per page access.
 
+use crate::backend::error::{RookError, RookResult};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -102,7 +103,7 @@ type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 // ─── Positional file I/O ─────────────────────────────────────────────────
 
-fn read_full_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+fn read_full_at(file: &File, buf: &mut [u8], offset: u64) -> RookResult<usize> {
     let mut done = 0;
     while done < buf.len() {
         #[cfg(unix)]
@@ -114,16 +115,16 @@ fn read_full_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
             Ok(0) => break,
             Ok(n) => done += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(RookError::from(e)),
         }
     }
     Ok(done)
 }
 
-fn write_all_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
+fn write_all_at(file: &File, buf: &[u8], offset: u64) -> RookResult<()> {
     #[cfg(unix)]
     {
-        std::os::unix::fs::FileExt::write_all_at(file, buf, offset)
+        std::os::unix::fs::FileExt::write_all_at(file, buf, offset).map_err(RookError::from)
     }
     #[cfg(windows)]
     {
@@ -287,7 +288,7 @@ impl Inner {
     }
 
     /// Write one dirty frame to its file and mark it clean.
-    fn write_frame(&mut self, idx: usize) -> io::Result<()> {
+    fn write_frame(&mut self, idx: usize) -> RookResult<()> {
         let f = &mut self.frames[idx];
         let file_id = (f.key >> 32) as u32;
         let page_id = f.key as u32;
@@ -303,7 +304,7 @@ impl Inner {
     }
 
     /// Write all dirty frames of a file.
-    fn write_dirty(&mut self, file_id: u32) -> io::Result<()> {
+    fn write_dirty(&mut self, file_id: u32) -> RookResult<()> {
         let list = match self.files.get_mut(&file_id) {
             Some(e) if e.dirty > 0 => std::mem::take(&mut e.dirty_list),
             _ => return Ok(()),
@@ -326,7 +327,7 @@ impl Inner {
     /// Find a frame that can take a new page: a free one, a new one while
     /// under budget, or a CLOCK victim (written back first if dirty).
     /// The returned frame is unoccupied and not in the free list.
-    fn acquire_frame(&mut self) -> io::Result<usize> {
+    fn acquire_frame(&mut self) -> RookResult<usize> {
         if let Some(idx) = self.free.pop() {
             return Ok(idx);
         }
@@ -366,7 +367,7 @@ impl Inner {
             f.clock_bit = false;
             return Ok(idx);
         }
-        Err(io::Error::new(
+        Err(RookError::io(
             io::ErrorKind::WouldBlock,
             "BufferPool: all frames are pinned — cannot evict",
         ))
@@ -393,7 +394,7 @@ impl Inner {
 
     /// Pin the frame holding `(file_id, page_id)`, loading it on a miss
     /// straight into the buffer of the frame that was evicted for it.
-    fn fetch(&mut self, file_id: u32, page_id: u32, total_pages: u32) -> io::Result<usize> {
+    fn fetch(&mut self, file_id: u32, page_id: u32, total_pages: u32) -> RookResult<usize> {
         if let Some(&idx) = self.table.get(&frame_key(file_id, page_id)) {
             let f = &mut self.frames[idx];
             f.pin_count += 1;
@@ -414,7 +415,7 @@ impl Inner {
         }
     }
 
-    fn load(&mut self, idx: usize, file_id: u32, page_id: u32, total_pages: u32) -> io::Result<()> {
+    fn load(&mut self, idx: usize, file_id: u32, page_id: u32, total_pages: u32) -> RookResult<()> {
         let entry = self.files.get(&file_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no open file")
         })?;
@@ -425,7 +426,7 @@ impl Inner {
             return Ok(());
         }
         if n > 0 {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::UnexpectedEof,
                 "failed to fill whole buffer",
             ));
@@ -436,7 +437,7 @@ impl Inner {
         // instead of inventing a blank page that could later be written
         // past end of file.
         if page_id >= total_pages {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::UnexpectedEof,
                 format!(
                     "page {} does not exist (file has {} pages)",
@@ -626,7 +627,7 @@ impl BufferPool {
     /// Attach an already-open heap file to the global store.
     ///
     /// Reads the header page to determine the total number of pages.
-    pub fn with_file(mut file: File, file_path: PathBuf) -> io::Result<Self> {
+    pub fn with_file(mut file: File, file_path: PathBuf) -> RookResult<Self> {
         let mut pool = Self::on_store(Store::global().clone());
         pool.total_pages = read_header_pages(&mut file)?.unwrap_or(0);
         pool.attach_file(file, file_path);
@@ -649,7 +650,7 @@ impl BufferPool {
     /// Open a file for the buffer pool to manage.
     ///
     /// Reads the header page to determine the total number of pages.
-    pub fn open(&mut self, path: &Path) -> io::Result<()> {
+    pub fn open(&mut self, path: &Path) -> RookResult<()> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -674,8 +675,12 @@ impl BufferPool {
 
     /// A duplicate of the underlying file handle (shares the file offset).
     /// Used for external scans such as the FSM rebuild.
-    pub(crate) fn try_clone_file(&self) -> io::Result<File> {
-        self.file.as_ref().ok_or_else(no_file)?.try_clone()
+    pub(crate) fn try_clone_file(&self) -> RookResult<File> {
+        self.file
+            .as_ref()
+            .ok_or_else(no_file)?
+            .try_clone()
+            .map_err(RookError::from)
     }
 
     /// Return the total number of pages tracked by this pool.
@@ -683,8 +688,8 @@ impl BufferPool {
         self.total_pages
     }
 
-    fn id(&self) -> io::Result<u32> {
-        self.file_id.ok_or_else(no_file)
+    fn id(&self) -> RookResult<u32> {
+        self.file_id.ok_or_else(no_file).map_err(RookError::from)
     }
 
     // ─── Core Page Fetch API ─────────────────────────────────────────────
@@ -696,7 +701,7 @@ impl BufferPool {
     ///
     /// Returns a `FrameId` that can be used with `get_page()` / `get_page_mut()`.
     /// Call `unpin()` when done to allow eviction.
-    pub fn fetch_page(&mut self, page_id: u32) -> io::Result<FrameId> {
+    pub fn fetch_page(&mut self, page_id: u32) -> RookResult<FrameId> {
         let id = self.id()?;
         let idx = self.store.lock().fetch(id, page_id, self.total_pages)?;
         Ok(FrameId(idx))
@@ -705,14 +710,14 @@ impl BufferPool {
     /// Allocate a new page (extend the file) and header count.
     ///
     /// Returns `(page_id, frame_id)` for the newly created page.
-    pub fn new_page(&mut self) -> io::Result<(u32, FrameId)> {
+    pub fn new_page(&mut self) -> RookResult<(u32, FrameId)> {
         let fid = self.id()?;
         let page_id = self.total_pages;
         let mut g = self.store.lock();
 
         // Evict first, BEFORE modifying the file.
         let idx = g.acquire_frame()?;
-        let res = (|| -> io::Result<()> {
+        let res = (|| -> RookResult<()> {
             let file = g.files.get(&fid).ok_or_else(no_file)?.file.clone();
             let page = &mut g.frames[idx].page;
             init_page(page);
@@ -748,13 +753,13 @@ impl BufferPool {
 
     /// Allocate a new raw page (without initializing heap headers or rewriting page 0).
     /// Used for index files where page 0 is a B+ Tree node.
-    pub fn allocate_raw_page(&mut self, data: &[u8]) -> io::Result<u32> {
+    pub fn allocate_raw_page(&mut self, data: &[u8]) -> RookResult<u32> {
         let fid = self.id()?;
         let page_id = self.total_pages;
         let mut g = self.store.lock();
 
         let idx = g.acquire_frame()?;
-        let res = (|| -> io::Result<()> {
+        let res = (|| -> RookResult<()> {
             let file = g.files.get(&fid).ok_or_else(no_file)?.file.clone();
             let mut f: &File = &file;
             f.seek(SeekFrom::End(0))?;
@@ -776,12 +781,12 @@ impl BufferPool {
 
     /// Read raw page bytes using the buffer pool cache.
     /// Hits return without any disk I/O!
-    pub fn read_page_bytes(&mut self, page_id: u32) -> io::Result<Vec<u8>> {
+    pub fn read_page_bytes(&mut self, page_id: u32) -> RookResult<Vec<u8>> {
         Ok(self.page_bytes(page_id)?.to_vec())
     }
 
     /// Write raw page bytes through the buffer pool (marks page dirty).
-    pub fn write_page_bytes(&mut self, page_id: u32, data: &[u8]) -> io::Result<()> {
+    pub fn write_page_bytes(&mut self, page_id: u32, data: &[u8]) -> RookResult<()> {
         self.page_bytes_mut(page_id)?[..data.len()].copy_from_slice(data);
         Ok(())
     }
@@ -790,7 +795,7 @@ impl BufferPool {
     ///
     /// Nothing is copied out of the frame. The frame stays pinned until the
     /// returned guard is dropped.
-    pub fn page_bytes(&mut self, page_id: u32) -> io::Result<PageRef<'_>> {
+    pub fn page_bytes(&mut self, page_id: u32) -> RookResult<PageRef<'_>> {
         let id = self.id()?;
         let mut g = self.store.lock();
         let idx = g.fetch(id, page_id, self.total_pages)?;
@@ -807,7 +812,7 @@ impl BufferPool {
 
     /// Borrow a page's bytes for editing in place; the page is marked dirty
     /// when the guard drops.
-    pub fn page_bytes_mut(&mut self, page_id: u32) -> io::Result<PageMut<'_>> {
+    pub fn page_bytes_mut(&mut self, page_id: u32) -> RookResult<PageMut<'_>> {
         let id = self.id()?;
         let mut g = self.store.lock();
         let idx = g.fetch(id, page_id, self.total_pages)?;
@@ -851,7 +856,7 @@ impl BufferPool {
     // ─── Flush API ───────────────────────────────────────────────────────
 
     /// Flush a specific page to disk if it is dirty.
-    pub fn flush_page(&mut self, page_id: u32) -> io::Result<()> {
+    pub fn flush_page(&mut self, page_id: u32) -> RookResult<()> {
         let id = self.id()?;
         let mut g = self.store.lock();
         if let Some(&idx) = g.table.get(&frame_key(id, page_id))
@@ -877,7 +882,7 @@ impl BufferPool {
     ///
     /// The pages become visible to direct-I/O readers and survive a process
     /// crash; `flush_all` makes them survive a power loss.
-    pub fn write_dirty(&mut self) -> io::Result<()> {
+    pub fn write_dirty(&mut self) -> RookResult<()> {
         match self.file_id {
             Some(id) => self.store.lock().write_dirty(id),
             None => Ok(()),
@@ -886,7 +891,7 @@ impl BufferPool {
 
     /// Flush all dirty pages to disk and fsync (if anything was written
     /// since the last fsync).
-    pub fn flush_all(&mut self) -> io::Result<()> {
+    pub fn flush_all(&mut self) -> RookResult<()> {
         let Some(id) = self.file_id else {
             return Ok(());
         };
@@ -910,7 +915,7 @@ impl BufferPool {
     }
 
     /// Fetch a page and return a `FrameGuard` that auto-unpins on drop.
-    pub fn fetch_page_guarded(&mut self, page_id: u32) -> io::Result<FrameGuard<'_>> {
+    pub fn fetch_page_guarded(&mut self, page_id: u32) -> RookResult<FrameGuard<'_>> {
         let frame_id = self.fetch_page(page_id)?;
         Ok(FrameGuard::new(self, frame_id))
     }
@@ -954,7 +959,7 @@ impl BufferPool {
 
 /// Page count from a heap file's header page, `None` if the file is too
 /// small to have one.
-fn read_header_pages(file: &mut File) -> io::Result<Option<u32>> {
+fn read_header_pages(file: &mut File) -> RookResult<Option<u32>> {
     let file_size = file.metadata()?.len();
     if file_size < PAGE_SIZE as u64 {
         return Ok(None);
@@ -994,7 +999,7 @@ mod tests {
         ))
     }
 
-    fn create_test_file(path: &std::path::Path, num_pages: u32) -> io::Result<()> {
+    fn create_test_file(path: &std::path::Path, num_pages: u32) -> RookResult<()> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)

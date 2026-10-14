@@ -25,9 +25,10 @@
 //! | Vacuum scan      | `vm_is_visible(db, tbl, page_id)` → skip if true |
 //! | Table drop/trunc | delete the `_vm` file               |
 
+use crate::backend::error::RookResult;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -88,7 +89,7 @@ fn registry(engine: &crate::backend::engine::Engine) -> &Mutex<VmRegistry> {
 
 /// Read the current on-disk VM byte at `byte_idx`.
 /// Returns 0 if the file is shorter than `byte_idx + 1`.
-fn read_vm_byte(path: &PathBuf, byte_idx: u64) -> io::Result<u8> {
+fn read_vm_byte(path: &PathBuf, byte_idx: u64) -> RookResult<u8> {
     if !path.exists() {
         return Ok(0);
     }
@@ -104,7 +105,7 @@ fn read_vm_byte(path: &PathBuf, byte_idx: u64) -> io::Result<u8> {
 }
 
 /// Write a single byte at `byte_idx`, extending the file if necessary.
-fn write_vm_byte(path: &std::path::Path, byte_idx: u64, value: u8) -> io::Result<()> {
+fn write_vm_byte(path: &std::path::Path, byte_idx: u64, value: u8) -> RookResult<()> {
     // Ensure parent directory exists.
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -143,7 +144,7 @@ pub fn vm_set_page(
     db_name: &str,
     table_name: &str,
     page_id: u32,
-) -> io::Result<()> {
+) -> RookResult<()> {
     if page_id == 0 {
         return Ok(()); // header page – never mark visible
     }
@@ -171,7 +172,7 @@ pub fn vm_clear_page(
     db_name: &str,
     table_name: &str,
     page_id: u32,
-) -> io::Result<()> {
+) -> RookResult<()> {
     if page_id == 0 {
         return Ok(()); // header page – always dirty
     }

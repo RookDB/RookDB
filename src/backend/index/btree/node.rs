@@ -3,6 +3,7 @@
 //! Moved verbatim from the original `btree.rs`; items the tree core touches
 //! are `pub(crate)`.
 
+use crate::backend::error::{RookError, RookResult};
 use std::io::{self};
 
 use super::codec::{
@@ -26,9 +27,9 @@ pub(crate) struct NodeView<'a> {
 
 impl<'a> NodeView<'a> {
     /// Validate the header and the fixed-width (children / values) area.
-    pub(crate) fn parse(buf: &'a [u8]) -> io::Result<Self> {
+    pub(crate) fn parse(buf: &'a [u8]) -> RookResult<Self> {
         if buf.len() < PAGE_HEADER {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::UnexpectedEof,
                 "Page too short for header",
             ));
@@ -38,7 +39,7 @@ impl<'a> NodeView<'a> {
         let is_leaf = match page_type {
             PAGE_TYPE_INTERNAL => {
                 if PAGE_HEADER + (num_keys + 1) * CHILD_SIZE > buf.len() {
-                    return Err(io::Error::new(
+                    return Err(RookError::io(
                         io::ErrorKind::UnexpectedEof,
                         "Truncated children",
                     ));
@@ -47,7 +48,7 @@ impl<'a> NodeView<'a> {
             }
             PAGE_TYPE_LEAF => {
                 if LEAF_HEADER + num_keys * VALUE_SIZE > buf.len() {
-                    return Err(io::Error::new(
+                    return Err(RookError::io(
                         io::ErrorKind::UnexpectedEof,
                         "Truncated values",
                     ));
@@ -55,7 +56,7 @@ impl<'a> NodeView<'a> {
                 true
             }
             _ => {
-                return Err(io::Error::new(
+                return Err(RookError::io(
                     io::ErrorKind::InvalidData,
                     format!("Unknown page type: {}", page_type),
                 ));
@@ -164,7 +165,7 @@ impl<'a> NodeView<'a> {
     }
 
     /// Offset one past the last key, i.e. the bytes this node occupies.
-    pub(crate) fn used_bytes(&self) -> io::Result<usize> {
+    pub(crate) fn used_bytes(&self) -> RookResult<usize> {
         let mut end = self.keys_start();
         for entry in self.keys() {
             let (off, key) = entry?;
@@ -174,7 +175,7 @@ impl<'a> NodeView<'a> {
     }
 
     /// Whether the node can take one more entry with a key of this size.
-    pub(crate) fn has_space_for(&self, encoded_key_size: usize) -> io::Result<bool> {
+    pub(crate) fn has_space_for(&self, encoded_key_size: usize) -> RookResult<bool> {
         let pointer = if self.is_leaf { VALUE_SIZE } else { CHILD_SIZE };
         Ok(self.used_bytes()? + pointer + encoded_key_size <= BTREE_PAGE_SIZE)
     }
@@ -201,7 +202,7 @@ pub(crate) struct KeyIter<'a> {
 }
 
 impl<'a> Iterator for KeyIter<'a> {
-    type Item = io::Result<(usize, &'a [u8])>;
+    type Item = RookResult<(usize, &'a [u8])>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
@@ -211,7 +212,7 @@ impl<'a> Iterator for KeyIter<'a> {
         let off = self.off;
         if off + KEY_LEN_SIZE > self.buf.len() {
             self.remaining = 0;
-            return Some(Err(io::Error::new(
+            return Some(Err(RookError::io(
                 io::ErrorKind::UnexpectedEof,
                 "Truncated key length",
             )));
@@ -220,7 +221,7 @@ impl<'a> Iterator for KeyIter<'a> {
         let end = off + KEY_LEN_SIZE + key_len;
         if end > self.buf.len() {
             self.remaining = 0;
-            return Some(Err(io::Error::new(
+            return Some(Err(RookError::io(
                 io::ErrorKind::UnexpectedEof,
                 "Truncated key data",
             )));
@@ -346,9 +347,9 @@ impl BTreeNode {
     }
 
     /// Deserialize a node from a byte buffer.
-    pub(crate) fn deserialize(buf: &[u8]) -> io::Result<Self> {
+    pub(crate) fn deserialize(buf: &[u8]) -> RookResult<Self> {
         if buf.len() < PAGE_HEADER {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::UnexpectedEof,
                 "Page too short for header",
             ));
@@ -368,7 +369,7 @@ impl BTreeNode {
                 for i in 0..num_children {
                     let off = children_start + i * CHILD_SIZE;
                     if off + CHILD_SIZE > buf.len() {
-                        return Err(io::Error::new(
+                        return Err(RookError::io(
                             io::ErrorKind::UnexpectedEof,
                             "Truncated children",
                         ));
@@ -383,7 +384,7 @@ impl BTreeNode {
                 let mut keys = Vec::with_capacity(nk);
                 for _ in 0..nk {
                     if key_off + KEY_LEN_SIZE > buf.len() {
-                        return Err(io::Error::new(
+                        return Err(RookError::io(
                             io::ErrorKind::UnexpectedEof,
                             "Truncated key length",
                         ));
@@ -391,7 +392,7 @@ impl BTreeNode {
                     let key_len = u16::from_le_bytes([buf[key_off], buf[key_off + 1]]) as usize;
                     let total_entry = KEY_LEN_SIZE + key_len;
                     if key_off + total_entry > buf.len() {
-                        return Err(io::Error::new(
+                        return Err(RookError::io(
                             io::ErrorKind::UnexpectedEof,
                             "Truncated key data",
                         ));
@@ -408,7 +409,7 @@ impl BTreeNode {
             }
             PAGE_TYPE_LEAF => {
                 if buf.len() < LEAF_HEADER {
-                    return Err(io::Error::new(
+                    return Err(RookError::io(
                         io::ErrorKind::UnexpectedEof,
                         "Page too short for leaf header",
                     ));
@@ -422,7 +423,7 @@ impl BTreeNode {
                 for i in 0..nk {
                     let off = values_start + i * VALUE_SIZE;
                     if off + VALUE_SIZE > buf.len() {
-                        return Err(io::Error::new(
+                        return Err(RookError::io(
                             io::ErrorKind::UnexpectedEof,
                             "Truncated values",
                         ));
@@ -443,7 +444,7 @@ impl BTreeNode {
                 let mut keys = Vec::with_capacity(nk);
                 for _ in 0..nk {
                     if key_off + KEY_LEN_SIZE > buf.len() {
-                        return Err(io::Error::new(
+                        return Err(RookError::io(
                             io::ErrorKind::UnexpectedEof,
                             "Truncated key length",
                         ));
@@ -451,7 +452,7 @@ impl BTreeNode {
                     let key_len = u16::from_le_bytes([buf[key_off], buf[key_off + 1]]) as usize;
                     let total_entry = KEY_LEN_SIZE + key_len;
                     if key_off + total_entry > buf.len() {
-                        return Err(io::Error::new(
+                        return Err(RookError::io(
                             io::ErrorKind::UnexpectedEof,
                             "Truncated key data",
                         ));
@@ -468,7 +469,7 @@ impl BTreeNode {
                     prev_leaf,
                 })
             }
-            _ => Err(io::Error::new(
+            _ => Err(RookError::io(
                 io::ErrorKind::InvalidData,
                 format!("Unknown page type: {}", page_type),
             )),

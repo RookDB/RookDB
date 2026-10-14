@@ -385,7 +385,7 @@ Latest run is injected automatically by `cargo run --bin benchmark_fsm_heap ...`
     Ok(())
 }
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config()?;
     ensure_parent_dir(&config.output)?;
 

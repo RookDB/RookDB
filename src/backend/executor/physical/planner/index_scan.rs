@@ -10,7 +10,7 @@ use rook_ast::logical::LogicalTableScan;
 use super::super::operators::{IndexScanMode, IndexScanOperator, PhysicalOperator};
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
-use crate::backend::error::{RookError, RookResult};
+use crate::backend::error::RookResult;
 use crate::types::Comparable;
 use crate::types::{DataType, DataValue};
 
@@ -157,7 +157,7 @@ impl PhysicalPlanner {
             let heap_manager =
                 crate::backend::cache::lease_heap_owned(self.catalog.engine(), &heap_path)
                     .map_err(|e| {
-                        RookError::Io(e).with_context(format!(
+                        e.with_context(format!(
                             "opening heap {} for table '{}'",
                             heap_path.display(),
                             ts.table

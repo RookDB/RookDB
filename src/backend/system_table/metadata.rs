@@ -1051,7 +1051,7 @@ pub fn rename_table_in_system(
     let refs: Vec<Option<&str>> = row.iter().map(|o| o.as_deref()).collect();
     let bytes = crate::types::serialize_nullable_row(SYS_TABLES_SCHEMA, &refs)?;
     heap.insert_tuple(&bytes)?;
-    Ok(heap.flush()?)
+    heap.flush()
 }
 
 #[cfg(test)]

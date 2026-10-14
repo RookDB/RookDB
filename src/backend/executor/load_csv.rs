@@ -6,7 +6,7 @@
 //! through the same path.
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{BufRead, BufReader};
 
 use crate::backend::error::{RookError, RookResult};
 use crate::catalog::types::{Catalog, Column};
@@ -132,11 +132,8 @@ fn insert_row_resolved(
     let (page_id, slot_id) = crate::backend::cache::with_heap(catalog.engine(), table_path, |hm| {
         hm.insert_tuple(&bytes)
     })
-    .map_err(|e| match e.kind() {
-        // A row the heap refuses (empty or larger than a page).
-        io::ErrorKind::InvalidInput => RookError::TypeMismatch(e.to_string()),
-        _ => RookError::Io(e),
-    })?;
+    // A row the heap refuses (empty or larger than a page) is a TypeMismatch.
+    ?;
 
     if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
         catalog.engine(),

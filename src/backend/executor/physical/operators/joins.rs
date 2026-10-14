@@ -462,8 +462,8 @@ fn estimate_tuple_bytes(tuple: &Tuple) -> usize {
     bytes
 }
 
-fn spill_error(e: std::io::Error) -> RookError {
-    RookError::Io(e).with_context("hash join spill")
+fn spill_error(e: impl Into<RookError>) -> RookError {
+    e.into().with_context("hash join spill")
 }
 
 /// One spilled run of tuples.
@@ -750,7 +750,7 @@ fn encode_value(dv: &DataValue, buf: &mut Vec<u8>) {
     }
 }
 
-fn decode_tuple(r: &mut impl std::io::Read) -> std::io::Result<Tuple> {
+fn decode_tuple(r: &mut impl std::io::Read) -> RookResult<Tuple> {
     let arity = u32::from_le_bytes(read_array(r)?) as usize;
     let mut values = Vec::with_capacity(arity);
     for _ in 0..arity {
@@ -764,13 +764,13 @@ fn decode_tuple(r: &mut impl std::io::Read) -> std::io::Result<Tuple> {
     Ok(Tuple::new(values))
 }
 
-fn read_array<const N: usize>(r: &mut impl std::io::Read) -> std::io::Result<[u8; N]> {
+fn read_array<const N: usize>(r: &mut impl std::io::Read) -> RookResult<[u8; N]> {
     let mut bytes = [0u8; N];
     r.read_exact(&mut bytes)?;
     Ok(bytes)
 }
 
-fn decode_value(tag: u8, r: &mut impl std::io::Read) -> std::io::Result<DataValue> {
+fn decode_value(tag: u8, r: &mut impl std::io::Read) -> RookResult<DataValue> {
     use crate::types::value::{NumericValue, OrderedF32, OrderedF64};
     fn invalid(what: &str) -> std::io::Error {
         std::io::Error::new(
@@ -778,21 +778,25 @@ fn decode_value(tag: u8, r: &mut impl std::io::Read) -> std::io::Result<DataValu
             format!("corrupt spill file: {}", what),
         )
     }
-    fn text(r: &mut impl std::io::Read) -> std::io::Result<String> {
+    fn text(r: &mut impl std::io::Read) -> RookResult<String> {
         let len = u32::from_le_bytes(read_array(r)?) as usize;
         let mut bytes = vec![0u8; len];
         r.read_exact(&mut bytes)?;
-        String::from_utf8(bytes).map_err(|_| invalid("text is not UTF-8"))
+        String::from_utf8(bytes)
+            .map_err(|_| invalid("text is not UTF-8"))
+            .map_err(RookError::from)
     }
-    fn date(r: &mut impl std::io::Read) -> std::io::Result<chrono::NaiveDate> {
+    fn date(r: &mut impl std::io::Read) -> RookResult<chrono::NaiveDate> {
         chrono::NaiveDate::from_num_days_from_ce_opt(i32::from_le_bytes(read_array(r)?))
             .ok_or_else(|| invalid("date out of range"))
+            .map_err(RookError::from)
     }
-    fn time(r: &mut impl std::io::Read) -> std::io::Result<chrono::NaiveTime> {
+    fn time(r: &mut impl std::io::Read) -> RookResult<chrono::NaiveTime> {
         let secs = u32::from_le_bytes(read_array(r)?);
         let nanos = u32::from_le_bytes(read_array(r)?);
         chrono::NaiveTime::from_num_seconds_from_midnight_opt(secs, nanos)
             .ok_or_else(|| invalid("time out of range"))
+            .map_err(RookError::from)
     }
     Ok(match tag {
         TAG_SMALLINT => DataValue::SmallInt(i16::from_le_bytes(read_array(r)?)),
@@ -818,7 +822,7 @@ fn decode_value(tag: u8, r: &mut impl std::io::Read) -> std::io::Result<DataValu
             let date = date(r)?;
             DataValue::Timestamp(date.and_time(time(r)?))
         }
-        _ => return Err(invalid("unknown value tag")),
+        _ => return Err(RookError::from(invalid("unknown value tag"))),
     })
 }
 

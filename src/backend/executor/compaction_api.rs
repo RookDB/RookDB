@@ -3,7 +3,7 @@
 //! These functions deliberately hide the `HeapManager` and `FSM`
 //! internal state implementations from other teams.
 
-use std::io;
+use crate::backend::error::RookResult;
 
 /// Rebuild the table's Free Space Map (FSM) from scratch.
 /// Call this ONCE after a full table compaction/rewrite is completed.
@@ -12,7 +12,7 @@ pub fn rebuild_table_fsm(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-) -> io::Result<()> {
+) -> RookResult<()> {
     let table_path = engine.paths().heap(db_name, table_name);
     let fsm_path = engine.paths().heap_fsm(db_name, table_name);
 
@@ -41,7 +41,7 @@ pub fn update_page_free_space(
     table_name: &str,
     page_id: u32,
     reclaimed_bytes: u32,
-) -> io::Result<()> {
+) -> RookResult<()> {
     let table_path = engine.paths().heap(db_name, table_name);
 
     // Open the HeapManager (loads the FSM)
@@ -68,7 +68,7 @@ pub fn insert_raw_tuple(
     db_name: &str,
     table_name: &str,
     tuple_data: &[u8],
-) -> io::Result<(u32, u32)> {
+) -> RookResult<(u32, u32)> {
     let table_path = engine.paths().heap(db_name, table_name);
 
     // Process-cached manager: avoids a full file+FSM open per tuple.

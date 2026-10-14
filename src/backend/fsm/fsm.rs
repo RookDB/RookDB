@@ -12,6 +12,7 @@
 //! - FSM_SLOTS_PER_PAGE: 4000 usable leaf slots
 //! - FSM_LEVELS: 3 (Level 0=leaves, Level 2=root, constant height)
 
+use crate::backend::error::{RookError, RookResult};
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -88,13 +89,13 @@ impl FSMPage {
     }
 
     /// Deserialize FSM page from exactly FSM_PAGE_SIZE bytes.
-    pub fn deserialize(bytes: &[u8]) -> io::Result<Self> {
+    pub fn deserialize(bytes: &[u8]) -> RookResult<Self> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_deserialize_page_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if bytes.len() < FSM_PAGE_SIZE {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidData,
                 format!(
                     "FSMPage buffer too small: {} < {}",
@@ -146,7 +147,7 @@ fn lock_cache(cache: &SharedFsmCache) -> MutexGuard<'_, FsmCache> {
 /// The cache for `file`, shared by every handle open on the same inode so
 /// two `HeapManager`s on one table keep seeing each other's FSM updates.
 #[cfg(unix)]
-fn shared_cache(file: &File) -> io::Result<SharedFsmCache> {
+fn shared_cache(file: &File) -> RookResult<SharedFsmCache> {
     use std::os::unix::fs::MetadataExt;
     use std::sync::{OnceLock, Weak};
 
@@ -174,7 +175,7 @@ fn shared_cache(file: &File) -> io::Result<SharedFsmCache> {
 
 /// Without a stable file identity each handle keeps a private cache.
 #[cfg(not(unix))]
-fn shared_cache(file: &File) -> io::Result<SharedFsmCache> {
+fn shared_cache(file: &File) -> RookResult<SharedFsmCache> {
     Ok(Arc::new(Mutex::new(FsmCache {
         file_len: file.metadata()?.len(),
         ..FsmCache::default()
@@ -201,7 +202,7 @@ pub struct FSM {
 
 impl FSM {
     /// Open existing FSM fork file or create if missing.
-    pub fn open(fsm_path: PathBuf, heap_page_count: u32) -> io::Result<Self> {
+    pub fn open(fsm_path: PathBuf, heap_page_count: u32) -> RookResult<Self> {
         log::trace!(
             "[FSM::open] Opening FSM fork at {:?} for heap_page_count={}",
             fsm_path,
@@ -241,7 +242,7 @@ impl FSM {
     /// 3. Build FSM tree structure with all categories
     /// 4. Write FSM pages to fork file
     /// 5. Update fsm_page_count in header
-    pub fn build_from_heap(heap_file: &mut File, fsm_path: PathBuf) -> io::Result<Self> {
+    pub fn build_from_heap(heap_file: &mut File, fsm_path: PathBuf) -> RookResult<Self> {
         log::trace!(
             "[FSM::build_from_heap] Building FSM from heap, writing to {:?}",
             fsm_path
@@ -465,7 +466,7 @@ impl FSM {
         }
     }
 
-    pub fn read_fsm_page(&mut self, level: u32, page_no: u32) -> io::Result<FSMPage> {
+    pub fn read_fsm_page(&mut self, level: u32, page_no: u32) -> RookResult<FSMPage> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_read_page_calls
@@ -496,12 +497,12 @@ impl FSM {
                 Ok(page)
             }
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(FSMPage::new()),
-            Err(e) => Err(e),
+            Err(e) => Err(RookError::from(e)),
         }
     }
 
     /// Write FSM page at logical position (buffered until `sync` or drop).
-    pub fn write_fsm_page(&mut self, level: u32, page_no: u32, page: &FSMPage) -> io::Result<()> {
+    pub fn write_fsm_page(&mut self, level: u32, page_no: u32, page: &FSMPage) -> RookResult<()> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_write_page_calls
@@ -529,7 +530,7 @@ impl FSM {
     ///
     /// Blocks go out in ascending order; a block past the current end of
     /// file leaves a zero-filled gap, which reads back as an empty FSM page.
-    fn flush_pages(&mut self) -> io::Result<()> {
+    fn flush_pages(&mut self) -> RookResult<()> {
         let mut cache = lock_cache(&self.cache);
         while let Some(&block) = cache.dirty.iter().next() {
             let bytes = match cache.pages.get(&block) {
@@ -548,7 +549,7 @@ impl FSM {
     }
 
     /// Write cached dirty pages to the fork file without fsync.
-    pub fn write_through(&mut self) -> io::Result<()> {
+    pub fn write_through(&mut self) -> RookResult<()> {
         if !lock_cache(&self.cache).dirty.is_empty() {
             self.flush_pages()?;
             self.dirty = true;
@@ -557,7 +558,7 @@ impl FSM {
     }
 
     /// Sync all changes to disk.
-    pub fn sync(&mut self) -> io::Result<()> {
+    pub fn sync(&mut self) -> RookResult<()> {
         log::trace!("[FSM::sync] Syncing FSM fork file");
         self.flush_pages()?;
         self.fsm_file.sync_all()?;
@@ -575,7 +576,7 @@ impl FSM {
         level: u32,
         page_no: u32,
         f: impl FnOnce(&mut FSMPage) -> (bool, R),
-    ) -> io::Result<R> {
+    ) -> RookResult<R> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_read_page_calls
@@ -593,7 +594,7 @@ impl FSM {
                     Ok(()) => {}
                     // Past the physical end of file: an empty page.
                     Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => page = FSMPage::new(),
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(RookError::from(e)),
                 }
             }
             cache.pages.insert(block, page);
@@ -685,7 +686,7 @@ impl FSM {
     /// Descends from the root FSM page to a leaf; returns `None` when the
     /// root is below `min_category` (no page has that much space) or when
     /// the descent lands on heap page 0, which is the header page.
-    pub fn search_page(&mut self, min_category: u8) -> io::Result<Option<u32>> {
+    pub fn search_page(&mut self, min_category: u8) -> RookResult<Option<u32>> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_search_avail_calls
@@ -717,7 +718,7 @@ impl FSM {
 
     /// Like [`FSM::search_page`], also returning a copy of the level-0 FSM
     /// page that covers the result.
-    pub fn fsm_search_avail(&mut self, min_category: u8) -> io::Result<Option<(u32, FSMPage)>> {
+    pub fn fsm_search_avail(&mut self, min_category: u8) -> RookResult<Option<(u32, FSMPage)>> {
         match self.search_page(min_category)? {
             Some(heap_page_id) => {
                 let page = self.read_fsm_page(0, heap_page_id / FSM_SLOTS_PER_PAGE)?;
@@ -739,7 +740,7 @@ impl FSM {
         heap_page_id: u32,
         new_free_bytes: u32,
         cached_page: Option<&mut FSMPage>,
-    ) -> io::Result<()> {
+    ) -> RookResult<()> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_set_avail_calls
@@ -776,7 +777,7 @@ impl FSM {
         &mut self,
         heap_page_id: u32,
         absolute_free_bytes: u32,
-    ) -> io::Result<()> {
+    ) -> RookResult<()> {
         use crate::backend::instrumentation::FSM_METRICS;
         FSM_METRICS
             .fsm_vacuum_update_calls

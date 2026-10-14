@@ -9,6 +9,7 @@
 //! The [`DataValue`](crate::types::value::DataValue) enum holds runtime values
 //! for the same set of types.
 
+use crate::backend::error::RookError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
@@ -143,31 +144,35 @@ impl fmt::Display for DataType {
     }
 }
 
-fn parse_precision_scale(raw: &str) -> Result<(u8, u8), String> {
+fn parse_precision_scale(raw: &str) -> Result<(u8, u8), RookError> {
     let parts: Vec<&str> = raw.split(',').map(|s| s.trim()).collect();
     if parts.len() != 2 {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "Invalid precision/scale '{}': expected format (p,s)",
             raw
-        ));
+        )));
     }
     let precision = parts[0]
         .parse::<u8>()
-        .map_err(|_| format!("Invalid precision '{}'", parts[0]))?;
+        .map_err(|_| RookError::TypeMismatch(format!("Invalid precision '{}'", parts[0])))?;
     let scale = parts[1]
         .parse::<u8>()
-        .map_err(|_| format!("Invalid scale '{}'", parts[1]))?;
+        .map_err(|_| RookError::TypeMismatch(format!("Invalid scale '{}'", parts[1])))?;
     if precision == 0 || precision > 38 {
-        return Err("NUMERIC precision must be in [1, 38]".to_string());
+        return Err(RookError::TypeMismatch(
+            "NUMERIC precision must be in [1, 38]".to_string(),
+        ));
     }
     if scale > precision {
-        return Err("NUMERIC scale must be <= precision".to_string());
+        return Err(RookError::TypeMismatch(
+            "NUMERIC scale must be <= precision".to_string(),
+        ));
     }
     Ok((precision, scale))
 }
 
 impl FromStr for DataType {
-    type Err = String;
+    type Err = RookError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let upper = s.trim().to_uppercase();
@@ -195,30 +200,29 @@ impl FromStr for DataType {
                     && !upper.starts_with("CHARACTER(")
                 {
                     let inner = &upper[5..upper.len() - 1];
-                    inner
-                        .parse::<u16>()
-                        .map(DataType::Char)
-                        .map_err(|_| format!("Invalid CHAR size: '{}'", inner))
+                    inner.parse::<u16>().map(DataType::Char).map_err(|_| {
+                        RookError::TypeMismatch(format!("Invalid CHAR size: '{}'", inner))
+                    })
                 } else if upper.starts_with("CHARACTER(") && upper.ends_with(')') {
                     let inner = &upper[10..upper.len() - 1];
-                    inner
-                        .parse::<u16>()
-                        .map(DataType::Character)
-                        .map_err(|_| format!("Invalid CHARACTER size: '{}'", inner))
+                    inner.parse::<u16>().map(DataType::Character).map_err(|_| {
+                        RookError::TypeMismatch(format!("Invalid CHARACTER size: '{}'", inner))
+                    })
                 } else if upper.starts_with("VARCHAR(") && upper.ends_with(')') {
                     let inner = &upper[8..upper.len() - 1];
-                    inner
-                        .parse::<u16>()
-                        .map(DataType::Varchar)
-                        .map_err(|_| format!("Invalid VARCHAR size: '{}'", inner))
+                    inner.parse::<u16>().map(DataType::Varchar).map_err(|_| {
+                        RookError::TypeMismatch(format!("Invalid VARCHAR size: '{}'", inner))
+                    })
                 } else if upper.starts_with("BIT(") && upper.ends_with(')') {
                     let inner = &upper[4..upper.len() - 1];
-                    inner
-                        .parse::<u16>()
-                        .map(DataType::Bit)
-                        .map_err(|_| format!("Invalid BIT size: '{}'", inner))
+                    inner.parse::<u16>().map(DataType::Bit).map_err(|_| {
+                        RookError::TypeMismatch(format!("Invalid BIT size: '{}'", inner))
+                    })
                 } else {
-                    Err(format!("Unknown data type: '{}'", s))
+                    Err(RookError::TypeMismatch(format!(
+                        "Unknown data type: '{}'",
+                        s
+                    )))
                 }
             }
         }

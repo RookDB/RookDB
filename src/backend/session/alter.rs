@@ -116,7 +116,7 @@ fn add_column(
         column_def
             .data_type
             .parse()
-            .map_err(|e: String| RookError::TypeMismatch(format!("Invalid data type: {}", e)))?,
+            .map_err(|e: RookError| RookError::TypeMismatch(format!("Invalid data type: {}", e)))?,
     );
     // Apply the column's constraints; refuse the ones this path cannot
     // honour rather than dropping them.

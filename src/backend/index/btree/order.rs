@@ -3,6 +3,7 @@
 //! It borrows only the tree's key types, so a caller can keep a page borrowed
 //! from the buffer pool while it searches the page.
 
+use crate::backend::error::{RookError, RookResult};
 use std::cmp::Ordering;
 use std::io;
 
@@ -50,16 +51,16 @@ fn invalid_data(message: impl ToString) -> io::Error {
 /// Split one `[len][bytes]` segment off the front of `data`. Returns the
 /// payload and the bytes consumed; same errors as [`decode_key`].
 #[inline]
-fn split_segment(data: &[u8]) -> io::Result<(&[u8], usize)> {
+fn split_segment(data: &[u8]) -> RookResult<(&[u8], usize)> {
     if data.len() < KEY_LEN_SIZE {
-        return Err(io::Error::new(
+        return Err(RookError::io(
             io::ErrorKind::UnexpectedEof,
             "Truncated key length",
         ));
     }
     let len = u16::from_le_bytes([data[0], data[1]]) as usize;
     if data.len() < KEY_LEN_SIZE + len {
-        return Err(io::Error::new(
+        return Err(RookError::io(
             io::ErrorKind::UnexpectedEof,
             "Truncated key data",
         ));
@@ -70,13 +71,13 @@ fn split_segment(data: &[u8]) -> io::Result<(&[u8], usize)> {
 /// Reject a VARCHAR payload longer than the declared limit, as
 /// `DataValue::from_bytes` does.
 #[inline]
-fn check_varchar_len(payload: &[u8], max_len: u16) -> io::Result<()> {
+fn check_varchar_len(payload: &[u8], max_len: u16) -> RookResult<()> {
     if payload.len() > max_len as usize {
-        return Err(invalid_data(format!(
+        return Err(RookError::from(invalid_data(format!(
             "VARCHAR payload length {} exceeds declared limit {}",
             payload.len(),
             max_len
-        )));
+        ))));
     }
     Ok(())
 }
@@ -90,7 +91,7 @@ fn check_varchar_len(payload: &[u8], max_len: u16) -> io::Result<()> {
 /// encoded from a `String`, so the payloads are not re-validated as UTF-8.
 /// Every other type is decoded first.
 #[inline]
-fn cmp_segments(a: &[u8], b: &[u8], ty: &DataType) -> io::Result<(Ordering, usize, usize)> {
+fn cmp_segments(a: &[u8], b: &[u8], ty: &DataType) -> RookResult<(Ordering, usize, usize)> {
     if let DataType::Varchar(max_len) = ty {
         let (pa, ca) = split_segment(a)?;
         let (pb, cb) = split_segment(b)?;
@@ -111,7 +112,7 @@ fn cmp_segment_vs_value(
     encoded: &[u8],
     ty: &DataType,
     value: &DataValue,
-) -> io::Result<(Ordering, usize)> {
+) -> RookResult<(Ordering, usize)> {
     if let (DataType::Varchar(max_len), DataValue::Varchar(text)) = (ty, value) {
         let (payload, consumed) = split_segment(encoded)?;
         check_varchar_len(payload, *max_len)?;
@@ -135,7 +136,7 @@ impl<'a> KeyOrder<'a> {
     ///
     /// Single-column trees store bare segments (legacy format); composite
     /// trees wrap the whole key in an envelope (see `encode_key_multi`).
-    pub(crate) fn cmp_encoded_keys(&self, a: &[u8], b: &[u8]) -> io::Result<Ordering> {
+    pub(crate) fn cmp_encoded_keys(&self, a: &[u8], b: &[u8]) -> RookResult<Ordering> {
         use std::cmp::Ordering as O;
         if self.key_types.len() == 1 {
             return cmp_segments(a, b, &self.key_types[0]).map(|(ordering, _, _)| ordering);
@@ -143,7 +144,7 @@ impl<'a> KeyOrder<'a> {
         // Composite: strip the outer envelope from both sides, then walk
         // inner segments in lockstep.
         if a.len() < KEY_LEN_SIZE || b.len() < KEY_LEN_SIZE {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidData,
                 "Truncated composite key envelope",
             ));
@@ -176,7 +177,7 @@ impl<'a> KeyOrder<'a> {
         &self,
         encoded: &[u8],
         values: &[DataValue],
-    ) -> io::Result<Ordering> {
+    ) -> RookResult<Ordering> {
         use std::cmp::Ordering as O;
         debug_assert_eq!(
             values.len(),
@@ -188,7 +189,7 @@ impl<'a> KeyOrder<'a> {
                 .map(|(ordering, _)| ordering);
         }
         if encoded.len() < KEY_LEN_SIZE {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidData,
                 "Truncated composite key envelope",
             ));
@@ -249,7 +250,7 @@ impl<'a> KeyOrder<'a> {
         &self,
         view: &NodeView<'_>,
         encoded_key: &[u8],
-    ) -> io::Result<(usize, u32)> {
+    ) -> RookResult<(usize, u32)> {
         if let Some((width, target)) = self.int_fast_path(view, encoded_key) {
             let child_idx = view.int_partition_point(width, |k| k <= target);
             return Ok((child_idx, view.child(child_idx)));
@@ -274,7 +275,7 @@ impl<'a> KeyOrder<'a> {
         &self,
         view: &NodeView<'_>,
         encoded_key: &[u8],
-    ) -> io::Result<u32> {
+    ) -> RookResult<u32> {
         if let Some((width, target)) = self.int_fast_path(view, encoded_key) {
             let child_idx = view.int_partition_point(width, |k| k < target);
             return Ok(view.child(child_idx));
@@ -298,7 +299,7 @@ impl<'a> KeyOrder<'a> {
         view: &NodeView<'_>,
         encoded_key: &[u8],
         value: (u32, u32),
-    ) -> io::Result<LeafMatch> {
+    ) -> RookResult<LeafMatch> {
         let mut found: Option<LeafSlot> = None;
         let mut past_key = false;
         let mut used = view.keys_start();
@@ -350,7 +351,7 @@ impl<'a> KeyOrder<'a> {
         &self,
         view: &NodeView<'_>,
         encoded_key: &[u8],
-    ) -> io::Result<LeafInsertSlot> {
+    ) -> RookResult<LeafInsertSlot> {
         let mut insert_at: Option<(usize, usize)> = None; // (index, offset)
         let mut used = view.keys_start();
         if let Some((width, target)) = self.int_fast_path(view, encoded_key) {

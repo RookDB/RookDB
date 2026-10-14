@@ -5,8 +5,6 @@
 //! compaction. Rows are soft-deleted via `SLOT_FLAG_DELETED`; space is
 //! reclaimed by VACUUM.
 
-use std::io;
-
 use crate::backend::error::{RookError, RookResult};
 
 use crate::backend::executor::compaction_api::rebuild_table_fsm;
@@ -102,8 +100,8 @@ pub fn compaction_table(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-) -> io::Result<usize> {
-    let result = (|| -> io::Result<usize> {
+) -> RookResult<usize> {
+    let result = (|| -> RookResult<usize> {
         let path = engine.paths().heap(db_name, table_name);
         let file = HeapFile::open(engine, std::path::Path::new(&path))?;
         let file_identity = file.identity();
@@ -195,7 +193,7 @@ fn flush_held_page(
     held: &mut Option<HeldPage>,
     db_name: &str,
     table_name: &str,
-) -> io::Result<()> {
+) -> RookResult<()> {
     if let Some(h) = held.take()
         && h.dirty
     {
@@ -256,7 +254,7 @@ fn delete_rows(
 
     let path = catalog.engine().paths().heap(db_name, table_name);
     let file = HeapFile::open(catalog.engine(), std::path::Path::new(&path))
-        .map_err(|e| RookError::Io(e).with_context("Failed to open table file"))?;
+        .map_err(|e| e.with_context("Failed to open table file"))?;
     let file_identity = file.identity();
 
     let mut deleted_count = 0usize;

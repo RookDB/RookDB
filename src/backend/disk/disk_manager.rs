@@ -1,5 +1,6 @@
+use crate::backend::error::{RookError, RookResult};
 use std::fs::File;
-use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 
 use crate::backend::instrumentation::HEAP_METRICS;
 use crate::heap::types::HeaderMetadata;
@@ -7,7 +8,7 @@ use crate::page::{PAGE_SIZE, Page};
 use std::sync::atomic::Ordering;
 
 // Read a page from disk into the provided page buffer
-pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {
+pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> RookResult<()> {
     HEAP_METRICS.read_page_calls.fetch_add(1, Ordering::Relaxed);
     // Calculate byte offset for the page
     // 64-bit arithmetic: a u32 byte offset wraps at page 524,288 (4 GiB).
@@ -18,10 +19,10 @@ pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<
 
     // Validate page existence
     if offset > file_size {
-        return Err(Error::new(
+        return Err(RookError::from(Error::new(
             ErrorKind::UnexpectedEof,
             format!("Page {} does not exist in the file", page_num),
-        ));
+        )));
     }
 
     // Seek to page offset
@@ -34,7 +35,7 @@ pub fn read_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<
 }
 
 // Write a page buffer to disk at the given page number
-pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result<()> {
+pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> RookResult<()> {
     HEAP_METRICS
         .write_page_calls
         .fetch_add(1, Ordering::Relaxed);
@@ -46,10 +47,10 @@ pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result
 
     // Validate page existence
     if offset > file_size {
-        return Err(Error::new(
+        return Err(RookError::from(Error::new(
             ErrorKind::UnexpectedEof,
             format!("Page {} does not exist in the file", page_num),
-        ));
+        )));
     }
 
     // Seek to page offset
@@ -62,7 +63,7 @@ pub fn write_page(file: &mut File, page: &mut Page, page_num: u32) -> io::Result
 }
 
 /// Update the header page (Page 0) with HeaderMetadata.
-pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> io::Result<()> {
+pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> RookResult<()> {
     // Serialize the header
     let header_bytes = header.serialize()?;
 
@@ -76,7 +77,7 @@ pub fn update_header_page(file: &mut File, header: &HeaderMetadata) -> io::Resul
 }
 
 /// Read and deserialize the header page (Page 0) into HeaderMetadata.
-pub fn read_header_page(file: &mut File) -> io::Result<HeaderMetadata> {
+pub fn read_header_page(file: &mut File) -> RookResult<HeaderMetadata> {
     // Seek to page 0, offset 0
     file.seek(SeekFrom::Start(0))?;
 
@@ -89,7 +90,7 @@ pub fn read_header_page(file: &mut File) -> io::Result<HeaderMetadata> {
 }
 
 /// Read all pages (header + data) from the file into memory.
-pub fn read_all_pages(file: &mut File) -> io::Result<Vec<Page>> {
+pub fn read_all_pages(file: &mut File) -> RookResult<Vec<Page>> {
     let metadata = file.metadata()?;
     let file_size = metadata.len();
 
@@ -107,7 +108,7 @@ pub fn read_all_pages(file: &mut File) -> io::Result<Vec<Page>> {
         match file.read_exact(&mut page.data) {
             Ok(_) => pages.push(page),
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e),
+            Err(e) => return Err(RookError::from(e)),
         }
     }
 
@@ -116,7 +117,7 @@ pub fn read_all_pages(file: &mut File) -> io::Result<Vec<Page>> {
 
 /// An identity for the open file `file`, the same for every handle on it:
 /// device and inode on Unix.
-pub fn file_identity_from_file(file: &File) -> io::Result<u64> {
+pub fn file_identity_from_file(file: &File) -> RookResult<u64> {
     let metadata = file.metadata()?;
     Ok(file_identity_from_metadata(&metadata))
 }

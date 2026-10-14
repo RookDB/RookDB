@@ -64,7 +64,7 @@ fn index_search(
     crate::backend::cache::with_btree(
         engine,
         &idx_path,
-        || -> std::io::Result<crate::backend::index::btree::BTree> {
+        || -> RookResult<crate::backend::index::btree::BTree> {
             let mut bt = crate::backend::index::btree::BTree::open(idx_path.clone())?;
             bt.set_key_types(key_types.to_vec());
             Ok(bt)

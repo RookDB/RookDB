@@ -31,6 +31,7 @@
 //! | 16 | 8×n | (page_id, slot_id) per entry |
 //! | 16+8×n | * | key_0_len(2) + key_bytes …  key_n-1_len(2) + key_bytes |
 
+use crate::backend::error::{RookError, RookResult};
 use std::cmp::Ordering;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -65,7 +66,7 @@ pub const MAX_ENCODED_KEY_SIZE: usize = (BTREE_PAGE_SIZE - LEAF_HEADER) / 3 - VA
 
 /// Encoded size of an index key, for callers that must reject an oversized
 /// key before changing anything.
-pub fn encoded_key_len(keys: &[DataValue]) -> io::Result<usize> {
+pub fn encoded_key_len(keys: &[DataValue]) -> RookResult<usize> {
     match keys {
         [single] => Ok(encode_key(single).len()),
         _ => encode_key_multi(keys).map(|k| k.len()),
@@ -91,7 +92,7 @@ fn balanced_split_point(keys: &[Vec<u8>], pointer_size: usize) -> usize {
 
 /// Refuse to serialize a node that does not fit its page: `serialize` would
 /// otherwise drop the overflowing keys without a trace.
-fn check_node_fits(node: &BTreeNode) -> io::Result<()> {
+fn check_node_fits(node: &BTreeNode) -> RookResult<()> {
     let size = match node {
         BTreeNode::Internal { keys, children, .. } => {
             PAGE_HEADER + children.len() * CHILD_SIZE + keys.iter().map(Vec::len).sum::<usize>()
@@ -101,7 +102,7 @@ fn check_node_fits(node: &BTreeNode) -> io::Result<()> {
         }
     };
     if size > BTREE_PAGE_SIZE {
-        return Err(io::Error::new(
+        return Err(RookError::io(
             io::ErrorKind::InvalidData,
             format!(
                 "B-tree node of {} bytes does not fit a {}-byte page",
@@ -136,12 +137,12 @@ pub struct BTree {
 
 impl BTree {
     /// Create a new B+ Tree index file.
-    pub fn create(file_path: PathBuf, key_type: DataType) -> io::Result<Self> {
+    pub fn create(file_path: PathBuf, key_type: DataType) -> RookResult<Self> {
         Self::create_composite(file_path, vec![key_type])
     }
 
     /// Create a new composite-key B+ Tree index file.
-    pub fn create_composite(file_path: PathBuf, key_types: Vec<DataType>) -> io::Result<Self> {
+    pub fn create_composite(file_path: PathBuf, key_types: Vec<DataType>) -> RookResult<Self> {
         log::info!(
             "[BTree::create] Creating new index at {:?} ({} col)",
             file_path,
@@ -149,7 +150,7 @@ impl BTree {
         );
 
         if key_types.is_empty() {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidInput,
                 "Composite index requires at least one key column",
             ));
@@ -193,11 +194,11 @@ impl BTree {
     }
 
     /// Open an existing B+ Tree index file.
-    pub fn open(file_path: PathBuf) -> io::Result<Self> {
+    pub fn open(file_path: PathBuf) -> RookResult<Self> {
         log::info!("[BTree::open] Opening index at {:?}", file_path);
 
         if !file_path.exists() {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::NotFound,
                 "Index file not found",
             ));
@@ -286,10 +287,10 @@ impl BTree {
     /// Encode lookup/insert keys in the format this tree stores:
     /// bare `[len][bytes]` for single-column trees (legacy on-disk
     /// compatibility), or the framed composite envelope otherwise.
-    fn encode_key_for(&self, keys: &[DataValue]) -> io::Result<Vec<u8>> {
+    fn encode_key_for(&self, keys: &[DataValue]) -> RookResult<Vec<u8>> {
         if self.key_types.len() == 1 {
             if keys.len() != 1 {
-                return Err(io::Error::new(
+                return Err(RookError::io(
                     io::ErrorKind::InvalidInput,
                     "single-column index takes exactly one key value",
                 ));
@@ -304,7 +305,7 @@ impl BTree {
     ///
     /// Returns every `(page_id, slot_id)` pair stored in the index,
     /// in key order. This implements a full index scan.
-    pub fn scan_all(&mut self) -> io::Result<Vec<(u32, u32)>> {
+    pub fn scan_all(&mut self) -> RookResult<Vec<(u32, u32)>> {
         let mut results = Vec::new();
 
         // Find the leftmost leaf by always following child[0]
@@ -330,7 +331,7 @@ impl BTree {
     }
 
     /// Navigate to the leftmost leaf by always following child[0] from the root.
-    fn find_leftmost_leaf(&mut self, page_id: u32) -> io::Result<u32> {
+    fn find_leftmost_leaf(&mut self, page_id: u32) -> RookResult<u32> {
         let mut page_id = page_id;
         loop {
             let bytes = self.pool.page_bytes(page_id)?;
@@ -352,12 +353,12 @@ impl BTree {
     /// Decode a node page into an owned node. Only the paths that
     /// restructure a node (splits) or print it need one; everything else
     /// reads the page in the pool through a [`NodeView`].
-    fn read_node(&mut self, page_id: u32) -> io::Result<BTreeNode> {
+    fn read_node(&mut self, page_id: u32) -> RookResult<BTreeNode> {
         BTreeNode::deserialize(&self.pool.page_bytes(page_id)?)
     }
 
     /// Write a node page through the buffer pool (marks page dirty).
-    fn write_node(&mut self, page_id: u32, node: &BTreeNode) -> io::Result<()> {
+    fn write_node(&mut self, page_id: u32, node: &BTreeNode) -> RookResult<()> {
         check_node_fits(node)?;
         let buf = node.serialize();
         self.pool.write_page_bytes(page_id, &buf)?;
@@ -365,7 +366,7 @@ impl BTree {
     }
 
     /// Allocate a new page (appends to file and caches in buffer pool).
-    fn allocate_page(&mut self, node: &BTreeNode) -> io::Result<u32> {
+    fn allocate_page(&mut self, node: &BTreeNode) -> RookResult<u32> {
         check_node_fits(node)?;
         let buf = node.serialize();
         let page_id = self.pool.allocate_raw_page(&buf)?;
@@ -374,13 +375,13 @@ impl BTree {
     }
 
     /// Sync all changes to durable storage.
-    pub fn sync(&mut self) -> io::Result<()> {
+    pub fn sync(&mut self) -> RookResult<()> {
         self.pool.flush_all()?;
         Ok(())
     }
 
     /// Write dirty pages to the index file without fsync.
-    pub fn write_through(&mut self) -> io::Result<()> {
+    pub fn write_through(&mut self) -> RookResult<()> {
         self.pool.write_dirty()
     }
 
@@ -389,12 +390,12 @@ impl BTree {
     /// Search for a key in the B+ Tree.
     ///
     /// Returns `Ok(Some((page_id, slot_id)))` if the key was found, or `Ok(None)` if not.
-    pub fn search(&mut self, key: &DataValue) -> io::Result<Option<(u32, u32)>> {
+    pub fn search(&mut self, key: &DataValue) -> RookResult<Option<(u32, u32)>> {
         self.search_keys(std::slice::from_ref(key))
     }
 
     /// Search for a (possibly composite) key in the B+ Tree.
-    pub fn search_keys(&mut self, keys: &[DataValue]) -> io::Result<Option<(u32, u32)>> {
+    pub fn search_keys(&mut self, keys: &[DataValue]) -> RookResult<Option<(u32, u32)>> {
         let encoded = self.encode_key_for(keys)?;
         self.search_in_tree(self.root_page_id, &encoded)
     }
@@ -406,7 +407,7 @@ impl BTree {
         &mut self,
         low: &DataValue,
         high: &DataValue,
-    ) -> io::Result<Vec<(u32, u32)>> {
+    ) -> RookResult<Vec<(u32, u32)>> {
         self.search_range_keys(std::slice::from_ref(low), std::slice::from_ref(high))
     }
 
@@ -416,7 +417,7 @@ impl BTree {
         &mut self,
         low: &[DataValue],
         high: &[DataValue],
-    ) -> io::Result<Vec<(u32, u32)>> {
+    ) -> RookResult<Vec<(u32, u32)>> {
         let low_encoded = self.encode_key_for(low)?;
         let mut results = Vec::new();
 
@@ -474,12 +475,12 @@ impl BTree {
     }
 
     /// Check whether a key exists in the tree.
-    pub fn contains(&mut self, key: &DataValue) -> io::Result<bool> {
+    pub fn contains(&mut self, key: &DataValue) -> RookResult<bool> {
         self.search(key).map(|opt| opt.is_some())
     }
 
     /// Check whether a (possibly composite) key exists in the tree.
-    pub fn contains_keys(&mut self, keys: &[DataValue]) -> io::Result<bool> {
+    pub fn contains_keys(&mut self, keys: &[DataValue]) -> RookResult<bool> {
         self.search_keys(keys).map(|opt| opt.is_some())
     }
 
@@ -490,12 +491,12 @@ impl BTree {
     /// Returns all `(page_id, slot_id)` pairs whose key equals the given key.
     /// For indexes without duplicates, this returns zero or one entry.
     /// For non-unique indexes, this returns all matching entries.
-    pub fn search_all(&mut self, key: &DataValue) -> io::Result<Vec<(u32, u32)>> {
+    pub fn search_all(&mut self, key: &DataValue) -> RookResult<Vec<(u32, u32)>> {
         self.search_all_keys(std::slice::from_ref(key))
     }
 
     /// Search for all entries matching a (possibly composite) key.
-    pub fn search_all_keys(&mut self, keys: &[DataValue]) -> io::Result<Vec<(u32, u32)>> {
+    pub fn search_all_keys(&mut self, keys: &[DataValue]) -> RookResult<Vec<(u32, u32)>> {
         let encoded = self.encode_key_for(keys)?;
         self.search_all_in_tree(self.root_page_id, &encoded)
     }
@@ -505,7 +506,7 @@ impl BTree {
         &mut self,
         page_id: u32,
         encoded_key: &[u8],
-    ) -> io::Result<Vec<(u32, u32)>> {
+    ) -> RookResult<Vec<(u32, u32)>> {
         let mut leaf_id = self.find_first_leaf(page_id, encoded_key)?;
         let mut results = Vec::new();
         let order = KeyOrder::new(&self.key_types);
@@ -557,7 +558,7 @@ impl BTree {
     /// searchable but may have reduced space utilization.
     ///
     /// Returns `true` if the entry was found and deleted, `false` if not found.
-    pub fn delete(&mut self, key: &DataValue, page_id: u32, slot_id: u32) -> io::Result<bool> {
+    pub fn delete(&mut self, key: &DataValue, page_id: u32, slot_id: u32) -> RookResult<bool> {
         self.delete_keys(std::slice::from_ref(key), page_id, slot_id)
     }
 
@@ -567,7 +568,7 @@ impl BTree {
         keys: &[DataValue],
         page_id: u32,
         slot_id: u32,
-    ) -> io::Result<bool> {
+    ) -> RookResult<bool> {
         let encoded = self.encode_key_for(keys)?;
         self.delete_from_tree(self.root_page_id, &encoded, page_id, slot_id)
     }
@@ -579,7 +580,7 @@ impl BTree {
         encoded_key: &[u8],
         value_page_id: u32,
         value_slot_id: u32,
-    ) -> io::Result<bool> {
+    ) -> RookResult<bool> {
         let mut leaf_id = self.find_first_leaf(page_id, encoded_key)?;
         let order = KeyOrder::new(&self.key_types);
         // Entries for one key can span several leaves, so walk the chain until
@@ -617,7 +618,7 @@ impl BTree {
     ///
     /// The value is a heap tuple identifier `(page_id, slot_id)`.
     /// If the key already exists, the value is overwritten.
-    pub fn insert(&mut self, key: &DataValue, page_id: u32, slot_id: u32) -> io::Result<()> {
+    pub fn insert(&mut self, key: &DataValue, page_id: u32, slot_id: u32) -> RookResult<()> {
         self.insert_keys(std::slice::from_ref(key), page_id, slot_id)
     }
 
@@ -627,7 +628,7 @@ impl BTree {
         keys: &[DataValue],
         page_id: u32,
         slot_id: u32,
-    ) -> io::Result<()> {
+    ) -> RookResult<()> {
         debug_assert_eq!(
             keys.len(),
             self.key_types.len(),
@@ -635,7 +636,7 @@ impl BTree {
         );
         let encoded = self.encode_key_for(keys)?;
         if encoded.len() > MAX_ENCODED_KEY_SIZE {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "index key of {} bytes exceeds the maximum of {} bytes",
@@ -685,7 +686,7 @@ impl BTree {
         &mut self,
         page_id: u32,
         encoded_key: &[u8],
-    ) -> io::Result<Option<(u32, u32)>> {
+    ) -> RookResult<Option<(u32, u32)>> {
         let mut leaf_id = self.find_first_leaf(page_id, encoded_key)?;
         let order = KeyOrder::new(&self.key_types);
         loop {
@@ -722,7 +723,7 @@ impl BTree {
 
     /// Find the first leaf that can contain `encoded_key`. Entries equal to
     /// the key may continue into the following leaves.
-    fn find_first_leaf(&mut self, page_id: u32, encoded_key: &[u8]) -> io::Result<u32> {
+    fn find_first_leaf(&mut self, page_id: u32, encoded_key: &[u8]) -> RookResult<u32> {
         let mut page_id = page_id;
         let order = KeyOrder::new(&self.key_types);
         loop {
@@ -749,7 +750,7 @@ impl BTree {
         encoded_key: &[u8],
         value_page_id: u32,
         value_slot_id: u32,
-    ) -> io::Result<Option<(Vec<u8>, u32)>> {
+    ) -> RookResult<Option<(Vec<u8>, u32)>> {
         let order = KeyOrder::new(&self.key_types);
         // Decide from the page in place, then release it (and its pin)
         // before anything below touches the pool again.
@@ -819,7 +820,7 @@ impl BTree {
         encoded_key: &[u8],
         value_page_id: u32,
         value_slot_id: u32,
-    ) -> io::Result<()> {
+    ) -> RookResult<()> {
         let LeafInsertSlot {
             num_keys,
             index: insert_pos,
@@ -828,7 +829,7 @@ impl BTree {
         } = slot;
         let key_len = encoded_key.len();
         if used + VALUE_SIZE + key_len > BTREE_PAGE_SIZE {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidData,
                 "insert_into_leaf: entry does not fit in the leaf page",
             ));
@@ -856,7 +857,7 @@ impl BTree {
         child_idx: usize,
         promoted_key: &[u8],
         new_child_id: u32,
-    ) -> io::Result<()> {
+    ) -> RookResult<()> {
         let mut node = self.read_node(page_id)?;
 
         match &mut node {
@@ -887,7 +888,7 @@ impl BTree {
         encoded_key: &[u8],
         value_page_id: u32,
         value_slot_id: u32,
-    ) -> io::Result<(Vec<u8>, u32)> {
+    ) -> RookResult<(Vec<u8>, u32)> {
         let node = self.read_node(page_id)?;
 
         let (old_keys, old_values, old_next_leaf, old_prev_leaf) = match &node {
@@ -1012,7 +1013,7 @@ impl BTree {
         child_idx: usize,
         promoted_key: &[u8],
         new_child_id: u32,
-    ) -> io::Result<(Vec<u8>, u32)> {
+    ) -> RookResult<(Vec<u8>, u32)> {
         let node = self.read_node(page_id)?;
 
         let (old_keys, old_children) = match &node {
@@ -1062,7 +1063,7 @@ impl BTree {
 
     /// Print the tree structure for debugging.
     #[allow(dead_code)]
-    pub fn print_tree(&mut self) -> io::Result<()> {
+    pub fn print_tree(&mut self) -> RookResult<()> {
         println!("=== B+ Tree ===");
         println!("Root page: {}", self.root_page_id);
         println!("Total pages: {}", self.total_pages);
@@ -1071,7 +1072,7 @@ impl BTree {
         Ok(())
     }
 
-    fn print_node(&mut self, page_id: u32, depth: usize) -> io::Result<()> {
+    fn print_node(&mut self, page_id: u32, depth: usize) -> RookResult<()> {
         let indent = "  ".repeat(depth);
         let node = self.read_node(page_id)?;
         match &node {
@@ -1140,8 +1141,8 @@ fn int_value(value: &DataValue) -> Option<i64> {
 // ─── Helper function to decode a key from a leaf entry ───────────────────────
 
 /// Decode a DataValue from an encoded key byte slice.
-pub fn decode_btree_key(encoded: &[u8], ty: &DataType) -> Result<(DataValue, usize), String> {
-    decode_key(encoded, ty).map_err(|e| e.to_string())
+pub fn decode_btree_key(encoded: &[u8], ty: &DataType) -> RookResult<(DataValue, usize)> {
+    decode_key(encoded, ty)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

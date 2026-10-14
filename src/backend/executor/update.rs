@@ -181,7 +181,7 @@ fn update_rows(
 
     let path = catalog.engine().paths().heap(db_name, table_name);
     let file = crate::backend::heap::HeapFile::open(catalog.engine(), std::path::Path::new(&path))
-        .map_err(|e| RookError::Io(e).with_context("Failed to open table file"))?;
+        .map_err(|e| e.with_context("Failed to open table file"))?;
     let file_identity = file.identity();
 
     let mut updated_count = 0usize;

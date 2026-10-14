@@ -70,7 +70,7 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
         rook_ast::ExprNode::Cast { expr, data_type } => {
             let inner = expr_from_ast(expr, column_names)?;
             let target_dt: crate::types::datatype::DataType =
-                data_type.parse().map_err(|e: String| {
+                data_type.parse().map_err(|e: RookError| {
                     RookError::TypeMismatch(format!(
                         "Invalid CAST target type '{}': {}",
                         data_type, e

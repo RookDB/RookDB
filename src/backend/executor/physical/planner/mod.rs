@@ -791,8 +791,7 @@ impl PhysicalPlanner {
             let heap_manager =
                 crate::backend::cache::lease_heap_owned(self.catalog.engine(), &heap_path)
                     .map_err(|e| {
-                        RookError::Io(e)
-                            .with_context(format!("Failed to open system table '{}'", sys_name))
+                        e.with_context(format!("Failed to open system table '{}'", sys_name))
                     })?;
             return Ok(Box::new(
                 SeqScanOperator::new_with_mapping(
@@ -838,13 +837,10 @@ impl PhysicalPlanner {
         )
         .unwrap_or_default();
 
-        let heap_manager = crate::backend::cache::lease_heap_owned(
-            self.catalog.engine(),
-            &heap_path,
-        )
-        .map_err(|e| {
-            RookError::Io(e).with_context(format!("Failed to open heap for table '{}'", ts.table))
-        })?;
+        let heap_manager =
+            crate::backend::cache::lease_heap_owned(self.catalog.engine(), &heap_path).map_err(
+                |e| e.with_context(format!("Failed to open heap for table '{}'", ts.table)),
+            )?;
 
         if let Some((first_idx_name, idx_cols, _)) = named_indexes.first() {
             // Use the first named index for the full scan
@@ -1079,7 +1075,7 @@ impl PhysicalPlanner {
             } => {
                 let inner_expr =
                     self.build_expr_with_correlated_subquery(inner, column_names, child_schema)?;
-                let target_dt: DataType = data_type.parse().map_err(|e: String| {
+                let target_dt: DataType = data_type.parse().map_err(|e: RookError| {
                     RookError::TypeMismatch(format!(
                         "Invalid CAST target type '{}': {}",
                         data_type, e

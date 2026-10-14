@@ -13,7 +13,6 @@
 //!    table is therefore bulk-rebuilt from the post-compaction heap.
 //! 4. **Header stamping** — `last_vacuum` is recorded in the table header.
 
-use std::io;
 use std::path::PathBuf;
 
 use crate::backend::error::{ResultContext, RookError, RookResult};
@@ -104,7 +103,7 @@ pub fn vacuum_table(catalog: &Catalog, db_name: &str, table_name: &str) -> RookR
 fn read_dead_tuple_count(
     engine: &crate::backend::engine::Engine,
     heap_path: &std::path::Path,
-) -> io::Result<u32> {
+) -> RookResult<u32> {
     let file = crate::backend::heap::HeapFile::open(engine, heap_path)?;
     Ok(file.header()?.dead_tuple_count)
 }

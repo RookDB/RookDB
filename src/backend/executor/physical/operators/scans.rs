@@ -1,5 +1,4 @@
 use super::super::explain::PlanNode;
-use std::io;
 
 use crate::backend::cache::{CachedIndex, HeapHandle};
 use crate::backend::heap::heap_manager::HeapScanIterator;
@@ -143,7 +142,7 @@ impl PhysicalOperator for SeqScanOperator {
 
                 Ok(Some(Tuple::new_with_location(values, page_id, slot_id)))
             }
-            Some(Err(e)) => Err(RookError::Io(e)),
+            Some(Err(e)) => Err(e),
             None => {
                 self.exhausted = true;
                 Ok(None)
@@ -183,7 +182,7 @@ impl PhysicalOperator for SeqScanOperator {
 
                     batch.push(Tuple::new_with_location(values, page_id, slot_id));
                 }
-                Some(Err(e)) => return Err(RookError::Io(e)),
+                Some(Err(e)) => return Err(e),
                 None => {
                     self.exhausted = true;
                     break;
@@ -329,7 +328,7 @@ impl IndexScanOperator {
     }
 
     /// Run this scan's lookup against `btree`.
-    fn lookup(mode: &IndexScanMode, btree: &mut BTree) -> io::Result<Vec<(u32, u32)>> {
+    fn lookup(mode: &IndexScanMode, btree: &mut BTree) -> RookResult<Vec<(u32, u32)>> {
         match mode {
             // search_range with the same key for both bounds retrieves ALL
             // matching entries, not just the first one found by search().
@@ -343,7 +342,7 @@ impl IndexScanOperator {
     }
 
     /// Look the keys up in the index.
-    fn search_index(&mut self) -> io::Result<Vec<(u32, u32)>> {
+    fn search_index(&mut self) -> RookResult<Vec<(u32, u32)>> {
         let mode = &self.mode;
         self.index.read(|btree| Self::lookup(mode, btree))
     }
@@ -405,9 +404,7 @@ impl IndexScanOperator {
             let mut next = 0;
             self.heap_manager
                 .for_tuples_on_page(page_id, &slots, |slot_id, bytes| {
-                    let values = decoder
-                        .decode(bytes)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                    let values = decoder.decode(bytes)?;
                     rows[positions[next]] =
                         Some(Tuple::new_with_location(values, page_id, slot_id));
                     next += 1;

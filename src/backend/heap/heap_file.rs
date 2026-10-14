@@ -5,6 +5,7 @@
 //! that interface over the same pool that inserts and scans use, so every
 //! reader and writer of a table sees one copy of each page.
 
+use crate::backend::error::RookResult;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ impl HeapFile {
     ///
     /// The pool is taken from the cached `HeapManager`, which keeps it
     /// resident between statements and has it written out at checkpoints.
-    pub fn open(engine: &crate::backend::engine::Engine, path: &Path) -> io::Result<Self> {
+    pub fn open(engine: &crate::backend::engine::Engine, path: &Path) -> RookResult<Self> {
         let pool = crate::backend::cache::with_heap(engine, path, |hm| Ok(Arc::clone(&hm.pool)))?;
         let identity = {
             let guard = pool.lock().unwrap_or_else(|p| p.into_inner());
@@ -46,7 +47,7 @@ impl HeapFile {
     }
 
     /// Copy page `page_num` into `page`.
-    pub fn read_page(&self, page: &mut Page, page_num: u32) -> io::Result<()> {
+    pub fn read_page(&self, page: &mut Page, page_num: u32) -> RookResult<()> {
         let mut pool = self.lock();
         let frame_id = pool.fetch_page(page_num)?;
         page.data.copy_from_slice(&pool.get_page(frame_id).data);
@@ -55,7 +56,7 @@ impl HeapFile {
     }
 
     /// Replace page `page_num` with `page`.
-    pub fn write_page(&self, page: &Page, page_num: u32) -> io::Result<()> {
+    pub fn write_page(&self, page: &Page, page_num: u32) -> RookResult<()> {
         let mut pool = self.lock();
         let frame_id = pool.fetch_page(page_num)?;
         pool.get_page_mut(frame_id).data.copy_from_slice(&page.data);
@@ -64,7 +65,7 @@ impl HeapFile {
     }
 
     /// Read the file header.
-    pub fn header(&self) -> io::Result<HeaderMetadata> {
+    pub fn header(&self) -> RookResult<HeaderMetadata> {
         let mut pool = self.lock();
         let frame_id = pool.fetch_page(0)?;
         let header = HeaderMetadata::deserialize(&pool.get_page(frame_id).data[..24]);
@@ -73,7 +74,7 @@ impl HeapFile {
     }
 
     /// Record that `count` live rows were soft-deleted.
-    pub fn record_dead_tuples(&self, count: u32) -> io::Result<()> {
+    pub fn record_dead_tuples(&self, count: u32) -> RookResult<()> {
         self.update_header(|h| {
             h.dead_tuple_count = h.dead_tuple_count.saturating_add(count);
             h.total_tuples = h.total_tuples.saturating_sub(count as u64);
@@ -81,11 +82,11 @@ impl HeapFile {
     }
 
     /// Reset the dead-tuple counter after compaction removed them.
-    pub fn reset_dead_tuples(&self) -> io::Result<()> {
+    pub fn reset_dead_tuples(&self) -> RookResult<()> {
         self.update_header(|h| h.dead_tuple_count = 0)
     }
 
-    fn update_header(&self, f: impl FnOnce(&mut HeaderMetadata)) -> io::Result<()> {
+    fn update_header(&self, f: impl FnOnce(&mut HeaderMetadata)) -> RookResult<()> {
         let mut pool = self.lock();
         let frame_id = pool.fetch_page(0)?;
         let updated = HeaderMetadata::deserialize(&pool.get_page(frame_id).data[..24]).and_then(

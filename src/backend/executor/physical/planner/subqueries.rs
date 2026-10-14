@@ -177,9 +177,7 @@ impl PhysicalPlanner {
             } => {
                 let inner_expr =
                     self.build_expr_with_correlated_subquery(inner, column_names, schema)?;
-                let dt: DataType = data_type
-                    .parse()
-                    .map_err(|e: String| RookError::TypeMismatch(e))?;
+                let dt: DataType = data_type.parse()?;
                 Ok(Expr::Cast(Box::new(inner_expr), dt))
             }
             _ => expr_from_ast(expr, column_names),

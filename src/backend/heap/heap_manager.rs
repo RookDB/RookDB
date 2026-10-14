@@ -11,6 +11,7 @@
 //! - Encapsulates FSM complexity; FSM-driven inserts spread load across pages
 //! - Header persistence survives crashes; FSM fork is a hint (can be rebuilt)
 
+use crate::backend::error::{RookError, RookResult};
 use std::fs::OpenOptions;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -32,7 +33,7 @@ use std::sync::atomic::Ordering;
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Read the header metadata from page 0 via the buffer pool.
-fn read_header_via_pool(pool: &mut BufferPool) -> io::Result<HeaderMetadata> {
+fn read_header_via_pool(pool: &mut BufferPool) -> RookResult<HeaderMetadata> {
     let frame_id = pool.fetch_page(0)?;
     let page = pool.get_page(frame_id);
     let header = HeaderMetadata::deserialize(&page.data[..24])?;
@@ -46,7 +47,7 @@ fn read_header_via_pool(pool: &mut BufferPool) -> io::Result<HeaderMetadata> {
 /// flush paths (checkpoint, pool eviction, `HeapManager::flush`). Forcing an
 /// 8 KiB header write on every tuple was the dominant write-amplification
 /// cost of bulk loads.
-fn write_header_via_pool(pool: &mut BufferPool, header: &HeaderMetadata) -> io::Result<()> {
+fn write_header_via_pool(pool: &mut BufferPool, header: &HeaderMetadata) -> RookResult<()> {
     let frame_id = pool.fetch_page(0)?;
     {
         let page = pool.get_page_mut(frame_id);
@@ -103,7 +104,7 @@ impl HeapScanIterator {
     }
 
     /// Copy a page out of the buffer pool and validate its header.
-    fn load_page(&mut self, page_id: u32) -> io::Result<()> {
+    fn load_page(&mut self, page_id: u32) -> RookResult<()> {
         self.loaded_page = None;
         {
             let mut pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
@@ -122,7 +123,7 @@ impl HeapScanIterator {
     ///
     /// A page that cannot be read or a slot pointing outside its page is
     /// reported once, and the scan moves past it.
-    fn advance(&mut self) -> Option<io::Result<(u32, u32, usize, usize)>> {
+    fn advance(&mut self) -> Option<RookResult<(u32, u32, usize, usize)>> {
         loop {
             if self.current_page >= self.total_pages {
                 return None;
@@ -152,7 +153,7 @@ impl HeapScanIterator {
             let start = slot.offset as usize;
             let end = start + slot.length as usize;
             if end > PAGE_SIZE {
-                return Some(Err(io::Error::new(
+                return Some(Err(RookError::io(
                     io::ErrorKind::InvalidData,
                     format!(
                         "Tuple bounds invalid: offset={}, length={}, page_size={}",
@@ -166,7 +167,7 @@ impl HeapScanIterator {
 
     /// The next live row as `(page_id, slot_id, bytes)`, with the bytes
     /// borrowed from the scan's page copy (valid until the next call).
-    pub fn next_ref(&mut self) -> Option<io::Result<(u32, u32, &[u8])>> {
+    pub fn next_ref(&mut self) -> Option<RookResult<(u32, u32, &[u8])>> {
         match self.advance()? {
             Ok((page_id, slot_id, start, end)) => {
                 Some(Ok((page_id, slot_id, &self.page.data[start..end])))
@@ -177,7 +178,7 @@ impl HeapScanIterator {
 }
 
 impl Iterator for HeapScanIterator {
-    type Item = io::Result<(u32, u32, Vec<u8>)>; // (page_id, slot_id, data)
+    type Item = RookResult<(u32, u32, Vec<u8>)>; // (page_id, slot_id, data)
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_ref()
@@ -223,7 +224,7 @@ impl HeapManager {
     }
 
     /// Vacuum update to expose vacuuming logic internally
-    pub fn vacuum_page(&mut self, page_id: u32, absolute_free_bytes: u32) -> io::Result<()> {
+    pub fn vacuum_page(&mut self, page_id: u32, absolute_free_bytes: u32) -> RookResult<()> {
         self.fsm.fsm_vacuum_update(page_id, absolute_free_bytes)
     }
 
@@ -234,7 +235,7 @@ impl HeapManager {
     ///
     /// # Returns
     /// HeapManager instance ready for inserts or error
-    pub fn create(file_path: PathBuf) -> io::Result<Self> {
+    pub fn create(file_path: PathBuf) -> RookResult<Self> {
         log::trace!(
             "[HeapManager::create] Creating new heap file at {:?}",
             file_path
@@ -333,12 +334,12 @@ impl HeapManager {
     ///
     /// # Returns
     /// HeapManager instance or error
-    pub fn open(file_path: PathBuf) -> io::Result<Self> {
+    pub fn open(file_path: PathBuf) -> RookResult<Self> {
         log::trace!("[HeapManager::open] Opening heap file {:?}", file_path);
 
         // Verify path exists
         if !file_path.exists() {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::NotFound,
                 format!("Heap file not found: {:?}", file_path),
             ));
@@ -415,7 +416,7 @@ impl HeapManager {
     /// Insert a tuple using FSM-guided page selection.
     ///
     /// All page I/O is routed through the CLOCK BufferPool.
-    pub fn insert_tuple(&mut self, tuple_data: &[u8]) -> io::Result<(u32, u32)> {
+    pub fn insert_tuple(&mut self, tuple_data: &[u8]) -> RookResult<(u32, u32)> {
         use crate::backend::instrumentation::HEAP_METRICS;
         HEAP_METRICS
             .insert_tuple_calls
@@ -423,21 +424,17 @@ impl HeapManager {
 
         // Validate input
         if tuple_data.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Tuple data cannot be empty",
+            return Err(RookError::TypeMismatch(
+                "Tuple data cannot be empty".to_string(),
             ));
         }
 
         if tuple_data.len() > PAGE_SIZE - PAGE_HEADER_SIZE as usize - ITEM_ID_SIZE as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Tuple too large: {} > {}",
-                    tuple_data.len(),
-                    PAGE_SIZE - PAGE_HEADER_SIZE as usize
-                ),
-            ));
+            return Err(RookError::TypeMismatch(format!(
+                "Tuple too large: {} > {}",
+                tuple_data.len(),
+                PAGE_SIZE - PAGE_HEADER_SIZE as usize
+            )));
         }
 
         // Calculate required space (tuple data + slot entry)
@@ -469,9 +466,9 @@ impl HeapManager {
         let page_id = self.allocate_new_page()?;
         match self.insert_into_page(page_id, tuple_data, required_bytes)? {
             Some(slot_id) => Ok((page_id, slot_id)),
-            None => Err(io::Error::other(
+            None => Err(RookError::from(io::Error::other(
                 "Could not find or allocate page with sufficient space",
-            )),
+            ))),
         }
     }
 
@@ -483,7 +480,7 @@ impl HeapManager {
         page_id: u32,
         tuple_data: &[u8],
         required_bytes: u32,
-    ) -> io::Result<Option<u32>> {
+    ) -> RookResult<Option<u32>> {
         // Read the target page via buffer pool (lock held for the whole
         // page access; released before FSM/header updates below).
         let (slot_id, new_free) = {
@@ -538,7 +535,7 @@ impl HeapManager {
     /// Retrieve a tuple by page and slot coordinates.
     ///
     /// Uses the buffer pool for page access.
-    pub fn get_tuple(&mut self, page_id: u32, slot_id: u32) -> io::Result<Vec<u8>> {
+    pub fn get_tuple(&mut self, page_id: u32, slot_id: u32) -> RookResult<Vec<u8>> {
         let mut row = Vec::new();
         self.for_tuples_on_page(page_id, &[slot_id], |_, bytes| {
             row = bytes.to_vec();
@@ -554,14 +551,14 @@ impl HeapManager {
         &mut self,
         page_id: u32,
         slots: &[u32],
-        mut f: impl FnMut(u32, &[u8]) -> io::Result<()>,
-    ) -> io::Result<()> {
+        mut f: impl FnMut(u32, &[u8]) -> RookResult<()>,
+    ) -> RookResult<()> {
         HEAP_METRICS
             .get_tuple_calls
             .fetch_add(slots.len(), Ordering::Relaxed);
 
         if page_id >= self.page_count() {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidData,
                 format!(
                     "Page {} out of bounds (page_count={})",
@@ -573,13 +570,12 @@ impl HeapManager {
 
         let mut pool = Self::lock_pool(&self.pool);
         let frame_id = pool.fetch_page(page_id)?;
-        let result = (|| -> io::Result<()> {
+        let result = (|| -> RookResult<()> {
             let page = pool.get_page(frame_id);
-            let tuple_count = get_tuple_count(page)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            let tuple_count = get_tuple_count(page)?;
             for &slot_id in slots {
                 if slot_id >= tuple_count {
-                    return Err(io::Error::new(
+                    return Err(RookError::io(
                         io::ErrorKind::InvalidData,
                         format!(
                             "Slot {} out of bounds (tuple_count={})",
@@ -589,7 +585,7 @@ impl HeapManager {
                 }
                 let (offset, length) = get_slot_entry(page, slot_id)?;
                 if offset == 0 && length == 0 {
-                    return Err(io::Error::new(
+                    return Err(RookError::io(
                         io::ErrorKind::NotFound,
                         format!(
                             "Tuple at page {}, slot {} is deleted or slot is unused",
@@ -598,7 +594,7 @@ impl HeapManager {
                     ));
                 }
                 if offset as usize + length as usize > PAGE_SIZE {
-                    return Err(io::Error::new(
+                    return Err(RookError::io(
                         io::ErrorKind::InvalidData,
                         format!(
                             "Tuple bounds exceed page: offset={}, length={}",
@@ -621,7 +617,7 @@ impl HeapManager {
     /// Delete a tuple by marking it as deleted and updating FSM.
     ///
     /// Uses the buffer pool for page access.
-    pub fn delete_tuple(&mut self, page_id: u32, slot_id: u32) -> io::Result<u32> {
+    pub fn delete_tuple(&mut self, page_id: u32, slot_id: u32) -> RookResult<u32> {
         use crate::backend::instrumentation::HEAP_METRICS;
         HEAP_METRICS
             .insert_tuple_calls
@@ -629,7 +625,7 @@ impl HeapManager {
 
         // Validate page_id
         if page_id >= self.page_count() {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidData,
                 format!(
                     "Page {} out of bounds (page_count={})",
@@ -645,7 +641,7 @@ impl HeapManager {
             let mut pool = Self::lock_pool(&self.pool);
             let frame_id = pool.fetch_page(page_id)?;
 
-            let delete_res = (|| -> io::Result<u32> {
+            let delete_res = (|| -> RookResult<u32> {
                 let page = pool.get_page_mut(frame_id);
 
                 // Get the tuple data to calculate freed bytes
@@ -729,12 +725,12 @@ impl HeapManager {
     }
 
     /// Read the file header from the pool's page 0.
-    pub fn header(&self) -> io::Result<HeaderMetadata> {
+    pub fn header(&self) -> RookResult<HeaderMetadata> {
         read_header_via_pool(&mut Self::lock_pool(&self.pool))
     }
 
     /// Change the file header in the pool's page 0.
-    pub fn update_header(&self, f: impl FnOnce(&mut HeaderMetadata)) -> io::Result<()> {
+    pub fn update_header(&self, f: impl FnOnce(&mut HeaderMetadata)) -> RookResult<()> {
         let mut pool = Self::lock_pool(&self.pool);
         let mut header = read_header_via_pool(&mut pool)?;
         f(&mut header);
@@ -742,14 +738,14 @@ impl HeapManager {
     }
 
     /// Search for a page with available space (for testing/debugging).
-    pub fn fsm_search_for_page(&mut self, min_category: u8) -> io::Result<Option<u32>> {
+    pub fn fsm_search_for_page(&mut self, min_category: u8) -> RookResult<Option<u32>> {
         self.fsm.search_page(min_category)
     }
 
     /// Persist all changes to disk.
     /// - Flushes all dirty pages in the buffer pool
     /// - Syncs FSM fork
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&mut self) -> RookResult<()> {
         self.flush_inner(true)
     }
 
@@ -757,11 +753,11 @@ impl HeapManager {
     ///
     /// Enough for direct-I/O readers to see them and for a process crash;
     /// `flush` adds the fsync that covers a power loss.
-    pub fn write_through(&mut self) -> io::Result<()> {
+    pub fn write_through(&mut self) -> RookResult<()> {
         self.flush_inner(false)
     }
 
-    fn flush_inner(&mut self, durable: bool) -> io::Result<()> {
+    fn flush_inner(&mut self, durable: bool) -> RookResult<()> {
         log::trace!("[HeapManager::flush] Flushing all changes");
 
         let mut pool = Self::lock_pool(&self.pool);
@@ -789,7 +785,7 @@ impl HeapManager {
 
     /// Allocate a new heap page and register with FSM.
     /// Uses the buffer pool for page creation.
-    fn allocate_new_page(&mut self) -> io::Result<u32> {
+    fn allocate_new_page(&mut self) -> RookResult<u32> {
         HEAP_METRICS
             .allocate_page_calls
             .fetch_add(1, Ordering::Relaxed);

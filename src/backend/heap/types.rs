@@ -9,6 +9,7 @@
 //!
 //! These fields enable O(1) COUNT(*) queries and FSM fork reconstruction.
 
+use crate::backend::error::{RookError, RookResult};
 use std::io::{self, Cursor, Read, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +43,7 @@ impl HeaderMetadata {
     ///
     /// # Errors
     /// Returns io::Error if write fails.
-    pub fn serialize(&self) -> io::Result<Vec<u8>> {
+    pub fn serialize(&self) -> RookResult<Vec<u8>> {
         let mut buf = Vec::with_capacity(24);
 
         buf.write_all(&self.page_count.to_le_bytes())?;
@@ -58,9 +59,9 @@ impl HeaderMetadata {
     ///
     /// # Errors
     /// Returns io::Error if buffer is too small or read fails.
-    pub fn deserialize(bytes: &[u8]) -> io::Result<Self> {
+    pub fn deserialize(bytes: &[u8]) -> RookResult<Self> {
         if bytes.len() < 24 {
-            return Err(io::Error::new(
+            return Err(RookError::io(
                 io::ErrorKind::InvalidData,
                 format!("Header buffer too small: {} < 24", bytes.len()),
             ));

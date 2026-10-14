@@ -3,6 +3,7 @@
 //! Page constants, key framing (`[u16 len][bytes]` + composite envelopes),
 //! the root-pointer sidecar, and key size helpers.
 
+use crate::backend::error::{RookError, RookResult};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -44,14 +45,14 @@ pub(crate) fn root_sidecar_path(idx_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-pub(crate) fn write_root_sidecar(idx_path: &Path, root_page_id: u32) -> io::Result<()> {
-    std::fs::write(root_sidecar_path(idx_path), root_page_id.to_le_bytes())
+pub(crate) fn write_root_sidecar(idx_path: &Path, root_page_id: u32) -> RookResult<()> {
+    std::fs::write(root_sidecar_path(idx_path), root_page_id.to_le_bytes()).map_err(RookError::from)
 }
 
-pub(crate) fn read_root_sidecar(idx_path: &Path) -> io::Result<u32> {
+pub(crate) fn read_root_sidecar(idx_path: &Path) -> RookResult<u32> {
     let bytes = std::fs::read(root_sidecar_path(idx_path))?;
     if bytes.len() < 4 {
-        return Err(io::Error::new(
+        return Err(RookError::io(
             io::ErrorKind::InvalidData,
             "short root sidecar",
         ));
@@ -69,23 +70,22 @@ pub(crate) fn encode_key(key: &DataValue) -> Vec<u8> {
 }
 
 /// Decode a key from on-disk format. Returns `(key, bytes_consumed)`.
-pub(crate) fn decode_key(data: &[u8], ty: &DataType) -> io::Result<(DataValue, usize)> {
+pub(crate) fn decode_key(data: &[u8], ty: &DataType) -> RookResult<(DataValue, usize)> {
     if data.len() < KEY_LEN_SIZE {
-        return Err(io::Error::new(
+        return Err(RookError::io(
             io::ErrorKind::UnexpectedEof,
             "Truncated key length",
         ));
     }
     let len = u16::from_le_bytes([data[0], data[1]]) as usize;
     if data.len() < KEY_LEN_SIZE + len {
-        return Err(io::Error::new(
+        return Err(RookError::io(
             io::ErrorKind::UnexpectedEof,
             "Truncated key data",
         ));
     }
     let key_bytes = &data[KEY_LEN_SIZE..KEY_LEN_SIZE + len];
-    let value = DataValue::from_bytes(ty, key_bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let value = DataValue::from_bytes(ty, key_bytes)?;
     Ok((value, KEY_LEN_SIZE + len))
 }
 
@@ -95,14 +95,14 @@ pub(crate) fn decode_key(data: &[u8], ty: &DataType) -> io::Result<(DataValue, u
 /// The outer envelope lets leaf serialisation/deserialisation treat the
 /// whole multi-segment key as a single opaque `[len][bytes]` entry, exactly
 /// like single-column keys.
-pub(crate) fn encode_key_multi(values: &[DataValue]) -> io::Result<Vec<u8>> {
+pub(crate) fn encode_key_multi(values: &[DataValue]) -> RookResult<Vec<u8>> {
     let mut body = Vec::new();
     for v in values {
         body.extend_from_slice(&encode_key(v));
     }
     let total = body.len();
     if total > u16::MAX as usize {
-        return Err(io::Error::new(
+        return Err(RookError::io(
             io::ErrorKind::InvalidInput,
             format!("Composite key too large: {} bytes", total),
         ));

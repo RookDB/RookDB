@@ -1,3 +1,4 @@
+use crate::backend::error::{RookError, RookResult};
 // Page size in bytes (8 KB)
 pub const PAGE_SIZE: usize = 8192;
 
@@ -157,7 +158,7 @@ impl Page {
     /// Store `data` as a new row, reusing the first dead slot if there is
     /// one, and return its slot id. A reused slot's old bytes stay on the
     /// page until compaction.
-    pub fn insert(&mut self, data: &[u8]) -> std::io::Result<u32> {
+    pub fn insert(&mut self, data: &[u8]) -> RookResult<u32> {
         self.insert_from(data, 0)
     }
 
@@ -165,13 +166,13 @@ impl Page {
     /// `scan_from` on: the caller knows slots before it are all live, so a page
     /// that fills by appending never rescans its whole directory. After the
     /// insert, slots `0..=returned id` are all live.
-    pub fn insert_from(&mut self, data: &[u8], scan_from: u32) -> std::io::Result<u32> {
+    pub fn insert_from(&mut self, data: &[u8], scan_from: u32) -> RookResult<u32> {
         let free = page_free_space(self)?;
         let reused =
             (scan_from..self.slot_count()).find(|&i| self.slot(i).is_some_and(|s| s.is_dead()));
         let required = data.len() as u32 + if reused.is_some() { 0 } else { ITEM_ID_SIZE };
         if free < required {
-            return Err(std::io::Error::new(
+            return Err(RookError::io(
                 std::io::ErrorKind::InvalidData,
                 format!("Insufficient free space in page: {} < {}", free, required),
             ));
@@ -237,12 +238,12 @@ pub fn init_page(page: &mut Page) {
 }
 
 // Return available free space in the page
-pub fn page_free_space(page: &Page) -> std::io::Result<u32> {
+pub fn page_free_space(page: &Page) -> RookResult<u32> {
     let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
     let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
 
     if lower < PAGE_HEADER_SIZE {
-        return Err(std::io::Error::new(
+        return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Invalid page lower pointer: {} < {}",
@@ -252,7 +253,7 @@ pub fn page_free_space(page: &Page) -> std::io::Result<u32> {
     }
 
     if lower > PAGE_SIZE as u32 || upper > PAGE_SIZE as u32 {
-        return Err(std::io::Error::new(
+        return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Page pointers out of bounds: lower={}, upper={}, page_size={}",
@@ -262,7 +263,7 @@ pub fn page_free_space(page: &Page) -> std::io::Result<u32> {
     }
 
     if upper < lower {
-        return Err(std::io::Error::new(
+        return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Corrupted page pointers: upper ({}) < lower ({})",
@@ -279,12 +280,12 @@ pub fn page_free_space(page: &Page) -> std::io::Result<u32> {
 ///
 /// # Errors
 /// Returns error if reading the page header fails.
-pub fn get_tuple_count(page: &Page) -> std::io::Result<u32> {
+pub fn get_tuple_count(page: &Page) -> RookResult<u32> {
     let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
     let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
 
     if lower < PAGE_HEADER_SIZE {
-        return Err(std::io::Error::new(
+        return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Invalid page lower pointer: {} < {}",
@@ -294,7 +295,7 @@ pub fn get_tuple_count(page: &Page) -> std::io::Result<u32> {
     }
 
     if lower > PAGE_SIZE as u32 || upper > PAGE_SIZE as u32 {
-        return Err(std::io::Error::new(
+        return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Page pointers out of bounds: lower={}, upper={}, page_size={}",
@@ -304,7 +305,7 @@ pub fn get_tuple_count(page: &Page) -> std::io::Result<u32> {
     }
 
     if upper < lower {
-        return Err(std::io::Error::new(
+        return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Corrupted page pointers: upper ({}) < lower ({})",
@@ -314,7 +315,7 @@ pub fn get_tuple_count(page: &Page) -> std::io::Result<u32> {
     }
 
     if !(lower - PAGE_HEADER_SIZE).is_multiple_of(ITEM_ID_SIZE) {
-        return Err(std::io::Error::new(
+        return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Invalid slot array alignment: lower={}, header={}, item_id_size={}",
@@ -343,7 +344,7 @@ pub fn get_tuple_count(page: &Page) -> std::io::Result<u32> {
 ///
 /// # Errors
 /// Returns an error only if `slot_id` is out of bounds or the page is structurally invalid.
-pub fn get_slot_entry(page: &Page, slot_id: u32) -> std::io::Result<(u32, u32)> {
+pub fn get_slot_entry(page: &Page, slot_id: u32) -> RookResult<(u32, u32)> {
     let tuple_count = get_tuple_count(page)?;
     let slot = page.slot(slot_id).ok_or_else(|| {
         std::io::Error::new(
@@ -361,7 +362,7 @@ pub fn get_slot_entry(page: &Page, slot_id: u32) -> std::io::Result<(u32, u32)> 
 
     let length = slot.length as u32;
     if slot.offset as u64 + length as u64 > PAGE_SIZE as u64 {
-        return Err(std::io::Error::new(
+        return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Corrupted slot entry bounds: offset={}, length={}, page_size={}",

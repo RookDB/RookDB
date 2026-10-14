@@ -44,7 +44,6 @@ pub fn init_catalog_in(
     // Create any system table file that is missing (e.g. sys_views in a
     // catalog that predates views).
     crate::backend::system_table::ensure_system_tables(engine)
-        .map_err(crate::backend::error::RookError::Io)
 }
 
 /// Loads the catalog from disk into memory.

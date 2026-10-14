@@ -124,19 +124,33 @@ impl RookError {
         }
     }
 
-    /// A storage failure rendered as `"context: source"`.
-    pub fn storage(context: impl Into<String>, source: std::io::Error) -> Self {
-        RookError::Storage {
-            context: Some(context.into()),
-            source,
+    /// A storage-level failure of the given kind, such as a corrupt page or
+    /// an out-of-range slot.
+    pub fn io(kind: std::io::ErrorKind, message: impl Into<String>) -> Self {
+        RookError::Io(std::io::Error::new(kind, message.into()))
+    }
+
+    /// A storage failure rendered as `"context: source"`. An I/O source is
+    /// shown without the `I/O error:` prefix; any other error just gains the
+    /// context.
+    pub fn storage(context: impl Into<String>, source: impl Into<RookError>) -> Self {
+        match source.into() {
+            RookError::Io(source) => RookError::Storage {
+                context: Some(context.into()),
+                source,
+            },
+            other => other.with_context(context),
         }
     }
 
-    /// A storage failure rendered as the bare `io::Error` text.
-    pub fn storage_bare(source: std::io::Error) -> Self {
-        RookError::Storage {
-            context: None,
-            source,
+    /// A storage failure rendered as the bare source text.
+    pub fn storage_bare(source: impl Into<RookError>) -> Self {
+        match source.into() {
+            RookError::Io(source) => RookError::Storage {
+                context: None,
+                source,
+            },
+            other => other,
         }
     }
 
@@ -332,7 +346,7 @@ mod tests {
         assert_eq!(e.constraint_kind(), Some(ConstraintKind::Unique));
         assert!(!e.is_io());
 
-        let io = RookError::from(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+        let io = RookError::io(std::io::ErrorKind::NotFound, "gone");
         assert!(io.is_io());
         assert_eq!(io.constraint_kind(), None);
     }
@@ -386,10 +400,7 @@ mod tests {
 
     #[test]
     fn with_context_preserves_semantics_and_renders_first() {
-        let io = RookError::from(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no such file",
-        ));
+        let io = RookError::io(std::io::ErrorKind::NotFound, "no such file");
         let ctx = io.with_context("Failed to open heap for table 'users'");
 
         // Semantics preserved through the wrapper

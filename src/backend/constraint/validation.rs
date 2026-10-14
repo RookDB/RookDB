@@ -3,6 +3,7 @@
 //! Provides the core validation logic for NOT NULL, UNIQUE, FOREIGN KEY,
 //! and CHECK constraints, called by the public API functions.
 
+use crate::backend::error::RookResult;
 use crate::catalog::types::Column;
 use crate::types::{DataType, DataValue};
 
@@ -98,7 +99,7 @@ pub(crate) fn check_unique_insert_meta(
         let tids = crate::backend::cache::with_btree(
             engine,
             &idx_path,
-            move || -> std::io::Result<crate::backend::index::btree::BTree> {
+            move || -> RookResult<crate::backend::index::btree::BTree> {
                 let mut bt = crate::backend::index::btree::BTree::open(open_path)?;
                 bt.set_key_types(kt1);
                 Ok(bt)
@@ -163,7 +164,7 @@ pub(crate) fn check_unique_insert_meta(
         let tids = crate::backend::cache::with_btree(
             engine,
             &idx_path,
-            move || -> std::io::Result<crate::backend::index::btree::BTree> {
+            move || -> RookResult<crate::backend::index::btree::BTree> {
                 let mut bt = crate::backend::index::btree::BTree::open(open_path)?;
                 bt.set_key_type(open_type);
                 Ok(bt)

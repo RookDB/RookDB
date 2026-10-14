@@ -1,6 +1,7 @@
+use crate::backend::error::RookResult;
 use chrono::{SecondsFormat, Utc};
 use std::fs::{OpenOptions, create_dir_all};
-use std::io::{self, Write};
+use std::io::Write;
 
 use serde_json::{Value, json};
 
@@ -16,7 +17,7 @@ fn append_log(
     file_name: &str,
     details: Value,
     status: &str,
-) -> io::Result<()> {
+) -> RookResult<()> {
     let dir = engine.paths().log_dir(db_name, table_name);
     create_dir_all(&dir)?;
 
@@ -44,7 +45,7 @@ pub fn log_update(
     table_name: &str,
     details: Value,
     status: &str,
-) -> io::Result<()> {
+) -> RookResult<()> {
     append_log(
         engine,
         db_name,
@@ -62,7 +63,7 @@ pub fn log_delete(
     table_name: &str,
     details: Value,
     status: &str,
-) -> io::Result<()> {
+) -> RookResult<()> {
     append_log(
         engine,
         db_name,
@@ -80,7 +81,7 @@ pub fn log_compaction(
     table_name: &str,
     details: Value,
     status: &str,
-) -> io::Result<()> {
+) -> RookResult<()> {
     append_log(
         engine,
         db_name,

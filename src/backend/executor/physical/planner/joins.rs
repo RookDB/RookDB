@@ -242,7 +242,7 @@ impl PhysicalPlanner {
                             &heap_path,
                         )
                         .map_err(|e| {
-                            RookError::Io(e).with_context(format!(
+                            e.with_context(format!(
                                 "opening heap {} for table '{}'",
                                 heap_path.display(),
                                 inner_ts.table

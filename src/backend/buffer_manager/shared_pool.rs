@@ -14,8 +14,8 @@
 //! The registry is keyed by file identity, not by engine, so it stays
 //! process-wide: engines on different data directories never share a path.
 
+use crate::backend::error::RookResult;
 use std::collections::HashMap;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -65,7 +65,7 @@ fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
 
 /// Return the shared pool for `file_path`, opening the file if no live pool
 /// exists yet.
-pub fn get_or_create(file_path: &Path) -> io::Result<SharedPool> {
+pub fn get_or_create(file_path: &Path) -> RookResult<SharedPool> {
     let key = canonical_key(file_path);
 
     // Sweep expired entries, then reuse a live pool when present.
