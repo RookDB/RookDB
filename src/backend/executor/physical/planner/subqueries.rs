@@ -8,7 +8,8 @@ use std::rc::Rc;
 
 use super::super::engine::execute_shared;
 use super::super::expr::correlated::{
-    CorrelatedSubquery, OuterBinding, SubqueryUse, ref_key, rewrite_pred, rewrite_select,
+    CorrelatedSubquery, OuterBinding, SubqueryUse, Visitor, outer_placeholder, ref_key,
+    rewrite_pred, rewrite_select,
 };
 use super::super::expr::predicate::SubqueryKind;
 use super::super::expr::{
@@ -507,6 +508,66 @@ impl PhysicalPlanner {
     }
 }
 
+/// Finds a subquery's outer references (see `PhysicalPlanner::prepare_template`).
+struct Marker<'a> {
+    planner: &'a PhysicalPlanner,
+    /// Scope of the select being walked, with and without output aliases.
+    cur: InnerScope,
+    cur_having: InnerScope,
+    /// Scopes of the selects between the template root and the one walked,
+    /// the root included.
+    enclosing: Vec<InnerScope>,
+    refs: &'a mut Vec<OuterRef>,
+    /// Whether the walk is inside a nested subquery.
+    nested: bool,
+}
+
+impl Visitor for Marker<'_> {
+    fn expr(&mut self, node: &rook_ast::ExprNode, having: bool) -> Option<rook_ast::ExprNode> {
+        let scope = if having { &self.cur_having } else { &self.cur };
+        if !self.planner.expr_is_outer_ref(node, scope) {
+            return None;
+        }
+        let key = ref_key(node)?;
+        if self.nested {
+            // Resolved by an enclosing scope up to the template root?
+            if self
+                .enclosing
+                .iter()
+                .any(|s| !self.planner.expr_is_outer_ref(node, s))
+            {
+                return None;
+            }
+            let placeholder = outer_placeholder(key.0.as_deref(), &key.1);
+            if !self.refs.contains(&key) {
+                self.refs.push(key);
+            }
+            return Some(placeholder);
+        }
+        if !self.refs.contains(&key) {
+            self.refs.push(key);
+        }
+        None
+    }
+
+    fn subquery(&mut self, select: &mut rook_ast::SelectPlan) {
+        let scope = self.planner.inner_scope(select);
+        let having_scope = PhysicalPlanner::alias_scope(select, &scope);
+        let outer_cur = std::mem::replace(&mut self.cur, scope);
+        let outer_having = std::mem::replace(&mut self.cur_having, having_scope);
+        let was_nested = std::mem::replace(&mut self.nested, true);
+        self.enclosing.push(InnerScope {
+            qualifiers: outer_cur.qualifiers.clone(),
+            columns: outer_cur.columns.clone(),
+        });
+        rewrite_select(select, self);
+        self.enclosing.pop();
+        self.nested = was_nested;
+        self.cur_having = outer_having;
+        self.cur = outer_cur;
+    }
+}
+
 // ── Correlated subquery detection ─────────────────────────────────────────────
 
 impl PhysicalPlanner {
@@ -528,43 +589,68 @@ impl PhysicalPlanner {
         }
     }
 
-    /// The outer columns a subquery names, as lower-cased (qualifier, name),
-    /// in first-use order. Looks through the SELECT list, WHERE, JOIN ... ON,
-    /// GROUP BY and HAVING (where output aliases are also in scope).
-    fn outer_refs(&self, select: &rook_ast::SelectPlan) -> Vec<OuterRef> {
-        let scope = self.inner_scope(select);
-        let mut having_scope = InnerScope {
+    /// The scope a clause sees where output aliases are also in scope
+    /// (HAVING, ORDER BY).
+    fn alias_scope(select: &rook_ast::SelectPlan, scope: &InnerScope) -> InnerScope {
+        let mut with_aliases = InnerScope {
             qualifiers: scope.qualifiers.clone(),
             columns: scope.columns.clone(),
         };
         for p in &select.projections {
             if let rook_ast::SelectExpr::ExprWithAlias { alias, .. } = p {
-                having_scope.columns.push(alias.clone());
+                with_aliases.columns.push(alias.clone());
             }
         }
+        with_aliases
+    }
+
+    /// The outer columns a subquery names, as lower-cased (qualifier, name),
+    /// in first-use order. Looks through the SELECT list, WHERE, JOIN ... ON,
+    /// GROUP BY, HAVING and ORDER BY (where output aliases are also in
+    /// scope), and into nested subqueries for references that neither the
+    /// nested subquery nor this one resolves.
+    fn outer_refs(&self, select: &rook_ast::SelectPlan) -> Vec<OuterRef> {
+        self.prepare_template(select).1
+    }
+
+    /// The template a correlated subquery is bound from, and its outer
+    /// references. A reference inside a nested subquery that no scope up to
+    /// and including `select` resolves reaches past `select` to the enclosing
+    /// query; it is rewritten to a placeholder so it can be bound wherever it
+    /// sits. References that `select` itself resolves are left for the nested
+    /// subquery's own planning.
+    fn prepare_template(
+        &self,
+        select: &rook_ast::SelectPlan,
+    ) -> (rook_ast::SelectPlan, Vec<OuterRef>) {
+        let scope = self.inner_scope(select);
+        let having_scope = Self::alias_scope(select, &scope);
         let mut refs: Vec<OuterRef> = Vec::new();
-        let mut probe = select.clone();
-        rewrite_select(&mut probe, &mut |node, having| {
-            let scope = if having { &having_scope } else { &scope };
-            if self.expr_is_outer_ref(node, scope)
-                && let Some(key) = ref_key(node)
-                && !refs.contains(&key)
-            {
-                refs.push(key);
-            }
-            None
-        });
-        refs
+        let mut template = select.clone();
+        let mut marker = Marker {
+            planner: self,
+            cur: scope,
+            cur_having: having_scope,
+            enclosing: Vec::new(),
+            refs: &mut refs,
+            nested: false,
+        };
+        rewrite_select(&mut template, &mut marker);
+        (template, refs)
     }
 
     /// Whether `pred` names an outer column, given the subquery's `scope`.
     fn pred_has_outer_ref(&self, pred: &rook_ast::PredicateNode, scope: &InnerScope) -> bool {
         let mut found = false;
         let mut probe = pred.clone();
-        rewrite_pred(&mut probe, false, &mut |node, _| {
-            found |= self.expr_is_outer_ref(node, scope);
-            None
-        });
+        rewrite_pred(
+            &mut probe,
+            false,
+            &mut |node: &rook_ast::ExprNode, _: bool| {
+                found |= self.expr_is_outer_ref(node, scope);
+                None
+            },
+        );
         found
     }
 
@@ -724,6 +810,22 @@ struct SimpleCorrelation {
     outer_indices: Vec<usize>,
 }
 
+/// Whether `pred` contains a subquery.
+fn has_nested_subquery(pred: &rook_ast::PredicateNode) -> bool {
+    struct Finder(bool);
+    impl Visitor for Finder {
+        fn expr(&mut self, _: &rook_ast::ExprNode, _: bool) -> Option<rook_ast::ExprNode> {
+            None
+        }
+        fn subquery(&mut self, _: &mut rook_ast::SelectPlan) {
+            self.0 = true;
+        }
+    }
+    let mut finder = Finder(false);
+    rewrite_pred(&mut pred.clone(), false, &mut finder);
+    finder.0
+}
+
 fn flatten_and<'a>(node: &'a rook_ast::PredicateNode, out: &mut Vec<&'a rook_ast::PredicateNode>) {
     match node {
         rook_ast::PredicateNode::BinaryOp {
@@ -771,7 +873,11 @@ impl PhysicalPlanner {
         outer_schema: &[ColumnInfo],
         shape: Shape,
     ) -> RookResult<Option<SimpleCorrelation>> {
-        if select.from.len() != 1 || !select.joins.is_empty() || select.distinct {
+        if select.from.len() != 1
+            || !select.joins.is_empty()
+            || select.distinct
+            || !select.order_by.is_empty()
+        {
             return Ok(None);
         }
         let has_aggregates = !select.group_by.is_empty()
@@ -801,6 +907,10 @@ impl PhysicalPlanner {
         let Some(selection) = &select.selection else {
             return Ok(None);
         };
+        // A nested subquery may reach the outer query; the general path binds it.
+        if has_nested_subquery(selection) {
+            return Ok(None);
+        }
 
         let scope = self.inner_scope(select);
         let mut conjuncts = Vec::new();
@@ -889,8 +999,9 @@ impl PhysicalPlanner {
         outer_schema: &[ColumnInfo],
         usage: SubqueryUse,
     ) -> RookResult<(Rc<CorrelatedSubquery>, Vec<ColumnInfo>)> {
+        let (template, refs) = self.prepare_template(select);
         let mut bindings = Vec::new();
-        for (qualifier, name) in self.outer_refs(select) {
+        for (qualifier, name) in refs {
             let index =
                 resolve_column(outer_schema, qualifier.as_deref(), &name)?.ok_or_else(|| {
                     RookError::NotFound {
@@ -904,15 +1015,18 @@ impl PhysicalPlanner {
                 index,
             });
         }
-        let nulls = vec![None; bindings.len()];
+        let types: Vec<String> = bindings
+            .iter()
+            .map(|b| outer_schema[b.index].data_type.to_string())
+            .collect();
         let sub = CorrelatedSubquery::new(
-            select.clone(),
+            template,
             bindings,
             std::sync::Arc::clone(&self.catalog),
             self.db_name.clone(),
             usage,
         );
-        let query_plan = rook_ast::QueryPlan::Select(sub.bound_select(&nulls));
+        let query_plan = rook_ast::QueryPlan::Select(sub.probe_select(&types));
         let logical = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
             .map_err(|e| {
                 RookError::Internal(e.message).with_context("Failed to plan correlated subquery")

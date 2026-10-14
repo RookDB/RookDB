@@ -91,15 +91,32 @@ impl CorrelatedSubquery {
     /// The subquery with every outer reference replaced by `values`
     /// (one per binding, in order).
     pub fn bound_select(&self, values: &[Option<DataValue>]) -> SelectPlan {
+        let exprs: Vec<ExprNode> = values.iter().map(|v| value_to_expr(v.as_ref())).collect();
+        self.bind_exprs(&exprs)
+    }
+
+    /// The subquery with every outer reference replaced by a NULL of the
+    /// outer column's type (one type per binding), for planning it before any
+    /// outer row exists: a bare NULL has no type to infer in arithmetic.
+    pub fn probe_select(&self, types: &[String]) -> SelectPlan {
+        let exprs: Vec<ExprNode> = types
+            .iter()
+            .map(|t| ExprNode::Cast {
+                expr: Box::new(ExprNode::Constant(ConstantValue::Null)),
+                data_type: t.clone(),
+            })
+            .collect();
+        self.bind_exprs(&exprs)
+    }
+
+    fn bind_exprs(&self, values: &[ExprNode]) -> SelectPlan {
         let mut select = self.template.clone();
-        rewrite_select(&mut select, &mut |node, _| {
-            let key = ref_key(node)?;
-            let i = self
-                .bindings
-                .iter()
-                .position(|b| b.qualifier == key.0 && b.name == key.1)?;
-            Some(value_to_expr(values[i].as_ref()))
-        });
+        let mut binder = Binder {
+            bindings: &self.bindings,
+            values,
+            depth: 0,
+        };
+        rewrite_select(&mut select, &mut binder);
         select
     }
 
@@ -170,15 +187,43 @@ fn value_to_expr(value: Option<&DataValue>) -> ExprNode {
 
 // ── AST walk ──────────────────────────────────────────────────────────────────
 
+/// Name an outer reference takes once it has been moved out of the scope that
+/// resolves it: a nested subquery's reference to a column two or more levels
+/// up is rewritten to `Compound([OUTER_MARK, "qualifier.name"])` when the
+/// correlated template is built, so binding can find it at any depth without
+/// redoing scope resolution.
+pub const OUTER_MARK: &str = "__rookdb_outer__";
+
+/// The placeholder node for an outer reference.
+pub fn outer_placeholder(qualifier: Option<&str>, name: &str) -> ExprNode {
+    ExprNode::Compound(vec![
+        OUTER_MARK.to_string(),
+        format!("{}.{}", qualifier.unwrap_or(""), name),
+    ])
+}
+
+/// Receives the expressions (and nested subqueries) the AST walk visits.
+pub trait Visitor {
+    /// `Some(new)` swaps the node and stops descending into it;
+    /// `in_having` is true for HAVING and ORDER BY, where output aliases are
+    /// also in scope.
+    fn expr(&mut self, node: &ExprNode, in_having: bool) -> Option<ExprNode>;
+
+    /// A subquery nested in an expression. Not entered unless overridden: a
+    /// nested subquery resolves names in its own scope first.
+    fn subquery(&mut self, _select: &mut SelectPlan) {}
+}
+
+impl<F: FnMut(&ExprNode, bool) -> Option<ExprNode>> Visitor for F {
+    fn expr(&mut self, node: &ExprNode, in_having: bool) -> Option<ExprNode> {
+        self(node, in_having)
+    }
+}
+
 /// Walk every expression of `select` that can hold an outer reference (SELECT
-/// list, WHERE, JOIN ... ON, GROUP BY, HAVING) and let `f` replace a node:
-/// `f(node, in_having)` returning `Some(new)` swaps it and stops descending.
-/// ORDER BY is left alone (its names may be output aliases) and nested
-/// subqueries are not entered (they resolve names in their own scope).
-pub fn rewrite_select(
-    select: &mut SelectPlan,
-    f: &mut dyn FnMut(&ExprNode, bool) -> Option<ExprNode>,
-) {
+/// list, WHERE, JOIN ... ON, GROUP BY, HAVING, ORDER BY) and let `f` replace a
+/// node. Nested subqueries are reported to `f.subquery`.
+pub fn rewrite_select<V: Visitor + ?Sized>(select: &mut SelectPlan, f: &mut V) {
     for p in &mut select.projections {
         match p {
             SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } => {
@@ -201,13 +246,12 @@ pub fn rewrite_select(
     if let Some(h) = &mut select.having {
         rewrite_pred(h, true, f);
     }
+    for o in &mut select.order_by {
+        rewrite_expr(&mut o.expr, true, f);
+    }
 }
 
-pub fn rewrite_pred(
-    node: &mut PredicateNode,
-    having: bool,
-    f: &mut dyn FnMut(&ExprNode, bool) -> Option<ExprNode>,
-) {
+pub fn rewrite_pred<V: Visitor + ?Sized>(node: &mut PredicateNode, having: bool, f: &mut V) {
     match node {
         PredicateNode::BinaryOp { left, right, .. } => {
             rewrite_pred(left, having, f);
@@ -222,8 +266,11 @@ pub fn rewrite_pred(
         PredicateNode::IsNull(e)
         | PredicateNode::IsNotNull(e)
         | PredicateNode::Like { expr: e, .. }
-        | PredicateNode::IsBoolean { expr: e, .. }
-        | PredicateNode::InSubquery { expr: e, .. } => rewrite_expr(e, having, f),
+        | PredicateNode::IsBoolean { expr: e, .. } => rewrite_expr(e, having, f),
+        PredicateNode::InSubquery { expr, subquery, .. } => {
+            rewrite_expr(expr, having, f);
+            f.subquery(&mut subquery.select);
+        }
         PredicateNode::Between { expr, low, high } => {
             rewrite_expr(expr, having, f);
             rewrite_expr(low, having, f);
@@ -235,24 +282,18 @@ pub fn rewrite_pred(
                 rewrite_expr(e, having, f);
             }
         }
-        PredicateNode::Exists(_) => {}
+        PredicateNode::Exists(info) => f.subquery(&mut info.select),
     }
 }
 
-pub fn rewrite_expr(
-    node: &mut ExprNode,
-    having: bool,
-    f: &mut dyn FnMut(&ExprNode, bool) -> Option<ExprNode>,
-) {
-    if let Some(new) = f(node, having) {
+pub fn rewrite_expr<V: Visitor + ?Sized>(node: &mut ExprNode, having: bool, f: &mut V) {
+    if let Some(new) = f.expr(node, having) {
         *node = new;
         return;
     }
     match node {
-        ExprNode::Column(_)
-        | ExprNode::Compound(_)
-        | ExprNode::Constant(_)
-        | ExprNode::ScalarSubquery(_) => {}
+        ExprNode::Column(_) | ExprNode::Compound(_) | ExprNode::Constant(_) => {}
+        ExprNode::ScalarSubquery(info) => f.subquery(&mut info.select),
         ExprNode::Binary { left, right, .. }
         | ExprNode::Compare { left, right, .. }
         | ExprNode::Logical { left, right, .. } => {
@@ -282,5 +323,37 @@ pub fn rewrite_expr(
                 rewrite_expr(e, having, f);
             }
         }
+    }
+}
+
+/// Substitutes bound values for a template's outer references: named
+/// references at the subquery's own level, and placeholders at any depth.
+struct Binder<'a> {
+    bindings: &'a [OuterBinding],
+    values: &'a [ExprNode],
+    depth: usize,
+}
+
+impl Visitor for Binder<'_> {
+    fn expr(&mut self, node: &ExprNode, _in_having: bool) -> Option<ExprNode> {
+        let key = ref_key(node)?;
+        let i = if key.0.as_deref() == Some(OUTER_MARK) {
+            self.bindings.iter().position(|b| {
+                format!("{}.{}", b.qualifier.as_deref().unwrap_or(""), b.name) == key.1
+            })?
+        } else if self.depth == 0 {
+            self.bindings
+                .iter()
+                .position(|b| b.qualifier == key.0 && b.name == key.1)?
+        } else {
+            return None;
+        };
+        Some(self.values[i].clone())
+    }
+
+    fn subquery(&mut self, select: &mut SelectPlan) {
+        self.depth += 1;
+        rewrite_select(select, self);
+        self.depth -= 1;
     }
 }
