@@ -329,6 +329,7 @@ fn test_select_with_join() {
                 ExprNode::Compound(vec!["users".to_string(), "id".to_string()]),
                 ExprNode::Compound(vec!["orders".to_string(), "user_id".to_string()]),
             )),
+            using: vec![],
         }],
         selection: None,
         group_by: vec![],

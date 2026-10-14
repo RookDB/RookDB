@@ -170,6 +170,7 @@ impl Optimizer {
                     right: Box::new(right),
                     join_type: j.join_type,
                     condition,
+                    using: j.using,
                 })
             }
             LogicalPlan::SetOp(s) => {
@@ -280,6 +281,7 @@ impl Optimizer {
                     right: Box::new(right),
                     join_type: j.join_type,
                     condition: j.condition,
+                    using: j.using,
                 })
             }
             LogicalPlan::SetOp(s) => {
@@ -464,6 +466,7 @@ impl Optimizer {
                     right: Box::new(right),
                     join_type: j.join_type,
                     condition,
+                    using: j.using,
                 });
                 match above {
                     Some(predicate) => LogicalPlan::Filter(LogicalFilter {
@@ -626,6 +629,7 @@ impl Optimizer {
                     right: Box::new(right),
                     join_type: j.join_type,
                     condition: j.condition,
+                    using: j.using,
                 })
             }
             LogicalPlan::SetOp(s) => {
@@ -908,6 +912,7 @@ impl Optimizer {
                     right: Box::new(right),
                     join_type: j.join_type,
                     condition: j.condition,
+                    using: j.using,
                 })
             }
             LogicalPlan::SetOp(s) => {
@@ -966,8 +971,9 @@ impl Optimizer {
 
 /// Whether an ORDER BY key names an input column of the projection, so the
 /// sort can run beneath it. A bare name that the projection redefines
-/// (`SELECT -id AS id ... ORDER BY id`) names the output instead, and a
-/// qualified name must match its table in the input.
+/// (`SELECT -id AS id ... ORDER BY id`) names the output instead, as does
+/// one that is ambiguous in the input but is an output's name; a qualified
+/// name must match its table in the input.
 fn sort_key_reads_input(
     expr: &ExprNode,
     outputs: &[NamedExpr],
@@ -985,7 +991,14 @@ fn sort_key_reads_input(
             let redefined = outputs
                 .iter()
                 .any(|o| o.name.eq_ignore_ascii_case(name) && !passthrough(&o.expr));
-            !redefined && input.iter().any(|(_, c)| c.name.eq_ignore_ascii_case(name))
+            let in_input = input
+                .iter()
+                .filter(|(_, c)| c.name.eq_ignore_ascii_case(name))
+                .count();
+            // Two input columns of that name would make the key ambiguous;
+            // an output of the name settles it, as it does in PostgreSQL.
+            let names_output = outputs.iter().any(|o| o.name.eq_ignore_ascii_case(name));
+            !redefined && in_input >= 1 && !(in_input > 1 && names_output)
         }
         ExprNode::Compound(parts) if parts.len() >= 2 => {
             let (table, name) = (&parts[parts.len() - 2], &parts[parts.len() - 1]);

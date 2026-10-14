@@ -10,6 +10,7 @@
 //! - `joins.rs`: NestedLoopJoinOperator, HashJoinOperator, JoinType
 //! - `filter_project.rs`: Filter, Projection, Limit, Distinct, SingleRow,
 //!   Null and CteScan operators
+//! - `merged.rs`: relabels the shared columns of USING / NATURAL joins
 //! - `sort.rs`: SortOperator
 //! - `aggregate.rs`: AggregateOperator with GROUP BY / HAVING support
 //! - `set_op.rs`: `UNION [ALL] / INTERSECT [ALL] / EXCEPT [ALL]`
@@ -22,6 +23,7 @@ mod aggregate;
 mod filter_project;
 mod insert;
 mod joins;
+mod merged;
 mod scans;
 mod set_op;
 mod sort;
@@ -48,6 +50,7 @@ pub use filter_project::{
     CteScanOperator, DistinctOperator, FilterOperator, LimitOperator, NullOperator,
     ProjectionOperator, SingleRowOperator,
 };
+pub use merged::{MergedColumnsOperator, mark_merged};
 pub use set_op::{SetOpOperator, SetOpType};
 pub use sort::SortOperator;
 pub(crate) use sort::compare_rows;

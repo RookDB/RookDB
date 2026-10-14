@@ -134,11 +134,11 @@ const QUERIES: &[(&str, bool)] = &[
         false,
     ),
     (
-        "SELECT name FROM big JOIN mid ON big.mid_id = mid.id",
+        "SELECT mid.name FROM big JOIN mid ON big.mid_id = mid.id",
         false,
     ),
     (
-        "SELECT id, name FROM small JOIN mid ON small.id = mid.small_id JOIN big ON big.mid_id = mid.id",
+        "SELECT small.id, small.name FROM small JOIN mid ON small.id = mid.small_id JOIN big ON big.mid_id = mid.id",
         false,
     ),
     (

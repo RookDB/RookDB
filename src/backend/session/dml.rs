@@ -142,6 +142,7 @@ pub(super) fn explain(
     }
 
     let schema = vec![ColumnInfo {
+        merged: false,
         name: "plan".to_string(),
         data_type: DataType::Varchar(u16::MAX),
         table: None,

@@ -139,6 +139,7 @@ fn correlated_not_in_with_null_in_subquery_is_unknown() {
 
     // Subquery result for one outer row: contains a NULL and a match (42).
     let inner_schema = vec![ColumnInfo {
+        merged: false,
         name: "val".into(),
         data_type: DataType::Int,
         table: None,
@@ -161,6 +162,7 @@ fn correlated_not_in_with_null_in_subquery_is_unknown() {
     // NULL, so `99 NOT IN (...)` must be UNKNOWN, never TRUE.
     let outer = Tuple::new(vec![Some(DataValue::Int(99))]);
     let outer_schema = vec![ColumnInfo {
+        merged: false,
         name: "x".into(),
         data_type: DataType::Int,
         table: None,

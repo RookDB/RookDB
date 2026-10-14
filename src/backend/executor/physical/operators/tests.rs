@@ -51,11 +51,13 @@ impl PhysicalOperator for MockOperator {
 fn int_schema() -> Vec<ColumnInfo> {
     vec![
         ColumnInfo {
+            merged: false,
             name: "a".into(),
             data_type: DataType::Int,
             table: None,
         },
         ColumnInfo {
+            merged: false,
             name: "b".into(),
             data_type: DataType::Int,
             table: None,
@@ -267,16 +269,19 @@ fn test_sort_descending() {
 fn name_schema() -> Vec<ColumnInfo> {
     vec![
         ColumnInfo {
+            merged: false,
             name: "name".into(),
             data_type: DataType::Varchar(100),
             table: None,
         },
         ColumnInfo {
+            merged: false,
             name: "age".into(),
             data_type: DataType::Int,
             table: None,
         },
         ColumnInfo {
+            merged: false,
             name: "salary".into(),
             data_type: DataType::DoublePrecision,
             table: None,
@@ -636,6 +641,7 @@ fn test_aggregate_reset() {
 
 fn single_col_schema(name: &str) -> Vec<ColumnInfo> {
     vec![ColumnInfo {
+        merged: false,
         name: name.into(),
         data_type: DataType::Int,
         table: None,
@@ -1001,11 +1007,13 @@ fn test_hash_join_table_qualified() {
     // Tests that table-qualified Expr::Column refs work correctly as join keys.
     let build_schema = vec![
         ColumnInfo {
+            merged: false,
             name: "id".into(),
             data_type: DataType::Int,
             table: Some("t1".into()),
         },
         ColumnInfo {
+            merged: false,
             name: "name".into(),
             data_type: DataType::Varchar(20),
             table: Some("t1".into()),
@@ -1013,11 +1021,13 @@ fn test_hash_join_table_qualified() {
     ];
     let probe_schema = vec![
         ColumnInfo {
+            merged: false,
             name: "id".into(),
             data_type: DataType::Int,
             table: Some("t2".into()),
         },
         ColumnInfo {
+            merged: false,
             name: "val".into(),
             data_type: DataType::Varchar(20),
             table: Some("t2".into()),
@@ -1170,11 +1180,13 @@ fn test_hash_join_table_qualified_multi_column() {
     // have columns with the same names ("id", "code").
     let build_schema = vec![
         ColumnInfo {
+            merged: false,
             name: "id".into(),
             data_type: DataType::Int,
             table: Some("t1".into()),
         },
         ColumnInfo {
+            merged: false,
             name: "code".into(),
             data_type: DataType::Int,
             table: Some("t1".into()),
@@ -1182,11 +1194,13 @@ fn test_hash_join_table_qualified_multi_column() {
     ];
     let probe_schema = vec![
         ColumnInfo {
+            merged: false,
             name: "id".into(),
             data_type: DataType::Int,
             table: Some("t2".into()),
         },
         ColumnInfo {
+            merged: false,
             name: "code".into(),
             data_type: DataType::Int,
             table: Some("t2".into()),
@@ -1255,11 +1269,13 @@ fn test_hash_join_remaining_predicate() {
     // on a uniquely-named column ("salary" > "min_salary").
     let build_schema = vec![
         ColumnInfo {
+            merged: false,
             name: "dept_id".into(),
             data_type: DataType::Int,
             table: None,
         },
         ColumnInfo {
+            merged: false,
             name: "salary".into(),
             data_type: DataType::Int,
             table: None,
@@ -1267,11 +1283,13 @@ fn test_hash_join_remaining_predicate() {
     ];
     let probe_schema = vec![
         ColumnInfo {
+            merged: false,
             name: "dept_id".into(),
             data_type: DataType::Int,
             table: None,
         },
         ColumnInfo {
+            merged: false,
             name: "min_salary".into(),
             data_type: DataType::Int,
             table: None,
@@ -1504,6 +1522,7 @@ fn test_single_row_operator() {
 #[test]
 fn test_null_operator() {
     let schema = vec![ColumnInfo {
+        merged: false,
         name: "x".into(),
         data_type: DataType::Int,
         table: None,
@@ -1611,11 +1630,13 @@ fn test_batch_count_star_acceleration() {
 #[test]
 fn test_batch_hash_join() {
     let schema1 = vec![ColumnInfo {
+        merged: false,
         name: "id".into(),
         data_type: DataType::Int,
         table: None,
     }];
     let schema2 = vec![ColumnInfo {
+        merged: false,
         name: "fk".into(),
         data_type: DataType::Int,
         table: None,
@@ -1661,6 +1682,7 @@ fn test_batch_hash_join() {
 #[test]
 fn test_batch_sort_operator() {
     let schema = vec![ColumnInfo {
+        merged: false,
         name: "val".into(),
         data_type: DataType::Int,
         table: None,

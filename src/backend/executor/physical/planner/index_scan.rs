@@ -41,6 +41,7 @@ impl PhysicalPlanner {
         let column_info: Vec<ColumnInfo> = table_schema
             .iter()
             .map(|c| ColumnInfo {
+                merged: false,
                 name: c.name.clone(),
                 data_type: c.data_type.clone(),
                 table: Some(table_name.clone()),

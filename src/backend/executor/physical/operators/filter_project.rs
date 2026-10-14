@@ -304,6 +304,7 @@ impl ProjectionOperator {
         let output_schema: Vec<ColumnInfo> = projections
             .iter()
             .map(|(_, name, dt)| ColumnInfo {
+                merged: false,
                 name: name.clone(),
                 data_type: dt.clone(),
                 table: None,

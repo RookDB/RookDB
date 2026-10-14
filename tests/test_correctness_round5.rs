@@ -397,6 +397,7 @@ impl PhysicalOperator for ContractMock {
 
 fn one_col(n: usize) -> (Vec<Tuple>, Vec<ColumnInfo>) {
     let schema = vec![ColumnInfo {
+        merged: false,
         name: "v".to_string(),
         data_type: DataType::Int,
         table: None,

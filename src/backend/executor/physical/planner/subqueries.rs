@@ -972,7 +972,7 @@ impl PhysicalPlanner {
             (agg_op, dt)
         } else {
             let child_schema = filtered_op.schema();
-            let col_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
+            let col_names = super::super::expr::binding_names(child_schema);
             let col_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
             let mut projections = Vec::new();
             for p in &select.projections {

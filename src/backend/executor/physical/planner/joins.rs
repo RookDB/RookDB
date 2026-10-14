@@ -2,11 +2,13 @@
 
 use rook_ast::logical::*;
 
-use super::super::expr::{ComparisonOp, Expr, Predicate, expr_from_ast, predicate_from_ast};
+use super::super::expr::{
+    ComparisonOp, Expr, Predicate, binding_names, expr_from_ast, predicate_from_ast,
+};
 use super::super::operators::{
     AggregateFunction, AggregateInfo, AggregateOperator, HashJoinOperator,
-    IndexNestedLoopJoinOperator, JoinType as PhysicalJoinType, NestedLoopJoinOperator,
-    PhysicalOperator, infer_aggregate_output_type,
+    IndexNestedLoopJoinOperator, JoinType as PhysicalJoinType, MergedColumnsOperator,
+    NestedLoopJoinOperator, PhysicalOperator, infer_aggregate_output_type, mark_merged,
 };
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
@@ -36,12 +38,38 @@ impl PhysicalPlanner {
         // ColumnInfo.table is populated with actual table names from each operator's
         // schema (set during plan_table_scan), so table-qualified references like
         // `t1.id` and `t2.id` resolve correctly without sentinel markers.
-        let combined_schema: Vec<ColumnInfo> = left
+        // The columns a USING / NATURAL join shows once; the join's output
+        // marks the extra copies so a bare reference to one is not ambiguous.
+        let merged_names: Vec<String> = match j.join_type {
+            rook_ast::JoinType::Natural => left
+                .schema()
+                .iter()
+                .filter(|l| {
+                    right
+                        .schema()
+                        .iter()
+                        .any(|r| r.name.eq_ignore_ascii_case(&l.name))
+                })
+                .map(|l| l.name.clone())
+                .collect(),
+            _ => j.using.clone(),
+        };
+        let keep_right = j.join_type == rook_ast::JoinType::Right;
+        let wrap = |op: Box<dyn PhysicalOperator>| -> Box<dyn PhysicalOperator> {
+            if merged_names.is_empty() {
+                op
+            } else {
+                Box::new(MergedColumnsOperator::new(op, &merged_names, keep_right))
+            }
+        };
+
+        let mut combined_schema: Vec<ColumnInfo> = left
             .schema()
             .iter()
             .cloned()
             .chain(right.schema().iter().cloned())
             .collect();
+        mark_merged(&mut combined_schema, &merged_names, keep_right);
 
         // Resolve the join condition against the combined schema.
         // For NATURAL JOIN, we build equality predicates on common column names.
@@ -62,9 +90,20 @@ impl PhysicalPlanner {
                         let col_name = r_col.name.clone();
                         // Use the right column's actual table qualifier for the rhs
                         let right_table = r_col.table.clone();
+                        // Qualified by the left column's table, so a chain
+                        // of joins that already has the name twice is unambiguous.
+                        let left_table = left_schema
+                            .iter()
+                            .find(|l| l.name.eq_ignore_ascii_case(&col_name) && !l.merged)
+                            .or_else(|| {
+                                left_schema
+                                    .iter()
+                                    .find(|l| l.name.eq_ignore_ascii_case(&col_name))
+                            })
+                            .and_then(|l| l.table.clone());
                         equality_preds.push(Predicate::Compare(
                             Expr::Column {
-                                table: None,
+                                table: left_table,
                                 column: col_name.clone(),
                             },
                             ComparisonOp::Equals,
@@ -83,8 +122,7 @@ impl PhysicalPlanner {
             }
             _ => match &j.condition {
                 Some(pred_node) => {
-                    let column_names: Vec<String> =
-                        combined_schema.iter().map(|c| c.name.clone()).collect();
+                    let column_names = binding_names(&combined_schema);
                     Some(predicate_from_ast(pred_node, &column_names)?)
                 }
                 None => None,
@@ -197,7 +235,7 @@ impl PhysicalPlanner {
                                 outer_card, idx_name, inner_ts.table
                             )
                         });
-                        return Ok(Box::new(
+                        return Ok(wrap(Box::new(
                             IndexNestedLoopJoinOperator::new(
                                 left,
                                 btree,
@@ -208,7 +246,7 @@ impl PhysicalPlanner {
                                 join_type,
                             )
                             .described(&inner_ts.table, idx_name),
-                        ));
+                        )));
                     }
                 }
             }
@@ -227,9 +265,9 @@ impl PhysicalPlanner {
                 extract_equi_join_keys(pred, &left_schema, &right_schema)
                 && !build_keys.is_empty()
             {
-                return Ok(Box::new(HashJoinOperator::new(
+                return Ok(wrap(Box::new(HashJoinOperator::new(
                     left, right, build_keys, probe_keys, residual,
-                )));
+                ))));
             }
         }
 
@@ -251,16 +289,16 @@ impl PhysicalPlanner {
                     .zip(right_keys.iter())
                     .all(|(l, r)| keys_hash_alike(l, &left_schema, r, &right_schema))
             {
-                return Ok(Box::new(HashJoinOperator::with_join_type(
+                return Ok(wrap(Box::new(HashJoinOperator::with_join_type(
                     left, right, left_keys, right_keys, residual, join_type,
-                )));
+                ))));
             }
         }
 
         // 4. Fallback: NestedLoopJoin for all join types
-        Ok(Box::new(NestedLoopJoinOperator::new(
+        Ok(wrap(Box::new(NestedLoopJoinOperator::new(
             left, right, predicate, join_type,
-        )))
+        ))))
     }
 
     /// Plan an aggregate (GROUP BY / HAVING) logical node into a physical operator.
@@ -279,7 +317,7 @@ impl PhysicalPlanner {
         a: &LogicalAggregate,
     ) -> RookResult<Box<dyn PhysicalOperator>> {
         let child_schema = child.schema();
-        let column_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
+        let column_names = binding_names(child_schema);
         let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
 
         // ─── Resolve GROUP BY expressions ────────────────────────────────
@@ -417,6 +455,7 @@ impl PhysicalPlanner {
                 .iter()
                 .zip(group_by_types.iter())
                 .map(|(name, dt)| ColumnInfo {
+                    merged: false,
                     name: name.clone(),
                     data_type: dt.clone(),
                     table: None,
@@ -424,12 +463,13 @@ impl PhysicalPlanner {
                 .collect();
             for agg in &aggregates {
                 having_schema.push(ColumnInfo {
+                    merged: false,
                     name: agg.output_name.clone(),
                     data_type: agg.output_type.clone(),
                     table: None,
                 });
             }
-            let having_names: Vec<String> = having_schema.iter().map(|c| c.name.clone()).collect();
+            let having_names = binding_names(&having_schema);
             Some(self.build_predicate_with_subqueries(
                 &having_node,
                 &having_names,
@@ -478,6 +518,7 @@ impl PhysicalPlanner {
             .columns
             .iter()
             .map(|c| super::super::tuple::ColumnInfo {
+                merged: false,
                 name: c.name.clone(),
                 data_type: crate::types::datatype::DataType::Varchar(u16::MAX),
                 table: Some(cte_table_name.clone()),

@@ -57,6 +57,7 @@ mod tests {
 
     fn int_schema() -> Vec<ColumnInfo> {
         vec![ColumnInfo {
+            merged: false,
             name: "val".into(),
             data_type: DataType::Int,
             table: None,
@@ -74,6 +75,7 @@ mod tests {
 
     fn outer_schema() -> Vec<ColumnInfo> {
         vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Int,
             table: None,
@@ -345,6 +347,7 @@ mod tests {
     #[test]
     fn test_is_distinct_from_both_null() {
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "a".into(),
             data_type: DataType::Int,
             table: None,
@@ -368,11 +371,13 @@ mod tests {
     fn test_is_distinct_from_null_and_value() {
         let schema = vec![
             ColumnInfo {
+                merged: false,
                 name: "a".into(),
                 data_type: DataType::Int,
                 table: None,
             },
             ColumnInfo {
+                merged: false,
                 name: "b".into(),
                 data_type: DataType::Int,
                 table: None,
@@ -412,11 +417,13 @@ mod tests {
     fn test_is_distinct_from_equal_values() {
         let schema = vec![
             ColumnInfo {
+                merged: false,
                 name: "a".into(),
                 data_type: DataType::Int,
                 table: None,
             },
             ColumnInfo {
+                merged: false,
                 name: "b".into(),
                 data_type: DataType::Int,
                 table: None,
@@ -442,11 +449,13 @@ mod tests {
     fn test_is_distinct_from_different_values() {
         let schema = vec![
             ColumnInfo {
+                merged: false,
                 name: "a".into(),
                 data_type: DataType::Int,
                 table: None,
             },
             ColumnInfo {
+                merged: false,
                 name: "b".into(),
                 data_type: DataType::Int,
                 table: None,
@@ -472,11 +481,13 @@ mod tests {
     fn test_is_distinct_from_text_values() {
         let schema = vec![
             ColumnInfo {
+                merged: false,
                 name: "a".into(),
                 data_type: DataType::Varchar(50),
                 table: None,
             },
             ColumnInfo {
+                merged: false,
                 name: "b".into(),
                 data_type: DataType::Varchar(50),
                 table: None,
@@ -522,6 +533,7 @@ mod tests {
     #[test]
     fn test_is_true_on_true() {
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -544,6 +556,7 @@ mod tests {
     #[test]
     fn test_is_true_on_false() {
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -566,6 +579,7 @@ mod tests {
     #[test]
     fn test_is_true_on_null() {
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -588,6 +602,7 @@ mod tests {
     #[test]
     fn test_is_false_on_false() {
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -610,6 +625,7 @@ mod tests {
     #[test]
     fn test_is_false_on_true() {
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -632,6 +648,7 @@ mod tests {
     #[test]
     fn test_is_unknown_on_null() {
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -654,6 +671,7 @@ mod tests {
     #[test]
     fn test_is_unknown_on_known_value() {
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -677,6 +695,7 @@ mod tests {
     fn test_is_not_true_on_false() {
         // IS NOT TRUE is true when value is false OR null
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -714,6 +733,7 @@ mod tests {
     fn test_is_not_false_on_true() {
         // IS NOT FALSE is true when value is true OR null
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -751,6 +771,7 @@ mod tests {
     fn test_is_not_unknown() {
         // IS NOT UNKNOWN is true when value is known (true or false)
         let schema = vec![ColumnInfo {
+            merged: false,
             name: "x".into(),
             data_type: DataType::Bool,
             table: None,
@@ -896,5 +917,44 @@ mod tests {
             args: vec![Expr::Null],
         };
         assert_eq!(sqrt_null_expr.evaluate(&tuple, &schema).unwrap(), None);
+    }
+    fn col(table: &str, name: &str, merged: bool) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: DataType::Int,
+            table: Some(table.to_string()),
+            merged,
+        }
+    }
+
+    #[test]
+    fn resolve_column_rejects_a_bare_name_two_columns_share() {
+        use super::super::resolve_column;
+        use crate::backend::error::RookError;
+        let schema = vec![
+            col("l", "id", false),
+            col("r", "id", false),
+            col("r", "x", false),
+        ];
+        assert!(matches!(
+            resolve_column(&schema, None, "ID"),
+            Err(RookError::AmbiguousColumn(_))
+        ));
+        assert_eq!(resolve_column(&schema, Some("r"), "id").unwrap(), Some(1));
+        assert_eq!(resolve_column(&schema, None, "x").unwrap(), Some(2));
+        assert_eq!(resolve_column(&schema, None, "nope").unwrap(), None);
+    }
+
+    #[test]
+    fn merged_copy_does_not_make_a_bare_name_ambiguous() {
+        use super::super::{binding_names, resolve_column};
+        let schema = vec![col("l", "k", false), col("r", "k", true)];
+        assert_eq!(resolve_column(&schema, None, "k").unwrap(), Some(0));
+        // The marked copy is still reachable by its table.
+        assert_eq!(resolve_column(&schema, Some("r"), "k").unwrap(), Some(1));
+        assert_eq!(binding_names(&schema), ["k", ""]);
+        // A RIGHT join keeps the right copy.
+        let schema = vec![col("l", "k", true), col("r", "k", false)];
+        assert_eq!(resolve_column(&schema, None, "k").unwrap(), Some(1));
     }
 }

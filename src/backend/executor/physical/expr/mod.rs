@@ -15,6 +15,7 @@ pub use predicate::{BooleanTest, ComparisonOp, Predicate, evaluate_predicate};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::backend::error::{RookError, RookResult};
 use crate::types::value::DataValue;
 
 use super::operators::PhysicalOperator;
@@ -182,7 +183,9 @@ impl Expr {
                 //    Match only columns where BOTH the table name AND column name match.
                 //    This correctly disambiguates `t1.id` from `t2.id` in join schemas.
                 // 2. If Expr has no table qualifier (e.g. `id`):
-                //    Match the FIRST column with the given name, regardless of table.
+                //    Match the first column with the given name, regardless of table.
+                //    The planner already rejected names that match more than one
+                //    (`expr_from_ast`), so this is a plain lookup, not a check.
                 let idx = column_position(schema, table.as_deref(), column).ok_or_else(|| {
                     let wanted = match table {
                         Some(t) => format!("{}.{}", t, column),
@@ -1307,7 +1310,10 @@ where
 ///
 /// A qualified name matches a column of that table, or else a column whose
 /// table an operator dropped (but never a column of another table). An
-/// unqualified name matches the first column with that name.
+/// unqualified name matches the first column with that name that a
+/// `USING` join has not merged away. The planner has already rejected
+/// ambiguous names (see [`resolve_column`]), so this is the cheap lookup
+/// for rows.
 pub(crate) fn column_position(
     schema: &[ColumnInfo],
     table: Option<&str>,
@@ -1330,6 +1336,49 @@ pub(crate) fn column_position(
             }),
         None => schema
             .iter()
-            .position(|ci| ci.name.eq_ignore_ascii_case(column)),
+            .position(|ci| ci.name.eq_ignore_ascii_case(column) && !ci.merged)
+            .or_else(|| {
+                schema
+                    .iter()
+                    .position(|ci| ci.name.eq_ignore_ascii_case(column))
+            }),
     }
+}
+
+/// Bind a column reference to its position in `schema`, once, at plan time.
+///
+/// Like [`column_position`], but a bare name that matches more than one
+/// column is an error (`Column reference 'id' is ambiguous`), as in SQL.
+/// `Ok(None)` means there is no such column. Columns a `USING` / `NATURAL`
+/// join merged do not count as a second match.
+pub(crate) fn resolve_column(
+    schema: &[ColumnInfo],
+    table: Option<&str>,
+    column: &str,
+) -> RookResult<Option<usize>> {
+    if table.is_none() {
+        let mut named = schema
+            .iter()
+            .enumerate()
+            .filter(|(_, ci)| ci.name.eq_ignore_ascii_case(column) && !ci.merged);
+        if named.next().is_some() && named.next().is_some() {
+            return Err(RookError::AmbiguousColumn(column.to_string()));
+        }
+    }
+    Ok(column_position(schema, table, column))
+}
+
+/// The names of `schema`'s columns for checking bare references: a column
+/// a join merged away has none, so its twin is the only match.
+pub(crate) fn binding_names(schema: &[ColumnInfo]) -> Vec<String> {
+    schema
+        .iter()
+        .map(|c| {
+            if c.merged {
+                String::new()
+            } else {
+                c.name.clone()
+            }
+        })
+        .collect()
 }

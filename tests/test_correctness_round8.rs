@@ -89,6 +89,7 @@ fn col(name: &str, ty: DataType, nullable: bool) -> Column {
 
 fn ci(name: &str, dt: DataType) -> ColumnInfo {
     ColumnInfo {
+        merged: false,
         name: name.to_string(),
         data_type: dt,
         table: None,

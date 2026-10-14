@@ -1709,6 +1709,7 @@ mod spill_tests {
                 info: names
                     .iter()
                     .map(|name| ColumnInfo {
+                        merged: false,
                         name: name.to_string(),
                         data_type: DataType::Int,
                         table: None,

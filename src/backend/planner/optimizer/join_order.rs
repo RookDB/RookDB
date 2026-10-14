@@ -248,6 +248,7 @@ impl Optimizer {
                 right: Box::new(self.order_joins(*j.right, guard)),
                 join_type: j.join_type,
                 condition: j.condition,
+                using: j.using,
             }),
             LogicalPlan::Filter(f) => LogicalPlan::Filter(LogicalFilter {
                 predicate: f.predicate,
@@ -375,6 +376,7 @@ impl Optimizer {
                     JoinType::Cross
                 },
                 condition,
+                using: vec![],
             });
             tree = Some((join, join_cardinality(acc_size, sizes[i])));
         }
@@ -389,6 +391,7 @@ impl Optimizer {
                 right: Box::new(self.keep_chain(*j.right, guard)),
                 join_type: j.join_type,
                 condition: j.condition,
+                using: j.using,
             }),
             other => self.order_joins(other, guard),
         }

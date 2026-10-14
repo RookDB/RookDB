@@ -7,7 +7,7 @@
 use rook_ast::logical::*;
 
 use super::explain::{PlanNode, PlanTrace};
-use super::expr::{Expr, Predicate, expr_from_ast};
+use super::expr::{Expr, Predicate, binding_names, expr_from_ast, resolve_column};
 use super::operators::{
     CteScanOperator, DistinctOperator, FilterOperator, IndexScanMode, IndexScanOperator,
     InsertOperator, LimitOperator, PhysicalOperator, ProjectionOperator, SeqScanOperator,
@@ -143,8 +143,7 @@ impl PhysicalPlanner {
             LogicalPlan::Project(p) => {
                 let child = self.plan_internal(&p.child, cte_registry)?;
                 let child_schema = child.schema();
-                let column_names: Vec<String> =
-                    child_schema.iter().map(|c| c.name.clone()).collect();
+                let column_names = binding_names(child_schema);
                 let child_types: Vec<_> =
                     child_schema.iter().map(|c| c.data_type.clone()).collect();
 
@@ -175,6 +174,7 @@ impl PhysicalPlanner {
                 let child_schema: Vec<ColumnInfo> = child.schema().to_vec();
                 let column_names: Vec<String> =
                     child_schema.iter().map(|c| c.name.clone()).collect();
+                let bind_names = binding_names(&child_schema);
                 let child_types: Vec<_> =
                     child_schema.iter().map(|c| c.data_type.clone()).collect();
 
@@ -193,12 +193,12 @@ impl PhysicalPlanner {
                 for ob in &s.order_by {
                     match &ob.expr {
                         rook_ast::ExprNode::Column(name) => {
-                            let idx = column_names
-                                .iter()
-                                .position(|n| n.eq_ignore_ascii_case(name))
-                                .ok_or_else(|| RookError::NotFound {
-                                    entity: "Column",
-                                    name: name.clone(),
+                            let idx =
+                                resolve_column(&child_schema, None, name)?.ok_or_else(|| {
+                                    RookError::NotFound {
+                                        entity: "Column",
+                                        name: name.clone(),
+                                    }
                                 })?;
                             sort_keys.push((idx, !ob.ascending));
                         }
@@ -206,7 +206,7 @@ impl PhysicalPlanner {
                             let name = parts.last().cloned().unwrap_or_default();
                             // Under a join, `b.id` is b's `id`, not the first `id`.
                             let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
-                            let idx = super::expr::column_position(&child_schema, table, &name)
+                            let idx = resolve_column(&child_schema, table, &name)?
                                 .or_else(|| {
                                     column_names
                                         .iter()
@@ -232,11 +232,8 @@ impl PhysicalPlanner {
                         }
                         complex_expr => {
                             // Complex sort expression: project as a hidden column
-                            let (phys_expr, data_type) = self.plan_projection_expr(
-                                complex_expr,
-                                &column_names,
-                                &child_types,
-                            )?;
+                            let (phys_expr, data_type) =
+                                self.plan_projection_expr(complex_expr, &bind_names, &child_types)?;
                             let col_name = format!("__sort_col_{}", extra_projections.len());
                             let sort_idx = column_names.len() + extra_projections.len();
                             sort_keys.push((sort_idx, !ob.ascending));
@@ -444,6 +441,7 @@ impl PhysicalPlanner {
                     let schema: Vec<ColumnInfo> = table_schema
                         .iter()
                         .map(|c| ColumnInfo {
+                            merged: false,
                             name: c.name.clone(),
                             data_type: c.data_type.clone(),
                             table: Some(inp.table.clone()),
@@ -541,6 +539,7 @@ impl PhysicalPlanner {
                     .iter()
                     .enumerate()
                     .map(|(i, c)| super::tuple::ColumnInfo {
+                        merged: false,
                         name: c.name.clone(),
                         data_type: types
                             .map(|types| types[i].clone())
@@ -638,6 +637,7 @@ impl PhysicalPlanner {
         let column_info: Vec<ColumnInfo> = table_schema
             .iter()
             .map(|c| ColumnInfo {
+                merged: false,
                 name: c.name.clone(),
                 data_type: c.data_type.clone(),
                 table: Some(table_name.clone()),
@@ -846,6 +846,7 @@ impl PhysicalPlanner {
                     .cloned()
                     .unwrap_or(DataType::Varchar(255));
                 ColumnInfo {
+                    merged: false,
                     name: c.name.clone(),
                     data_type: dt,
                     table: None,
@@ -887,7 +888,7 @@ impl PhysicalPlanner {
         pred_node: &rook_ast::PredicateNode,
         schema: &[ColumnInfo],
     ) -> RookResult<Predicate> {
-        let column_names: Vec<String> = schema.iter().map(|c| c.name.clone()).collect();
+        let column_names = binding_names(schema);
         self.build_predicate_with_subqueries(pred_node, &column_names, schema)
     }
 }
@@ -911,6 +912,7 @@ impl PhysicalPlanner {
                         .iter()
                         .zip(child_types.iter())
                         .map(|(c, t)| ColumnInfo {
+                            merged: false,
                             name: c.clone(),
                             data_type: t.clone(),
                             table: None,
@@ -934,6 +936,7 @@ impl PhysicalPlanner {
                     .iter()
                     .zip(child_types.iter())
                     .map(|(c, t)| ColumnInfo {
+                        merged: false,
                         name: c.clone(),
                         data_type: t.clone(),
                         table: None,
@@ -960,6 +963,7 @@ impl PhysicalPlanner {
                     .iter()
                     .zip(child_types.iter())
                     .map(|(c, t)| ColumnInfo {
+                        merged: false,
                         name: c.clone(),
                         data_type: t.clone(),
                         table: None,

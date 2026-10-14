@@ -395,6 +395,7 @@ fn plan_select_with_ctes(
             right: Box::new(right_plan),
             join_type: join.join_type,
             condition: join.condition.clone(),
+            using: join.using.clone(),
         });
     }
 

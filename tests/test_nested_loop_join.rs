@@ -38,6 +38,7 @@ impl CountingSource {
         let schema = ["id", "k"]
             .iter()
             .map(|name| ColumnInfo {
+                merged: false,
                 name: name.to_string(),
                 data_type: DataType::Int,
                 table: Some(table.to_string()),

@@ -421,6 +421,7 @@ impl AggregateOperator {
             .zip(group_by_types.iter())
             .zip(group_by_exprs.iter())
             .map(|((name, dt), expr)| ColumnInfo {
+                merged: false,
                 name: name.clone(),
                 data_type: dt.clone(),
                 table: match expr {
@@ -440,6 +441,7 @@ impl AggregateOperator {
             .collect();
         for agg in &aggregates {
             output_schema.push(ColumnInfo {
+                merged: false,
                 name: agg.output_name.clone(),
                 data_type: agg.output_type.clone(),
                 table: None,

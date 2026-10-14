@@ -8,18 +8,23 @@ use super::Expr;
 use super::predicate::{BooleanTest, ComparisonOp, Predicate};
 
 /// Convert a `rook_ast::ExprNode` into a physical `Expr`, resolving column
-/// names against a schema.
+/// names against a schema. `column_names` come from `binding_names`, so a
+/// bare name that two columns share is rejected as ambiguous.
 pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> RookResult<Expr> {
     match node {
         rook_ast::ExprNode::Column(name) => {
             // Unqualified column reference — just store the column name.
             // Resolution happens at evaluation time against the tuple's schema.
-            // Verify the column exists in the schema for early error detection.
-            if !column_names.iter().any(|c| c.eq_ignore_ascii_case(name)) {
+            // Verify here, once, that it names exactly one column.
+            let mut named = column_names.iter().filter(|c| c.eq_ignore_ascii_case(name));
+            if named.next().is_none() {
                 return Err(RookError::NotFound {
                     entity: "Column",
                     name: name.clone(),
                 });
+            }
+            if named.next().is_some() {
+                return Err(RookError::AmbiguousColumn(name.clone()));
             }
             Ok(Expr::Column {
                 table: None,

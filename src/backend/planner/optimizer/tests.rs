@@ -841,6 +841,7 @@ fn test_join_ordering_smaller_on_left() {
         right: Box::new(make_table_scan("orders", &["id"])),
         join_type: rook_ast::JoinType::Inner,
         condition: Some(eq_pred(qcol("users", "id"), qcol("orders", "id"))),
+        using: vec![],
     });
     let optimizer = Optimizer::with_statistics(stats);
     let optimized = optimizer.join_ordering(plan);
@@ -913,6 +914,7 @@ fn test_join_ordering_preserves_left_join() {
         right: Box::new(make_table_scan("orders", &["id"])),
         join_type: rook_ast::JoinType::Left,
         condition: Some(eq_pred(column("id"), column("id"))),
+        using: vec![],
     });
     let optimizer = Optimizer::with_statistics(stats.clone());
     let optimized = optimizer.join_ordering(plan);
@@ -977,6 +979,7 @@ fn test_join_ordering_preserves_right_join() {
         right: Box::new(make_table_scan("orders", &["id"])),
         join_type: rook_ast::JoinType::Right,
         condition: Some(eq_pred(column("id"), column("id"))),
+        using: vec![],
     });
     let optimizer = Optimizer::with_statistics(stats);
     let optimized = optimizer.join_ordering(plan);
@@ -1043,6 +1046,7 @@ fn test_join_ordering_reorders_inner_join() {
         right: Box::new(make_table_scan("orders", &["id"])),
         join_type: rook_ast::JoinType::Inner,
         condition: Some(eq_pred(qcol("users", "id"), qcol("orders", "id"))),
+        using: vec![],
     });
     let optimizer = Optimizer::with_statistics(stats);
     let optimized = optimizer.join_ordering(plan);
@@ -1096,6 +1100,7 @@ fn inner_join(left: LogicalPlan, right: LogicalPlan, condition: PredicateNode) -
         right: Box::new(right),
         join_type: rook_ast::JoinType::Inner,
         condition: Some(condition),
+        using: vec![],
     })
 }
 
@@ -1226,6 +1231,7 @@ fn test_join_ordering_stops_at_outer_join() {
         right: Box::new(make_table_scan("small", &["mid_id"])),
         join_type: rook_ast::JoinType::Left,
         condition: Some(eq_pred(qcol("mid", "id"), qcol("small", "mid_id"))),
+        using: vec![],
     });
     let optimized = Optimizer::with_statistics(stats).join_ordering(plan);
     let LogicalPlan::Join(top) = &optimized else {
@@ -1309,6 +1315,7 @@ fn test_push_filter_with_both_side_predicate_merged_into_inner_join_condition() 
             right: Box::new(make_table_scan("orders", &["id", "user_id", "amount"])),
             join_type: JoinType::Inner,
             condition: Some(eq_pred(column("user_id"), column("id"))),
+            using: vec![],
         })),
     });
 
@@ -1357,6 +1364,7 @@ fn test_push_cross_side_predicate_stays_above_left_join() {
             right: Box::new(make_table_scan("orders", &["id", "user_id", "amount"])),
             join_type: JoinType::Left,
             condition: Some(eq_pred(column("user_id"), column("id"))),
+            using: vec![],
         })),
     });
 
@@ -1385,6 +1393,7 @@ fn test_push_cross_side_predicate_stays_above_right_join() {
             right: Box::new(make_table_scan("orders", &["id", "user_id", "amount"])),
             join_type: JoinType::Right,
             condition: Some(eq_pred(column("user_id"), column("id"))),
+            using: vec![],
         })),
     });
 
@@ -1417,6 +1426,7 @@ fn test_push_conjuncts_are_placed_independently() {
                 right: Box::new(make_table_scan("orders", &["id", "user_id", "amount"])),
                 join_type,
                 condition: Some(eq_pred(column("user_id"), column("id"))),
+                using: vec![],
             })),
         })
     };
@@ -1449,6 +1459,7 @@ fn test_push_qualified_predicate_is_not_single_sided() {
             right: Box::new(make_table_scan("r", &["k", "v"])),
             join_type: JoinType::Cross,
             condition: None,
+            using: vec![],
         })),
     });
 
@@ -1476,6 +1487,7 @@ fn test_push_single_side_predicate_pushed_through_join() {
             right: Box::new(make_table_scan("orders", &["id", "user_id", "amount"])),
             join_type: JoinType::Inner,
             condition: Some(eq_pred(column("user_id"), column("id"))),
+            using: vec![],
         })),
     });
 
@@ -1505,6 +1517,7 @@ fn test_push_cross_side_predicate_merged_into_cross_join() {
             right: Box::new(make_table_scan("orders", &["id", "user_id", "amount"])),
             join_type: JoinType::Cross,
             condition: None,
+            using: vec![],
         })),
     });
 

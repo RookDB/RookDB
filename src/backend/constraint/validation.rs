@@ -442,6 +442,7 @@ pub(crate) fn check_constraints_meta(
     let schema: Vec<crate::backend::executor::physical::tuple::ColumnInfo> = columns
         .iter()
         .map(|c| crate::backend::executor::physical::tuple::ColumnInfo {
+            merged: false,
             name: c.name.clone(),
             data_type: c.data_type.clone(),
             table: None,

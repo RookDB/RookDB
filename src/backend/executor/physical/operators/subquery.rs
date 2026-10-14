@@ -46,6 +46,7 @@ impl SubqueryExecOperator {
             SubqueryType::Scalar => child.schema().to_vec(),
             SubqueryType::Exists => {
                 vec![ColumnInfo {
+                    merged: false,
                     name: "exists".to_string(),
                     data_type: DataType::Bool,
                     table: None,

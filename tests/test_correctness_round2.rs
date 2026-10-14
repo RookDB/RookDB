@@ -263,6 +263,7 @@ impl PhysicalOperator for MockSource {
 
 fn int_tuples(descending: bool, n: usize) -> (Vec<Tuple>, Vec<ColumnInfo>) {
     let schema = vec![ColumnInfo {
+        merged: false,
         name: "v".to_string(),
         data_type: DataType::Int,
         table: None,

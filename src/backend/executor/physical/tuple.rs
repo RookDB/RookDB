@@ -8,8 +8,12 @@ pub struct ColumnInfo {
     pub data_type: DataType,
     /// Optional table name for qualified column references (e.g. `t1.id`).
     /// Used by join operators to disambiguate columns with the same name
-    /// from different tables. Currently informational; lookups use `name` only.
+    /// from different tables.
     pub table: Option<String>,
+    /// A `USING` / `NATURAL` join shows a shared column once: the copy that
+    /// loses is marked, and a bare reference to the name skips it instead
+    /// of being ambiguous. Qualified references still reach it.
+    pub merged: bool,
 }
 
 /// A single row in the result set.

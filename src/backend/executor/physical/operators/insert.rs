@@ -353,11 +353,13 @@ mod tests {
     fn int_schema() -> Vec<ColumnInfo> {
         vec![
             ColumnInfo {
+                merged: false,
                 name: "a".into(),
                 data_type: DataType::Int,
                 table: None,
             },
             ColumnInfo {
+                merged: false,
                 name: "b".into(),
                 data_type: DataType::Int,
                 table: None,
