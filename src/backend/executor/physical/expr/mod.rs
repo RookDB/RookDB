@@ -143,350 +143,38 @@ impl Expr {
     /// Evaluate this expression against a tuple and schema, returning the resulting value
     /// (or `None` for NULL).
     pub fn evaluate(&self, tuple: &Tuple, schema: &[ColumnInfo]) -> RookResult<Option<DataValue>> {
+        use std::cmp::Ordering;
         match self {
             Expr::CorrelatedScalarSubquery {
                 inner_plan,
                 params,
                 outer_col_indices,
-            } => {
-                for (param, idx) in params.iter().zip(outer_col_indices.iter()) {
-                    let outer_val = tuple.values.get(*idx).and_then(|v| v.clone());
-                    *param.borrow_mut() = outer_val;
-                }
-                let mut plan_ref = inner_plan.borrow_mut();
-                plan_ref
-                    .reset()
-                    .context("Correlated scalar subquery reset error")?;
-                match plan_ref
-                    .next()
-                    .context("Correlated scalar subquery error")?
-                {
-                    None => Ok(None),
-                    Some(mut t) => {
-                        let val = t.values.drain(..).next().flatten();
-                        if plan_ref
-                            .next()
-                            .context("Correlated scalar subquery error")?
-                            .is_some()
-                        {
-                            return Err(RookError::Evaluation(
-                                "Scalar subquery returned more than one row".to_string(),
-                            ));
-                        }
-                        Ok(val)
-                    }
-                }
-            }
-            Expr::SubqueryScalar(sub) => {
-                let rows = sub.rows(tuple)?;
-                match rows.len() {
-                    0 => Ok(None),
-                    1 => Ok(rows[0].values.first().cloned().flatten()),
-                    _ => Err(RookError::Evaluation(
-                        "Scalar subquery returned more than one row".to_string(),
-                    )),
-                }
-            }
-            Expr::Column { table, column } => {
-                // Look up the column by name in the schema (case-insensitive).
-                // ColumnInfo.table is populated with actual table names by scan/join
-                // operators, so table-qualified references like `t1.id` vs `t2.id`
-                // resolve to different columns directly.
-                //
-                // Resolution rules:
-                // 1. If Expr has a table qualifier (e.g. `t1.id`):
-                //    Match only columns where BOTH the table name AND column name match.
-                //    This correctly disambiguates `t1.id` from `t2.id` in join schemas.
-                // 2. If Expr has no table qualifier (e.g. `id`):
-                //    Match the first column with the given name, regardless of table.
-                //    The planner already rejected names that match more than one
-                //    (`expr_from_ast`), so this is a plain lookup, not a check.
-                let idx = column_position(schema, table.as_deref(), column).ok_or_else(|| {
-                    let wanted = match table {
-                        Some(t) => format!("{}.{}", t, column),
-                        None => column.clone(),
-                    };
-                    let available: Vec<String> = schema
-                        .iter()
-                        .map(|c| match &c.table {
-                            Some(t) => format!("{}.{}", t, c.name),
-                            None => c.name.clone(),
-                        })
-                        .collect();
-                    format!(
-                        "Column '{}' not found (available: {})",
-                        wanted,
-                        available.join(", ")
-                    )
-                })?;
-                Ok(tuple
-                    .values
-                    .get(idx)
-                    .ok_or_else(|| {
-                        format!(
-                            "Column '{}' index {} out of bounds (arity {})",
-                            column,
-                            idx,
-                            tuple.arity()
-                        )
-                    })?
-                    .clone())
-            }
+            } => evaluate_correlated_scalar_subquery(inner_plan, params, outer_col_indices, tuple),
+            Expr::SubqueryScalar(sub) => evaluate_subquery_scalar(sub, tuple),
+            Expr::Column { table, column } => evaluate_column(table, column, tuple, schema),
             Expr::Constant(dv) => Ok(Some(dv.clone())),
             Expr::Null => Ok(None),
-            Expr::Add(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                arithmetic_op(
-                    lv,
-                    rv,
-                    |a, b| {
-                        a.checked_add(b).ok_or_else(|| {
-                            RookError::Evaluation("Integer addition overflow".to_string())
-                        })
-                    },
-                    |a, b| {
-                        a.checked_add(b).ok_or_else(|| {
-                            RookError::Evaluation("BigInt addition overflow".to_string())
-                        })
-                    },
-                    |a, b| {
-                        a.checked_add(b).ok_or_else(|| {
-                            RookError::Evaluation("SmallInt addition overflow".to_string())
-                        })
-                    },
-                    |a, b| Ok(a + b),
-                    |a, b| Ok(a + b),
-                    numeric_add,
-                )
-            }
-            Expr::Sub(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                arithmetic_op(
-                    lv,
-                    rv,
-                    |a, b| {
-                        a.checked_sub(b).ok_or_else(|| {
-                            RookError::Evaluation("Integer subtraction overflow".to_string())
-                        })
-                    },
-                    |a, b| {
-                        a.checked_sub(b).ok_or_else(|| {
-                            RookError::Evaluation("BigInt subtraction overflow".to_string())
-                        })
-                    },
-                    |a, b| {
-                        a.checked_sub(b).ok_or_else(|| {
-                            RookError::Evaluation("SmallInt subtraction overflow".to_string())
-                        })
-                    },
-                    |a, b| Ok(a - b),
-                    |a, b| Ok(a - b),
-                    numeric_sub,
-                )
-            }
-            Expr::Mul(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                arithmetic_op(
-                    lv,
-                    rv,
-                    |a, b| {
-                        a.checked_mul(b).ok_or_else(|| {
-                            RookError::Evaluation("Integer multiplication overflow".to_string())
-                        })
-                    },
-                    |a, b| {
-                        a.checked_mul(b).ok_or_else(|| {
-                            RookError::Evaluation("BigInt multiplication overflow".to_string())
-                        })
-                    },
-                    |a, b| {
-                        a.checked_mul(b).ok_or_else(|| {
-                            RookError::Evaluation("SmallInt multiplication overflow".to_string())
-                        })
-                    },
-                    |a, b| Ok(a * b),
-                    |a, b| Ok(a * b),
-                    numeric_mul,
-                )
-            }
-            Expr::Div(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                arithmetic_op(
-                    lv,
-                    rv,
-                    |a, b| {
-                        if b == 0 {
-                            Err("Division by zero".into())
-                        } else {
-                            a.checked_div(b)
-                                .ok_or_else(|| "Integer division overflow".into())
-                        }
-                    },
-                    |a, b| {
-                        if b == 0 {
-                            Err("Division by zero".into())
-                        } else {
-                            a.checked_div(b)
-                                .ok_or_else(|| "BigInt division overflow".into())
-                        }
-                    },
-                    |a, b| {
-                        if b == 0 {
-                            Err("Division by zero".into())
-                        } else {
-                            a.checked_div(b)
-                                .ok_or_else(|| "SmallInt division overflow".into())
-                        }
-                    },
-                    |a, b| {
-                        if b == 0.0 {
-                            Err("Division by zero".into())
-                        } else {
-                            Ok(a / b)
-                        }
-                    },
-                    |a, b| {
-                        if b == 0.0 {
-                            Err("Division by zero".into())
-                        } else {
-                            Ok(a / b)
-                        }
-                    },
-                    numeric_div,
-                )
-            }
+            Expr::Add(l, r) => add_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
+            Expr::Sub(l, r) => sub_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
+            Expr::Mul(l, r) => mul_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
+            Expr::Div(l, r) => div_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
             Expr::Cast(inner, target_type) => {
-                let val = inner.evaluate(tuple, schema)?;
-                match val {
-                    None => Ok(None), // CAST(NULL AS type) → NULL
-                    Some(dv) => {
-                        let result = crate::types::functions::cast(&dv, target_type)
-                            .context("CAST error")?;
-                        Ok(Some(result))
-                    }
-                }
+                evaluate_cast(inner.evaluate(tuple, schema)?, target_type)
             }
             Expr::CorrelatedParam(param_cell) => Ok(param_cell.borrow().clone()),
             Expr::Case {
                 when_then_pairs,
                 else_result,
-            } => {
-                for (cond, res) in when_then_pairs {
-                    let cond_val = cond.evaluate(tuple, schema)?;
-                    match cond_val {
-                        Some(DataValue::Bool(true)) => return res.evaluate(tuple, schema),
-                        _ => continue, // false or NULL → try next WHEN
-                    }
-                }
-                // No WHEN matched, use ELSE or NULL
-                match else_result {
-                    Some(else_expr) => else_expr.evaluate(tuple, schema),
-                    None => Ok(None),
-                }
-            }
+            } => evaluate_case(when_then_pairs, else_result, tuple, schema),
             Expr::Function { name, args } => evaluate_scalar_function(name, args, tuple, schema),
-            Expr::Eq(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                match (lv, rv) {
-                    (Some(l), Some(r)) => {
-                        let ord = crate::types::Comparable::compare(&l, &r)
-                            .context("Comparison error")?;
-                        Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Equal)))
-                    }
-                    _ => Ok(None),
-                }
-            }
-            Expr::Ne(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                match (lv, rv) {
-                    (Some(l), Some(r)) => {
-                        let ord = crate::types::Comparable::compare(&l, &r)
-                            .context("Comparison error")?;
-                        Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Equal)))
-                    }
-                    _ => Ok(None),
-                }
-            }
-            Expr::Lt(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                match (lv, rv) {
-                    (Some(l), Some(r)) => {
-                        let ord = crate::types::Comparable::compare(&l, &r)
-                            .context("Comparison error")?;
-                        Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Less)))
-                    }
-                    _ => Ok(None),
-                }
-            }
-            Expr::Le(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                match (lv, rv) {
-                    (Some(l), Some(r)) => {
-                        let ord = crate::types::Comparable::compare(&l, &r)
-                            .context("Comparison error")?;
-                        Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Greater)))
-                    }
-                    _ => Ok(None),
-                }
-            }
-            Expr::Gt(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                match (lv, rv) {
-                    (Some(l), Some(r)) => {
-                        let ord = crate::types::Comparable::compare(&l, &r)
-                            .context("Comparison error")?;
-                        Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Greater)))
-                    }
-                    _ => Ok(None),
-                }
-            }
-            Expr::Ge(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                match (lv, rv) {
-                    (Some(l), Some(r)) => {
-                        let ord = crate::types::Comparable::compare(&l, &r)
-                            .context("Comparison error")?;
-                        Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Less)))
-                    }
-                    _ => Ok(None),
-                }
-            }
-            Expr::And(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                match (lv, rv) {
-                    (Some(DataValue::Bool(false)), _) | (_, Some(DataValue::Bool(false))) => {
-                        Ok(Some(DataValue::Bool(false)))
-                    }
-                    (Some(DataValue::Bool(true)), Some(DataValue::Bool(true))) => {
-                        Ok(Some(DataValue::Bool(true)))
-                    }
-                    _ => Ok(None),
-                }
-            }
-            Expr::Or(l, r) => {
-                let lv = l.evaluate(tuple, schema)?;
-                let rv = r.evaluate(tuple, schema)?;
-                match (lv, rv) {
-                    (Some(DataValue::Bool(true)), _) | (_, Some(DataValue::Bool(true))) => {
-                        Ok(Some(DataValue::Bool(true)))
-                    }
-                    (Some(DataValue::Bool(false)), Some(DataValue::Bool(false))) => {
-                        Ok(Some(DataValue::Bool(false)))
-                    }
-                    _ => Ok(None),
-                }
-            }
+            Expr::Eq(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o == Ordering::Equal),
+            Expr::Ne(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o != Ordering::Equal),
+            Expr::Lt(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o == Ordering::Less),
+            Expr::Le(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o != Ordering::Greater),
+            Expr::Gt(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o == Ordering::Greater),
+            Expr::Ge(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o != Ordering::Less),
+            Expr::And(l, r) => and_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
+            Expr::Or(l, r) => or_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
             Expr::Not(inner) => {
                 let v = inner.evaluate(tuple, schema)?;
                 match v {
@@ -503,6 +191,308 @@ impl Expr {
                 Ok(Some(DataValue::Bool(v.is_some())))
             }
         }
+    }
+}
+
+/// Run the inner plan of a correlated scalar subquery with the outer row's
+/// values bound to its parameters; at most one row may come back.
+fn evaluate_correlated_scalar_subquery(
+    inner_plan: &Rc<RefCell<Box<dyn PhysicalOperator>>>,
+    params: &[Rc<RefCell<Option<DataValue>>>],
+    outer_col_indices: &[usize],
+    tuple: &Tuple,
+) -> RookResult<Option<DataValue>> {
+    for (param, idx) in params.iter().zip(outer_col_indices.iter()) {
+        let outer_val = tuple.values.get(*idx).and_then(|v| v.clone());
+        *param.borrow_mut() = outer_val;
+    }
+    let mut plan_ref = inner_plan.borrow_mut();
+    plan_ref
+        .reset()
+        .context("Correlated scalar subquery reset error")?;
+    match plan_ref
+        .next()
+        .context("Correlated scalar subquery error")?
+    {
+        None => Ok(None),
+        Some(mut t) => {
+            let val = t.values.drain(..).next().flatten();
+            if plan_ref
+                .next()
+                .context("Correlated scalar subquery error")?
+                .is_some()
+            {
+                return Err(RookError::Evaluation(
+                    "Scalar subquery returned more than one row".to_string(),
+                ));
+            }
+            Ok(val)
+        }
+    }
+}
+
+/// A correlated scalar subquery run as a full plan: no rows is NULL, more than one is an error.
+fn evaluate_subquery_scalar(
+    sub: &correlated::CorrelatedSubquery,
+    tuple: &Tuple,
+) -> RookResult<Option<DataValue>> {
+    let rows = sub.rows(tuple)?;
+    match rows.len() {
+        0 => Ok(None),
+        1 => Ok(rows[0].values.first().cloned().flatten()),
+        _ => Err(RookError::Evaluation(
+            "Scalar subquery returned more than one row".to_string(),
+        )),
+    }
+}
+
+/// Look up a column value in the tuple by name (and optional table qualifier).
+fn evaluate_column(
+    table: &Option<String>,
+    column: &str,
+    tuple: &Tuple,
+    schema: &[ColumnInfo],
+) -> RookResult<Option<DataValue>> {
+    // Look up the column by name in the schema (case-insensitive).
+    // ColumnInfo.table is populated with actual table names by scan/join
+    // operators, so table-qualified references like `t1.id` vs `t2.id`
+    // resolve to different columns directly.
+    //
+    // Resolution rules:
+    // 1. If Expr has a table qualifier (e.g. `t1.id`):
+    //    Match only columns where BOTH the table name AND column name match.
+    //    This correctly disambiguates `t1.id` from `t2.id` in join schemas.
+    // 2. If Expr has no table qualifier (e.g. `id`):
+    //    Match the first column with the given name, regardless of table.
+    //    The planner already rejected names that match more than one
+    //    (`expr_from_ast`), so this is a plain lookup, not a check.
+    let idx = column_position(schema, table.as_deref(), column).ok_or_else(|| {
+        let wanted = match table {
+            Some(t) => format!("{}.{}", t, column),
+            None => column.to_string(),
+        };
+        let available: Vec<String> = schema
+            .iter()
+            .map(|c| match &c.table {
+                Some(t) => format!("{}.{}", t, c.name),
+                None => c.name.clone(),
+            })
+            .collect();
+        format!(
+            "Column '{}' not found (available: {})",
+            wanted,
+            available.join(", ")
+        )
+    })?;
+    Ok(tuple
+        .values
+        .get(idx)
+        .ok_or_else(|| {
+            format!(
+                "Column '{}' index {} out of bounds (arity {})",
+                column,
+                idx,
+                tuple.arity()
+            )
+        })?
+        .clone())
+}
+
+/// SQL addition of two nullable values, promoting across numeric types.
+fn add_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
+    arithmetic_op(
+        lv,
+        rv,
+        |a, b| {
+            a.checked_add(b)
+                .ok_or_else(|| RookError::Evaluation("Integer addition overflow".to_string()))
+        },
+        |a, b| {
+            a.checked_add(b)
+                .ok_or_else(|| RookError::Evaluation("BigInt addition overflow".to_string()))
+        },
+        |a, b| {
+            a.checked_add(b)
+                .ok_or_else(|| RookError::Evaluation("SmallInt addition overflow".to_string()))
+        },
+        |a, b| Ok(a + b),
+        |a, b| Ok(a + b),
+        numeric_add,
+    )
+}
+
+/// SQL subtraction of two nullable values, promoting across numeric types.
+fn sub_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
+    arithmetic_op(
+        lv,
+        rv,
+        |a, b| {
+            a.checked_sub(b)
+                .ok_or_else(|| RookError::Evaluation("Integer subtraction overflow".to_string()))
+        },
+        |a, b| {
+            a.checked_sub(b)
+                .ok_or_else(|| RookError::Evaluation("BigInt subtraction overflow".to_string()))
+        },
+        |a, b| {
+            a.checked_sub(b)
+                .ok_or_else(|| RookError::Evaluation("SmallInt subtraction overflow".to_string()))
+        },
+        |a, b| Ok(a - b),
+        |a, b| Ok(a - b),
+        numeric_sub,
+    )
+}
+
+/// SQL multiplication of two nullable values, promoting across numeric types.
+fn mul_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
+    arithmetic_op(
+        lv,
+        rv,
+        |a, b| {
+            a.checked_mul(b)
+                .ok_or_else(|| RookError::Evaluation("Integer multiplication overflow".to_string()))
+        },
+        |a, b| {
+            a.checked_mul(b)
+                .ok_or_else(|| RookError::Evaluation("BigInt multiplication overflow".to_string()))
+        },
+        |a, b| {
+            a.checked_mul(b).ok_or_else(|| {
+                RookError::Evaluation("SmallInt multiplication overflow".to_string())
+            })
+        },
+        |a, b| Ok(a * b),
+        |a, b| Ok(a * b),
+        numeric_mul,
+    )
+}
+
+/// SQL division of two nullable values, promoting across numeric types.
+fn div_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
+    arithmetic_op(
+        lv,
+        rv,
+        |a, b| {
+            if b == 0 {
+                Err("Division by zero".into())
+            } else {
+                a.checked_div(b)
+                    .ok_or_else(|| "Integer division overflow".into())
+            }
+        },
+        |a, b| {
+            if b == 0 {
+                Err("Division by zero".into())
+            } else {
+                a.checked_div(b)
+                    .ok_or_else(|| "BigInt division overflow".into())
+            }
+        },
+        |a, b| {
+            if b == 0 {
+                Err("Division by zero".into())
+            } else {
+                a.checked_div(b)
+                    .ok_or_else(|| "SmallInt division overflow".into())
+            }
+        },
+        |a, b| {
+            if b == 0.0 {
+                Err("Division by zero".into())
+            } else {
+                Ok(a / b)
+            }
+        },
+        |a, b| {
+            if b == 0.0 {
+                Err("Division by zero".into())
+            } else {
+                Ok(a / b)
+            }
+        },
+        numeric_div,
+    )
+}
+
+/// `CAST(expr AS type)` of an already-evaluated operand.
+fn evaluate_cast(
+    val: Option<DataValue>,
+    target_type: &crate::types::datatype::DataType,
+) -> RookResult<Option<DataValue>> {
+    match val {
+        None => Ok(None), // CAST(NULL AS type) → NULL
+        Some(dv) => {
+            let result = crate::types::functions::cast(&dv, target_type).context("CAST error")?;
+            Ok(Some(result))
+        }
+    }
+}
+
+/// `CASE WHEN ... THEN ... [ELSE ...] END`: the first WHEN that is true wins.
+fn evaluate_case(
+    when_then_pairs: &[(Expr, Expr)],
+    else_result: &Option<Box<Expr>>,
+    tuple: &Tuple,
+    schema: &[ColumnInfo],
+) -> RookResult<Option<DataValue>> {
+    for (cond, res) in when_then_pairs {
+        let cond_val = cond.evaluate(tuple, schema)?;
+        match cond_val {
+            Some(DataValue::Bool(true)) => return res.evaluate(tuple, schema),
+            _ => continue, // false or NULL → try next WHEN
+        }
+    }
+    // No WHEN matched, use ELSE or NULL
+    match else_result {
+        Some(else_expr) => else_expr.evaluate(tuple, schema),
+        None => Ok(None),
+    }
+}
+
+/// Evaluate both operands and compare them; NULL if either is NULL, otherwise
+/// `test` maps the ordering to the boolean result.
+fn evaluate_comparison(
+    l: &Expr,
+    r: &Expr,
+    tuple: &Tuple,
+    schema: &[ColumnInfo],
+    test: impl FnOnce(std::cmp::Ordering) -> bool,
+) -> RookResult<Option<DataValue>> {
+    let lv = l.evaluate(tuple, schema)?;
+    let rv = r.evaluate(tuple, schema)?;
+    match (lv, rv) {
+        (Some(l), Some(r)) => {
+            let ord = crate::types::Comparable::compare(&l, &r).context("Comparison error")?;
+            Ok(Some(DataValue::Bool(test(ord))))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// SQL three-valued AND of two evaluated operands.
+fn and_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
+    match (lv, rv) {
+        (Some(DataValue::Bool(false)), _) | (_, Some(DataValue::Bool(false))) => {
+            Ok(Some(DataValue::Bool(false)))
+        }
+        (Some(DataValue::Bool(true)), Some(DataValue::Bool(true))) => {
+            Ok(Some(DataValue::Bool(true)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// SQL three-valued OR of two evaluated operands.
+fn or_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
+    match (lv, rv) {
+        (Some(DataValue::Bool(true)), _) | (_, Some(DataValue::Bool(true))) => {
+            Ok(Some(DataValue::Bool(true)))
+        }
+        (Some(DataValue::Bool(false)), Some(DataValue::Bool(false))) => {
+            Ok(Some(DataValue::Bool(false)))
+        }
+        _ => Ok(None),
     }
 }
 
