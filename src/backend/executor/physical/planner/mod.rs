@@ -38,6 +38,10 @@ pub struct PhysicalPlanner {
     /// Lower-case names of the columns the query being planned reads, or
     /// `None` to decode every column (see `read_columns`).
     read_columns: std::cell::RefCell<Option<std::collections::HashSet<String>>>,
+    /// Column types of the non-recursive CTEs in scope (derived tables
+    /// included), by lower-case name, so a scan of one carries the types its
+    /// body produced.
+    cte_types: std::cell::RefCell<std::collections::HashMap<String, Vec<DataType>>>,
 }
 
 impl PhysicalPlanner {
@@ -46,6 +50,7 @@ impl PhysicalPlanner {
             catalog: catalog.into(),
             db_name,
             read_columns: std::cell::RefCell::new(None),
+            cte_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -62,6 +67,7 @@ impl PhysicalPlanner {
         } else {
             read_columns::read_columns(logical_plan)
         };
+        self.cte_types.borrow_mut().clear();
         self.plan_internal(logical_plan, &mut cte_registry)
     }
 
@@ -381,12 +387,26 @@ impl PhysicalPlanner {
                     tuples.len()
                 );
 
-                // 2. Register the materialised tuples so CteScan leaves can find them.
-                cte_registry.insert(c.name.to_ascii_lowercase(), tuples);
+                // 2. Register the materialised tuples so CteScan leaves can find
+                //    them, with the column types the body declared.
+                let key = c.name.to_ascii_lowercase();
+                let types = inner_op
+                    .schema()
+                    .iter()
+                    .map(|ci| ci.data_type.clone())
+                    .collect();
+                cte_registry.insert(key.clone(), tuples);
+                let shadowed = self.cte_types.borrow_mut().insert(key.clone(), types);
 
                 // 3. Plan the outer query (which may contain CteScan leaves that
                 //    reference the CTE we just registered).
-                self.plan_internal(&c.outer, cte_registry)
+                let outer = self.plan_internal(&c.outer, cte_registry);
+                let mut cte_types = self.cte_types.borrow_mut();
+                match shadowed {
+                    Some(types) => cte_types.insert(key, types),
+                    None => cte_types.remove(&key),
+                };
+                outer
             }
 
             LogicalPlan::Insert(inp) => {
@@ -485,14 +505,24 @@ impl PhysicalPlanner {
                 // references (e.g. `my_cte.col`) and NATURAL JOIN disambiguation work
                 // correctly when a CTE is on the right side of a join.
                 // An alias (`FROM c x`) replaces the name, as it does for tables.
+                // Columns take the types the CTE body declared; a recursive CTE,
+                // whose rows come from more than one plan, keeps the untyped
+                // VARCHAR placeholder.
                 let cte_table_name = cs.alias.clone().unwrap_or_else(|| cs.name.clone());
+                let cte_types = self.cte_types.borrow();
+                let types = cte_types
+                    .get(&cs.name.to_ascii_lowercase())
+                    .filter(|types| types.len() == cs.schema.columns.len());
                 let schema: Vec<super::tuple::ColumnInfo> = cs
                     .schema
                     .columns
                     .iter()
-                    .map(|c| super::tuple::ColumnInfo {
+                    .enumerate()
+                    .map(|(i, c)| super::tuple::ColumnInfo {
                         name: c.name.clone(),
-                        data_type: crate::types::datatype::DataType::Varchar(u16::MAX),
+                        data_type: types
+                            .map(|types| types[i].clone())
+                            .unwrap_or(DataType::Varchar(u16::MAX)),
                         table: Some(cte_table_name.clone()),
                     })
                     .collect();
@@ -1011,6 +1041,7 @@ mod tests {
             )),
             db_name: "test".to_string(),
             read_columns: std::cell::RefCell::new(None),
+            cte_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 

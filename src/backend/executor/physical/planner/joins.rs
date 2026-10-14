@@ -481,6 +481,9 @@ impl PhysicalPlanner {
     ) -> RookResult<Box<dyn PhysicalOperator>> {
         log::info!("[Volcano] Planning recursive CTE '{}'", rc.name);
         let cte_key = rc.name.to_ascii_lowercase();
+        // Scans of this CTE are untyped; an outer CTE of the same name is
+        // hidden until the outer query has been planned.
+        let shadowed = self.cte_types.borrow_mut().remove(&cte_key);
         // Use the recursive CTE name as the table qualifier so that
         // table-qualified column references and NATURAL JOIN disambiguation
         // work correctly when a recursive CTE appears in a join context.
@@ -561,10 +564,14 @@ impl PhysicalPlanner {
             rc.name,
             all_tuples.len()
         );
-        cte_registry.insert(cte_key, all_tuples);
+        cte_registry.insert(cte_key.clone(), all_tuples);
 
         // Plan the outer query which may reference the CTE via CteScan
-        self.plan_internal(&rc.outer, cte_registry)
+        let outer = self.plan_internal(&rc.outer, cte_registry);
+        if let Some(types) = shadowed {
+            self.cte_types.borrow_mut().insert(cte_key, types);
+        }
+        outer
     }
 }
 

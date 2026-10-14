@@ -432,3 +432,19 @@ fn nested_loop_with_limit_returns_the_first_rows() {
         assert_eq!(limited[..], all[..10], "{}", sql);
     }
 }
+
+#[test]
+fn derived_table_left_join_plans_as_hash_join() {
+    let (_ws, mut s) = setup("derived", "nlj_derived");
+    let derived = "SELECT x.k, x.c, b.id FROM (SELECT k, COUNT(*) c FROM a GROUP BY k) x \
+                   LEFT JOIN b ON x.k = b.k";
+    assert_eq!(join_operator("nlj_derived", derived), "HashJoin");
+    let hashed = rows(&mut s, derived);
+    let nested = rows(
+        &mut s,
+        "SELECT x.k, x.c, b.id FROM (SELECT k, COUNT(*) c FROM a GROUP BY k) x \
+         LEFT JOIN b ON x.k <= b.k AND x.k >= b.k",
+    );
+    assert!(!hashed.is_empty());
+    assert_eq!(sorted(hashed), sorted(nested));
+}
