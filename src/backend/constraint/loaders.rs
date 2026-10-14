@@ -4,6 +4,7 @@
 //! and table schemas from the system tables (`sys_indexes`, `sys_constraints`,
 //! `sys_columns`, `sys_tables`).
 
+use crate::backend::error::{ResultContext, RookResult};
 use crate::backend::system_table::split_column_list;
 use crate::types::{DataType, DataValue};
 
@@ -30,7 +31,7 @@ pub fn load_referencing_foreign_keys(
     engine: &crate::backend::engine::Engine,
     _db_name: &str,
     our_table_name: &str,
-) -> Result<Vec<ReferencingFk>, String> {
+) -> RookResult<Vec<ReferencingFk>> {
     use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_TABLES_SCHEMA};
 
     let constr_path = engine.paths().system_table("constraints");
@@ -65,16 +66,15 @@ pub fn load_referencing_foreign_keys(
     }
 
     let heap = crate::backend::cache::lease_heap(engine, &constr_path)
-        .map_err(|e| format!("Failed to open sys_constraints: {}", e))?;
+        .context("Failed to open sys_constraints")?;
 
     let mut referencing_fks = Vec::new();
     let schema = SYS_CONSTRAINTS_SCHEMA;
 
     for result in heap.scan() {
-        let (_page_id, _slot_id, raw_bytes) =
-            result.map_err(|e| format!("Error scanning sys_constraints: {}", e))?;
+        let (_page_id, _slot_id, raw_bytes) = result.context("Error scanning sys_constraints")?;
         let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
-            .map_err(|e| format!("Error deserializing sys_constraints: {}", e))?;
+            .context("Error deserializing sys_constraints")?;
 
         if decoded.len() < 6 {
             continue;
@@ -141,7 +141,7 @@ pub(crate) fn load_table_schema(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-) -> Result<Option<Vec<(String, DataType)>>, String> {
+) -> RookResult<Option<Vec<(String, DataType)>>> {
     use crate::backend::system_table::{SYS_COLUMNS_SCHEMA, resolve_table_id};
 
     let (table_id, _) = match resolve_table_id(engine, db_name, table_name) {
@@ -155,15 +155,14 @@ pub(crate) fn load_table_schema(
     }
 
     let heap = crate::backend::cache::lease_heap(engine, &col_path)
-        .map_err(|e| format!("Failed to open sys_columns: {}", e))?;
+        .context("Failed to open sys_columns")?;
 
     let mut schema: Vec<(i32, String, DataType)> = Vec::new();
 
     for result in heap.scan() {
-        let (_page_id, _slot_id, raw_bytes) =
-            result.map_err(|e| format!("Error scanning sys_columns: {}", e))?;
+        let (_page_id, _slot_id, raw_bytes) = result.context("Error scanning sys_columns")?;
         let decoded = crate::types::deserialize_nullable_row(SYS_COLUMNS_SCHEMA, &raw_bytes)
-            .map_err(|e| format!("Error deserializing sys_columns: {}", e))?;
+            .context("Error deserializing sys_columns")?;
 
         if decoded.len() < 8 {
             continue;

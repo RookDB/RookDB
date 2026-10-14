@@ -16,16 +16,13 @@ use crate::types::row::serialize_nullable_typed_row;
 
 /// Parse a row given as text, one string per column, the way SQL literals
 /// are parsed. Empty text and `NULL` (any case) are SQL NULL.
-pub fn parse_text_row(
-    columns: &[Column],
-    values: &[&str],
-) -> Result<Vec<Option<DataValue>>, String> {
+pub fn parse_text_row(columns: &[Column], values: &[&str]) -> RookResult<Vec<Option<DataValue>>> {
     if values.len() != columns.len() {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "expected {} values, got {}",
             columns.len(),
             values.len()
-        ));
+        )));
     }
     columns
         .iter()
@@ -35,7 +32,7 @@ pub fn parse_text_row(
 }
 
 /// Parse one value given as text for `column`; see [`parse_text_row`].
-pub fn parse_text_value(column: &Column, text: &str) -> Result<Option<DataValue>, String> {
+pub fn parse_text_value(column: &Column, text: &str) -> RookResult<Option<DataValue>> {
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
         return Ok(None);
@@ -43,7 +40,7 @@ pub fn parse_text_value(column: &Column, text: &str) -> Result<Option<DataValue>
     DataValue::parse_and_encode(&column.data_type, text)
         .and_then(|bytes| DataValue::from_bytes(&column.data_type, &bytes))
         .map(Some)
-        .map_err(|e| format!("column '{}': {}", column.name, e))
+        .map_err(|e| e.with_context(format!("column '{}'", column.name)))
 }
 
 /// Insert one row: convert each value to its column's type, check the
@@ -329,9 +326,7 @@ pub fn load_csv(
         }
         let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
 
-        let result = parse_text_row(columns, &refs)
-            .map_err(RookError::TypeMismatch)
-            .and_then(|row| target.insert_row(&row));
+        let result = parse_text_row(columns, &refs).and_then(|row| target.insert_row(&row));
         match result {
             Ok(_) => inserted += 1,
             Err(e) => {

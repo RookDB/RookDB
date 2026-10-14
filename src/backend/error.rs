@@ -219,6 +219,25 @@ impl From<std::io::Error> for RookError {
     }
 }
 
+/// Attach a context phrase to a failure while keeping its kind: an
+/// `io::Error` becomes [`RookError::Storage`], a [`RookError`] gets
+/// [`RookError::with_context`]. Either way the text renders `"context: cause"`.
+pub trait ResultContext<T> {
+    fn context(self, context: impl Into<String>) -> RookResult<T>;
+}
+
+impl<T> ResultContext<T> for Result<T, std::io::Error> {
+    fn context(self, context: impl Into<String>) -> RookResult<T> {
+        self.map_err(|e| RookError::storage(context, e))
+    }
+}
+
+impl<T> ResultContext<T> for Result<T, RookError> {
+    fn context(self, context: impl Into<String>) -> RookResult<T> {
+        self.map_err(|e| e.with_context(context))
+    }
+}
+
 /// Result alias used by newly migrated APIs.
 pub type RookResult<T> = Result<T, RookError>;
 

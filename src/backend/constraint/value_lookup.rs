@@ -228,7 +228,7 @@ pub(crate) fn child_rows_referencing(
     child_table: &str,
     child_cols: &[String],
     key: &[DataValue],
-) -> Result<Vec<Vec<Option<DataValue>>>, String> {
+) -> RookResult<Vec<Vec<Option<DataValue>>>> {
     let pointers = child_row_pointers(catalog, db_name, child_table, child_cols, key)?;
     if pointers.is_empty() {
         return Ok(Vec::new());
