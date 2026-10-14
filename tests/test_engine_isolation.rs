@@ -28,7 +28,6 @@ impl Drop for TempRoot {
 }
 
 fn session(root: &Path) -> Session {
-    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
     let engine = Engine::open(root);
     init_catalog_in(&engine);
     Session::new(load_catalog_in(&engine))

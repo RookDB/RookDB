@@ -418,19 +418,6 @@ fn flush_caches(engine: &Engine, durable: bool) {
 
 // ── table metadata cache ─────────────────────────────────────────────────────
 
-pub type CheckParserFn = fn(&str) -> Result<rook_ast::PredicateNode, String>;
-static CHECK_PARSER: OnceLock<CheckParserFn> = OnceLock::new();
-
-/// Register a parser hook for raw CHECK constraint expressions.
-pub fn register_check_parser(parser: CheckParserFn) {
-    let _ = CHECK_PARSER.set(parser);
-}
-
-/// Retrieve the registered CHECK constraint parser, if any.
-pub fn get_check_parser() -> Option<CheckParserFn> {
-    CHECK_PARSER.get().copied()
-}
-
 /// Constraint/index metadata for one table, loaded from the system tables.
 #[derive(Debug, Clone)]
 pub struct TableMeta {
@@ -440,10 +427,11 @@ pub struct TableMeta {
     pub unique_indexes: Vec<(String, Vec<String>)>,
     /// Foreign keys as `(child_cols, parent_table, parent_cols)`.
     pub foreign_keys: Vec<(Vec<String>, String, Vec<String>)>,
-    /// CHECK constraint expressions.
-    pub check_exprs: Vec<String>,
-    /// Precompiled CHECK constraints as `(expression_sql, AST_node)`.
-    pub check_ast: Vec<(String, rook_ast::PredicateNode)>,
+    /// CHECK constraints as `(expression_sql, parsed expression)`. The SQL
+    /// text is what `sys_constraints` stores; it is parsed once, here. A text
+    /// that no longer parses is kept as its error, so every write to the
+    /// table fails instead of skipping the constraint.
+    pub checks: Vec<(String, Result<rook_ast::PredicateNode, String>)>,
     /// All named indexes as `(index_name, Vec<column_name>, is_unique)`
     /// (superset view of `unique_indexes`, kept for callers needing layout).
     pub named_indexes: Vec<(String, Vec<String>, bool)>,
@@ -534,23 +522,19 @@ fn load_meta(
         }
     }
 
-    let mut check_ast = Vec::new();
-    if !check_exprs.is_empty()
-        && let Some(parser) = CHECK_PARSER.get()
-    {
-        for expr in &check_exprs {
-            if let Ok(ast_node) = parser(expr) {
-                check_ast.push((expr.clone(), ast_node));
-            }
-        }
-    }
+    let checks = check_exprs
+        .into_iter()
+        .map(|expr| {
+            let parsed = rook_parser::parse_check_expr(&expr);
+            (expr, parsed)
+        })
+        .collect();
 
     Some(Arc::new(TableMeta {
         table_id,
         unique_indexes,
         foreign_keys,
-        check_exprs,
-        check_ast,
+        checks,
         named_indexes,
     }))
 }

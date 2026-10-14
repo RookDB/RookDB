@@ -4,7 +4,6 @@
 //! for repeated query forms (such as bulk INSERTs and repetitive SELECTs).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::OnceLock;
 
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::executor::{parse_text_row, parse_text_value};
@@ -452,24 +451,6 @@ pub fn store_cached_plan(
     crate::backend::engine::lock(&engine.plans).insert(db_name, normalized_sql, entry);
 }
 
-/// Register a SQL parser function (e.g. from rook-parser).
-type SqlParserFn = Box<dyn Fn(&str) -> Result<QueryPlan, String> + Send + Sync>;
-static SQL_PARSER: OnceLock<SqlParserFn> = OnceLock::new();
-
-pub fn register_sql_parser(
-    parser: impl Fn(&str) -> Result<QueryPlan, String> + Send + Sync + 'static,
-) {
-    let _ = SQL_PARSER.set(Box::new(parser));
-}
-
-fn parse_sql(sql: &str) -> Result<QueryPlan, String> {
-    if let Some(parser) = SQL_PARSER.get() {
-        parser(sql)
-    } else {
-        Err("SQL parser not registered (call register_sql_parser first)".to_string())
-    }
-}
-
 /// Parse a normalized INSERT statement template without external parser dependencies.
 pub fn parse_insert_template(normalized_sql: &str, arity: usize) -> Option<CachedInsert> {
     let raw_tokens = tokenize_for_normalization(normalized_sql).ok()?;
@@ -651,7 +632,7 @@ pub fn execute_cached_insert(
     }
 
     // If fast template failed (e.g. complex expression), fall back to SQL parser if registered
-    if let Ok(QueryPlan::Insert(ref ip)) = parse_sql(sql)
+    if let Ok(QueryPlan::Insert(ref ip)) = rook_parser::parse_sql(sql)
         && ip.source_select.is_none()
     {
         let cached_insert = CachedInsert {
@@ -707,7 +688,7 @@ impl PreparedStatement {
             });
         }
 
-        let plan = parse_sql(sql)?;
+        let plan = rook_parser::parse_sql(sql)?;
         let entry = match plan {
             QueryPlan::Insert(ref ip) if ip.source_select.is_none() => {
                 PlanCacheEntry::Insert(CachedInsert {

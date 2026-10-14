@@ -304,7 +304,7 @@ pub(crate) fn check_constraints_meta(
         None => return Ok(()),
     };
 
-    if meta.check_exprs.is_empty() {
+    if meta.checks.is_empty() {
         return Ok(());
     }
 
@@ -321,77 +321,37 @@ pub(crate) fn check_constraints_meta(
         })
         .collect();
 
-    // Fast path: evaluate precompiled check AST nodes directly (no SQL parsing)
-    if !meta.check_ast.is_empty() {
-        for (expr, ast_node) in &meta.check_ast {
-            let pred =
-                crate::backend::executor::physical::expr::predicate_from_ast(ast_node, &col_names)
-                    .map_err(|e| {
-                        RookError::Internal(format!(
-                            "Failed to compile CHECK constraint '{}': {}",
-                            expr, e
-                        ))
-                    })?;
-            match crate::backend::executor::physical::expr::evaluate_predicate(
-                &pred, &tuple, &schema,
-            ) {
-                Ok(Some(true)) => {} // satisfied
-                Ok(Some(false)) => {
-                    return Err(RookError::constraint(
-                        ConstraintKind::Check,
-                        table_name,
-                        None,
-                        format!("CHECK constraint violated: '{}'", expr),
-                    ));
-                }
-                Ok(None) => {} // UNKNOWN (NULL) → pass, per SQL
-                Err(e) => {
-                    return Err(RookError::Internal(format!(
-                        "Failed to evaluate CHECK constraint '{}': {}",
+    for (expr, parsed) in &meta.checks {
+        let ast_node = parsed.as_ref().map_err(|e| {
+            RookError::Internal(format!(
+                "Failed to parse CHECK constraint expression '{}': {}",
+                expr, e
+            ))
+        })?;
+        let pred =
+            crate::backend::executor::physical::expr::predicate_from_ast(ast_node, &col_names)
+                .map_err(|e| {
+                    RookError::Internal(format!(
+                        "Failed to compile CHECK constraint '{}': {}",
                         expr, e
-                    )));
-                }
+                    ))
+                })?;
+        match crate::backend::executor::physical::expr::evaluate_predicate(&pred, &tuple, &schema) {
+            Ok(Some(true)) => {} // satisfied
+            Ok(Some(false)) => {
+                return Err(RookError::constraint(
+                    ConstraintKind::Check,
+                    table_name,
+                    None,
+                    format!("CHECK constraint violated: '{}'", expr),
+                ));
             }
-        }
-        return Ok(());
-    }
-
-    // Fallback path: parse and compile using registered hook if check_ast is empty
-    if let Some(parser) = crate::backend::cache::get_check_parser() {
-        for expr in &meta.check_exprs {
-            let node = parser(expr).map_err(|e| {
-                RookError::Internal(format!(
-                    "Failed to parse CHECK constraint expression '{}': {}",
+            Ok(None) => {} // UNKNOWN (NULL) → pass, per SQL
+            Err(e) => {
+                return Err(RookError::Internal(format!(
+                    "Failed to evaluate CHECK constraint '{}': {}",
                     expr, e
-                ))
-            })?;
-            let pred =
-                crate::backend::executor::physical::expr::predicate_from_ast(&node, &col_names)
-                    .map_err(|e| {
-                        RookError::Internal(format!(
-                            "Failed to compile CHECK constraint '{}': {}",
-                            expr, e
-                        ))
-                    })?;
-            match crate::backend::executor::physical::expr::evaluate_predicate(
-                &pred, &tuple, &schema,
-            ) {
-                Ok(Some(true)) => {}
-                Ok(Some(false)) => {
-                    return Err(RookError::constraint(
-                        ConstraintKind::Check,
-                        table_name,
-                        None,
-                        format!("CHECK constraint violated: '{}'", expr),
-                    ));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return Err(RookError::Internal(format!(
-                        "Failed to evaluate CHECK constraint '{}': {}",
-                        expr, e
-                    )));
-                }
+                )));
             }
         }
     }

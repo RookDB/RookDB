@@ -28,10 +28,6 @@ impl Drop for TempRoot {
 }
 
 fn session(root: &Path, keep_join_order: bool) -> Session {
-    storage_manager::backend::executor::row_select::register_where_parser(
-        rook_parser::parse_where_text,
-    );
-    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
     let engine = Engine::open(root);
     engine.set_keep_join_order(keep_join_order);
     init_catalog_in(&engine);

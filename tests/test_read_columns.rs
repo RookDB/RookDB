@@ -27,10 +27,6 @@ impl Drop for TempRoot {
 }
 
 fn session(root: &Path, decode_all: bool) -> Session {
-    storage_manager::backend::executor::row_select::register_where_parser(
-        rook_parser::parse_where_text,
-    );
-    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
     let engine = Engine::open(root);
     engine.set_decode_all_columns(decode_all);
     init_catalog_in(&engine);

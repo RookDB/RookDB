@@ -6,7 +6,6 @@ mod common;
 use storage_manager::backend::session::{Session, StatementResult};
 
 fn session() -> Session {
-    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
     common::init_catalog();
     let mut s = Session::new(common::load_catalog());
     ok(&mut s, "CREATE DATABASE app");

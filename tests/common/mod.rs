@@ -89,12 +89,6 @@ impl TestWorkspace {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create workspace");
 
-        storage_manager::backend::executor::row_select::register_where_parser(
-            rook_parser::parse_where_text,
-        );
-        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
-        storage_manager::backend::planner::plan_cache::register_sql_parser(rook_parser::parse_sql);
-
         let engine = Engine::open(&path);
         storage_manager::catalog::init_catalog_in(&engine);
         CURRENT.with(|c| *c.borrow_mut() = Some(Arc::clone(&engine)));

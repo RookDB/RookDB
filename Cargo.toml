@@ -7,6 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 rook-ast = { path = "../rook-ast" }
+rook-parser = { path = "../rook-parser" }
 sqlparser = { version = "0.61.0", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -15,6 +16,3 @@ regex = "1"
 sysinfo = "0.33"
 log = "0.4"
 env_logger = "0.11"
-
-[dev-dependencies]
-rook-parser = { path = "../rook-parser" }

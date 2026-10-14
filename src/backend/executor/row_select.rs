@@ -14,17 +14,7 @@ use rook_ast::{PredicateNode, QueryPlan, SelectExpr, SelectPlan, TableRef};
 use crate::backend::error::RookError;
 use crate::catalog::Catalog;
 
-use std::sync::OnceLock;
-
-pub type WhereParserFn = fn(&str) -> Result<Option<PredicateNode>, String>;
-static WHERE_PARSER: OnceLock<WhereParserFn> = OnceLock::new();
-
-/// Register a parser hook for raw WHERE-clause strings.
-pub fn register_where_parser(parser: WhereParserFn) {
-    let _ = WHERE_PARSER.set(parser);
-}
-
-/// Parse a raw WHERE-clause string into a `PredicateNode` using the registered SQL parser.
+/// Parse a raw WHERE-clause string into a `PredicateNode`.
 ///
 /// `None` means "no predicate" (match every row).
 pub fn parse_where_text(text: &str) -> crate::backend::error::RookResult<Option<PredicateNode>> {
@@ -32,13 +22,7 @@ pub fn parse_where_text(text: &str) -> crate::backend::error::RookResult<Option<
     if trimmed.is_empty() {
         return Ok(None);
     }
-    if let Some(parser) = WHERE_PARSER.get() {
-        parser(trimmed).map_err(RookError::Internal)
-    } else {
-        Err(RookError::Internal(
-            "No WHERE-clause parser registered".to_string(),
-        ))
-    }
+    rook_parser::parse_where_text(trimmed).map_err(RookError::Internal)
 }
 
 /// Execute a wildcard scan over `db.table` with an optional predicate and

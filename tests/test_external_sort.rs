@@ -30,10 +30,6 @@ impl Drop for TempRoot {
 }
 
 fn session(root: &Path) -> (Arc<Engine>, Session) {
-    storage_manager::backend::executor::row_select::register_where_parser(
-        rook_parser::parse_where_text,
-    );
-    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
     let engine = Engine::open(root);
     init_catalog_in(&engine);
     let session = Session::new(load_catalog_in(&engine));

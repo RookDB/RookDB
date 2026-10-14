@@ -6,7 +6,6 @@ use storage_manager::backend::session::Session;
 use storage_manager::types::DataValue;
 
 fn session() -> Session {
-    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
     common::init_catalog();
     Session::new(common::load_catalog())
 }

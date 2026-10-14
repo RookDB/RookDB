@@ -23,8 +23,6 @@
 //!   on different directories never meet in them, and two routes to the
 //!   same file still get one copy of its pages. They play the part of a
 //!   process's open-file table.
-//! * The parser hooks (`register_*_parser`): code supplied once by the
-//!   front end, not data about a directory.
 //! * The table of open engines behind [`Engine::open`].
 
 use std::collections::HashMap;

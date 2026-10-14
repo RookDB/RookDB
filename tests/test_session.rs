@@ -7,7 +7,6 @@ use storage_manager::backend::session::{NO_DATABASE, Session, StatementResult};
 use storage_manager::types::DataValue;
 
 fn session() -> Session {
-    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
     common::init_catalog();
     Session::new(common::load_catalog())
 }
@@ -159,7 +158,6 @@ fn a_session_keeps_every_file_under_its_engine_root() {
     use storage_manager::backend::engine::Engine;
 
     let _ws = common::TestWorkspace::new("session", "root");
-    storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
 
     // The test workspace's own data directory must not change.
     let watched = _ws.path().join("database");
