@@ -3,7 +3,6 @@ pub mod backend;
 pub use backend::buffer_manager;
 pub use backend::catalog;
 pub use backend::disk;
-pub use backend::error_handler;
 pub use backend::executor;
 pub use backend::executor::insert_single_tuple;
 pub use backend::heap;

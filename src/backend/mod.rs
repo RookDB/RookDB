@@ -5,7 +5,6 @@ pub mod constraint;
 pub mod disk;
 pub mod engine;
 pub mod error;
-pub mod error_handler;
 pub mod executor;
 pub mod fsm;
 pub mod heap;
