@@ -10,6 +10,7 @@
 //! - `joins.rs`: NestedLoopJoinOperator, HashJoinOperator, JoinType
 //! - `filter_project.rs`: Filter, Projection, Limit, Distinct, SingleRow,
 //!   Null and CteScan operators
+//! - `estimated.rs`: attaches the planner's row estimate to an operator
 //! - `merged.rs`: relabels the shared columns of USING / NATURAL joins
 //! - `sort.rs`: SortOperator
 //! - `aggregate.rs`: AggregateOperator with GROUP BY / HAVING support
@@ -20,6 +21,7 @@
 //! - `tests.rs`: unit tests (mock operator + operator behaviour)
 
 mod aggregate;
+mod estimated;
 mod filter_project;
 mod insert;
 mod joins;
@@ -35,6 +37,7 @@ mod utils;
 mod tests;
 
 // Re-export everything from submodules
+pub use estimated::Estimated;
 pub use insert::{InsertOperator, ValuesOperator};
 pub use joins::{HashJoinOperator, IndexNestedLoopJoinOperator, JoinType, NestedLoopJoinOperator};
 pub use joins::{

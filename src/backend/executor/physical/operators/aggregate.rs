@@ -602,6 +602,14 @@ impl PhysicalOperator for AggregateOperator {
         Ok(())
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        if self.group_by_exprs.is_empty() {
+            1
+        } else {
+            (self.child.estimate_cardinality() / 2).max(1)
+        }
+    }
+
     fn name(&self) -> &'static str {
         "Aggregate"
     }

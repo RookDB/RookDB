@@ -705,12 +705,8 @@ mod tests {
             op.schema().is_empty(),
             "SingleRow child should produce empty schema"
         );
-        // SingleRowOperator.estimate_cardinality() returns 0 by default
-        assert_eq!(
-            op.estimate_cardinality(),
-            0,
-            "SingleRowOperator returns 0 by default"
-        );
+        // The child is the single-row source: one row to insert.
+        assert_eq!(op.estimate_cardinality(), 1);
     }
 
     #[test]

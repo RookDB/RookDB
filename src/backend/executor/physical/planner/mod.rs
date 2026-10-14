@@ -9,7 +9,7 @@ use rook_ast::logical::*;
 use super::explain::{PlanNode, PlanTrace};
 use super::expr::{Expr, Predicate, binding_names, expr_from_ast, resolve_column};
 use super::operators::{
-    CteScanOperator, DistinctOperator, FilterOperator, IndexScanMode, IndexScanOperator,
+    CteScanOperator, Estimated, DistinctOperator, FilterOperator, IndexScanMode, IndexScanOperator,
     InsertOperator, LimitOperator, PhysicalOperator, ProjectionOperator, SeqScanOperator,
     SetOpOperator, SetOpType as PhysicalSetOpType, SingleRowOperator, SortOperator,
     SubqueryExecOperator, SubqueryType as PhysicalSubqueryType, ValuesOperator,
@@ -22,6 +22,7 @@ use crate::backend::catalog::types::Catalog;
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
+use crate::statistics::estimator::{Estimator, StatsSource};
 
 pub mod helpers;
 pub mod index_scan;
@@ -46,6 +47,59 @@ pub struct PhysicalPlanner {
     /// Decisions that leave no operator in the tree, collected while a plan
     /// is being explained (`plan_traced`); `None` otherwise.
     trace: std::cell::RefCell<Option<PlanTrace>>,
+    /// What the estimator learned of each table while this plan was made,
+    /// so a table's statistics are looked up once per plan.
+    table_info: std::cell::RefCell<std::collections::HashMap<String, TableInfo>>,
+}
+
+/// A table's statistics (if current ones are at hand) and live row count.
+#[derive(Clone)]
+struct TableInfo {
+    stats: Option<std::sync::Arc<crate::statistics::TableStatistics>>,
+    rows: Option<f64>,
+}
+
+/// The statistics the estimator may read while a plan is made: only what is
+/// already at hand, so planning a query never reads a table to gather them.
+struct PlannerStats<'p>(&'p PhysicalPlanner);
+
+impl PlannerStats<'_> {
+    fn info(&self, table: &str) -> TableInfo {
+        let planner = self.0;
+        if let Some(info) = planner.table_info.borrow().get(table) {
+            return info.clone();
+        }
+        let engine = planner.catalog.engine();
+        let stats =
+            crate::backend::cache::known_statistics(&planner.catalog, &planner.db_name, table);
+        let rows = if stats.is_some() {
+            None
+        } else {
+            crate::backend::heap::HeapFile::open(
+                engine,
+                &engine.paths().heap(&planner.db_name, table),
+            )
+            .and_then(|f| f.header())
+            .ok()
+            .map(|h| h.total_tuples as f64)
+        };
+        let info = TableInfo { stats, rows };
+        planner
+            .table_info
+            .borrow_mut()
+            .insert(table.to_string(), info.clone());
+        info
+    }
+}
+
+impl StatsSource for PlannerStats<'_> {
+    fn table(&self, table: &str) -> Option<std::sync::Arc<crate::statistics::TableStatistics>> {
+        self.info(table).stats
+    }
+
+    fn row_hint(&self, table: &str) -> Option<f64> {
+        self.info(table).rows
+    }
 }
 
 impl PhysicalPlanner {
@@ -56,6 +110,7 @@ impl PhysicalPlanner {
             read_columns: std::cell::RefCell::new(None),
             cte_types: std::cell::RefCell::new(std::collections::HashMap::new()),
             trace: std::cell::RefCell::new(None),
+            table_info: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -106,10 +161,39 @@ impl PhysicalPlanner {
             read_columns::read_columns(logical_plan)
         };
         self.cte_types.borrow_mut().clear();
+        self.table_info.borrow_mut().clear();
         self.plan_internal(logical_plan, &mut cte_registry)
     }
 
+    /// The operator for `plan`, carrying the estimator's row count for it.
     pub(crate) fn plan_internal(
+        &self,
+        plan: &LogicalPlan,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        let op = self.plan_node(plan, cte_registry)?;
+        if op.is_estimated() {
+            return Ok(op);
+        }
+        let rows = self.estimate_rows(plan, cte_registry);
+        Ok(Box::new(Estimated::new(op, rows)))
+    }
+
+    /// The shared estimator's row count for `plan`.
+    pub(crate) fn estimate_rows(
+        &self,
+        plan: &LogicalPlan,
+        cte_registry: &std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> f64 {
+        let stats = PlannerStats(self);
+        let ctes = cte_registry
+            .iter()
+            .map(|(name, rows)| (name.clone(), rows.len() as f64))
+            .collect();
+        Estimator::new(&stats).with_cte_rows(ctes).rows(plan)
+    }
+
+    fn plan_node(
         &self,
         plan: &LogicalPlan,
         cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
@@ -1056,6 +1140,7 @@ mod tests {
             read_columns: std::cell::RefCell::new(None),
             cte_types: std::cell::RefCell::new(std::collections::HashMap::new()),
             trace: std::cell::RefCell::new(None),
+            table_info: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 

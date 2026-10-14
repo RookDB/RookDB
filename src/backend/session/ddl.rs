@@ -593,6 +593,7 @@ pub(super) fn drop_table(
     let dat_path = catalog.engine().paths().heap(db, table);
     let _ = std::fs::remove_file(&dat_path);
     let _ = std::fs::remove_file(catalog.engine().paths().heap_fsm(db, table));
+    crate::backend::cache::drop_statistics(catalog.engine(), db, table);
     remove_index_files_for_table(catalog.engine(), db, table, None);
 
     if let Err(e) = crate::backend::system_table::delete_table_metadata(catalog.engine(), db, table)
@@ -852,6 +853,46 @@ pub(super) fn vacuum(catalog: &Catalog, db: &str, table: &str) -> RookResult<Sta
     )];
     if stats.pages_compacted == 0 {
         lines.push("Table is already clean — nothing to do.".to_string());
+    }
+    // The rows moved; what the planner knows of them is gathered anew.
+    crate::backend::cache::analyze_table(catalog, db, table)
+        .map_err(|e| RookError::Io(e).with_context("VACUUM statistics failed"))?;
+    Ok(StatementResult::lines(lines))
+}
+
+/// ANALYZE: gather the planner's statistics for one table, or every table of
+/// the database.
+pub(super) fn analyze(
+    catalog: &Catalog,
+    db: &str,
+    table: Option<&str>,
+) -> RookResult<StatementResult> {
+    let db_obj = catalog
+        .databases
+        .get(db)
+        .ok_or_else(|| RookError::Internal(format!("Database '{}' not found", db)))?;
+    let mut tables: Vec<&str> = match table {
+        Some(t) if db_obj.tables.contains_key(t) => vec![t],
+        Some(t) => {
+            return Err(RookError::NotFound {
+                entity: "Table",
+                name: format!("{}.{}", db, t),
+            });
+        }
+        None => db_obj.tables.keys().map(String::as_str).collect(),
+    };
+    tables.sort_unstable();
+    let mut lines = Vec::new();
+    for t in tables {
+        let stats = crate::backend::cache::analyze_table(catalog, db, t)
+            .map_err(|e| RookError::Io(e).with_context(format!("ANALYZE '{}' failed", t)))?;
+        lines.push(format!(
+            "ANALYZE '{}.{}' complete: {} row(s), {} column(s).",
+            db,
+            t,
+            stats.total_tuple_count,
+            stats.columns.len()
+        ));
     }
     Ok(StatementResult::lines(lines))
 }

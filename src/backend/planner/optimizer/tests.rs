@@ -13,6 +13,7 @@ use super::helpers::*;
 use rook_ast::logical::*;
 use rook_ast::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -816,6 +817,7 @@ fn test_join_ordering_smaller_on_left() {
         min_tuple_bytes: 20,
         max_tuple_bytes: 100,
         page_breakdown: vec![],
+        ..Default::default()
     };
     let small = crate::statistics::TableStatistics {
         total_tuple_count: 100,
@@ -832,9 +834,10 @@ fn test_join_ordering_smaller_on_left() {
         min_tuple_bytes: 20,
         max_tuple_bytes: 100,
         page_breakdown: vec![],
+        ..Default::default()
     };
-    stats.insert("users".to_string(), large);
-    stats.insert("orders".to_string(), small);
+    stats.insert("users".to_string(), Arc::new(large));
+    stats.insert("orders".to_string(), Arc::new(small));
 
     let plan = LogicalPlan::Join(LogicalJoin {
         left: Box::new(make_table_scan("users", &["id"])),
@@ -887,6 +890,7 @@ fn test_join_ordering_preserves_left_join() {
         min_tuple_bytes: 20,
         max_tuple_bytes: 100,
         page_breakdown: vec![],
+        ..Default::default()
     };
     let small = crate::statistics::TableStatistics {
         total_tuple_count: 100,
@@ -903,10 +907,11 @@ fn test_join_ordering_preserves_left_join() {
         min_tuple_bytes: 20,
         max_tuple_bytes: 100,
         page_breakdown: vec![],
+        ..Default::default()
     };
     // users is LARGE (should stay on left for LEFT JOIN), orders is SMALL
-    stats.insert("users".to_string(), large);
-    stats.insert("orders".to_string(), small);
+    stats.insert("users".to_string(), Arc::new(large));
+    stats.insert("orders".to_string(), Arc::new(small));
 
     // LEFT JOIN with large left (users) and small right (orders) — should NOT swap
     let plan = LogicalPlan::Join(LogicalJoin {
@@ -952,6 +957,7 @@ fn test_join_ordering_preserves_right_join() {
         min_tuple_bytes: 20,
         max_tuple_bytes: 100,
         page_breakdown: vec![],
+        ..Default::default()
     };
     let small = crate::statistics::TableStatistics {
         total_tuple_count: 100,
@@ -968,11 +974,12 @@ fn test_join_ordering_preserves_right_join() {
         min_tuple_bytes: 20,
         max_tuple_bytes: 100,
         page_breakdown: vec![],
+        ..Default::default()
     };
     // orders is SMALL (on right), users is LARGE (on left) — for RIGHT JOIN, the
     // right side (orders, small) must be preserved, NOT swapped to the left.
-    stats.insert("users".to_string(), large);
-    stats.insert("orders".to_string(), small);
+    stats.insert("users".to_string(), Arc::new(large));
+    stats.insert("orders".to_string(), Arc::new(small));
 
     let plan = LogicalPlan::Join(LogicalJoin {
         left: Box::new(make_table_scan("users", &["id"])),
@@ -1003,7 +1010,7 @@ fn test_join_ordering_reorders_inner_join() {
     let mut stats = HashMap::new();
     stats.insert(
         "users".to_string(),
-        crate::statistics::TableStatistics {
+        Arc::new(crate::statistics::TableStatistics {
             total_tuple_count: 1000,
             total_pages: 10,
             data_pages: 9,
@@ -1018,11 +1025,12 @@ fn test_join_ordering_reorders_inner_join() {
             min_tuple_bytes: 20,
             max_tuple_bytes: 100,
             page_breakdown: vec![],
-        },
+        ..Default::default()
+        }),
     );
     stats.insert(
         "orders".to_string(),
-        crate::statistics::TableStatistics {
+        Arc::new(crate::statistics::TableStatistics {
             total_tuple_count: 100,
             total_pages: 2,
             data_pages: 1,
@@ -1037,7 +1045,8 @@ fn test_join_ordering_reorders_inner_join() {
             min_tuple_bytes: 20,
             max_tuple_bytes: 100,
             page_breakdown: vec![],
-        },
+        ..Default::default()
+        }),
     );
 
     // INNER JOIN: large (users) left, small (orders) right — should swap
@@ -1067,13 +1076,13 @@ fn test_join_ordering_reorders_inner_join() {
 // ─── Join Chain Reordering (F4) ──────────────────────────────────────────────
 
 /// Statistics giving each table its row count.
-fn row_counts(tables: &[(&str, u64)]) -> HashMap<String, crate::statistics::TableStatistics> {
+fn row_counts(tables: &[(&str, u64)]) -> HashMap<String, Arc<crate::statistics::TableStatistics>> {
     tables
         .iter()
         .map(|(name, rows)| {
             (
                 name.to_string(),
-                crate::statistics::TableStatistics {
+                Arc::new(crate::statistics::TableStatistics {
                     total_tuple_count: *rows,
                     total_pages: 1,
                     data_pages: 1,
@@ -1088,7 +1097,8 @@ fn row_counts(tables: &[(&str, u64)]) -> HashMap<String, crate::statistics::Tabl
                     min_tuple_bytes: 0,
                     max_tuple_bytes: 0,
                     page_breakdown: vec![],
-                },
+        ..Default::default()
+                }),
             )
         })
         .collect()

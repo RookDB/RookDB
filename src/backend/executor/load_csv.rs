@@ -118,6 +118,7 @@ pub fn insert_row(
         ))));
     }
 
+    crate::backend::cache::note_modified(catalog.engine(), db_name, table_name, 1);
     Ok((page_id, slot_id))
 }
 

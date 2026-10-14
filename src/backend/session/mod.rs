@@ -95,6 +95,7 @@ impl Session {
             QueryPlan::Delete(p) => dml::delete(&self.catalog, self.db()?, p),
             QueryPlan::Explain(p) => dml::explain(&self.catalog, self.db()?, p),
             QueryPlan::Vacuum(p) => ddl::vacuum(&self.catalog, self.db()?, &p.table),
+            QueryPlan::Analyze(p) => ddl::analyze(&self.catalog, self.db()?, p.table.as_deref()),
             QueryPlan::CreateIndex(p) => ddl::create_index(&self.catalog, self.db()?, p),
             QueryPlan::Unknown(msg) => Err(RookError::Internal(format!(
                 "Unsupported SQL statement: {}",

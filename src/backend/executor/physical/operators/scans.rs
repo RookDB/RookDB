@@ -202,6 +202,15 @@ impl PhysicalOperator for SeqScanOperator {
         Ok(())
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        // Rows the header counts; a file the header does not describe yet is
+        // sized by its pages.
+        match self.heap_manager.header() {
+            Ok(h) if h.total_tuples > 0 => h.total_tuples as usize,
+            _ => self.heap_manager.page_count().saturating_sub(1) as usize * 100,
+        }
+    }
+
     fn name(&self) -> &'static str {
         "SeqScan"
     }
@@ -224,10 +233,6 @@ impl PhysicalOperator for SeqScanOperator {
             ),
             _ => node,
         }
-    }
-
-    fn estimate_cardinality(&self) -> usize {
-        self.heap_manager.page_count() as usize * 100
     }
 }
 
@@ -521,6 +526,19 @@ impl PhysicalOperator for IndexScanOperator {
         self.ready.clear();
         self.loaded = false;
         Ok(())
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        let table_rows = || {
+            self.heap_manager
+                .header()
+                .map_or(0, |h| h.total_tuples as usize)
+        };
+        match &self.mode {
+            IndexScanMode::PointLookup(_) | IndexScanMode::CompositePointLookup(_) => 1,
+            IndexScanMode::RangeLookup(..) => table_rows() / 3,
+            IndexScanMode::FullScan => table_rows(),
+        }
     }
 
     fn name(&self) -> &'static str {

@@ -37,9 +37,18 @@ pub trait PhysicalOperator {
         Err(RookError::Internal("reset() not supported".to_string()))
     }
 
-    /// Estimate how many tuples this operator will produce (0 = unknown).
+    /// Estimate how many tuples this operator will produce. Operators the
+    /// planner builds carry the shared estimator's figure ([`Estimated`]);
+    /// the rest derive one from their inputs.
+    ///
+    /// [`Estimated`]: super::Estimated
     fn estimate_cardinality(&self) -> usize {
         0
+    }
+
+    /// Whether the planner has attached its own estimate to this operator.
+    fn is_estimated(&self) -> bool {
+        false
     }
 
     /// A human-readable name for the operator (for debug printing).

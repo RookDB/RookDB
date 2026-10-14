@@ -14,7 +14,7 @@
 //! 4. Each conjunct goes on the lowest join that has all its relations.
 //!
 //! Within each join the smaller estimated input goes on the left, the build
-//! side of a hash join. Estimates come from `estimate_cardinality`.
+//! side of a hash join. Estimates come from the shared [`Estimator`](crate::statistics::estimator::Estimator).
 //!
 //! Outer and NATURAL joins end a chain and keep their inputs in place; a
 //! chain inside one of their inputs is reordered on its own.
@@ -40,7 +40,7 @@ use rook_ast::{ComparisonOp, ExprNode, FunctionArg, JoinType, PredicateNode};
 use crate::planner::helpers::derive_qualified_schema;
 
 use super::helpers::{extract_column_refs, extract_expr_column_refs};
-use super::{Optimizer, join_cardinality, split_conjuncts};
+use super::{Optimizer, split_conjuncts};
 
 /// What the query around the joins lets the pass change: the names it reads
 /// unqualified, where the order of a join's columns could matter.
@@ -225,6 +225,9 @@ struct Conjunct {
     rels: u64,
     /// An equality between columns of two disjoint sets of relations.
     equi: bool,
+    /// The fraction of the cross product of its relations it keeps, once
+    /// the relations are known.
+    selectivity: f64,
 }
 
 impl Optimizer {
@@ -333,15 +336,24 @@ impl Optimizer {
             }
         }
 
+        let estimator = self.estimator();
         let sizes: Vec<f64> = leaves
             .iter()
-            .map(|leaf| self.estimate_cardinality(leaf.as_ref().expect("leaf present")))
+            .map(|leaf| estimator.rows(leaf.as_ref().expect("leaf present")))
             .collect();
+        let inputs: Vec<&LogicalPlan> = leaves
+            .iter()
+            .map(|leaf| leaf.as_ref().expect("leaf present"))
+            .collect();
+        for c in joining.iter_mut().flatten() {
+            c.selectivity = estimator.conjunct_selectivity(&c.pred, &inputs, &sizes);
+        }
         let order = greedy_order(&sizes, &joining);
 
         let mut joined = 0u64;
         let mut tree: Option<(LogicalPlan, f64)> = None;
         for i in order {
+            let before = joined;
             joined |= 1 << i;
             let leaf = leaves[i].take().expect("each leaf is joined once");
             let Some((acc, acc_size)) = tree.take() else {
@@ -378,7 +390,7 @@ impl Optimizer {
                 condition,
                 using: vec![],
             });
-            tree = Some((join, join_cardinality(acc_size, sizes[i])));
+            tree = Some((join, joined_size(acc_size, before, i, &sizes, &joining)));
         }
         tree.expect("a chain has two or more relations").0
     }
@@ -525,9 +537,34 @@ fn analyse_chain(
                 }
                 _ => false,
             };
-            Some(Conjunct { pred, rels, equi })
+            Some(Conjunct {
+                pred,
+                rels,
+                equi,
+                selectivity: 1.0,
+            })
         })
         .collect()
+}
+
+/// Estimated rows of `size` rows (the relations in `joined`) joined to
+/// relation `next`: the cross product, less what each condition that
+/// reads `next` and what is joined already keeps.
+fn joined_size(
+    size: f64,
+    joined: u64,
+    next: usize,
+    sizes: &[f64],
+    conjuncts: &[Option<Conjunct>],
+) -> f64 {
+    let bit = 1u64 << next;
+    let kept: f64 = conjuncts
+        .iter()
+        .flatten()
+        .filter(|c| c.rels & bit != 0 && c.rels & !(joined | bit) == 0)
+        .map(|c| c.selectivity)
+        .product();
+    size * sizes[next] * kept
 }
 
 /// The order to join relations of estimated `sizes` in, given the
@@ -558,11 +595,13 @@ fn greedy_order(sizes: &[f64], conjuncts: &[Option<Conjunct>]) -> Vec<usize> {
             .filter(|r| joined & (1 << r) == 0)
             .min_by(|&a, &b| {
                 link(a).cmp(&link(b)).then(
-                    join_cardinality(size, sizes[a]).total_cmp(&join_cardinality(size, sizes[b])),
+                    joined_size(size, joined, a, sizes, conjuncts).total_cmp(&joined_size(
+                        size, joined, b, sizes, conjuncts,
+                    )),
                 )
             })
             .expect("a relation is left to join");
-        size = join_cardinality(size, sizes[next]);
+        size = joined_size(size, joined, next, sizes, conjuncts);
         joined |= 1 << next;
         order.push(next);
     }

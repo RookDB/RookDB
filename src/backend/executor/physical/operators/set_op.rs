@@ -245,6 +245,17 @@ impl PhysicalOperator for SetOpOperator {
         Ok(())
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        let (left, right) = (
+            self.left.estimate_cardinality(),
+            self.right.estimate_cardinality(),
+        );
+        match self.op_type {
+            SetOpType::Union => left + right,
+            _ => left.min(right),
+        }
+    }
+
     fn name(&self) -> &'static str {
         match (self.op_type, self.all) {
             (SetOpType::Union, true) => "UnionAll",

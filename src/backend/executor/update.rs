@@ -494,6 +494,15 @@ fn update_rows(
         }
     }
 
+    if updated_count > 0 {
+        crate::backend::cache::note_modified(
+            catalog.engine(),
+            db_name,
+            table_name,
+            updated_count as u64,
+        );
+    }
+
     let result = UpdateResult {
         updated_count,
         returning_rows,

@@ -120,6 +120,10 @@ impl PhysicalOperator for SubqueryExecOperator {
         Ok(())
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        1
+    }
+
     fn name(&self) -> &'static str {
         match self.subquery_type {
             SubqueryType::Scalar => "SubqueryExec(Scalar)",

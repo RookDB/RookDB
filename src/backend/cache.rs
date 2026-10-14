@@ -531,31 +531,167 @@ pub fn invalidate_metadata(engine: &Engine) {
 
 // ── table statistics cache ───────────────────────────────────────────────────
 
-/// Memoised `collect_table_statistics`, validated by heap file size.
-///
-/// The optimizer calls this for every table on every query; collecting scans
-/// EVERY page of the heap (122 MB at one million rows). Statistics feed
-/// cardinality estimates only, so a size-keyed snapshot is sufficient: any
-/// append/truncate/compaction changes the file length and forces a recompute.
-pub fn table_statistics(
+/// Count `rows` inserted, updated or deleted rows of `db.table`, so its
+/// statistics are refreshed once enough of the table has changed.
+pub fn note_modified(engine: &Engine, db_name: &str, table_name: &str, rows: u64) {
+    let mut counts = lock(&engine.modifications);
+    match counts.get_mut(db_name).and_then(|t| t.get_mut(table_name)) {
+        Some(count) => *count += rows,
+        None => {
+            counts
+                .entry(db_name.to_string())
+                .or_default()
+                .insert(table_name.to_string(), rows);
+        }
+    }
+}
+
+fn modified_rows(engine: &Engine, db_name: &str, table_name: &str) -> u64 {
+    lock(&engine.modifications)
+        .get(db_name)
+        .and_then(|t| t.get(table_name))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn reset_modified(engine: &Engine, db_name: &str, table_name: &str) {
+    if let Some(count) = lock(&engine.modifications)
+        .get_mut(db_name)
+        .and_then(|t| t.get_mut(table_name))
+    {
+        *count = 0;
+    }
+}
+
+/// Whether `stats` no longer describe the table: more than a tenth of its
+/// rows were changed since they were gathered, or the heap header's row
+/// count moved by more than a tenth (rows loaded or removed by something
+/// that does not count, or a restart since). A changed file length is not a
+/// sign: updating or soft-deleting rows leaves it alone.
+fn statistics_are_stale(
     engine: &Engine,
     db_name: &str,
     table_name: &str,
-) -> io::Result<std::sync::Arc<crate::statistics::TableStatistics>> {
-    let key = (db_name.to_string(), table_name.to_string());
-    let path = engine.paths().heap(db_name, table_name);
-    let file_len = std::fs::metadata(&path)?.len();
-
-    if let Some((len, hit)) = lock(&engine.statistics).get(&key)
-        && *len == file_len
-    {
-        return Ok(std::sync::Arc::clone(hit));
+    stats: &crate::statistics::TableStatistics,
+) -> bool {
+    let rows = stats.total_tuple_count;
+    if modified_rows(engine, db_name, table_name) * 10 > rows {
+        return true;
     }
+    let path = engine.paths().heap(db_name, table_name);
+    let header_rows = crate::backend::heap::HeapFile::open(engine, &path)
+        .and_then(|f| f.header())
+        .map(|h| h.total_tuples);
+    header_rows.is_ok_and(|now| now.abs_diff(stats.header_tuples) * 10 > rows)
+}
 
-    let stats = crate::statistics::collect_table_statistics(engine, db_name, table_name)?;
-    let arc = std::sync::Arc::new(stats);
-    lock(&engine.statistics).insert(key, (file_len, std::sync::Arc::clone(&arc)));
+/// The statistics of `db.table` when they are at hand and current: in
+/// memory, else stored from an earlier run. Never reads the table, so it is
+/// safe for the planner to call for any table a query touches.
+pub fn known_statistics(
+    catalog: &crate::catalog::Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> Option<Arc<crate::statistics::TableStatistics>> {
+    let engine = catalog.engine();
+    let columns = &catalog.databases.get(db_name)?.tables.get(table_name)?.columns;
+    let key = (db_name.to_string(), table_name.to_string());
+    let cached = lock(&engine.statistics).get(&key).cloned();
+    let stats = match cached {
+        Some(stats) => stats,
+        None => {
+            let stored = Arc::new(load_stored_statistics(engine, db_name, table_name, columns)?);
+            lock(&engine.statistics).insert(key, Arc::clone(&stored));
+            stored
+        }
+    };
+    (!statistics_are_stale(engine, db_name, table_name, &stats)).then_some(stats)
+}
+
+/// Statistics of `db.table` that are current, gathered now (one pass over
+/// the table, sizes and columns) when none are at hand. The planner calls
+/// this for the tables under a join.
+pub fn table_statistics(
+    catalog: &crate::catalog::Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<Arc<crate::statistics::TableStatistics>> {
+    match known_statistics(catalog, db_name, table_name) {
+        Some(stats) => Ok(stats),
+        None => analyze_table(catalog, db_name, table_name),
+    }
+}
+
+/// Gather the statistics of `db.table` now, keep them and store them beside
+/// the table. What `ANALYZE` and `VACUUM` do.
+pub fn analyze_table(
+    catalog: &crate::catalog::Catalog,
+    db_name: &str,
+    table_name: &str,
+) -> io::Result<Arc<crate::statistics::TableStatistics>> {
+    let engine = catalog.engine();
+    let columns = &catalog
+        .databases
+        .get(db_name)
+        .and_then(|db| db.tables.get(table_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Table '{}.{}' not found", db_name, table_name),
+            )
+        })?
+        .columns;
+    let path = engine.paths().heap(db_name, table_name);
+    let stats = crate::statistics::collect_heap_statistics_for(engine, &path, columns)?;
+    // Best effort: statistics that cannot be stored are gathered again later.
+    if let Err(e) = store_statistics(engine, db_name, table_name, &stats) {
+        log::debug!("[Statistics] not stored for {}.{}: {}", db_name, table_name, e);
+    }
+    let arc = Arc::new(stats);
+    lock(&engine.statistics).insert(
+        (db_name.to_string(), table_name.to_string()),
+        Arc::clone(&arc),
+    );
+    reset_modified(engine, db_name, table_name);
     Ok(arc)
+}
+
+fn store_statistics(
+    engine: &Engine,
+    db_name: &str,
+    table_name: &str,
+    stats: &crate::statistics::TableStatistics,
+) -> io::Result<()> {
+    let path = engine.paths().statistics(db_name, table_name);
+    let tmp = crate::backend::paths::with_suffix(&path, ".tmp");
+    std::fs::write(&tmp, serde_json::to_vec(stats).map_err(io::Error::other)?)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// The statistics stored for `db.table`, if they exist and describe the
+/// table's current columns.
+fn load_stored_statistics(
+    engine: &Engine,
+    db_name: &str,
+    table_name: &str,
+    columns: &[crate::catalog::types::Column],
+) -> Option<crate::statistics::TableStatistics> {
+    let bytes = std::fs::read(engine.paths().statistics(db_name, table_name)).ok()?;
+    let stats: crate::statistics::TableStatistics = serde_json::from_slice(&bytes).ok()?;
+    let same_columns = stats.columns.len() == columns.len()
+        && stats.columns.iter().zip(columns).all(|(s, c)| {
+            s.name == c.name && s.data_type == format!("{:?}", c.data_type)
+        });
+    same_columns.then_some(stats)
+}
+
+/// Forget the statistics of `db.table`, in memory and stored.
+pub fn drop_statistics(engine: &Engine, db_name: &str, table_name: &str) {
+    lock(&engine.statistics).remove(&(db_name.to_string(), table_name.to_string()));
+    lock(&engine.modifications)
+        .get_mut(db_name)
+        .map(|t| t.remove(table_name));
+    let _ = std::fs::remove_file(engine.paths().statistics(db_name, table_name));
 }
 
 // ── referencing-FK cache ─────────────────────────────────────────────────────

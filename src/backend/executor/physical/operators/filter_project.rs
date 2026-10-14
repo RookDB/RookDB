@@ -50,6 +50,10 @@ impl PhysicalOperator for SingleRowOperator {
         Ok(())
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        1
+    }
+
     fn name(&self) -> &'static str {
         "SingleRow"
     }
@@ -75,6 +79,10 @@ impl PhysicalOperator for NullOperator {
 
     fn schema(&self) -> &[ColumnInfo] {
         &self.schema
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        0
     }
 
     fn name(&self) -> &'static str {
@@ -225,7 +233,8 @@ impl PhysicalOperator for FilterOperator {
     }
 
     fn estimate_cardinality(&self) -> usize {
-        self.child.estimate_cardinality()
+        // A tenth, the factor used where nothing is known of the data.
+        (self.child.estimate_cardinality() / 10).max(1)
     }
 
     fn name(&self) -> &'static str {
@@ -484,6 +493,10 @@ impl PhysicalOperator for ProjectionOperator {
         self.child.reset()
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        self.child.estimate_cardinality()
+    }
+
     fn name(&self) -> &'static str {
         "Project"
     }
@@ -572,6 +585,13 @@ impl PhysicalOperator for LimitOperator {
         Ok(())
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        self.child
+            .estimate_cardinality()
+            .saturating_sub(self.offset)
+            .min(self.limit)
+    }
+
     fn name(&self) -> &'static str {
         "Limit"
     }
@@ -643,6 +663,10 @@ impl PhysicalOperator for DistinctOperator {
         self.pos = 0;
         self.loaded = false;
         Ok(())
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        self.child.estimate_cardinality() / 5 * 4
     }
 
     fn name(&self) -> &'static str {

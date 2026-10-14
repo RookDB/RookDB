@@ -370,6 +370,12 @@ fn delete_rows(
 
     if deleted_count > 0 {
         file.record_dead_tuples(deleted_count as u32)?;
+        crate::backend::cache::note_modified(
+            catalog.engine(),
+            db_name,
+            table_name,
+            deleted_count as u64,
+        );
     }
 
     let result = DeleteResult {

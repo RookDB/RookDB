@@ -62,6 +62,12 @@ fn setup_join_db(db: &str) -> Catalog {
         insert_single_tuple(&catalog, db, "departments", &row).unwrap();
     }
 
+    // Departments no employee is in: probing an index beats scanning the
+    // table only when the table is big enough to make a scan costly.
+    for id in 1000..1300 {
+        insert_single_tuple(&catalog, db, "departments", &[&id.to_string(), "Unstaffed"]).unwrap();
+    }
+
     // Insert employees (including one with dept_id 99 which has no matching department)
     for row in [
         vec!["1", "Alice", "10"],

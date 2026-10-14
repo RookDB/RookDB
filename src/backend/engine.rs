@@ -39,7 +39,10 @@ type TableKey = (String, String);
 pub struct Engine {
     paths: crate::backend::paths::Paths,
     pub(crate) table_meta: Mutex<HashMap<TableKey, Arc<TableMeta>>>,
-    pub(crate) statistics: Mutex<HashMap<TableKey, (u64, Arc<crate::statistics::TableStatistics>)>>,
+    pub(crate) statistics: Mutex<HashMap<TableKey, Arc<crate::statistics::TableStatistics>>>,
+    /// Rows inserted, updated or deleted since each table's statistics were
+    /// gathered, by database then table (see `cache::note_modified`).
+    pub(crate) modifications: Mutex<HashMap<String, HashMap<String, u64>>>,
     pub(crate) referencing_fks: Mutex<HashMap<TableKey, Arc<RefFks>>>,
     pub(crate) index_discovery:
         Mutex<HashMap<TableKey, crate::backend::executor::create_index::IndexList>>,
@@ -82,6 +85,7 @@ impl Engine {
             paths: crate::backend::paths::Paths::new(root.clone()),
             table_meta: Mutex::default(),
             statistics: Mutex::default(),
+            modifications: Mutex::default(),
             referencing_fks: Mutex::default(),
             index_discovery: Mutex::default(),
             heaps: Mutex::default(),

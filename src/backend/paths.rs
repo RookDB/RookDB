@@ -87,6 +87,11 @@ impl Paths {
         self.database_dir(db).join(format!("{}.dat", table))
     }
 
+    /// A table's stored column statistics.
+    pub fn statistics(&self, db: &str, table: &str) -> PathBuf {
+        self.database_dir(db).join(format!("{}.stats", table))
+    }
+
     /// The free-space map fork of a table's heap file.
     pub fn heap_fsm(&self, db: &str, table: &str) -> PathBuf {
         self.database_dir(db).join(format!("{}.dat.fsm", table))

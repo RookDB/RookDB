@@ -395,6 +395,7 @@ fn rename_table(
         catalog.engine().paths().heap_fsm(db, new_name),
     );
     rename_index_files_for_table(catalog.engine(), db, old_name, new_name);
+    crate::backend::cache::drop_statistics(catalog.engine(), db, old_name);
 
     let mut lines = Vec::new();
     if let Err(e) = crate::backend::system_table::rename_table_in_system(

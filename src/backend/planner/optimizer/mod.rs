@@ -27,9 +27,11 @@ use rook_ast::logical::*;
 use rook_ast::{ExprNode, JoinType, PredicateNode};
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::planner::helpers::derive_qualified_schema;
 use crate::statistics::TableStatistics;
+use crate::statistics::estimator::{Estimator, StatsSource};
 
 use self::helpers::*;
 
@@ -40,7 +42,7 @@ use self::helpers::*;
 #[derive(Debug, Default)]
 pub struct Optimizer {
     /// Map of table name → statistics, used by join-ordering heuristics.
-    pub table_stats: Option<HashMap<String, TableStatistics>>,
+    pub table_stats: Option<HashMap<String, Arc<TableStatistics>>>,
     /// Leave every join in the order the query wrote it, even with
     /// statistics. For checking that join ordering changes no result.
     pub skip_join_ordering: bool,
@@ -53,7 +55,7 @@ impl Optimizer {
     }
 
     /// Create an optimizer with table statistics (needed for join ordering).
-    pub fn with_statistics(stats: HashMap<String, TableStatistics>) -> Self {
+    pub fn with_statistics(stats: HashMap<String, Arc<TableStatistics>>) -> Self {
         Self {
             table_stats: Some(stats),
             ..Self::default()
@@ -684,61 +686,11 @@ impl Optimizer {
         }
     }
 
-    /// Estimate the number of rows a plan node will produce.
-    fn estimate_cardinality(&self, plan: &LogicalPlan) -> f64 {
-        match plan {
-            LogicalPlan::TableScan(t) => {
-                if let Some(ref stats) = self.table_stats {
-                    stats
-                        .get(&t.table)
-                        .map(|s| s.total_tuple_count as f64)
-                        .unwrap_or(1000.0)
-                } else {
-                    1000.0
-                }
-            }
-            LogicalPlan::Filter(_) => self.estimate_child_cardinality(plan) * 0.1,
-            LogicalPlan::Project(p) => self.estimate_cardinality(&p.child),
-            LogicalPlan::Join(j) => join_cardinality(
-                self.estimate_cardinality(&j.left),
-                self.estimate_cardinality(&j.right),
-            ),
-            LogicalPlan::Aggregate(_) => self.estimate_child_cardinality(plan) * 0.5,
-            LogicalPlan::Distinct(d) => self.estimate_cardinality(&d.child) * 0.8,
-            LogicalPlan::Sort(s) => self.estimate_cardinality(&s.child),
-            LogicalPlan::Limit(l) => l.limit as f64,
-            LogicalPlan::SetOp(s) => match s.op {
-                SetOpType::Union => {
-                    let left = self.estimate_cardinality(&s.left);
-                    let right = self.estimate_cardinality(&s.right);
-                    if s.all {
-                        left + right
-                    } else {
-                        (left + right) * 0.7
-                    }
-                }
-                _ => {
-                    let left = self.estimate_cardinality(&s.left);
-                    let right = self.estimate_cardinality(&s.right);
-                    (left.min(right)) * 0.5
-                }
-            },
-            LogicalPlan::Subquery(sq) => self.estimate_cardinality(&sq.subquery),
-            LogicalPlan::Cte(c) => self.estimate_cardinality(&c.outer),
-            LogicalPlan::RecursiveCte(rc) => self.estimate_cardinality(&rc.outer),
-            LogicalPlan::CteScan(_) => 1000.0,
-            LogicalPlan::Insert(inp) => self.estimate_cardinality(&inp.child),
-        }
-    }
-
-    fn estimate_child_cardinality(&self, plan: &LogicalPlan) -> f64 {
-        match plan {
-            LogicalPlan::Filter(f) => self.estimate_cardinality(&f.child),
-            LogicalPlan::Aggregate(a) => self.estimate_cardinality(&a.child),
-            LogicalPlan::Cte(c) => self.estimate_cardinality(&c.outer),
-            LogicalPlan::RecursiveCte(rc) => self.estimate_cardinality(&rc.outer),
-            LogicalPlan::CteScan(_) => 1000.0,
-            _ => 1000.0,
+    /// The estimator the passes share with the physical planner.
+    fn estimator(&self) -> Estimator<'_> {
+        match &self.table_stats {
+            Some(stats) => Estimator::new(stats),
+            None => Estimator::new(&NoStatistics),
         }
     }
 
@@ -1079,9 +1031,13 @@ fn widen_sort_hint(plan: LogicalPlan, needed: u64) -> LogicalPlan {
     }
 }
 
-/// Estimated rows of a join of inputs of `left` and `right` estimated rows.
-fn join_cardinality(left: f64, right: f64) -> f64 {
-    left * right * 0.2
+/// No table has statistics: every estimate is a fixed factor.
+struct NoStatistics;
+
+impl StatsSource for NoStatistics {
+    fn table(&self, _table: &str) -> Option<Arc<TableStatistics>> {
+        None
+    }
 }
 
 /// Flatten a predicate into its top-level AND-ed conjuncts.

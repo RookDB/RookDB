@@ -32,6 +32,11 @@ pub(super) fn resolve_table_names(
         QueryPlan::Truncate(p) => resolve(&mut p.table),
         QueryPlan::AlterTable(p) => resolve(&mut p.table),
         QueryPlan::Vacuum(p) => resolve(&mut p.table),
+        QueryPlan::Analyze(p) => {
+            if let Some(table) = p.table.as_mut() {
+                resolve(table)
+            }
+        }
         QueryPlan::CreateIndex(p) => resolve(&mut p.table_name),
         QueryPlan::DropIndex(p) => resolve(&mut p.table_name),
         QueryPlan::Explain(p) => {

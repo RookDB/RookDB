@@ -11,7 +11,8 @@ use super::super::operators::{
     NestedLoopJoinOperator, PhysicalOperator, infer_aggregate_output_type, mark_merged,
 };
 use super::super::tuple::ColumnInfo;
-use super::PhysicalPlanner;
+use super::{PhysicalPlanner, PlannerStats};
+use crate::statistics::estimator::{Estimator, hash_join_cost, index_nested_loop_cost};
 use super::helpers::infer_expr_type_from_ast;
 use crate::backend::error::{RookError, RookResult};
 use crate::types::datatype::DataType;
@@ -21,7 +22,8 @@ impl PhysicalPlanner {
     ///
     /// Three-tier algorithm selection (see `plan_join_with_ctes` body):
     /// 1. IndexNestedLoopJoin — inner side is a plain table scan with an index
-    ///    on the join key, join is INNER/LEFT, outer side is small.
+    ///    on the join key, join is INNER/LEFT, and probing the index once per
+    ///    estimated outer row costs less than a hash join.
     /// 2. HashJoin — INNER join with at least one cross-side equality conjunct;
     ///    leftover conjuncts become a residual post-join filter.
     /// 3. NestedLoopJoin — universal fallback for every other join type
@@ -190,15 +192,25 @@ impl PhysicalPlanner {
                             .unwrap_or(false)
                 });
 
-                let outer_card = left.estimate_cardinality();
-                let is_outer_small = outer_card <= 5000
-                    || matches!(
-                        j.left.as_ref(),
-                        LogicalPlan::Limit(_) | LogicalPlan::Filter(_)
-                    );
+                // Probe the index once per outer row, or scan the inner side
+                // once through a hash table built on the outer rows.
+                let outer_rows = left.estimate_cardinality() as f64;
+                let inner_rows = right.estimate_cardinality() as f64;
+                let matches = Estimator::new(&PlannerStats(self)).rows_per_key(&j.right, inner_col);
+                let index_cost = index_nested_loop_cost(outer_rows, matches);
+                let hash_cost = hash_join_cost(outer_rows, inner_rows);
+                let index_is_cheaper = index_cost <= hash_cost;
+                if matched_idx.is_some() && !index_is_cheaper {
+                    self.note(|| {
+                        format!(
+                            "HashJoin chosen over the index on '{}': about {} outer and {} inner row(s), estimated cost {:.0} against {:.0} for probing",
+                            inner_ts.table, outer_rows, inner_rows, hash_cost, index_cost
+                        )
+                    });
+                }
 
                 if let Some((idx_name, _, _)) = matched_idx
-                    && is_outer_small
+                    && index_is_cheaper
                 {
                     let idx_path = self.catalog.engine().paths().index(
                         &self.db_name,
@@ -243,8 +255,8 @@ impl PhysicalPlanner {
 
                         self.note(|| {
                             format!(
-                                "IndexNestedLoopJoin chosen: about {} outer row(s) probe index '{}' of '{}'",
-                                outer_card, idx_name, inner_ts.table
+                                "IndexNestedLoopJoin chosen: about {} outer row(s) probe index '{}' of '{}', estimated cost {:.0} against {:.0} for a hash join",
+                                outer_rows, idx_name, inner_ts.table, index_cost, hash_cost
                             )
                         });
                         return Ok(wrap(Box::new(

@@ -1,10 +1,27 @@
+//! What the planner knows about a table: sizes from the heap file and, per
+//! column, the number of distinct values, NULLs and the value range.
+//!
+//! [`collect_heap_statistics`] reads every page once; with the table's
+//! columns it also gathers [`ColumnStatistics`] ([`column`]). The
+//! [`estimator`] turns them into row estimates. Where they are kept and
+//! when they are refreshed is `cache::table_statistics`.
+
+pub mod column;
+pub mod estimator;
+
 use std::io::{self};
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::backend::heap::HeapFile;
+use crate::catalog::types::Column;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, page_free_space};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub use column::ColumnStatistics;
+use column::ColumnCollector;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageStatistics {
     pub page_id: u32,
     pub tuple_count: u32,
@@ -17,7 +34,7 @@ pub struct PageStatistics {
     pub max_tuple_bytes: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TableStatistics {
     pub total_pages: u32,
     pub data_pages: u32,
@@ -32,10 +49,25 @@ pub struct TableStatistics {
     pub max_page_free_bytes: u32,
     pub min_tuple_bytes: u32,
     pub max_tuple_bytes: u32,
+    /// Not stored with the statistics: a table's pages are numerous and only
+    /// reports read them.
+    #[serde(skip)]
     pub page_breakdown: Vec<PageStatistics>,
+    /// Per-column statistics, empty when the pass did not know the columns.
+    pub columns: Vec<ColumnStatistics>,
+    /// The live-row count the heap header held when these were gathered. A
+    /// header that has moved since means rows came or went.
+    pub header_tuples: u64,
 }
 
 impl TableStatistics {
+    /// The statistics of the column called `name`, if gathered.
+    pub fn column(&self, name: &str) -> Option<&ColumnStatistics> {
+        self.columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+    }
+
     pub fn data_capacity_bytes(&self) -> u64 {
         self.data_pages as u64 * PAGE_SIZE as u64
     }
@@ -89,11 +121,23 @@ pub fn collect_table_statistics(
 }
 
 /// Statistics for the heap file at `path`, read through its buffer pool.
+/// Sizes only; see [`collect_heap_statistics_for`] for column statistics.
 pub fn collect_heap_statistics(
     engine: &crate::backend::engine::Engine,
     path: &Path,
 ) -> io::Result<TableStatistics> {
+    collect_heap_statistics_for(engine, path, &[])
+}
+
+/// [`collect_heap_statistics`], also gathering the statistics of `columns`
+/// (the table's columns, in order) in the same pass.
+pub fn collect_heap_statistics_for(
+    engine: &crate::backend::engine::Engine,
+    path: &Path,
+    columns: &[Column],
+) -> io::Result<TableStatistics> {
     let file = HeapFile::open(engine, path)?;
+    let mut collector = (!columns.is_empty()).then(|| ColumnCollector::new(columns));
     let total_pages = file.page_count();
     let file_size_bytes = total_pages as u64 * PAGE_SIZE as u64;
     let data_pages = total_pages.saturating_sub(1);
@@ -113,6 +157,8 @@ pub fn collect_heap_statistics(
         min_tuple_bytes: u32::MAX,
         max_tuple_bytes: 0,
         page_breakdown: Vec::new(),
+        columns: Vec::new(),
+        header_tuples: file.header().map(|h| h.total_tuples).unwrap_or(0),
     };
 
     for page_num in 1..total_pages {
@@ -146,6 +192,9 @@ pub fn collect_heap_statistics(
             page_tuple_bytes += length as u64;
             page_min_tuple_bytes = page_min_tuple_bytes.min(length);
             page_max_tuple_bytes = page_max_tuple_bytes.max(length);
+            if let Some(collector) = collector.as_mut() {
+                collector.add(tuple);
+            }
         }
 
         if tuple_count_on_page == 0 {
@@ -166,6 +215,10 @@ pub fn collect_heap_statistics(
             min_tuple_bytes: page_min_tuple_bytes,
             max_tuple_bytes: page_max_tuple_bytes,
         });
+    }
+
+    if let Some(collector) = collector {
+        stats.columns = collector.finish();
     }
 
     if stats.total_tuple_count == 0 {

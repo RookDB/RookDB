@@ -270,6 +270,17 @@ impl PhysicalOperator for NestedLoopJoinOperator {
         Ok(())
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        let (left, right) = (
+            self.left.estimate_cardinality(),
+            self.right.estimate_cardinality(),
+        );
+        match (&self.predicate, self.join_type) {
+            (None, _) | (_, JoinType::Cross) => left.saturating_mul(right),
+            _ => (left.saturating_mul(right) / 5).max(1),
+        }
+    }
+
     fn name(&self) -> &'static str {
         "NestedLoopJoin"
     }
@@ -1428,6 +1439,14 @@ impl PhysicalOperator for HashJoinOperator {
         Ok(())
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        let (build, probe) = (
+            self.build.estimate_cardinality(),
+            self.probe.estimate_cardinality(),
+        );
+        (build.saturating_mul(probe) / 5).max(1)
+    }
+
     fn name(&self) -> &'static str {
         "HashJoin"
     }
@@ -1657,6 +1676,7 @@ impl PhysicalOperator for IndexNestedLoopJoinOperator {
     }
 
     fn estimate_cardinality(&self) -> usize {
+        // About one match per outer row.
         self.outer.estimate_cardinality()
     }
 

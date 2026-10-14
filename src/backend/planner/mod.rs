@@ -41,7 +41,8 @@ impl std::error::Error for PlanError {}
 
 /// Load table statistics for all tables in the given database.
 ///
-/// Collects tuple counts and page usage from each table's heap file.
+/// Collects row counts and per-column statistics from each table's heap file
+/// (see `cache::table_statistics` for when they are gathered again).
 /// Tables whose heap files don't exist yet (e.g. freshly created with no
 /// data) are silently skipped. Returns an empty map if no stats can be
 /// collected.
@@ -49,7 +50,7 @@ fn load_table_statistics(
     db_name: &str,
     catalog: &Catalog,
     plan: &LogicalPlan,
-) -> std::collections::HashMap<String, crate::statistics::TableStatistics> {
+) -> std::collections::HashMap<String, std::sync::Arc<crate::statistics::TableStatistics>> {
     let db = match catalog.databases.get(db_name) {
         Some(d) => d,
         None => return std::collections::HashMap::new(),
@@ -63,13 +64,13 @@ fn load_table_statistics(
 
     let mut stats = std::collections::HashMap::new();
     for table_name in db.tables.keys().filter(|t| joined_tables.contains(*t)) {
-        // Process-cached (file-size validated): collection reads every heap
-        // page and would otherwise dominate per-query planning latency.
+        // Process-cached until the table changes enough: collection reads
+        // every heap page and would otherwise dominate per-query planning
+        // latency.
         if let Ok(table_stats) =
-            crate::backend::cache::table_statistics(catalog.engine(), db_name, table_name)
+            crate::backend::cache::table_statistics(catalog, db_name, table_name)
         {
-            let cloned: crate::statistics::TableStatistics = (*table_stats).clone();
-            stats.insert(table_name.clone(), cloned);
+            stats.insert(table_name.clone(), table_stats);
         }
     }
     stats

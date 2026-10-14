@@ -130,10 +130,26 @@ fn join_reports_the_algorithm() {
     assert_eq!(scan.detail("table"), Some("dept"));
     assert_eq!(scan.detail("alias"), Some("d"));
 
-    // A small outer side and an index on the inner join key: index nested loop.
+    // Every dept finds 20 emp rows: reading all 200 through the index costs
+    // more than one scan of emp, so the join hashes.
     let plan = explain(
         &mut s,
         "EXPLAIN SELECT d.dname, e.name FROM dept d JOIN emp e ON d.dno = e.dept",
+    );
+    assert!(plan.root.contains("HashJoin"), "{:?}", plan.root);
+    assert!(
+        plan.trace
+            .notes
+            .iter()
+            .any(|n| n.starts_with("HashJoin chosen over the index")),
+        "{:?}",
+        plan.trace.notes
+    );
+
+    // One outer row and an index on the inner join key: index nested loop.
+    let plan = explain(
+        &mut s,
+        "EXPLAIN SELECT d.dname, e.name FROM dept d JOIN emp e ON d.dno = e.dept WHERE d.dname = 'd3'",
     );
     let join = plan
         .root
