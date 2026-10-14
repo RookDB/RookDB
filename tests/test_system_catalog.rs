@@ -2,8 +2,8 @@
 //!
 //! The catalog's single source of truth is the set of heap files under
 //! `database/system/` (sys_databases, sys_tables, sys_columns, ...). These
-//! tests cover bootstrap, persistence across sessions and the one-time
-//! migration from the legacy `catalog.json`.
+//! tests cover bootstrap, persistence across sessions and the refusal of a
+//! data directory from before the system catalog.
 //!
 //! Run with: cargo test --test test_system_catalog -- --test-threads=1
 
@@ -74,45 +74,21 @@ fn catalog_round_trips_through_system_tables() {
 }
 
 #[test]
-fn legacy_json_catalog_is_migrated_once() {
+fn old_json_catalog_is_not_migrated() {
     let _ws = common::TestWorkspace::new("syscat", "migrate");
 
-    // Simulate a pre-system-tables installation: the guard bootstrapped the
-    // system tables on entry, so wipe them (and any stray JSON) to restore
-    // the "only a catalog.json exists" state this test needs.
+    // Simulate a pre-system-tables installation: wipe the system tables the
+    // guard bootstrapped and leave only a catalog.json.
     let _ = std::fs::remove_dir_all(common::path("database/system"));
-    let _ = std::fs::remove_file(common::path("database/global/catalog.json"));
-
     std::fs::create_dir_all(common::path("database/global")).unwrap();
-    let json = r#"{
-        "databases": {
-            "old_db": {
-                "tables": {
-                    "legacy": {
-                        "columns": [
-                            {"name": "id", "data_type": "Int", "nullable": false,
-                             "constraints": {"not_null": true, "unique": false,
-                                             "default": null, "check": null}}
-                        ]
-                    }
-                }
-            }
-        }
-    }"#;
+    let json = r#"{"databases": {"old_db": {"tables": {}}}}"#;
     std::fs::write(common::path("database/global/catalog.json"), json).unwrap();
 
     init_catalog();
 
-    // The JSON file is renamed out of the way and its content lives in the
-    // system tables from now on.
-    assert!(
-        common::path("database/global/catalog.json.migrated").exists(),
-        "catalog.json must be renamed to catalog.json.migrated"
-    );
-    let catalog = load_catalog();
-    assert!(
-        catalog.databases.contains_key("old_db"),
-        "migrated databases survive"
-    );
-    assert!(catalog.databases["old_db"].tables.contains_key("legacy"));
+    // The old file is left alone, nothing is imported and no system tables
+    // are created over it.
+    assert!(common::path("database/global/catalog.json").exists());
+    assert!(!common::path("database/system").exists());
+    assert!(load_catalog().databases.is_empty());
 }

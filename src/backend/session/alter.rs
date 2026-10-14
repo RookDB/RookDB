@@ -462,10 +462,6 @@ fn rename_index_file(
         crate::backend::index::btree::root_sidecar_path(&old_path),
         crate::backend::index::btree::root_sidecar_path(&engine.paths().index(db, table, new)),
     );
-    let _ = std::fs::rename(
-        engine.paths().index_meta(db, table, old),
-        engine.paths().index_meta(db, table, new),
-    );
 }
 
 fn schema(columns: &[Column]) -> Vec<DataType> {

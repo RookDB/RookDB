@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use crate::catalog::types::{Catalog, Column, Constraints, Database, Table};
 use crate::types::DataType;
 
-use save::{populate_system_tables, strip_check_wrapper};
+use save::strip_check_wrapper;
 
 mod info_schema;
 mod metadata;
@@ -126,45 +126,6 @@ fn datatype_to_string(dt: &DataType) -> String {
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
-/// Bootstrap the system catalog from `catalog.json` if needed.
-///
-/// Returns `true` if a migration happened, `false` if system tables already
-/// existed (or if no JSON catalog was found).
-pub fn bootstrap_system_catalog(engine: &std::sync::Arc<crate::backend::engine::Engine>) -> bool {
-    let sys_dir = engine.paths().system_dir();
-    let catalog_json = engine.paths().catalog_file();
-
-    // If system directory already exists with at least one table file, skip.
-    if sys_dir.exists() && sys_path(engine, "databases").exists() {
-        return false;
-    }
-
-    // No JSON catalog to bootstrap from — just create empty system tables.
-    if !catalog_json.exists() {
-        log::info!("[SystemCatalog] No catalog.json found; creating empty system tables.");
-        create_system_table_files(engine);
-        return false;
-    }
-
-    log::info!("[SystemCatalog] Migrating catalog.json → system tables ...");
-
-    // Read the existing JSON catalog.
-    let catalog = crate::catalog::load_catalog_in(engine);
-
-    // Create system directory and heap files.
-    std::fs::create_dir_all(&sys_dir).ok();
-    create_system_table_files(engine);
-
-    // Populate system tables from the in-memory catalog.
-    populate_system_tables(&catalog, Vec::new(), None);
-
-    // Rename catalog.json so we don't migrate again.
-    let migrated_str = crate::backend::paths::with_suffix(&catalog_json, ".migrated");
-    let _ = std::fs::rename(&catalog_json, &migrated_str);
-
-    log::info!("[SystemCatalog] Migration complete. catalog.json → system tables.");
-    true
-}
 /// Load the full `Catalog` from system table heap files.
 ///
 /// Scans each system table via direct disk reads and reconstructs the
@@ -527,17 +488,6 @@ pub fn resolve_table_id(
         })?;
 
     Ok((table_id, db_id))
-}
-/// Check if the system tables exist and are accessible.
-pub fn system_tables_exist(engine: &crate::backend::engine::Engine) -> bool {
-    let sys_dir = engine.paths().system_dir();
-    sys_dir.exists()
-        && sys_path(engine, "databases").exists()
-        && sys_path(engine, "tables").exists()
-        && sys_path(engine, "columns").exists()
-        && sys_path(engine, "constraints").exists()
-        && sys_path(engine, "indexes").exists()
-        && sys_path(engine, "views").exists()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

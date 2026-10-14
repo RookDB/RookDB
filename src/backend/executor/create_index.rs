@@ -15,8 +15,6 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::backend::index::btree::BTree;
 use crate::catalog::Catalog;
 use crate::catalog::types::Column;
@@ -35,68 +33,28 @@ pub(crate) fn index_file_path(
     engine.paths().index(db_name, table_name, index_name)
 }
 
-/// Construct the legacy `.idx` file path (single-index fallback).
-fn legacy_index_file_path(
-    engine: &crate::backend::engine::Engine,
-    db_name: &str,
-    table_name: &str,
-) -> PathBuf {
-    engine.paths().legacy_index(db_name, table_name)
-}
-
-/// Construct the legacy `.idx.meta` file path (single-index fallback).
-fn legacy_index_meta_file_path(
-    engine: &crate::backend::engine::Engine,
-    db_name: &str,
-    table_name: &str,
-) -> PathBuf {
-    engine.paths().legacy_index_meta(db_name, table_name)
-}
-
 /// The key layout of an index: its columns, their positions in the row and
-/// their types. Read from a legacy index's `.idx.meta` file, or built from
-/// `sys_indexes` and the table schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// their types. Built from `sys_indexes` and the table schema.
+#[derive(Debug, Clone)]
 pub(crate) struct IndexMeta {
     /// The name of the indexed column (for human reference).
     ///
-    /// Legacy single-column field; kept for backward compatibility with
-    /// meta files written before composite indexes. When present alongside
-    /// `column_names`, it mirrors the first entry.
-    #[serde(default)]
+    /// Mirrors the first entry of `column_names`.
     column_name: String,
     /// The ordinal position of the indexed column in the table schema.
-    #[serde(default)]
     column_idx: usize,
     /// String representation of the key type (e.g. "INT", "VARCHAR(100)").
-    #[serde(default)]
     key_type: String,
     /// Indexed columns in key order — composite indexes have >1 entry.
-    #[serde(default)]
     column_names: Vec<String>,
     /// Ordinal position of each indexed column, aligned with `column_names`.
-    #[serde(default)]
     column_idxs: Vec<usize>,
     /// Key type per segment, aligned with `column_names`.
-    #[serde(default)]
     key_types: Vec<String>,
-    /// Whether this index enforces uniqueness (feeds `sys_indexes.is_unique`,
-    /// which in turn feeds the UNIQUE checker's index fast path).
-    ///
-    /// Defaults to `false` when absent (older `.idx.meta` files): a missing
-    /// flag degrades UNIQUE enforcement to the heap-scan fallback — correct,
-    /// just slower. Defaulting to `true` instead would wrongly let plain
-    /// indexes reject duplicate values after a catalog rebuild.
-    #[serde(default)]
-    is_unique: bool,
-    /// Whether this index was created for a PRIMARY KEY (informational;
-    /// surfaced through `information_schema.indexes`).
-    #[serde(default)]
-    is_primary: bool,
 }
 
 impl IndexMeta {
-    /// Indexed column names, normalising legacy single-column files.
+    /// Indexed column names, falling back to the single column.
     fn columns(&self) -> Vec<String> {
         if !self.column_names.is_empty() {
             self.column_names.clone()
@@ -105,7 +63,7 @@ impl IndexMeta {
         }
     }
 
-    /// Column ordinal positions, normalising legacy files.
+    /// Column ordinal positions, .
     fn idxs(&self) -> Vec<usize> {
         if !self.column_idxs.is_empty() {
             self.column_idxs.clone()
@@ -114,7 +72,7 @@ impl IndexMeta {
         }
     }
 
-    /// Key types as strings, normalising legacy files.
+    /// Key types as strings, .
     fn types(&self) -> Vec<String> {
         if !self.key_types.is_empty() {
             self.key_types.clone()
@@ -122,13 +80,6 @@ impl IndexMeta {
             vec![self.key_type.clone()]
         }
     }
-}
-
-/// Load index metadata from an `.idx.meta` file.
-fn load_index_meta(meta_path: &PathBuf) -> Result<IndexMeta, String> {
-    let meta_json = std::fs::read_to_string(meta_path)
-        .map_err(|e| format!("Failed to read index metadata: {}", e))?;
-    serde_json::from_str(&meta_json).map_err(|e| format!("Failed to parse index metadata: {}", e))
 }
 
 /// Load all indexes defined for a table from `sys_indexes`.
@@ -140,10 +91,8 @@ fn load_index_meta(meta_path: &PathBuf) -> Result<IndexMeta, String> {
 /// - `sys_indexes` to be populated (i.e., `save_catalog()` has been called at
 ///   least once so the system tables contain this table's metadata).
 ///
-/// During initial catalog bootstrap — before `save_catalog()` has persisted
-/// the table's metadata — this function returns an empty list because the
-/// system tables have not yet been populated.  Callers should fall back to
-/// legacy `{table}.idx` file scanning when this function returns `Vec::new()`.
+/// Before `save_catalog()` has persisted the table's metadata this function
+/// returns an empty list because the system tables have not yet been populated.
 ///
 /// Returns `Vec<(index_name, column_name, is_unique)>`.
 ///
@@ -242,15 +191,6 @@ pub fn load_table_indexes_multi(
     }
 
     Ok(indexes)
-}
-
-/// Check if a legacy single-index file exists for a table.
-pub fn legacy_index_exists(
-    engine: &crate::backend::engine::Engine,
-    db_name: &str,
-    table_name: &str,
-) -> bool {
-    legacy_index_file_path(engine, db_name, table_name).exists()
 }
 
 // ── Create Index ──────────────────────────────────────────────────────────────
@@ -752,7 +692,7 @@ pub fn ensure_fk_parent_indexes(catalog: &Catalog, db_name: &str, table_name: &s
 
 // ── DML Index Update Helpers ──────────────────────────────────────────────────
 
-/// For a given table, discover all index files (named and legacy) and return
+/// For a given table, discover all index files and return
 /// `Vec<(idx_path, IndexMeta)>`.
 fn discover_indexes_for_table(
     engine: &crate::backend::engine::Engine,
@@ -768,7 +708,7 @@ fn discover_indexes_for_table(
             .ok()
             .flatten()
             .unwrap_or_default();
-    for (idx_name, columns, is_unique) in
+    for (idx_name, columns, _) in
         load_table_indexes_multi(engine, db_name, table_name).unwrap_or_default()
     {
         let idx_path = index_file_path(engine, db_name, table_name, &idx_name);
@@ -799,28 +739,8 @@ fn discover_indexes_for_table(
             key_types: positions.iter().map(|&i| schema[i].1.to_string()).collect(),
             column_names: columns,
             column_idxs: positions,
-            is_unique,
-            is_primary: false,
         };
         discovered.push((idx_path, meta));
-    }
-
-    // 2. Fallback: check for legacy single-index file
-    let legacy_idx = legacy_index_file_path(engine, db_name, table_name);
-    let legacy_meta = legacy_index_meta_file_path(engine, db_name, table_name);
-    if legacy_idx.exists() && legacy_meta.exists() {
-        // Only add if not already covered by a named index (avoid duplicates)
-        if !discovered.iter().any(|(p, _)| *p == legacy_idx)
-            && let Ok(meta) = load_index_meta(&legacy_meta)
-        {
-            log::info!(
-                "[IndexDiscover] Found legacy index for {}.{} at {:?}",
-                db_name,
-                table_name,
-                legacy_idx
-            );
-            discovered.push((legacy_idx, meta));
-        }
     }
 
     discovered
@@ -954,7 +874,7 @@ fn open_btree_for_meta(idx_path: &Path, meta: &IndexMeta) -> Option<BTree> {
 /// After a tuple is deleted from the heap, update all existing B+ Tree indexes
 /// for the table.
 ///
-/// Discovers all indexes (named and legacy) via `sys_indexes` and file scanning,
+/// Discovers all indexes via `sys_indexes` and file scanning,
 /// then removes the specific entry matching `(page_id, slot_id)` from each one.
 ///
 /// Returns `Ok(true)` if at least one index was updated, `Ok(false)` if no
@@ -1026,7 +946,7 @@ pub fn update_index_on_delete(
 
 /// After a tuple is updated, update all existing B+ Tree indexes for the table.
 ///
-/// Discovers all indexes (named and legacy) via `sys_indexes` and file scanning,
+/// Discovers all indexes via `sys_indexes` and file scanning,
 /// then for each index:
 ///   - Deletes the old key matching `(old_page_id, old_slot_id)`
 ///   - Inserts the new key at `(new_page_id, new_slot_id)`

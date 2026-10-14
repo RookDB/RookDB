@@ -105,8 +105,7 @@ fn read_dead_tuple_count(
 
 /// Bulk-rebuild every named index on a table from current heap contents.
 ///
-/// Preserves `.idx.meta` files (they describe columns/types, not contents);
-/// only the `.idx` B+Tree files are regenerated.
+/// Only the `.idx` B+Tree files are regenerated; `sys_indexes` is untouched.
 fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result<usize, String> {
     let engine = catalog.engine();
     let indexes = load_table_indexes_multi(engine, db_name, table_name)?;

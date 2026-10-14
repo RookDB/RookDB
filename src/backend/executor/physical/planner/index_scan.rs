@@ -53,7 +53,7 @@ impl PhysicalPlanner {
             return Ok(None);
         }
 
-        // Load indexes (both named and legacy), preserving composite layouts
+        // Load the named indexes, preserving composite layouts
         let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
             self.catalog.engine(),
             &self.db_name,
@@ -121,46 +121,6 @@ impl PhysicalPlanner {
                     best_col_names = vec![col_name.clone()];
                     best_key_types.clear();
                     best_mode = Some(mode);
-                }
-            }
-        }
-
-        // Try legacy index if no named index matched
-        if best_mode.is_none() {
-            let legacy_idx_path = self
-                .catalog
-                .engine()
-                .paths()
-                .legacy_index(&self.db_name, &ts.table);
-            let meta_path = self
-                .catalog
-                .engine()
-                .paths()
-                .legacy_index_meta(&self.db_name, &ts.table);
-            if legacy_idx_path.exists()
-                && let Ok(meta_json) = std::fs::read_to_string(&meta_path)
-            {
-                #[derive(serde::Deserialize)]
-                struct IndexMeta {
-                    column_name: String,
-                }
-                if let Ok(meta) = serde_json::from_str::<IndexMeta>(&meta_json) {
-                    let col_type = table_schema
-                        .iter()
-                        .find(|c| c.name.eq_ignore_ascii_case(&meta.column_name))
-                        .map(|c| &c.data_type)
-                        .unwrap_or_else(|| &DataType::Int);
-                    if let Some(mode) = self.extract_index_mode_from_predicate(
-                        pred_node,
-                        &meta.column_name,
-                        col_type,
-                    ) {
-                        let col_name = meta.column_name.clone();
-                        best_mode = Some(mode);
-                        best_col_name = Some(col_name.clone());
-                        best_col_names = vec![col_name];
-                        best_idx_name = Some(format!("idx_{}_{}", ts.table, meta.column_name));
-                    }
                 }
             }
         }

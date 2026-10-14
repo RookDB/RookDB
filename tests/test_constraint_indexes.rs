@@ -68,7 +68,6 @@ fn forget_indexes(table: &str) {
         storage_manager::backend::system_table::delete_index_metadata(&engine, "app", table, &name)
             .unwrap();
         let _ = std::fs::remove_file(engine.paths().index("app", table, &name));
-        let _ = std::fs::remove_file(engine.paths().index_meta("app", table, &name));
     }
     engine.invalidate_metadata();
 }

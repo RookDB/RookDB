@@ -935,12 +935,10 @@ pub(super) fn remove_index_files_for_table(
     if !base_path.exists() {
         return;
     }
-    let legacy_idx = engine.paths().legacy_index(db, table);
     let prefix = format!("{}.", table);
 
     // Drop any cached B+ Tree handle(s) for the files being removed so a
     // later CREATE INDEX on the same name cannot reuse the stale tree.
-    evict_btree(engine, std::path::Path::new(&legacy_idx));
     if let Some(name) = index_name {
         evict_btree(
             engine,
@@ -961,16 +959,11 @@ pub(super) fn remove_index_files_for_table(
     if let Some(name) = index_name {
         let idx_path = engine.paths().index(db, table, name);
         let _ = std::fs::remove_file(&idx_path);
-        let _ = std::fs::remove_file(engine.paths().index_meta(db, table, name));
     } else {
-        let _ = std::fs::remove_file(&legacy_idx);
-        let _ = std::fs::remove_file(engine.paths().legacy_index_meta(db, table));
         if let Ok(entries) = std::fs::read_dir(base_path) {
             for entry in entries.flatten() {
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if fname.starts_with(&prefix)
-                    && (fname.ends_with(".idx") || fname.ends_with(".idx.meta"))
-                {
+                if fname.starts_with(&prefix) && fname.ends_with(".idx") {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -1035,28 +1028,13 @@ pub(super) fn rename_index_files_for_table(
         return;
     }
 
-    let old_legacy = engine.paths().legacy_index(db, old_name);
-    let new_legacy = engine.paths().legacy_index(db, new_name);
-    crate::backend::cache::flush_and_evict_btree(engine, &old_legacy);
-    let _ = std::fs::rename(&old_legacy, &new_legacy);
-    let _ = std::fs::rename(
-        crate::backend::index::btree::root_sidecar_path(&old_legacy),
-        crate::backend::index::btree::root_sidecar_path(&new_legacy),
-    );
-    let _ = std::fs::rename(
-        engine.paths().legacy_index_meta(db, old_name),
-        engine.paths().legacy_index_meta(db, new_name),
-    );
-
     // {old_name}.{index_name}.idx → {new_name}.{index_name}.idx
     if let Ok(entries) = std::fs::read_dir(base_path) {
         let prefix = format!("{}.", old_name);
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
             if let Some(suffix) = fname.strip_prefix(&prefix)
-                && (fname.ends_with(".idx")
-                    || fname.ends_with(".idx.meta")
-                    || fname.ends_with(".idx.root"))
+                && (fname.ends_with(".idx") || fname.ends_with(".idx.root"))
             {
                 if fname.ends_with(".idx") {
                     crate::backend::cache::flush_and_evict_btree(engine, &entry.path());
@@ -1105,24 +1083,11 @@ pub(super) fn drop_index(
 
     if !table_name.is_empty() {
         let named_idx_path = catalog.engine().paths().index(db, table_name, index_name);
-        let legacy_idx_path = catalog.engine().paths().legacy_index(db, table_name);
-        let legacy_meta_path = catalog.engine().paths().legacy_index_meta(db, table_name);
 
         if std::path::Path::new(&named_idx_path).exists() {
             remove_index_files_for_table(catalog.engine(), db, table_name, Some(index_name));
-        } else if std::path::Path::new(&legacy_idx_path).exists()
-            && legacy_index_name(&legacy_meta_path, table_name)
-                .is_some_and(|n| n.eq_ignore_ascii_case(index_name))
-        {
-            std::fs::remove_file(&legacy_idx_path)?;
-            let _ = std::fs::remove_file(&legacy_meta_path);
         } else if if_exists {
             return Ok(skipped());
-        } else if std::path::Path::new(&legacy_idx_path).exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Index '{}' not found on table '{}'", index_name, table_name),
-            ));
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -1150,29 +1115,14 @@ pub(super) fn drop_index(
         let Some(without_suffix) = fname.strip_suffix(".idx") else {
             continue;
         };
-        // Named index file `{table}.{index}.idx`, or legacy `{table}.idx`
-        // whose generated name comes from its metadata.
-        let (tbl_name, meta_path) = match without_suffix.rfind('.') {
-            Some(dot) if without_suffix[dot + 1..].eq_ignore_ascii_case(index_name) => (
-                &without_suffix[..dot],
-                base_dir.join(format!("{}.meta", fname)),
-            ),
-            Some(_) => continue,
-            None => {
-                let meta_path = catalog
-                    .engine()
-                    .paths()
-                    .legacy_index_meta(db, without_suffix);
-                if !legacy_index_name(&meta_path, without_suffix)
-                    .is_some_and(|n| n.eq_ignore_ascii_case(index_name))
-                {
-                    continue;
-                }
-                (without_suffix, meta_path)
+        // Named index file `{table}.{index}.idx`.
+        let tbl_name = match without_suffix.rfind('.') {
+            Some(dot) if without_suffix[dot + 1..].eq_ignore_ascii_case(index_name) => {
+                &without_suffix[..dot]
             }
+            _ => continue,
         };
         std::fs::remove_file(entry.path())?;
-        let _ = std::fs::remove_file(&meta_path);
         let tbl_name = tbl_name.to_string();
         forget(&tbl_name);
         lines.push(format!(
@@ -1190,15 +1140,4 @@ pub(super) fn drop_index(
             format!("Index '{}' not found in database '{}'", index_name, db),
         ))
     }
-}
-
-/// The generated name (`idx_{table}_{column}`) of a legacy single-index file,
-/// read from its metadata.
-fn legacy_index_name(meta_path: &std::path::Path, table: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct IndexMeta {
-        column_name: String,
-    }
-    let meta: IndexMeta = serde_json::from_str(&std::fs::read_to_string(meta_path).ok()?).ok()?;
-    Some(format!("idx_{}_{}", table, meta.column_name))
 }

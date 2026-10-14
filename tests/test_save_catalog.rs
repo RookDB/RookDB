@@ -1,5 +1,4 @@
 use common::{init_catalog, load_catalog};
-use std::fs;
 mod common;
 use storage_manager::catalog::{Column, Database, Table, save_catalog};
 use storage_manager::types::DataType;
@@ -7,15 +6,13 @@ use storage_manager::types::DataType;
 #[test]
 fn test_save_catalog() {
     let _ws = common::TestWorkspace::new("save", "save_catalog");
-    // Step 1: Ensure the catalog file exists (create if missing)
-    if !common::path("database/global/catalog.json").exists() {
-        init_catalog();
-    }
+    // Step 1: Ensure the system catalog exists
+    init_catalog();
 
     // Step 2: Load catalog into memory
     let mut catalog = load_catalog();
 
-    // Setup cleanup guard to remove the test database from catalog json when test ends
+    // Setup cleanup guard to remove the test database from catalog when test ends
     struct CatalogCleanup(&'static str);
     impl Drop for CatalogCleanup {
         fn drop(&mut self) {
@@ -84,10 +81,4 @@ fn test_save_catalog() {
     assert!(users_table.columns.iter().all(|c| !c.constraints.not_null
         && !c.constraints.unique
         && c.constraints.default.is_none()));
-
-    // Step 7: Clean up (optional)
-    if common::path("database/global/catalog.json").exists() {
-        fs::remove_file(common::path("database/global/catalog.json"))
-            .expect("Failed to clean up test catalog.json");
-    }
 }

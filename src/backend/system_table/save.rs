@@ -128,7 +128,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     }
     // Create fresh files and populate
     create_system_table_files(catalog.engine());
-    populate_system_tables(catalog, fk_rows, Some(saved_indexes));
+    populate_system_tables(catalog, fk_rows, saved_indexes);
     // System tables rewritten wholesale: table_ids may have changed and
     // constraint/index rows were rebuilt — forget all memoised metadata.
     catalog.engine().invalidate_metadata();
@@ -176,12 +176,11 @@ fn check_expr(field: &str) -> &str {
 /// Writes databases, tables, columns, constraints, and (where possible)
 /// indexes to their respective heap files.
 ///
-/// `indexes` are the `sys_indexes` rows to write back. `None` (the one-time
-/// migration from `catalog.json`) recovers them from `.idx.meta` files.
+/// `indexes` are the `sys_indexes` rows to write back.
 pub(crate) fn populate_system_tables(
     catalog: &Catalog,
     mut constr_rows: Vec<Vec<Option<String>>>,
-    indexes: Option<Vec<SavedIndex>>,
+    indexes: Vec<SavedIndex>,
 ) {
     // Sequence counters for auto-generated IDs
     let mut next_db_id = 1i32;
@@ -407,18 +406,6 @@ pub(crate) fn populate_system_tables(
         log::error!("[SystemCatalog] Failed to write sys_constraints: {}", e);
     }
 
-    // ── Populate sys_indexes by scanning .idx.meta files on disk ────────
-    // Build a table_name → table_id mapping for index rows.
-    let mut table_name_to_id: std::collections::HashMap<String, i32> =
-        std::collections::HashMap::new();
-    for row in &tbl_rows {
-        // tbl_rows: [table_id, db_id, name, file_path]
-        if let (Some(table_id_str), Some(table_name)) = (&row[0], &row[2])
-            && let Ok(tid) = table_id_str.parse::<i32>()
-        {
-            table_name_to_id.insert(table_name.clone(), tid);
-        }
-    }
     // ── Populate sys_views ──────────────────────────────────────────────
     let mut view_rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut next_view_id = 1i32;
@@ -448,10 +435,7 @@ pub(crate) fn populate_system_tables(
         log::error!("[SystemCatalog] Failed to write sys_views: {}", e);
     }
 
-    match indexes {
-        Some(saved) => write_saved_indexes(catalog.engine(), &saved, &db_rows, &tbl_rows),
-        None => populate_indexes_from_meta(catalog.engine(), &table_name_to_id),
-    }
+    write_saved_indexes(catalog.engine(), &indexes, &db_rows, &tbl_rows);
 
     let view_count: usize = catalog.databases.values().map(|d| d.views.len()).sum();
     log::info!(
@@ -606,10 +590,7 @@ fn write_saved_indexes(
 
     let idx_rows: Vec<Vec<Option<String>>> = saved
         .iter()
-        .filter(|ix| {
-            engine.paths().index(&ix.db, &ix.table, &ix.name).exists()
-                || engine.paths().legacy_index(&ix.db, &ix.table).exists()
-        })
+        .filter(|ix| engine.paths().index(&ix.db, &ix.table, &ix.name).exists())
         .filter_map(|ix| {
             let table_id = table_ids.get(&(ix.db.as_str(), ix.table.as_str()))?;
             Some((table_id.to_string(), ix))
@@ -626,180 +607,6 @@ fn write_saved_indexes(
             ]
         })
         .collect();
-
-    if !idx_rows.is_empty()
-        && let Err(e) = insert_system_rows(engine, "indexes", SYS_INDEXES_SCHEMA, &idx_rows)
-    {
-        log::error!("[SystemCatalog] Failed to write sys_indexes: {}", e);
-    }
-}
-
-/// Scan `database/base/**/*.idx.meta` files and populate `sys_indexes`.
-///
-/// Only used when migrating from `catalog.json`; afterwards `sys_indexes`
-/// is the only record of which indexes exist.
-///
-/// `table_name_to_id` maps table names to their assigned table IDs (from
-/// `sys_tables`) so the index rows can reference the correct table.
-fn populate_indexes_from_meta(
-    engine: &crate::backend::engine::Engine,
-    table_name_to_id: &std::collections::HashMap<String, i32>,
-) {
-    let base_dir = engine.paths().base_dir();
-    if !base_dir.exists() {
-        return;
-    }
-
-    let mut idx_rows: Vec<Vec<Option<String>>> = Vec::new();
-    let mut next_idx_id = 1i32;
-
-    // Walk database/base/*/ looking for .idx.meta files
-    let walker = match std::fs::read_dir(base_dir) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    for entry in walker.flatten() {
-        let entry_path = entry.path();
-        if !entry_path.is_dir() {
-            continue;
-        }
-
-        // Look for *.idx.meta files in this database directory
-        let meta_files = match std::fs::read_dir(&entry_path) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        for meta_entry in meta_files.flatten() {
-            let meta_path = meta_entry.path();
-            let fname = meta_path.to_string_lossy();
-            if !fname.ends_with(".idx.meta") {
-                continue;
-            }
-
-            // Extract table name and index name from the .idx.meta filename.
-            //
-            // Named format:  {table}.{index_name}.idx.meta
-            //   e.g. "users.idx_users_name.idx.meta" → stem = "users.idx_users_name.idx"
-            //   strip ".idx" → "users.idx_users_name" → split on first '.' → table="users", index="idx_users_name"
-            //
-            // Legacy format: {table}.idx.meta
-            //   e.g. "users.idx.meta" → stem = "users.idx" → strip ".idx" → "users"
-            //   no '.' in the result → legacy, index_name = "idx_{table}_{column}"
-            let filename = match meta_path.file_stem() {
-                Some(s) => s.to_string_lossy().to_string(),
-                None => continue,
-            };
-            let stripped = filename
-                .strip_suffix(".idx")
-                .unwrap_or(&filename)
-                .to_string();
-
-            // Determine if this is a named or legacy format by checking for extra dots
-            let (table_name, index_name) = if stripped.contains('.') {
-                // Named format: "table.index_name" → split at first dot
-                if let Some(dot_pos) = stripped.find('.') {
-                    let tbl = stripped[..dot_pos].to_string();
-                    let idx = stripped[dot_pos + 1..].to_string();
-                    (tbl, idx)
-                } else {
-                    (stripped.clone(), format!("idx_{}", stripped))
-                }
-            } else {
-                // Legacy format: just "table" → index_name = "idx_{table}_{column}"
-                // We'll read the meta to get the column name later
-                (stripped.clone(), String::new())
-            };
-
-            // Resolve table_id from the mapping
-            let table_id = match table_name_to_id.get(&table_name) {
-                Some(id) => *id,
-                None => {
-                    log::warn!(
-                        "[SystemCatalog] Index meta references unknown table '{}', skipping",
-                        table_name
-                    );
-                    continue;
-                }
-            };
-
-            // Read and parse the metadata JSON
-            let meta_content = match std::fs::read_to_string(&meta_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            // Parse IndexMeta from the metadata file.
-            //
-            // The flags (`is_unique` / `is_primary`) and the full composite
-            // `column_names` list are optional: older .idx.meta files predate
-            // them. Missing flags default to `false` — a plain index must NOT
-            // enforce uniqueness, so defaulting to `true` (the old behaviour)
-            // wrongly made every rebuilt index a UNIQUE constraint.
-            #[derive(serde::Deserialize)]
-            #[allow(dead_code)]
-            struct IndexMeta {
-                column_name: String,
-                #[serde(default)]
-                column_idx: usize,
-                #[serde(default)]
-                key_type: String,
-                #[serde(default)]
-                column_names: Vec<String>,
-                #[serde(default)]
-                is_unique: bool,
-                #[serde(default)]
-                is_primary: bool,
-            }
-
-            let meta: IndexMeta = match serde_json::from_str(&meta_content) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            // Full key layout, normalising legacy single-column files.
-            let mut columns = if meta.column_names.is_empty() {
-                vec![meta.column_name.clone()]
-            } else {
-                meta.column_names.clone()
-            };
-            // sys_indexes.columns is VARCHAR(255): truncate instead of failing
-            // the whole save if a very wide composite key does not fit.
-            let columns_field = {
-                let joined = columns.join(",");
-                if joined.len() > 255 {
-                    log::warn!(
-                        "[SystemCatalog] Index column list {:?} exceeds 255 bytes; truncating",
-                        joined
-                    );
-                    columns.truncate(1);
-                    columns[0].clone()
-                } else {
-                    joined
-                }
-            };
-
-            // Compute the index name: use parsed name if available, otherwise generate from column
-            let idx_name = if !index_name.is_empty() {
-                index_name
-            } else {
-                format!("idx_{}_{}", table_name, meta.column_name)
-            };
-
-            // SYS_INDEXES_SCHEMA: [index_id:INT, table_id:INT, name:VARCHAR(255),
-            //                     is_unique:BOOL, is_primary:BOOL, columns:VARCHAR(255)]
-            idx_rows.push(vec![
-                Some(next_idx_id.to_string()),     // index_id
-                Some(table_id.to_string()),        // table_id
-                Some(idx_name),                    // name
-                Some(meta.is_unique.to_string()),  // is_unique (persisted in .idx.meta)
-                Some(meta.is_primary.to_string()), // is_primary
-                Some(columns_field),               // columns (full composite list)
-            ]);
-            next_idx_id += 1;
-        }
-    }
 
     if !idx_rows.is_empty()
         && let Err(e) = insert_system_rows(engine, "indexes", SYS_INDEXES_SCHEMA, &idx_rows)

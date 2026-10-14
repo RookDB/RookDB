@@ -60,8 +60,7 @@ pub struct Database {
     pub tables: HashMap<String, Table>,
     /// Named views stored in this database.
     ///
-    /// Populated by the DDL stage; declared here so the catalog schema is
-    /// stable and old `catalog.json` files keep loading (`serde(default)`).
+    /// Populated by the DDL stage.
     #[serde(default)]
     pub views: HashMap<String, ViewDef>,
 }

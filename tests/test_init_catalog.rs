@@ -3,8 +3,7 @@ use common::init_catalog;
 mod common;
 
 /// `init_catalog()` bootstraps the heap-file system catalog: since the
-/// system-catalog stage it creates `database/system/*.dat` instead of the
-/// legacy `catalog.json` (which is migrated once, then retired).
+/// system-catalog stage it creates `database/system/*.dat`.
 #[test]
 fn test_init_catalog() {
     // Isolated workspace: init_catalog() bootstraps the system tables here.

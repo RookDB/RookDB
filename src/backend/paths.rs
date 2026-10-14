@@ -41,16 +41,6 @@ impl Paths {
         self.root.join("database")
     }
 
-    /// Directory holding the legacy JSON catalog.
-    pub fn global_dir(&self) -> PathBuf {
-        self.data_dir().join("global")
-    }
-
-    /// The legacy JSON catalog, read once to migrate it.
-    pub fn catalog_file(&self) -> PathBuf {
-        self.global_dir().join("catalog.json")
-    }
-
     /// Directory holding one sub-directory per database.
     pub fn base_dir(&self) -> PathBuf {
         self.data_dir().join("base")
@@ -106,21 +96,5 @@ impl Paths {
     pub fn index(&self, db: &str, table: &str, index: &str) -> PathBuf {
         self.database_dir(db)
             .join(format!("{}.{}.idx", table, index))
-    }
-
-    /// The JSON metadata sidecar of a named index.
-    pub fn index_meta(&self, db: &str, table: &str, index: &str) -> PathBuf {
-        self.database_dir(db)
-            .join(format!("{}.{}.idx.meta", table, index))
-    }
-
-    /// The single unnamed index file older tables may have.
-    pub fn legacy_index(&self, db: &str, table: &str) -> PathBuf {
-        self.database_dir(db).join(format!("{}.idx", table))
-    }
-
-    /// The JSON metadata sidecar of the legacy index file.
-    pub fn legacy_index_meta(&self, db: &str, table: &str) -> PathBuf {
-        self.database_dir(db).join(format!("{}.idx.meta", table))
     }
 }

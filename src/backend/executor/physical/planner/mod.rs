@@ -746,8 +746,7 @@ impl PhysicalPlanner {
             });
         }
 
-        // Check for any index files (named or legacy) alongside the heap file
-        // First try loading named indexes from sys_indexes
+        // Try loading named indexes from sys_indexes
         let named_indexes = crate::backend::executor::create_index::load_table_indexes(
             self.catalog.engine(),
             &self.db_name,
@@ -805,49 +804,6 @@ impl PhysicalPlanner {
                     .described(&ts.table, first_idx_name),
                 ));
             }
-        }
-
-        // Fallback: check for legacy single-index file
-        let legacy_index_path = self
-            .catalog
-            .engine()
-            .paths()
-            .legacy_index(&self.db_name, &ts.table);
-
-        if legacy_index_path.exists() {
-            crate::backend::cache::checkpoint();
-            let mut btree = BTree::open(legacy_index_path).map_err(|e| {
-                RookError::Io(e).with_context(format!(
-                    "Failed to open legacy index for table '{}'",
-                    ts.table
-                ))
-            })?;
-
-            if let Some(first_col) = table_schema.first() {
-                btree.set_key_type(first_col.data_type.clone());
-            }
-
-            // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
-            let heap_manager = HeapManager::open(heap_path).map_err(|e| {
-                RookError::Io(e)
-                    .with_context(format!("Failed to open heap for table '{}'", ts.table))
-            })?;
-
-            let indexed_cols: Vec<usize> = if column_info.is_empty() {
-                Vec::new()
-            } else {
-                vec![0]
-            };
-            return Ok(Box::new(
-                IndexScanOperator::new(
-                    btree,
-                    heap_manager,
-                    IndexScanMode::FullScan,
-                    column_info,
-                    indexed_cols,
-                )
-                .described(&ts.table, "(legacy index file)"),
-            ));
         }
 
         // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.

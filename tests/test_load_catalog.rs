@@ -6,10 +6,8 @@ use storage_manager::catalog::Catalog;
 #[test]
 fn test_load_catalog() {
     let _ws = common::TestWorkspace::new("load", "load_catalog");
-    // Step 1: Ensure a valid catalog file exists before loading
-    if !common::path("database/global/catalog.json").exists() {
-        init_catalog(); // create catalog.json if missing
-    }
+    // Step 1: Ensure the system catalog exists before loading
+    init_catalog();
 
     // Step 2: Run load_catalog()
     let catalog = load_catalog();

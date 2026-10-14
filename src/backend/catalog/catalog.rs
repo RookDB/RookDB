@@ -13,27 +13,20 @@ pub fn init_catalog() {
 
 /// [`init_catalog`] for the data directory of `engine`.
 pub fn init_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) {
-    let catalog_path = engine.paths().catalog_file();
-
-    debug_print_catalog(&format!(
-        "Initializing catalog at: {}",
-        catalog_path.display()
-    ));
-
-    // Create directory if not exist
-    if let Some(parent) = catalog_path.parent()
-        && !parent.exists()
-    {
-        match fs::create_dir_all(parent) {
-            Ok(_) => {
-                debug_print_catalog(&format!(" Created catalog directory: {}", parent.display()));
-            }
-            Err(e) => {
-                log::error!("Failed to create catalog directory: {}", e);
-                log::error!("Please check directory permissions and disk space.");
-                return;
-            }
-        }
+    // A data directory from before the system catalog has a catalog.json and
+    // no system tables; it is no longer migrated.
+    let old_catalog = engine
+        .paths()
+        .data_dir()
+        .join("global")
+        .join("catalog.json");
+    if old_catalog.exists() && !engine.paths().system_dir().exists() {
+        log::error!(
+            "{} is from an older RookDB version that kept its catalog in catalog.json; \
+             that format is no longer supported. Use a fresh data directory.",
+            old_catalog.display()
+        );
+        return;
     }
 
     // Ensure base database directory exists
@@ -61,21 +54,9 @@ pub fn init_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) 
         log::error!("Failed to create system directory: {}", e);
     }
 
-    // Bootstrap: migrate catalog.json → system tables if needed
-    let migrated = crate::backend::system_table::bootstrap_system_catalog(engine);
-    if migrated {
-        debug_print_catalog("Catalog migrated from JSON to system tables.");
-    }
-
     // Ensure all system table files exist (e.g. sys_views may be missing if
     // this is an existing system catalog that predates the views feature).
     crate::backend::system_table::ensure_system_tables(engine);
-
-    // NOTE: catalog.json is no longer created or maintained.
-    // The system table heap files under database/system/ are the single
-    // source of truth for catalog metadata. The bootstrap migration in
-    // bootstrap_system_catalog() handles migrating existing catalog.json
-    // into the system tables.
 }
 
 /// Loads the catalog from disk into memory.
@@ -86,51 +67,15 @@ pub fn load_catalog() -> Catalog {
 
 /// [`load_catalog`] for the data directory of `engine`.
 pub fn load_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) -> Catalog {
-    // Always load from system tables (the single source of truth).
-    if crate::backend::system_table::system_tables_exist(engine) {
-        debug_print_catalog("Loading catalog from system tables.");
-        return crate::backend::system_table::load_catalog_from_system(engine);
-    }
-
-    // Fallback: if system tables do not exist, attempt JSON load for backward
-    // compatibility during migration. This path is exercised during the first
-    // call before bootstrap_system_catalog() has created the heap files.
-    let catalog_path = engine.paths().catalog_file();
-    if !catalog_path.exists() {
-        debug_print_catalog("No catalog.json or system tables found. Returning empty catalog.");
-        return Catalog::new(std::sync::Arc::clone(engine));
-    }
-
-    match fs::read_to_string(catalog_path) {
-        Ok(data) => serde_json::from_str::<Catalog>(&data)
-            .map(|parsed| Catalog::with_databases(std::sync::Arc::clone(engine), parsed.databases))
-            .unwrap_or_else(|e| {
-                log::error!("Failed to parse catalog JSON: {}", e);
-                Catalog::new(std::sync::Arc::clone(engine))
-            }),
-        Err(e) => {
-            log::error!("Failed to read catalog.json: {}", e);
-            Catalog::new(std::sync::Arc::clone(engine))
-        }
-    }
+    debug_print_catalog("Loading catalog from system tables.");
+    crate::backend::system_table::load_catalog_from_system(engine)
 }
 
 /// Persists the in-memory catalog state to disk.
 /// Returns Ok(()) on success, or an error with a detailed message if something goes wrong.
 pub fn save_catalog(catalog: &Catalog) -> std::io::Result<()> {
-    // Always save to system tables (the single source of truth).
-    if crate::backend::system_table::system_tables_exist(catalog.engine()) {
-        debug_print_catalog("Saving catalog to system tables.");
-        return crate::backend::system_table::save_catalog_to_system(catalog);
-    }
-
-    // Fallback: save as JSON if system tables don't exist yet
-    // (during initial bootstrap before migration completes).
-    let catalog_path = catalog.engine().paths().catalog_file();
-    debug_print_catalog(&format!("Saving catalog to: {}", catalog_path.display()));
-    let json = serde_json::to_string_pretty(catalog)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    fs::write(catalog_path, json)
+    debug_print_catalog("Saving catalog to system tables.");
+    crate::backend::system_table::save_catalog_to_system(catalog)
 }
 
 /// Print debug information for catalog operations
@@ -198,7 +143,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
         db_name
     ));
 
-    // Persist updated catalog (routes to system tables if migrated)
+    // Persist updated catalog
     if let Err(e) = save_catalog(catalog) {
         log::info!("Failed to persist catalog: {}", e);
         debug_print_catalog(&format!("Persist error: {}", e));
