@@ -27,12 +27,15 @@ pub enum JoinType {
 
 /// A nested-loop join operator that works for any join predicate.
 ///
-/// For each tuple from the left (outer) child, scans all tuples from the
-/// right (inner) child and evaluates the join predicate on each pair.
-/// Tuples that match the predicate are concatenated and yielded.
+/// Reads the right (inner) child into memory once, then streams the left
+/// (outer) child one row at a time, pairing each outer row with every inner
+/// row and evaluating the join predicate on each pair. Rows come out as they
+/// are found: the outer side is read only as far as the consumer asks.
 ///
-/// Supports: INNER, LEFT, RIGHT, FULL, CROSS join types.
-/// For CROSS joins (no predicate), all pairs match.
+/// Supports: INNER, LEFT, RIGHT, FULL, CROSS join types. An outer row
+/// without a partner is NULL-extended (LEFT/FULL) right after its last
+/// pairing; inner rows without one (RIGHT/FULL) come out after the outer
+/// side ends. For CROSS joins (no predicate), all pairs match.
 pub struct NestedLoopJoinOperator {
     left: Box<dyn PhysicalOperator>,
     right: Box<dyn PhysicalOperator>,
@@ -42,26 +45,34 @@ pub struct NestedLoopJoinOperator {
     join_type: JoinType,
     /// Output schema (left columns + right columns).
     output_schema: Vec<ColumnInfo>,
+    left_arity: usize,
+    right_arity: usize,
 
     // ── Runtime state ──
-    /// All tuples from the left child (materialised on first pass).
-    left_tuples: Vec<Tuple>,
-    /// All tuples from the right child (materialised on first pass).
-    right_tuples: Vec<Tuple>,
-    /// Which left tuples have found at least one match (for LEFT/FULL OUTER).
-    left_matched: Vec<bool>,
-    /// Which right tuples have found at least one match (for RIGHT/FULL OUTER).
-    right_matched: Vec<bool>,
-    /// Output buffer of result tuples.
-    output_buffer: Vec<Tuple>,
-    /// Current read position in output_buffer.
-    output_pos: usize,
-    /// Whether children have been consumed.
-    consumed: bool,
-    /// Equi-join keys `(left side, right side)`. When set, candidate pairs
-    /// come from a hash table on the right input instead of the full cross
-    /// product; the predicate is still evaluated on every candidate.
-    equi_keys: Option<(Vec<Expr>, Vec<Expr>)>,
+    phase: NestedLoopPhase,
+    /// All tuples from the right child, read on the first call.
+    inner_rows: Vec<Tuple>,
+    /// Which inner rows have found at least one match (RIGHT/FULL only).
+    inner_matched: Vec<bool>,
+    /// The outer row being paired, and whether it has matched yet.
+    cur_outer: Option<Tuple>,
+    cur_outer_matched: bool,
+    /// Next inner row to pair with `cur_outer`; in the unmatched phase, the
+    /// next inner row to check.
+    inner_pos: usize,
+    /// Joined row the predicate is evaluated on; handed out when it matches.
+    candidate: Tuple,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NestedLoopPhase {
+    /// Nothing read yet.
+    Start,
+    /// Streaming outer rows past the inner rows.
+    Outer,
+    /// Outer side done: NULL-extending unmatched inner rows (RIGHT/FULL).
+    InnerUnmatched,
+    Done,
 }
 
 impl NestedLoopJoinOperator {
@@ -83,6 +94,8 @@ impl NestedLoopJoinOperator {
         // when building the combined schema for predicate resolution.
         let mut output_schema = left.schema().to_vec();
         output_schema.extend(right.schema().iter().cloned());
+        let left_arity = left.schema().len();
+        let right_arity = right.schema().len();
 
         Self {
             left,
@@ -90,193 +103,138 @@ impl NestedLoopJoinOperator {
             predicate,
             join_type,
             output_schema,
-            left_tuples: Vec::new(),
-            right_tuples: Vec::new(),
-            left_matched: Vec::new(),
-            right_matched: Vec::new(),
-            output_buffer: Vec::new(),
-            output_pos: 0,
-            consumed: false,
-            equi_keys: None,
+            left_arity,
+            right_arity,
+            phase: NestedLoopPhase::Start,
+            inner_rows: Vec::new(),
+            inner_matched: Vec::new(),
+            cur_outer: None,
+            cur_outer_matched: false,
+            inner_pos: 0,
+            candidate: Tuple::empty(),
         }
     }
 
-    /// Outer join on equality keys: same output as the nested loop, but each
-    /// left row only meets the right rows that share its key.
-    pub fn with_equi_keys(
-        left: Box<dyn PhysicalOperator>,
-        right: Box<dyn PhysicalOperator>,
-        predicate: Option<Predicate>,
-        join_type: JoinType,
-        left_keys: Vec<Expr>,
-        right_keys: Vec<Expr>,
-    ) -> Self {
-        let mut op = Self::new(left, right, predicate, join_type);
-        op.equi_keys = Some((left_keys, right_keys));
-        op
+    fn preserve_outer(&self) -> bool {
+        matches!(self.join_type, JoinType::Left | JoinType::Full)
     }
 
-    /// Materialise all tuples from both children, compute the join, and buffer results.
-    fn materialise(&mut self) -> RookResult<()> {
-        // Consume both children in batches
-        self.left_tuples.clear();
-        self.right_tuples.clear();
+    fn preserve_inner(&self) -> bool {
+        matches!(self.join_type, JoinType::Right | JoinType::Full)
+    }
+
+    /// Read the inner side and pick the first phase.
+    fn start(&mut self) -> RookResult<()> {
+        self.inner_rows.clear();
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
-        while self.left.next_batch(&mut child_batch)? > 0 {
-            self.left_tuples.append(&mut child_batch);
-        }
         while self.right.next_batch(&mut child_batch)? > 0 {
-            self.right_tuples.append(&mut child_batch);
+            self.inner_rows.append(&mut child_batch);
         }
-
-        let num_left = self.left_tuples.len();
-        let num_right = self.right_tuples.len();
-
-        // Initialise match tracking for outer joins
-        self.left_matched = vec![false; num_left];
-        self.right_matched = vec![false; num_right];
-
-        let mut joined = Tuple::empty();
-
-        // Compute the join
-        if self.join_type != JoinType::Cross
-            && let Some(pred) = &self.predicate
-            && let Some((left_keys, right_keys)) = &self.equi_keys
-        {
-            // A NULL key matches nothing, so those rows stay out of the table
-            // and surface only through the unmatched-row passes below.
-            let left_schema = self.left.schema().to_vec();
-            let right_schema = self.right.schema().to_vec();
-            let mut table: HashMap<Vec<DataValue>, Vec<usize>> = HashMap::new();
-            for (r_idx, tuple) in self.right_tuples.iter().enumerate() {
-                if let Some(key) =
-                    HashJoinOperator::make_hash_key(right_keys, tuple, &right_schema)?
-                {
-                    table.entry(key).or_default().push(r_idx);
-                }
-            }
-            for l_idx in 0..num_left {
-                let Some(key) = HashJoinOperator::make_hash_key(
-                    left_keys,
-                    &self.left_tuples[l_idx],
-                    &left_schema,
-                )?
-                else {
-                    continue;
-                };
-                let Some(candidates) = table.get(&key) else {
-                    continue;
-                };
-                for &r_idx in candidates {
-                    self.left_tuples[l_idx]
-                        .concatenate_into(&self.right_tuples[r_idx], &mut joined);
-                    if let Some(true) = evaluate_predicate(pred, &joined, &self.output_schema)? {
-                        self.output_buffer.push(joined.clone());
-                        self.left_matched[l_idx] = true;
-                        self.right_matched[r_idx] = true;
-                    }
-                }
-            }
-        } else if self.join_type != JoinType::Cross
-            && let Some(pred) = &self.predicate
-        {
-            for l_idx in 0..num_left {
-                for r_idx in 0..num_right {
-                    self.left_tuples[l_idx]
-                        .concatenate_into(&self.right_tuples[r_idx], &mut joined);
-                    if let Some(true) = evaluate_predicate(pred, &joined, &self.output_schema)? {
-                        self.output_buffer.push(joined.clone());
-                        self.left_matched[l_idx] = true;
-                        self.right_matched[r_idx] = true;
-                    }
-                }
-            }
+        self.inner_matched = if self.preserve_inner() {
+            vec![false; self.inner_rows.len()]
         } else {
-            // CROSS JOIN (no predicate) or predicate is None
-            for l_idx in 0..num_left {
-                for r_idx in 0..num_right {
-                    self.left_tuples[l_idx]
-                        .concatenate_into(&self.right_tuples[r_idx], &mut joined);
-                    self.output_buffer.push(joined.clone());
-                    self.left_matched[l_idx] = true;
-                    self.right_matched[r_idx] = true;
-                }
-            }
-        }
-
-        // Handle outer join NULL-extensions
-        let left_cols = self.left.schema().to_vec();
-        let right_cols = self.right.schema().to_vec();
-
-        match self.join_type {
-            JoinType::Left | JoinType::Full => {
-                // Emit NULL-extended rows for unmatched left tuples
-                for (l_idx, &matched) in self.left_matched.iter().enumerate() {
-                    if !matched {
-                        let null_values: Vec<Option<DataValue>> =
-                            right_cols.iter().map(|_| None).collect();
-                        let null_right = Tuple::new(null_values);
-                        self.left_tuples[l_idx].concatenate_into(&null_right, &mut joined);
-                        self.output_buffer.push(joined.clone());
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        match self.join_type {
-            JoinType::Right | JoinType::Full => {
-                // Emit NULL-extended rows for unmatched right tuples
-                for (r_idx, &matched) in self.right_matched.iter().enumerate() {
-                    if !matched {
-                        let null_values: Vec<Option<DataValue>> =
-                            left_cols.iter().map(|_| None).collect();
-                        let null_left = Tuple::new(null_values);
-                        null_left.concatenate_into(&self.right_tuples[r_idx], &mut joined);
-                        self.output_buffer.push(joined.clone());
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        self.consumed = true;
+            Vec::new()
+        };
+        self.cur_outer = None;
+        self.inner_pos = 0;
+        // With no inner row to pair with and no outer row to preserve, the
+        // outer side need not be read at all.
+        self.phase = if self.inner_rows.is_empty() && !self.preserve_outer() {
+            NestedLoopPhase::InnerUnmatched
+        } else {
+            NestedLoopPhase::Outer
+        };
         Ok(())
+    }
+
+    /// Pair outer rows with inner rows until one output row is ready.
+    /// Returns `None` after moving on to the unmatched-inner phase.
+    fn outer_step(&mut self) -> RookResult<Option<Tuple>> {
+        // A CROSS join, or a join without a condition, matches every pair.
+        let predicate = match self.join_type {
+            JoinType::Cross => None,
+            _ => self.predicate.as_ref(),
+        };
+        loop {
+            let Some(outer) = &self.cur_outer else {
+                match self.left.next()? {
+                    Some(tuple) => {
+                        self.cur_outer = Some(tuple);
+                        self.cur_outer_matched = false;
+                        self.inner_pos = 0;
+                        continue;
+                    }
+                    None => {
+                        self.phase = NestedLoopPhase::InnerUnmatched;
+                        self.inner_pos = 0;
+                        return Ok(None);
+                    }
+                }
+            };
+            while self.inner_pos < self.inner_rows.len() {
+                let idx = self.inner_pos;
+                self.inner_pos += 1;
+                outer.concatenate_into(&self.inner_rows[idx], &mut self.candidate);
+                if let Some(pred) = predicate
+                    && evaluate_predicate(pred, &self.candidate, &self.output_schema)? != Some(true)
+                {
+                    continue;
+                }
+                self.cur_outer_matched = true;
+                if let Some(matched) = self.inner_matched.get_mut(idx) {
+                    *matched = true;
+                }
+                return Ok(Some(std::mem::replace(&mut self.candidate, Tuple::empty())));
+            }
+            // Every inner row seen: this outer row is finished.
+            let outer = self.cur_outer.take().expect("current outer row");
+            if !self.cur_outer_matched && self.preserve_outer() {
+                let mut values = outer.values;
+                values.extend(std::iter::repeat_n(None, self.right_arity));
+                return Ok(Some(Tuple::new(values)));
+            }
+        }
+    }
+
+    /// Next unmatched inner row, NULL-extended. The inner rows are not needed
+    /// after this phase, so each is moved out rather than cloned.
+    fn inner_unmatched_step(&mut self) -> Option<Tuple> {
+        while self.inner_pos < self.inner_matched.len() {
+            let idx = self.inner_pos;
+            self.inner_pos += 1;
+            if !self.inner_matched[idx] {
+                let inner = std::mem::replace(&mut self.inner_rows[idx], Tuple::empty());
+                let mut values = Vec::with_capacity(self.left_arity + inner.values.len());
+                values.extend(std::iter::repeat_n(None, self.left_arity));
+                values.extend(inner.values);
+                return Some(Tuple::new(values));
+            }
+        }
+        None
     }
 }
 
 impl PhysicalOperator for NestedLoopJoinOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        if !self.consumed {
-            self.materialise()?;
+        loop {
+            match self.phase {
+                NestedLoopPhase::Start => self.start()?,
+                NestedLoopPhase::Outer => {
+                    if let Some(tuple) = self.outer_step()? {
+                        return Ok(Some(tuple));
+                    }
+                }
+                NestedLoopPhase::InnerUnmatched => {
+                    if let Some(tuple) = self.inner_unmatched_step() {
+                        return Ok(Some(tuple));
+                    }
+                    self.phase = NestedLoopPhase::Done;
+                    self.inner_rows = Vec::new();
+                    self.inner_matched = Vec::new();
+                }
+                NestedLoopPhase::Done => return Ok(None),
+            }
         }
-
-        if self.output_pos < self.output_buffer.len() {
-            let tuple = self.output_buffer[self.output_pos].clone();
-            self.output_pos += 1;
-            Ok(Some(tuple))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
-        batch.clear();
-        if !self.consumed {
-            self.materialise()?;
-        }
-
-        let available = self.output_buffer.len().saturating_sub(self.output_pos);
-        if available == 0 {
-            return Ok(0);
-        }
-        let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
-        batch.reserve(take);
-        for i in 0..take {
-            batch.push(self.output_buffer[self.output_pos + i].clone());
-        }
-        self.output_pos += take;
-        Ok(take)
     }
 
     fn schema(&self) -> &[ColumnInfo] {
@@ -286,22 +244,16 @@ impl PhysicalOperator for NestedLoopJoinOperator {
     fn reset(&mut self) -> RookResult<()> {
         self.left.reset()?;
         self.right.reset()?;
-        self.left_tuples.clear();
-        self.right_tuples.clear();
-        self.left_matched.clear();
-        self.right_matched.clear();
-        self.output_buffer.clear();
-        self.output_pos = 0;
-        self.consumed = false;
+        self.inner_rows.clear();
+        self.inner_matched.clear();
+        self.cur_outer = None;
+        self.inner_pos = 0;
+        self.phase = NestedLoopPhase::Start;
         Ok(())
     }
 
     fn name(&self) -> &'static str {
-        if self.equi_keys.is_some() {
-            "HashOuterJoin"
-        } else {
-            "NestedLoopJoin"
-        }
+        "NestedLoopJoin"
     }
 }
 
