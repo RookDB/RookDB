@@ -35,8 +35,9 @@ impl PhysicalPlanner {
             Err(_) => return Ok(None),
         };
 
-        // Build column_info for the table
-        let table_name = ts.table.clone();
+        // Build column_info for the table, qualified as the query names it:
+        // once a table is aliased, references must use the alias.
+        let table_name = ts.alias.clone().unwrap_or_else(|| ts.table.clone());
         let column_info: Vec<ColumnInfo> = table_schema
             .iter()
             .map(|c| ColumnInfo {
