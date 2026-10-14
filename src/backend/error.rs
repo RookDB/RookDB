@@ -249,6 +249,18 @@ impl From<RookError> for String {
     }
 }
 
+impl From<crate::types::comparison::ComparisonError> for RookError {
+    fn from(e: crate::types::comparison::ComparisonError) -> Self {
+        RookError::Evaluation(e.to_string())
+    }
+}
+
+impl From<crate::types::functions::FunctionError> for RookError {
+    fn from(e: crate::types::functions::FunctionError) -> Self {
+        RookError::Evaluation(e.to_string())
+    }
+}
+
 impl From<std::io::Error> for RookError {
     fn from(e: std::io::Error) -> Self {
         RookError::Io(e)

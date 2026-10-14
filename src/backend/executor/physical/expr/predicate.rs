@@ -235,9 +235,7 @@ pub fn evaluate_predicate(
             match (lv, rv) {
                 (None, _) | (_, None) => Ok(None), // NULL → UNKNOWN
                 (Some(a), Some(b)) => {
-                    let ordering = compare_nullable(Some(&a), Some(&b))
-                        .map_err(|e| e.to_string())?
-                        .unwrap(); // Safe: both non-NULL
+                    let ordering = compare_nullable(Some(&a), Some(&b))?.unwrap(); // Safe: both non-NULL
                     let result = match op {
                         ComparisonOp::Equals => ordering == Ordering::Equal,
                         ComparisonOp::NotEquals => ordering != Ordering::Equal,
@@ -391,9 +389,7 @@ pub fn evaluate_predicate(
                 (None, None) => Ok(Some(false)), // both NULL → not distinct
                 (None, Some(_)) | (Some(_), None) => Ok(Some(true)), // one NULL → distinct
                 (Some(a), Some(b)) => {
-                    let ordering = compare_nullable(Some(&a), Some(&b))
-                        .map_err(|e| e.to_string())?
-                        .unwrap(); // Safe: both non-NULL
+                    let ordering = compare_nullable(Some(&a), Some(&b))?.unwrap(); // Safe: both non-NULL
                     Ok(Some(ordering != Ordering::Equal))
                 }
             }
@@ -489,8 +485,7 @@ fn in_result<T: std::borrow::Borrow<DataValue>>(
         };
         match value? {
             Some(v) => {
-                let equal = compare_nullable(Some(v.borrow()), Some(lhs))
-                    .map_err(|e| e.to_string())?
+                let equal = compare_nullable(Some(v.borrow()), Some(lhs))?
                     .map(|o| o == Ordering::Equal)
                     .unwrap_or(false);
                 if equal {

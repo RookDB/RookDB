@@ -6,6 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 
+use crate::backend::error::{RookError, RookResult};
 use crate::backend::executor::{parse_text_row, parse_text_value};
 use crate::catalog::Catalog;
 use rook_ast::QueryPlan;
@@ -266,20 +267,21 @@ pub struct CachedInsert {
 
 impl CachedInsert {
     /// Execute the insert using the cached template and extracted parameter values.
-    pub fn execute(
-        &self,
-        catalog: &Catalog,
-        db_name: &str,
-        values: &[&str],
-    ) -> Result<usize, String> {
+    pub fn execute(&self, catalog: &Catalog, db_name: &str, values: &[&str]) -> RookResult<usize> {
         let db = catalog
             .databases
             .get(db_name)
-            .ok_or_else(|| format!("Database '{}' not found", db_name))?;
+            .ok_or_else(|| RookError::NotFound {
+                entity: "Database",
+                name: db_name.to_string(),
+            })?;
         let table = db
             .tables
             .get(&self.table)
-            .ok_or_else(|| format!("Table '{}' not found", self.table))?;
+            .ok_or_else(|| RookError::NotFound {
+                entity: "Table",
+                name: self.table.clone(),
+            })?;
 
         let row_arities = if self.row_arities.is_empty() {
             vec![self.arity]
@@ -296,10 +298,10 @@ impl CachedInsert {
                     .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(col_name))
                     .ok_or_else(|| {
-                        format!(
+                        RookError::Internal(format!(
                             "Column '{}' does not exist in table '{}'",
                             col_name, self.table
-                        )
+                        ))
                     })?;
                 col_positions.push(pos);
             }
@@ -314,36 +316,35 @@ impl CachedInsert {
 
         let total_values_expected: usize = row_arities.iter().sum();
         if values.len() != total_values_expected {
-            return Err(format!(
+            return Err(RookError::TypeMismatch(format!(
                 "Expected {} values for table '{}', got {}",
                 total_values_expected,
                 self.table,
                 values.len()
-            ));
+            )));
         }
 
         for &row_len in &row_arities {
             if self.columns.is_empty() {
                 if row_len != expected_row_len {
-                    return Err(format!(
+                    return Err(RookError::TypeMismatch(format!(
                         "INSERT row has {} value(s) but table '{}' has {} column(s)",
                         row_len, self.table, expected_row_len
-                    ));
+                    )));
                 }
             } else {
                 if row_len != expected_row_len {
-                    return Err(format!(
+                    return Err(RookError::TypeMismatch(format!(
                         "INSERT row has {} value(s) but {} column(s) listed",
                         row_len, expected_row_len
-                    ));
+                    )));
                 }
             }
         }
 
         // Execute row by row against one resolved table.
         let target =
-            crate::backend::executor::load_csv::InsertTarget::new(catalog, db_name, &self.table)
-                .map_err(|e| e.to_string())?;
+            crate::backend::executor::load_csv::InsertTarget::new(catalog, db_name, &self.table)?;
         let mut offset = 0;
         let mut inserted_count = 0;
 
@@ -366,7 +367,7 @@ impl CachedInsert {
                 row
             };
 
-            target.insert_row(&row).map_err(|e| e.to_string())?;
+            target.insert_row(&row)?;
             inserted_count += 1;
         }
 
@@ -618,7 +619,7 @@ pub fn execute_cached_insert(
     catalog: &Catalog,
     db_name: &str,
     sql: &str,
-) -> Result<Option<usize>, String> {
+) -> RookResult<Option<usize>> {
     let (normalized, params) = normalize_sql(sql);
     let key_matched =
         normalized.starts_with("INSERT INTO") || normalized.starts_with("insert into");
@@ -684,7 +685,7 @@ pub struct PreparedStatement {
 
 impl PreparedStatement {
     /// Prepare a statement from a SQL string.
-    pub fn prepare(catalog: &Catalog, db_name: &str, sql: &str) -> Result<Self, String> {
+    pub fn prepare(catalog: &Catalog, db_name: &str, sql: &str) -> RookResult<Self> {
         let (normalized, default_params) = normalize_sql(sql);
         if let Some(entry) = get_cached_plan(catalog.engine(), db_name, &normalized) {
             return Ok(Self {
@@ -718,7 +719,7 @@ impl PreparedStatement {
             }
             _ => {
                 let logical = crate::backend::planner::plan_query(&plan, catalog, db_name)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| RookError::Internal(e.to_string()))?;
                 PlanCacheEntry::Plan(logical)
             }
         };
@@ -733,7 +734,7 @@ impl PreparedStatement {
     }
 
     /// Execute the prepared statement with given parameters.
-    pub fn execute(&self, catalog: &Catalog, params: &[&str]) -> Result<usize, String> {
+    pub fn execute(&self, catalog: &Catalog, params: &[&str]) -> RookResult<usize> {
         match &self.entry {
             PlanCacheEntry::Insert(ins) => ins.execute(catalog, &self.db_name, params),
             PlanCacheEntry::Plan(plan) => {
@@ -741,8 +742,7 @@ impl PreparedStatement {
                     plan,
                     catalog,
                     &self.db_name,
-                )
-                .map_err(|e| e.to_string())?;
+                )?;
                 Ok(tuples.len())
             }
         }

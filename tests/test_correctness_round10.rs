@@ -208,9 +208,8 @@ fn h_plan_cache_multirow_insert_valid_sql_errors_instead() {
 
     let result = execute_cached_insert(&catalog, "db10h", "INSERT INTO mr1 VALUES (3),(4)");
 
-    assert_eq!(
-        result,
-        Ok(Some(2)),
+    assert!(
+        matches!(result, Ok(Some(2))),
         "BUG H CONFIRMED: cached multi-row insert returned {:?} instead of \
          inserting 2 rows — normalize_sql flattens all rows' literals into \
          one params vec (3,4), which fails CachedInsert::execute's \
@@ -381,7 +380,7 @@ fn j_plan_cache_missing_column_ignores_declared_default() {
 
     let result = execute_cached_insert(&catalog, "db10j", "INSERT INTO t5 (a) VALUES (2)");
 
-    assert_eq!(result, Ok(Some(1)), "cached insert succeeds");
+    assert!(matches!(result, Ok(Some(1))), "cached insert succeeds");
     assert_eq!(
         run_select(&catalog, "db10j", "SELECT a, b FROM t5 WHERE a = 2"),
         vec![vec!["2", "42"]],
@@ -409,10 +408,10 @@ fn x_regression_plain_single_row_cached_insert_works() {
     let catalog = load_catalog();
 
     let first = execute_cached_insert(&catalog, "db10x", "INSERT INTO plain VALUES (7, 8)");
-    assert_eq!(first, Ok(Some(1)), "first (miss-path) insert");
+    assert!(matches!(first, Ok(Some(1))), "first (miss-path) insert");
 
     let second = execute_cached_insert(&catalog, "db10x", "INSERT INTO plain VALUES (7, 8)");
-    assert_eq!(second, Ok(Some(1)), "second (hit-path) insert");
+    assert!(matches!(second, Ok(Some(1))), "second (hit-path) insert");
 
     assert_eq!(
         run_select(&catalog, "db10x", "SELECT a, b FROM plain"),

@@ -892,7 +892,7 @@ pub(super) fn create_index(
         &params.index_name,
         &params.columns,
     )
-    .map_err(|e| RookError::Internal(e.to_string()).with_context("Failed to create index"))?;
+    .map_err(|e| e.with_context("Failed to create index"))?;
     Ok(StatementResult::message(format!(
         "Created index '{}' on {}.{}({}) with {} entries.",
         params.index_name,

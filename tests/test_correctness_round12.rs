@@ -205,9 +205,8 @@ fn n_plan_cache_insert_with_null_literal_is_rejected() {
     // The public plan-cache entry point must handle the same statement.
     let result = execute_cached_insert(&catalog, "db12n", "INSERT INTO t VALUES (2, NULL)");
 
-    assert_eq!(
-        result,
-        Ok(Some(1)),
+    assert!(
+        matches!(result, Ok(Some(1))),
         "BUG N CONFIRMED: cached INSERT with a NULL literal returned {:?} — \
          normalize_sql does not parameterize the NULL keyword, so \
          parse_insert_template sees a Word token it cannot count and bails; \
@@ -510,9 +509,8 @@ fn n2_plan_cache_insert_null_via_column_list_rejected_too() {
     let catalog = load_catalog();
 
     let result = execute_cached_insert(&catalog, "db12n2", "INSERT INTO t (a, b) VALUES (7, NULL)");
-    assert_eq!(
-        result,
-        Ok(Some(1)),
+    assert!(
+        matches!(result, Ok(Some(1))),
         "BUG N2 CONFIRMED: cached INSERT with NULL via column list returned {:?} — \
          same normalize_sql NULL gap as finding N",
         result
@@ -572,9 +570,9 @@ fn x3_plan_cache_plain_inserts_still_work() {
     let catalog = load_catalog();
 
     let first = execute_cached_insert(&catalog, "db12x3", "INSERT INTO t VALUES (1, 'x')");
-    assert_eq!(first, Ok(Some(1)), "cache-miss plain insert");
+    assert!(matches!(first, Ok(Some(1))), "cache-miss plain insert");
     let second = execute_cached_insert(&catalog, "db12x3", "INSERT INTO t VALUES (2, 'y')");
-    assert_eq!(second, Ok(Some(1)), "cache-hit plain insert");
+    assert!(matches!(second, Ok(Some(1))), "cache-hit plain insert");
     assert_eq!(
         try_select(&catalog, "db12x3", "SELECT a, b FROM t ORDER BY a").expect("select"),
         vec![vec!["1", "'x'"], vec!["2", "'y'"]],
