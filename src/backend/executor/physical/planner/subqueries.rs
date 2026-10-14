@@ -13,6 +13,14 @@ use super::super::expr::{
 
 /// An outer column a correlated subquery names: its qualifier, if written, and name.
 type OuterRef = (Option<String>, String);
+
+/// What a subquery's own FROM clause makes visible: the names a qualifier may
+/// use (alias, or table name) and the columns of its relations. A reference
+/// that matches neither belongs to the enclosing query (innermost scope wins).
+struct InnerScope {
+    qualifiers: Vec<String>,
+    columns: Vec<String>,
+}
 use super::super::operators::{
     FilterOperator, LimitOperator, PhysicalOperator, ProjectionOperator,
 };
@@ -501,58 +509,46 @@ impl PhysicalPlanner {
     /// Check if a predicate (from an inner query's SELECT) references columns
     /// belonging to an **outer** table (i.e., columns that are NOT in any of
     /// the inner FROM tables). If so, the subquery is correlated.
-    pub(crate) fn is_predicate_correlated(
+    fn is_predicate_correlated(
         &self,
         pred_node: Option<&rook_ast::PredicateNode>,
-        inner_table_names: &[String],
+        scope: &InnerScope,
     ) -> bool {
         let Some(node) = pred_node else {
             return false;
         };
-        self.pred_contains_outer_ref(node, inner_table_names)
+        self.pred_contains_outer_ref(node, scope)
     }
 
     /// Recursively walk a predicate tree looking for any column reference that
     /// does not belong to the inner query's tables.
-    fn pred_contains_outer_ref(
-        &self,
-        node: &rook_ast::PredicateNode,
-        inner_tables: &[String],
-    ) -> bool {
+    fn pred_contains_outer_ref(&self, node: &rook_ast::PredicateNode, scope: &InnerScope) -> bool {
         match node {
             rook_ast::PredicateNode::BinaryOp { left, right, .. } => {
-                self.pred_contains_outer_ref(left, inner_tables)
-                    || self.pred_contains_outer_ref(right, inner_tables)
+                self.pred_contains_outer_ref(left, scope)
+                    || self.pred_contains_outer_ref(right, scope)
             }
-            rook_ast::PredicateNode::Not(inner) => {
-                self.pred_contains_outer_ref(inner, inner_tables)
-            }
+            rook_ast::PredicateNode::Not(inner) => self.pred_contains_outer_ref(inner, scope),
             rook_ast::PredicateNode::Compare { left, right, .. } => {
-                self.expr_is_outer_ref(left, inner_tables)
-                    || self.expr_is_outer_ref(right, inner_tables)
+                self.expr_is_outer_ref(left, scope) || self.expr_is_outer_ref(right, scope)
             }
             rook_ast::PredicateNode::IsNull(expr) | rook_ast::PredicateNode::IsNotNull(expr) => {
-                self.expr_is_outer_ref(expr, inner_tables)
+                self.expr_is_outer_ref(expr, scope)
             }
             rook_ast::PredicateNode::Between { expr, low, high } => {
-                self.expr_is_outer_ref(expr, inner_tables)
-                    || self.expr_is_outer_ref(low, inner_tables)
-                    || self.expr_is_outer_ref(high, inner_tables)
+                self.expr_is_outer_ref(expr, scope)
+                    || self.expr_is_outer_ref(low, scope)
+                    || self.expr_is_outer_ref(high, scope)
             }
             rook_ast::PredicateNode::InList { expr, list } => {
-                self.expr_is_outer_ref(expr, inner_tables)
-                    || list.iter().any(|e| self.expr_is_outer_ref(e, inner_tables))
+                self.expr_is_outer_ref(expr, scope)
+                    || list.iter().any(|e| self.expr_is_outer_ref(e, scope))
             }
-            rook_ast::PredicateNode::Like { expr, .. } => {
-                self.expr_is_outer_ref(expr, inner_tables)
-            }
+            rook_ast::PredicateNode::Like { expr, .. } => self.expr_is_outer_ref(expr, scope),
             rook_ast::PredicateNode::IsDistinctFrom { left, right } => {
-                self.expr_is_outer_ref(left, inner_tables)
-                    || self.expr_is_outer_ref(right, inner_tables)
+                self.expr_is_outer_ref(left, scope) || self.expr_is_outer_ref(right, scope)
             }
-            rook_ast::PredicateNode::IsBoolean { expr, .. } => {
-                self.expr_is_outer_ref(expr, inner_tables)
-            }
+            rook_ast::PredicateNode::IsBoolean { expr, .. } => self.expr_is_outer_ref(expr, scope),
             // EXISTS and IN-subquery inside a predicate are not expected here
             rook_ast::PredicateNode::Exists(_) | rook_ast::PredicateNode::InSubquery { .. } => {
                 false
@@ -565,11 +561,12 @@ impl PhysicalPlanner {
     /// A `Compound([table, col])` is an outer ref if `table` does not match any
     /// of the inner table names. A simple `Column(name)` is assumed to be an
     /// inner ref unless proven otherwise (conservative heuristic).
-    fn expr_is_outer_ref(&self, expr: &rook_ast::ExprNode, inner_tables: &[String]) -> bool {
+    fn expr_is_outer_ref(&self, expr: &rook_ast::ExprNode, scope: &InnerScope) -> bool {
         match expr {
             rook_ast::ExprNode::Compound(parts) => {
                 if let Some(table_part) = parts.first() {
-                    !inner_tables
+                    !scope
+                        .qualifiers
                         .iter()
                         .any(|t| t.eq_ignore_ascii_case(table_part))
                 } else {
@@ -582,38 +579,32 @@ impl PhysicalPlanner {
             // is an unqualified inner column and `outer.col` is compound.
             rook_ast::ExprNode::Column(name) => {
                 // Check if it's a column in any inner table
-                !self.column_exists_in_any_inner_table(name, inner_tables)
+                !scope.columns.iter().any(|c| c.eq_ignore_ascii_case(name))
             }
             rook_ast::ExprNode::Constant(_) | rook_ast::ExprNode::ScalarSubquery(_) => false,
             rook_ast::ExprNode::Function { .. } => false,
             rook_ast::ExprNode::Binary { left, right, .. } => {
-                self.expr_is_outer_ref(left, inner_tables)
-                    || self.expr_is_outer_ref(right, inner_tables)
+                self.expr_is_outer_ref(left, scope) || self.expr_is_outer_ref(right, scope)
             }
-            rook_ast::ExprNode::Cast { expr: inner, .. } => {
-                self.expr_is_outer_ref(inner, inner_tables)
-            }
+            rook_ast::ExprNode::Cast { expr: inner, .. } => self.expr_is_outer_ref(inner, scope),
             rook_ast::ExprNode::Compare { left, right, .. }
             | rook_ast::ExprNode::Logical { left, right, .. } => {
-                self.expr_is_outer_ref(left, inner_tables)
-                    || self.expr_is_outer_ref(right, inner_tables)
+                self.expr_is_outer_ref(left, scope) || self.expr_is_outer_ref(right, scope)
             }
             rook_ast::ExprNode::Not(inner)
             | rook_ast::ExprNode::IsNull(inner)
-            | rook_ast::ExprNode::IsNotNull(inner) => self.expr_is_outer_ref(inner, inner_tables),
+            | rook_ast::ExprNode::IsNotNull(inner) => self.expr_is_outer_ref(inner, scope),
             rook_ast::ExprNode::Case {
                 when_then_pairs,
                 else_result,
             } => {
                 for (when, then) in when_then_pairs {
-                    if self.expr_is_outer_ref(when, inner_tables)
-                        || self.expr_is_outer_ref(then, inner_tables)
-                    {
+                    if self.expr_is_outer_ref(when, scope) || self.expr_is_outer_ref(then, scope) {
                         return true;
                     }
                 }
                 if let Some(else_node) = else_result {
-                    self.expr_is_outer_ref(else_node, inner_tables)
+                    self.expr_is_outer_ref(else_node, scope)
                 } else {
                     false
                 }
@@ -621,42 +612,88 @@ impl PhysicalPlanner {
         }
     }
 
-    /// Check whether a bare column name exists in any of the inner tables'
-    /// catalog schemas.
-    fn column_exists_in_any_inner_table(&self, col_name: &str, inner_tables: &[String]) -> bool {
-        let db = match self.catalog.databases.get(&self.db_name) {
-            Some(db) => db,
-            None => return false,
-        };
-        for table_name in inner_tables {
-            if let Some(table) = db.tables.get(table_name)
-                && table
-                    .columns
-                    .iter()
-                    .any(|c| c.name.eq_ignore_ascii_case(col_name))
-            {
-                return true;
+    /// The scope a subquery's FROM clause (including JOINed relations) opens.
+    fn inner_scope(&self, select: &rook_ast::SelectPlan) -> InnerScope {
+        let mut qualifiers: Vec<String> = Vec::new();
+        let mut columns: Vec<String> = Vec::new();
+        let relations = select
+            .from
+            .iter()
+            .chain(select.joins.iter().map(|j| &j.relation));
+        for t in relations {
+            if let Some(ref alias) = t.alias {
+                qualifiers.push(alias.clone());
+            } else {
+                qualifiers.push(
+                    t.name
+                        .strip_prefix("__cte__:")
+                        .unwrap_or(&t.name)
+                        .to_string(),
+                );
+                qualifiers.push(t.name.clone());
             }
+            // Columns come from the relation itself, never from its alias.
+            columns.extend(self.relation_column_names(select, t));
         }
-        false
+        InnerScope {
+            qualifiers,
+            columns,
+        }
+    }
+
+    /// Column names of one FROM relation: a CTE's output or a table's schema.
+    fn relation_column_names(
+        &self,
+        select: &rook_ast::SelectPlan,
+        t: &rook_ast::TableRef,
+    ) -> Vec<String> {
+        let raw_name = t.name.strip_prefix("__cte__:").unwrap_or(&t.name);
+        if let Some(cte_def) = select
+            .ctes
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(raw_name))
+        {
+            return self.cte_output_columns(select, cte_def).unwrap_or_default();
+        }
+        self.resolve_table_schema(&t.name)
+            .map(|cols| cols.into_iter().map(|c| c.name).collect())
+            .unwrap_or_default()
+    }
+
+    /// Plan a CTE body and return its output column names.
+    fn cte_output_columns(
+        &self,
+        select: &rook_ast::SelectPlan,
+        cte_def: &rook_ast::CteDef,
+    ) -> RookResult<Vec<String>> {
+        let base = self.plan_cte_body(select, cte_def)?;
+        Ok(base.schema().iter().map(|c| c.name.clone()).collect())
+    }
+
+    /// Plan a CTE body into a physical operator.
+    fn plan_cte_body(
+        &self,
+        select: &rook_ast::SelectPlan,
+        cte_def: &rook_ast::CteDef,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        let mut query = (*cte_def.query).clone();
+        if query.ctes.is_empty() {
+            query.ctes = select.ctes.clone();
+        }
+        let query_plan = rook_ast::QueryPlan::Select(query);
+        let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
+            .map_err(|e| {
+                RookError::Internal(e.message)
+                    .with_context("Failed to plan CTE inner query in correlated subquery")
+            })?;
+        let inner_planner =
+            PhysicalPlanner::new(std::sync::Arc::clone(&self.catalog), self.db_name.clone());
+        inner_planner.plan(&logical_plan)
     }
 
     pub(crate) fn is_subquery_correlated(&self, select: &rook_ast::SelectPlan) -> bool {
-        let mut inner_tables: Vec<String> = Vec::new();
-        for t in &select.from {
-            if let Some(ref alias) = t.alias {
-                inner_tables.push(alias.clone());
-            } else {
-                let raw_name = t
-                    .name
-                    .strip_prefix("__cte__:")
-                    .unwrap_or(&t.name)
-                    .to_string();
-                inner_tables.push(raw_name);
-                inner_tables.push(t.name.clone());
-            }
-        }
-        self.is_predicate_correlated(select.selection.as_ref(), &inner_tables)
+        let scope = self.inner_scope(select);
+        self.is_predicate_correlated(select.selection.as_ref(), &scope)
     }
 
     fn resolve_inner_scan_and_columns(
@@ -682,21 +719,7 @@ impl PhysicalPlanner {
             .iter()
             .find(|c| c.name.eq_ignore_ascii_case(raw_name))
         {
-            let mut query = (*cte_def.query).clone();
-            if query.ctes.is_empty() {
-                query.ctes = select.ctes.clone();
-            }
-            let query_plan = rook_ast::QueryPlan::Select(query);
-            let logical_plan =
-                crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name).map_err(
-                    |e| {
-                        RookError::Internal(e.message)
-                            .with_context("Failed to plan CTE inner query in correlated subquery")
-                    },
-                )?;
-            let inner_planner =
-                PhysicalPlanner::new(std::sync::Arc::clone(&self.catalog), self.db_name.clone());
-            let inner_base = inner_planner.plan(&logical_plan)?;
+            let inner_base = self.plan_cte_body(select, cte_def)?;
             let inner_col_names: Vec<String> =
                 inner_base.schema().iter().map(|c| c.name.clone()).collect();
             Ok((inner_base, inner_table_alias, inner_col_names))
@@ -980,11 +1003,13 @@ impl PhysicalPlanner {
             for p in &select.projections {
                 match p {
                     rook_ast::SelectExpr::UnnamedExpr(e) => {
-                        let (expr, dt) = self.plan_projection_expr(e, &col_names, &col_types)?;
+                        let (expr, dt) =
+                            self.plan_projection_expr(e, &col_names, &col_types, child_schema)?;
                         projections.push((expr, "".to_string(), dt));
                     }
                     rook_ast::SelectExpr::ExprWithAlias { expr: e, alias } => {
-                        let (expr, dt) = self.plan_projection_expr(e, &col_names, &col_types)?;
+                        let (expr, dt) =
+                            self.plan_projection_expr(e, &col_names, &col_types, child_schema)?;
                         projections.push((expr, alias.clone(), dt));
                     }
                     _ => {}

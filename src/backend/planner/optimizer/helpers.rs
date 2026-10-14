@@ -499,6 +499,21 @@ pub fn extract_column_names(pred: &PredicateNode) -> Vec<String> {
         .collect()
 }
 
+/// Whether a predicate holds an `EXISTS` or `IN (subquery)` anywhere. Its
+/// column references name only what the outer expression reads: a correlated
+/// subquery may also read outer columns that no such list shows, so the
+/// predicate must stay where every outer column is still in scope.
+pub fn contains_subquery(pred: &PredicateNode) -> bool {
+    match pred {
+        PredicateNode::Exists(_) | PredicateNode::InSubquery { .. } => true,
+        PredicateNode::BinaryOp { left, right, .. } => {
+            contains_subquery(left) || contains_subquery(right)
+        }
+        PredicateNode::Not(inner) => contains_subquery(inner),
+        _ => false,
+    }
+}
+
 /// Extract column references from a `PredicateNode` as `(table qualifier,
 /// column name)` pairs, keeping the qualifier so `a.k` and `r.k` stay apart.
 pub fn extract_column_refs(pred: &PredicateNode) -> Vec<(Option<String>, String)> {

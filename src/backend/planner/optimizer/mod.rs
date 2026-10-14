@@ -366,9 +366,10 @@ impl Optimizer {
                     })
                     .collect();
                 let pred_cols = extract_column_names(&pred);
-                if pred_cols
-                    .iter()
-                    .all(|c| passthrough_cols.contains(c.as_str()))
+                if !contains_subquery(&pred)
+                    && pred_cols
+                        .iter()
+                        .all(|c| passthrough_cols.contains(c.as_str()))
                 {
                     LogicalPlan::Project(LogicalProject {
                         expressions: p.expressions,
@@ -442,6 +443,12 @@ impl Optimizer {
                 };
 
                 for conjunct in conjuncts {
+                    if contains_subquery(&conjunct) {
+                        // A correlated subquery may read outer columns from either
+                        // side; evaluate it above the join, where all are in scope.
+                        above = and(above, conjunct);
+                        continue;
+                    }
                     let refs = extract_column_refs(&conjunct);
                     let on_left = refs.iter().all(|r| side_has(&left_schema, r));
                     let on_right = refs.iter().all(|r| side_has(&right_schema, r));

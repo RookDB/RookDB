@@ -9,7 +9,7 @@ use rook_ast::logical::*;
 use super::explain::{PlanNode, PlanTrace};
 use super::expr::{Expr, Predicate, binding_names, expr_from_ast, resolve_column};
 use super::operators::{
-    CteScanOperator, Estimated, DistinctOperator, FilterOperator, IndexScanMode, IndexScanOperator,
+    CteScanOperator, DistinctOperator, Estimated, FilterOperator, IndexScanMode, IndexScanOperator,
     InsertOperator, LimitOperator, PhysicalOperator, ProjectionOperator, SeqScanOperator,
     SetOpOperator, SetOpType as PhysicalSetOpType, SingleRowOperator, SortOperator,
     SubqueryExecOperator, SubqueryType as PhysicalSubqueryType, ValuesOperator,
@@ -239,8 +239,12 @@ impl PhysicalPlanner {
 
                 let mut projections = Vec::new();
                 for ne in &p.expressions {
-                    let (e, data_type) =
-                        self.plan_projection_expr(&ne.expr, &column_names, &child_types)?;
+                    let (e, data_type) = self.plan_projection_expr(
+                        &ne.expr,
+                        &column_names,
+                        &child_types,
+                        child_schema,
+                    )?;
                     projections.push((e, ne.name.clone(), data_type));
                 }
 
@@ -316,8 +320,12 @@ impl PhysicalPlanner {
                         }
                         complex_expr => {
                             // Complex sort expression: project as a hidden column
-                            let (phys_expr, data_type) =
-                                self.plan_projection_expr(complex_expr, &bind_names, &child_types)?;
+                            let (phys_expr, data_type) = self.plan_projection_expr(
+                                complex_expr,
+                                &bind_names,
+                                &child_types,
+                                &child_schema,
+                            )?;
                             let col_name = format!("__sort_col_{}", extra_projections.len());
                             let sort_idx = column_names.len() + extra_projections.len();
                             sort_keys.push((sort_idx, !ob.ascending));
@@ -987,23 +995,16 @@ impl PhysicalPlanner {
         expr: &rook_ast::ExprNode,
         column_names: &[String],
         child_types: &[DataType],
+        child_schema: &[ColumnInfo],
     ) -> RookResult<(Expr, DataType)> {
         match expr {
-            // Top-level scalar subquery: materialize or build correlated
+            // Top-level scalar subquery: materialize or build correlated.
+            // Outer references bind against `child_schema`, so a qualifier
+            // (`r.id` vs `l.id`) picks the right column.
             rook_ast::ExprNode::ScalarSubquery(info) => {
                 if self.is_subquery_correlated(&info.select) {
-                    let outer_schema: Vec<ColumnInfo> = column_names
-                        .iter()
-                        .zip(child_types.iter())
-                        .map(|(c, t)| ColumnInfo {
-                            merged: false,
-                            name: c.clone(),
-                            data_type: t.clone(),
-                            table: None,
-                        })
-                        .collect();
                     let (phys_expr, dt) =
-                        self.build_correlated_scalar_subquery(info, &outer_schema)?;
+                        self.build_correlated_scalar_subquery(info, child_schema)?;
                     Ok((phys_expr, dt))
                 } else {
                     let (value, data_type) = self.materialize_scalar_subquery(&info.select)?;
@@ -1016,20 +1017,10 @@ impl PhysicalPlanner {
             }
             // Nested subqueries inside Binary or Cast
             rook_ast::ExprNode::Binary { left, op, right } => {
-                let outer_schema: Vec<ColumnInfo> = column_names
-                    .iter()
-                    .zip(child_types.iter())
-                    .map(|(c, t)| ColumnInfo {
-                        merged: false,
-                        name: c.clone(),
-                        data_type: t.clone(),
-                        table: None,
-                    })
-                    .collect();
                 let left_expr =
-                    self.build_expr_with_correlated_subquery(left, column_names, &outer_schema)?;
+                    self.build_expr_with_correlated_subquery(left, column_names, child_schema)?;
                 let right_expr =
-                    self.build_expr_with_correlated_subquery(right, column_names, &outer_schema)?;
+                    self.build_expr_with_correlated_subquery(right, column_names, child_schema)?;
                 let phys_op = match op {
                     rook_ast::ArithOp::Add => Expr::Add(Box::new(left_expr), Box::new(right_expr)),
                     rook_ast::ArithOp::Sub => Expr::Sub(Box::new(left_expr), Box::new(right_expr)),
@@ -1043,18 +1034,8 @@ impl PhysicalPlanner {
                 expr: inner,
                 data_type,
             } => {
-                let outer_schema: Vec<ColumnInfo> = column_names
-                    .iter()
-                    .zip(child_types.iter())
-                    .map(|(c, t)| ColumnInfo {
-                        merged: false,
-                        name: c.clone(),
-                        data_type: t.clone(),
-                        table: None,
-                    })
-                    .collect();
                 let inner_expr =
-                    self.build_expr_with_correlated_subquery(inner, column_names, &outer_schema)?;
+                    self.build_expr_with_correlated_subquery(inner, column_names, child_schema)?;
                 let target_dt: DataType = data_type.parse().map_err(|e: String| {
                     RookError::TypeMismatch(format!(
                         "Invalid CAST target type '{}': {}",
