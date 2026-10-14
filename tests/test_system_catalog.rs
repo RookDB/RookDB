@@ -84,7 +84,9 @@ fn old_json_catalog_is_not_migrated() {
     let json = r#"{"databases": {"old_db": {"tables": {}}}}"#;
     std::fs::write(common::path("database/global/catalog.json"), json).unwrap();
 
-    init_catalog();
+    let err = storage_manager::catalog::init_catalog_in(&common::engine())
+        .expect_err("an old-format data directory is refused");
+    assert!(err.to_string().contains("catalog.json"), "{}", err);
 
     // The old file is left alone, nothing is imported and no system tables
     // are created over it.

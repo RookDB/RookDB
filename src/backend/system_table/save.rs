@@ -127,7 +127,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> RookResult<()> {
         }
     }
     // Create fresh files and populate
-    create_system_table_files(catalog.engine());
+    create_system_table_files(catalog.engine())?;
     populate_system_tables(catalog, fk_rows, saved_indexes);
     // System tables rewritten wholesale: table_ids may have changed and
     // constraint/index rows were rebuilt — forget all memoised metadata.

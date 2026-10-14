@@ -30,7 +30,7 @@ impl Drop for TempRoot {
 fn session(root: &Path, keep_join_order: bool) -> Session {
     let engine = Engine::open(root);
     engine.set_keep_join_order(keep_join_order);
-    init_catalog_in(&engine);
+    init_catalog_in(&engine).expect("init catalog");
     Session::new(load_catalog_in(&engine))
 }
 

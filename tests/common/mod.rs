@@ -90,7 +90,7 @@ impl TestWorkspace {
         std::fs::create_dir_all(&path).expect("create workspace");
 
         let engine = Engine::open(&path);
-        storage_manager::catalog::init_catalog_in(&engine);
+        storage_manager::catalog::init_catalog_in(&engine).expect("init catalog");
         CURRENT.with(|c| *c.borrow_mut() = Some(Arc::clone(&engine)));
         Self { path, engine }
     }
@@ -132,7 +132,7 @@ pub fn load_catalog() -> storage_manager::catalog::Catalog {
 /// Bootstrap the current workspace's system catalog (idempotent).
 #[allow(dead_code)]
 pub fn init_catalog() {
-    storage_manager::catalog::init_catalog_in(&engine())
+    storage_manager::catalog::init_catalog_in(&engine()).expect("init catalog")
 }
 
 /// `relative` inside the current test's workspace.

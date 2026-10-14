@@ -488,8 +488,8 @@ pub fn resolve_table_id(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 /// Create empty system table heap files (with HeapManager).
-fn create_system_table_files(engine: &crate::backend::engine::Engine) {
-    let _ = std::fs::create_dir_all(engine.paths().system_dir());
+fn create_system_table_files(engine: &crate::backend::engine::Engine) -> std::io::Result<()> {
+    std::fs::create_dir_all(engine.paths().system_dir())?;
 
     for name in &[
         "databases",
@@ -501,28 +501,23 @@ fn create_system_table_files(engine: &crate::backend::engine::Engine) {
     ] {
         let path = sys_path(engine, name);
         if !path.exists() {
-            match crate::backend::heap::HeapManager::create(path.clone()) {
-                Ok(mut hm) => {
-                    if let Err(e) = hm.flush() {
-                        log::warn!("[SystemCatalog] Failed to flush {}: {}", name, e);
-                    }
-                }
-                Err(e) => {
-                    log::error!(
-                        "[SystemCatalog] Failed to create system table {}: {}",
-                        name,
-                        e
-                    );
-                }
-            }
+            crate::backend::heap::HeapManager::create(path.clone())
+                .and_then(|mut hm| hm.flush())
+                .map_err(|e| {
+                    std::io::Error::new(
+                        e.kind(),
+                        format!("Failed to create system table {}: {}", name, e),
+                    )
+                })?;
         }
     }
+    Ok(())
 }
 /// Public wrapper: ensure all system table files exist, creating any that are
 /// missing. Called during startup to support incremental schema additions
 /// (e.g. adding `sys_views` to an existing system catalog).
-pub fn ensure_system_tables(engine: &crate::backend::engine::Engine) {
-    create_system_table_files(engine);
+pub fn ensure_system_tables(engine: &crate::backend::engine::Engine) -> std::io::Result<()> {
+    create_system_table_files(engine)
 }
 /// Scan all rows from a system table and return decoded values.
 fn scan_system_table(

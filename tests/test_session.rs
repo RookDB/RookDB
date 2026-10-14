@@ -167,7 +167,7 @@ fn a_session_keeps_every_file_under_its_engine_root() {
     let root = _ws.path().join("elsewhere");
     std::fs::create_dir_all(&root).unwrap();
     let engine = Engine::open(&root);
-    storage_manager::catalog::init_catalog_in(&engine);
+    storage_manager::catalog::init_catalog_in(&engine).expect("init catalog");
     let mut s = Session::new(storage_manager::catalog::load_catalog_in(&engine));
 
     for sql in [

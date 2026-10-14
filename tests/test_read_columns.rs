@@ -29,7 +29,7 @@ impl Drop for TempRoot {
 fn session(root: &Path, decode_all: bool) -> Session {
     let engine = Engine::open(root);
     engine.set_decode_all_columns(decode_all);
-    init_catalog_in(&engine);
+    init_catalog_in(&engine).expect("init catalog");
     Session::new(load_catalog_in(&engine))
 }
 

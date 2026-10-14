@@ -7,56 +7,44 @@ use crate::heap::HeapManager;
 
 /// Create the directories and system tables of the working directory's
 /// data directory if they are missing.
-pub fn init_catalog() {
+pub fn init_catalog() -> crate::backend::error::RookResult<()> {
     init_catalog_in(&crate::backend::engine::Engine::current_dir())
 }
 
-/// [`init_catalog`] for the data directory of `engine`.
-pub fn init_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) {
-    // A data directory from before the system catalog has a catalog.json and
-    // no system tables; it is no longer migrated.
+/// [`init_catalog`] for the data directory of `engine`. A data directory from
+/// before the system catalog (a `catalog.json` and no system tables) is an
+/// error: it is no longer migrated.
+pub fn init_catalog_in(
+    engine: &std::sync::Arc<crate::backend::engine::Engine>,
+) -> crate::backend::error::RookResult<()> {
     let old_catalog = engine
         .paths()
         .data_dir()
         .join("global")
         .join("catalog.json");
     if old_catalog.exists() && !engine.paths().system_dir().exists() {
-        log::error!(
-            "{} is from an older RookDB version that kept its catalog in catalog.json; \
-             that format is no longer supported. Use a fresh data directory.",
-            old_catalog.display()
-        );
-        return;
+        return Err(crate::backend::error::RookError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{} is from an older RookDB version that kept its catalog in catalog.json; \
+                 that format is no longer supported. Use a fresh data directory.",
+                old_catalog.display()
+            ),
+        )));
     }
 
-    // Ensure base database directory exists
     let base_dir = engine.paths().base_dir();
-    if !base_dir.exists() {
-        match fs::create_dir_all(&base_dir) {
-            Ok(_) => {
-                debug_print_catalog(&format!(
-                    "Created base database directory: {}",
-                    base_dir.display()
-                ));
-            }
-            Err(e) => {
-                log::error!("Failed to create base data directory: {}", e);
-                log::error!("Please check directory permissions and disk space.");
-            }
-        }
-    }
+    fs::create_dir_all(&base_dir).map_err(|e| {
+        crate::backend::error::RookError::Io(e).with_context(format!(
+            "Failed to create the data directory {}",
+            base_dir.display()
+        ))
+    })?;
 
-    // Create system directory if not exist
-    let system_dir = engine.paths().system_dir();
-    if !system_dir.exists()
-        && let Err(e) = fs::create_dir_all(&system_dir)
-    {
-        log::error!("Failed to create system directory: {}", e);
-    }
-
-    // Ensure all system table files exist (e.g. sys_views may be missing if
-    // this is an existing system catalog that predates the views feature).
-    crate::backend::system_table::ensure_system_tables(engine);
+    // Create any system table file that is missing (e.g. sys_views in a
+    // catalog that predates views).
+    crate::backend::system_table::ensure_system_tables(engine)
+        .map_err(crate::backend::error::RookError::Io)
 }
 
 /// Loads the catalog from disk into memory.

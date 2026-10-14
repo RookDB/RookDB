@@ -29,7 +29,7 @@ impl Drop for TempRoot {
 
 fn session(root: &Path) -> Session {
     let engine = Engine::open(root);
-    init_catalog_in(&engine);
+    init_catalog_in(&engine).expect("init catalog");
     Session::new(load_catalog_in(&engine))
 }
 
