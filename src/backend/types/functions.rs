@@ -28,6 +28,7 @@
 use chrono::{Datelike, Local, Timelike};
 use std::fmt;
 
+use crate::backend::error::{RookError, RookResult};
 use crate::types::comparison::Comparable;
 use crate::types::comparison::value_type_name;
 use crate::types::datatype::DataType;
@@ -76,15 +77,15 @@ pub enum DatePart {
 
 /// Parse a date-part string (e.g. "YEAR", "MONTH", "DAY") into a `DatePart`.
 /// Returns `Err` if the string is not a recognized date part.
-pub fn parse_date_part(s: &DataValue) -> Result<DatePart, String> {
+pub fn parse_date_part(s: &DataValue) -> RookResult<DatePart> {
     let upper = match s {
         DataValue::Varchar(s) => s.to_uppercase(),
         DataValue::Char(s) => s.to_uppercase(),
         _ => {
-            return Err(format!(
+            return Err(RookError::TypeMismatch(format!(
                 "Invalid date part argument: expected string, got {:?}",
                 s
-            ));
+            )));
         }
     };
     match upper.as_str() {
@@ -94,7 +95,10 @@ pub fn parse_date_part(s: &DataValue) -> Result<DatePart, String> {
         "HOUR" => Ok(DatePart::Hour),
         "MINUTE" => Ok(DatePart::Minute),
         "SECOND" => Ok(DatePart::Second),
-        _ => Err(format!("Unknown date part: '{}'", upper)),
+        _ => Err(RookError::TypeMismatch(format!(
+            "Unknown date part: '{}'",
+            upper
+        ))),
     }
 }
 
