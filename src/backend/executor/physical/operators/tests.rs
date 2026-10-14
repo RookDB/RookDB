@@ -328,6 +328,59 @@ fn test_aggregate_count_star() {
 }
 
 #[test]
+fn test_aggregate_groups_in_first_seen_order_with_having_and_reset() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), Some(1.0)),
+        ("Bob", Some(25), Some(2.0)),
+        ("Carol", None, Some(3.0)),
+        ("Dan", Some(30), Some(4.0)),
+        ("Eve", Some(25), Some(5.0)),
+        ("Fay", Some(40), Some(6.0)),
+        ("Gus", Some(30), Some(7.0)),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![Expr::Column {
+            table: None,
+            column: "age".into(),
+        }],
+        vec!["age".to_string()],
+        vec![DataType::Int],
+        vec![AggregateInfo {
+            function: AggregateFunction::Count,
+            input: None,
+            output_name: "cnt".to_string(),
+            output_type: DataType::BigInt,
+            distinct: false,
+        }],
+        // HAVING cnt <> 2 drops the age-25 group from the middle.
+        Some(Predicate::Compare(
+            Expr::Column {
+                table: None,
+                column: "cnt".into(),
+            },
+            ComparisonOp::NotEquals,
+            Expr::Constant(DataValue::BigInt(2)),
+        )),
+    );
+    let expected = vec![
+        vec![Some(DataValue::Int(30)), Some(DataValue::BigInt(3))],
+        vec![None, Some(DataValue::BigInt(1))],
+        vec![Some(DataValue::Int(40)), Some(DataValue::BigInt(1))],
+    ];
+    for _ in 0..2 {
+        let mut got = Vec::new();
+        while let Some(t) = agg.next().unwrap() {
+            got.push(t.values);
+        }
+        assert_eq!(got, expected);
+        assert!(agg.next().unwrap().is_none());
+        agg.reset().unwrap();
+    }
+}
+
+#[test]
 fn test_aggregate_count_column() {
     let (tuples, schema) = employee_tuples(vec![
         ("Alice", Some(30), Some(50000.0)),

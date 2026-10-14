@@ -393,8 +393,9 @@ pub struct AggregateOperator {
     output_schema: Vec<ColumnInfo>,
 
     group_map: HashMap<Vec<Option<DataValue>>, usize>,
+    /// Groups in first-seen order, which is the output order.
     groups: Vec<GroupEntry>,
-    output_buffer: Vec<Tuple>,
+    /// Next group to emit.
     output_pos: usize,
     consumed: bool,
 }
@@ -454,17 +455,17 @@ impl AggregateOperator {
             output_schema,
             group_map: HashMap::new(),
             groups: Vec::new(),
-            output_buffer: Vec::new(),
             output_pos: 0,
             consumed: false,
         }
     }
 
-    fn build_output_tuple(&self, entry: &GroupEntry) -> RookResult<Tuple> {
-        let mut values = Vec::new();
-        for val in &entry.key_values {
-            values.push(val.clone());
-        }
+    /// Output row for a group. Each group is emitted once, so its key values
+    /// are moved out rather than cloned.
+    fn take_output_tuple(&mut self, idx: usize) -> RookResult<Tuple> {
+        let entry = &mut self.groups[idx];
+        let mut values = std::mem::take(&mut entry.key_values);
+        values.reserve(self.aggregates.len());
         for (agg_idx, agg) in self.aggregates.iter().enumerate() {
             let val = entry.agg_states[agg_idx]
                 .finalize(agg)
@@ -474,19 +475,6 @@ impl AggregateOperator {
         Ok(Tuple::new(values))
     }
 
-    fn materialise(&mut self) -> RookResult<()> {
-        for entry in &self.groups {
-            let tuple = self.build_output_tuple(entry)?;
-            if let Some(ref having) = self.having {
-                if let Some(true) = evaluate_predicate(having, &tuple, &self.output_schema)? {
-                    self.output_buffer.push(tuple)
-                }
-            } else {
-                self.output_buffer.push(tuple);
-            }
-        }
-        Ok(())
-    }
     fn consume_if_needed(&mut self) -> RookResult<()> {
         if self.consumed {
             return Ok(());
@@ -531,11 +519,12 @@ impl AggregateOperator {
                             .map_err(RookError::Internal)?
                     };
 
-                    let group_idx = match self.group_map.entry(key_values.clone()) {
-                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                        std::collections::hash_map::Entry::Vacant(entry) => {
+                    // The key is cloned only when it starts a new group.
+                    let group_idx = match self.group_map.get(&key_values) {
+                        Some(&idx) => idx,
+                        None => {
                             let idx = self.groups.len();
-                            entry.insert(idx);
+                            self.group_map.insert(key_values.clone(), idx);
                             let agg_states = (0..self.aggregates.len())
                                 .map(|_| PerGroupState::new())
                                 .collect();
@@ -572,44 +561,29 @@ impl AggregateOperator {
             });
         }
 
+        // Every group is known; the lookup table is no longer needed.
+        self.group_map = HashMap::new();
         self.consumed = true;
-        self.materialise()?;
         Ok(())
     }
 }
 
 impl PhysicalOperator for AggregateOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        if !self.consumed {
-            self.consume_if_needed()?;
-        }
-
-        if self.output_pos < self.output_buffer.len() {
-            let tuple = self.output_buffer[self.output_pos].clone();
+        self.consume_if_needed()?;
+        while self.output_pos < self.groups.len() {
+            let tuple = self.take_output_tuple(self.output_pos)?;
             self.output_pos += 1;
-            Ok(Some(tuple))
-        } else {
-            Ok(None)
+            match &self.having {
+                Some(having) => {
+                    if let Some(true) = evaluate_predicate(having, &tuple, &self.output_schema)? {
+                        return Ok(Some(tuple));
+                    }
+                }
+                None => return Ok(Some(tuple)),
+            }
         }
-    }
-
-    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
-        batch.clear();
-        if !self.consumed {
-            self.consume_if_needed()?;
-        }
-
-        let available = self.output_buffer.len().saturating_sub(self.output_pos);
-        if available == 0 {
-            return Ok(0);
-        }
-        let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
-        batch.reserve(take);
-        for i in 0..take {
-            batch.push(self.output_buffer[self.output_pos + i].clone());
-        }
-        self.output_pos += take;
-        Ok(take)
+        Ok(None)
     }
 
     fn schema(&self) -> &[ColumnInfo] {
@@ -620,7 +594,6 @@ impl PhysicalOperator for AggregateOperator {
         self.child.reset()?;
         self.group_map.clear();
         self.groups.clear();
-        self.output_buffer.clear();
         self.output_pos = 0;
         self.consumed = false;
         Ok(())
