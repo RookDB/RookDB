@@ -52,6 +52,10 @@ pub struct PhysicalPlanner {
     table_info: std::cell::RefCell<std::collections::HashMap<String, TableInfo>>,
 }
 
+/// What `plan_sort_keys` works out: the (column index, descending) sort keys,
+/// the hidden columns complex sort expressions need, and whether there are any.
+type SortKeys = (Vec<(usize, bool)>, Vec<(Expr, String, DataType)>, bool);
+
 /// A table's statistics (if current ones are at hand) and live row count.
 #[derive(Clone)]
 struct TableInfo {
@@ -201,235 +205,16 @@ impl PhysicalPlanner {
         match plan {
             LogicalPlan::TableScan(ts) => self.plan_table_scan(ts),
 
-            LogicalPlan::Filter(f) => {
-                // Check if the filter's child is a TableScan that can use an
-                // index-accelerated scan (PointLookup or RangeLookup) instead
-                // of a SeqScan + FilterOperator.
-                if let LogicalPlan::TableScan(ref ts) = *f.child
-                    && let Some(scan_op) =
-                        self.try_plan_index_scan_with_predicate(ts, &f.predicate)?
-                {
-                    // IMPORTANT: Always apply the full predicate as a FilterOperator
-                    // on top of the index-accelerated scan. This guarantees correctness
-                    // for compound AND predicates like `indexed_col = 5 AND other > 10`
-                    // where only the indexed portion is used by the index scan and the
-                    // non-indexed portion must still be applied as a filter.
-                    let predicate = self.make_predicate(&f.predicate, scan_op.schema())?;
-                    return Ok(Box::new(FilterOperator::new(scan_op, predicate)));
-                }
+            LogicalPlan::Filter(f) => self.plan_filter(f, cte_registry),
 
-                // Fall through: create a SeqScan + FilterOperator
-                let child = self.plan_internal(&f.child, cte_registry)?;
-                let predicate = self.make_predicate(&f.predicate, child.schema())?;
-                Ok(Box::new(FilterOperator::new(child, predicate)))
-            }
-
-            LogicalPlan::Project(p) => {
-                let child = self.plan_internal(&p.child, cte_registry)?;
-                let child_schema = child.schema();
-                let column_names = binding_names(child_schema);
-                let child_types: Vec<_> =
-                    child_schema.iter().map(|c| c.data_type.clone()).collect();
-
-                // Convert project expressions to physical expressions
-                if p.expressions.is_empty() {
-                    // No explicit expressions — treat as SELECT *
-                    return Ok(Box::new(ProjectionOperator::star(child)));
-                }
-
-                let mut projections = Vec::new();
-                for ne in &p.expressions {
-                    let (e, data_type) = self.plan_projection_expr(
-                        &ne.expr,
-                        &column_names,
-                        &child_types,
-                        child_schema,
-                    )?;
-                    projections.push((e, ne.name.clone(), data_type));
-                }
-
-                Ok(Box::new(ProjectionOperator::new(child, projections)))
-            }
+            LogicalPlan::Project(p) => self.plan_project(p, cte_registry),
 
             LogicalPlan::Distinct(d) => {
                 let child = self.plan_internal(&d.child, cte_registry)?;
                 Ok(Box::new(DistinctOperator::new(child)))
             }
 
-            LogicalPlan::Sort(s) => {
-                let child = self.plan_internal(&s.child, cte_registry)?;
-                // Clone the schema immediately to avoid borrowing `child` (which will be moved later)
-                let child_schema: Vec<ColumnInfo> = child.schema().to_vec();
-                let column_names: Vec<String> =
-                    child_schema.iter().map(|c| c.name.clone()).collect();
-                let bind_names = binding_names(&child_schema);
-                let child_types: Vec<_> =
-                    child_schema.iter().map(|c| c.data_type.clone()).collect();
-
-                // ── Build sort keys, handling complex expressions ──────────────
-                //
-                // For simple column references, we look up the column index directly.
-                // For complex expressions (e.g. `ORDER BY a+b`), we:
-                //   1. Plan the expression as an extra physical expression
-                //   2. Project it as an additional hidden column
-                //   3. Sort by the hidden column's index
-                //   4. Strip the hidden column after sorting
-                let mut sort_keys: Vec<(usize, bool)> = Vec::new();
-                let mut extra_projections: Vec<(Expr, String, DataType)> = Vec::new();
-                let mut has_complex = false;
-
-                for ob in &s.order_by {
-                    match &ob.expr {
-                        rook_ast::ExprNode::Column(name) => {
-                            let idx =
-                                resolve_column(&child_schema, None, name)?.ok_or_else(|| {
-                                    RookError::NotFound {
-                                        entity: "Column",
-                                        name: name.clone(),
-                                    }
-                                })?;
-                            sort_keys.push((idx, !ob.ascending));
-                        }
-                        rook_ast::ExprNode::Compound(parts) => {
-                            let name = parts.last().cloned().unwrap_or_default();
-                            // Under a join, `b.id` is b's `id`, not the first `id`.
-                            let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
-                            let idx = resolve_column(&child_schema, table, &name)?
-                                .or_else(|| {
-                                    column_names
-                                        .iter()
-                                        .position(|n| n.eq_ignore_ascii_case(&name))
-                                })
-                                .ok_or(RookError::NotFound {
-                                    entity: "Column",
-                                    name,
-                                })?;
-                            sort_keys.push((idx, !ob.ascending));
-                        }
-                        rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Int(pos)) => {
-                            let pos_usize = *pos as usize;
-                            if pos_usize >= 1 && pos_usize <= column_names.len() {
-                                sort_keys.push((pos_usize - 1, !ob.ascending));
-                            } else {
-                                return Err(RookError::Internal(format!(
-                                    "ORDER BY position {} is out of range (1..={})",
-                                    pos,
-                                    column_names.len()
-                                )));
-                            }
-                        }
-                        complex_expr => {
-                            // Complex sort expression: project as a hidden column
-                            let (phys_expr, data_type) = self.plan_projection_expr(
-                                complex_expr,
-                                &bind_names,
-                                &child_types,
-                                &child_schema,
-                            )?;
-                            let col_name = format!("__sort_col_{}", extra_projections.len());
-                            let sort_idx = column_names.len() + extra_projections.len();
-                            sort_keys.push((sort_idx, !ob.ascending));
-                            extra_projections.push((phys_expr, col_name.clone(), data_type));
-                            has_complex = true;
-                        }
-                    }
-                }
-
-                // ── Build the operator chain ──────────────────────────────────
-
-                // Option 1: Project all existing columns + extra sort columns
-                if has_complex {
-                    let mut all_projections: Vec<(Expr, String, DataType)> = child_schema
-                        .iter()
-                        .map(|ci| {
-                            let expr = Expr::Column {
-                                table: None,
-                                column: ci.name.clone(),
-                            };
-                            (expr, ci.name.clone(), ci.data_type.clone())
-                        })
-                        .collect();
-                    all_projections.extend(extra_projections);
-                    let child_with_extra =
-                        Box::new(ProjectionOperator::new(child, all_projections));
-
-                    let mut sort_op = SortOperator::new(child_with_extra, sort_keys)
-                        .with_spill(self.catalog.engine().sort_spill());
-                    if let Some(limit) = s.limit {
-                        sort_op = sort_op.with_limit(limit as usize);
-                    }
-
-                    // Strip the extra sort columns
-                    let result_schema: Vec<String> =
-                        child_schema.iter().map(|c| c.name.clone()).collect();
-                    let indices: Vec<usize> = (0..column_names.len()).collect();
-
-                    if let Some(limit) = s.limit {
-                        let limited =
-                            Box::new(LimitOperator::new(Box::new(sort_op), limit as usize, 0));
-                        Ok(Box::new(ProjectionOperator::from_indices(
-                            limited,
-                            &indices,
-                            &result_schema,
-                        )?))
-                    } else {
-                        Ok(Box::new(ProjectionOperator::from_indices(
-                            Box::new(sort_op),
-                            &indices,
-                            &result_schema,
-                        )?))
-                    }
-                } else {
-                    // Simple case: all sort keys are column references
-                    let already_sorted = if let Some(child_order) = child.ordering() {
-                        sort_keys.len() <= child_order.len()
-                            && sort_keys
-                                .iter()
-                                .zip(&child_order)
-                                .all(|(req, actual)| req == actual)
-                    } else {
-                        false
-                    };
-
-                    if already_sorted {
-                        self.note(|| {
-                            let keys: Vec<String> = sort_keys
-                                .iter()
-                                .map(|&(idx, descending)| {
-                                    let dir = if descending { "DESC" } else { "ASC" };
-                                    format!("{} {}", column_names[idx], dir)
-                                })
-                                .collect();
-                            format!(
-                                "Sort eliminated: {} already yields rows ordered by {}",
-                                child.name(),
-                                keys.join(", ")
-                            )
-                        });
-                        if let Some(limit) = s.limit {
-                            Ok(Box::new(LimitOperator::new(child, limit as usize, 0)))
-                        } else {
-                            Ok(child)
-                        }
-                    } else {
-                        let mut sort_op = SortOperator::new(child, sort_keys)
-                            .with_spill(self.catalog.engine().sort_spill());
-                        if let Some(limit) = s.limit {
-                            sort_op = sort_op.with_limit(limit as usize);
-                        }
-
-                        if let Some(limit) = s.limit {
-                            Ok(Box::new(LimitOperator::new(
-                                Box::new(sort_op),
-                                limit as usize,
-                                0,
-                            )))
-                        } else {
-                            Ok(Box::new(sort_op))
-                        }
-                    }
-                }
-            }
+            LogicalPlan::Sort(s) => self.plan_sort(s, cte_registry),
 
             LogicalPlan::Limit(l) => {
                 let child = self.plan_internal(&l.child, cte_registry)?;
@@ -444,205 +229,520 @@ impl PhysicalPlanner {
 
             LogicalPlan::Join(j) => self.plan_join_with_ctes(j, cte_registry),
 
-            LogicalPlan::SetOp(s) => {
-                let left = self.plan_internal(&s.left, cte_registry)?;
-                let right = self.plan_internal(&s.right, cte_registry)?;
+            LogicalPlan::SetOp(s) => self.plan_set_op(s, cte_registry),
 
-                if left.schema().len() != right.schema().len() {
-                    return Err(RookError::Internal(format!(
-                        "Set operation queries must have the same number of columns: {} vs {}",
-                        left.schema().len(),
-                        right.schema().len()
-                    )));
-                }
-
-                let op_type = match s.op {
-                    rook_ast::logical::SetOpType::Union => PhysicalSetOpType::Union,
-                    rook_ast::logical::SetOpType::Intersect => PhysicalSetOpType::Intersect,
-                    rook_ast::logical::SetOpType::Except => PhysicalSetOpType::Except,
-                };
-
-                Ok(Box::new(SetOpOperator::new(left, right, op_type, s.all)))
-            }
-
-            LogicalPlan::Subquery(sq) => {
-                // For FROM-clause subqueries (derived tables), plan the inner query
-                // and optionally wrap in SubqueryExecOperator in table (passthrough) mode.
-                let inner = self.plan_internal(&sq.subquery, cte_registry)?;
-
-                // If the subquery has an alias, it's a derived table in FROM clause.
-                // Just return the inner plan directly — it acts as a scan of the subquery result.
-                if sq.alias.is_some() {
-                    return Ok(inner);
-                }
-
-                // No alias means this is likely a scalar subquery used in an expression.
-                // Wrap it in SubqueryExecOperator in Scalar mode.
-                Ok(Box::new(SubqueryExecOperator::new(
-                    inner,
-                    PhysicalSubqueryType::Scalar,
-                    None,
-                )))
-            }
+            LogicalPlan::Subquery(sq) => self.plan_subquery(sq, cte_registry),
 
             // ── Recursive CTE node ──────────────────────────────────────────
             LogicalPlan::RecursiveCte(rc) => self.plan_recursive_cte(rc, cte_registry),
 
             // ── CTE nodes ────────────────────────────────────────────────────
-            LogicalPlan::Cte(c) => {
-                // 1. Materialise the CTE inner plan into an in-memory Vec<Tuple>.
-                //
-                // We fully execute the inner plan now (before planning the outer
-                // query) so that any CteScan leaves in the outer query can look
-                // up the cached tuples in O(1) without re-executing the CTE body.
-                let mut inner_op = self.plan_internal(&c.inner, cte_registry)?;
-                let mut tuples = Vec::new();
-                while let Some(tuple) = inner_op.next()? {
-                    tuples.push(tuple);
+            LogicalPlan::Cte(c) => self.plan_cte(c, cte_registry),
+
+            LogicalPlan::Insert(inp) => self.plan_insert(inp, cte_registry),
+
+            LogicalPlan::CteScan(cs) => self.plan_cte_scan(cs, cte_registry),
+        }
+    }
+
+    /// A filter, index-accelerated when it sits directly on a table scan.
+    fn plan_filter(
+        &self,
+        f: &LogicalFilter,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        // Check if the filter's child is a TableScan that can use an
+        // index-accelerated scan (PointLookup or RangeLookup) instead
+        // of a SeqScan + FilterOperator.
+        if let LogicalPlan::TableScan(ref ts) = *f.child
+            && let Some(scan_op) = self.try_plan_index_scan_with_predicate(ts, &f.predicate)?
+        {
+            // IMPORTANT: Always apply the full predicate as a FilterOperator
+            // on top of the index-accelerated scan. This guarantees correctness
+            // for compound AND predicates like `indexed_col = 5 AND other > 10`
+            // where only the indexed portion is used by the index scan and the
+            // non-indexed portion must still be applied as a filter.
+            let predicate = self.make_predicate(&f.predicate, scan_op.schema())?;
+            return Ok(Box::new(FilterOperator::new(scan_op, predicate)));
+        }
+
+        // Fall through: create a SeqScan + FilterOperator
+        let child = self.plan_internal(&f.child, cte_registry)?;
+        let predicate = self.make_predicate(&f.predicate, child.schema())?;
+        Ok(Box::new(FilterOperator::new(child, predicate)))
+    }
+
+    /// A projection (`SELECT *` when it lists no expressions).
+    fn plan_project(
+        &self,
+        p: &LogicalProject,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        let child = self.plan_internal(&p.child, cte_registry)?;
+        let child_schema = child.schema();
+        let column_names = binding_names(child_schema);
+        let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
+
+        // Convert project expressions to physical expressions
+        if p.expressions.is_empty() {
+            // No explicit expressions — treat as SELECT *
+            return Ok(Box::new(ProjectionOperator::star(child)));
+        }
+
+        let mut projections = Vec::new();
+        for ne in &p.expressions {
+            let (e, data_type) =
+                self.plan_projection_expr(&ne.expr, &column_names, &child_types, child_schema)?;
+            projections.push((e, ne.name.clone(), data_type));
+        }
+
+        Ok(Box::new(ProjectionOperator::new(child, projections)))
+    }
+
+    /// ORDER BY, with an optional top-k bound.
+    fn plan_sort(
+        &self,
+        s: &LogicalSort,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        let child = self.plan_internal(&s.child, cte_registry)?;
+        // Clone the schema immediately to avoid borrowing `child` (which will be moved later)
+        let child_schema: Vec<ColumnInfo> = child.schema().to_vec();
+        let column_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
+        let bind_names = binding_names(&child_schema);
+        let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
+
+        // ── Build sort keys, handling complex expressions ──────────────
+        //
+        // For simple column references, we look up the column index directly.
+        // For complex expressions (e.g. `ORDER BY a+b`), we:
+        //   1. Plan the expression as an extra physical expression
+        //   2. Project it as an additional hidden column
+        //   3. Sort by the hidden column's index
+        //   4. Strip the hidden column after sorting
+        let (sort_keys, extra_projections, has_complex) = self.plan_sort_keys(
+            &s.order_by,
+            &child_schema,
+            &column_names,
+            &bind_names,
+            &child_types,
+        )?;
+
+        // ── Build the operator chain ──────────────────────────────────
+
+        if has_complex {
+            self.plan_sort_with_hidden_columns(
+                s,
+                child,
+                &child_schema,
+                column_names.len(),
+                extra_projections,
+                sort_keys,
+            )
+        } else {
+            self.plan_sort_on_columns(s, child, &column_names, sort_keys)
+        }
+    }
+
+    /// The sort keys as (column index, descending) pairs, the hidden columns that complex
+    /// sort expressions need, and whether there are any.
+    fn plan_sort_keys(
+        &self,
+        order_by: &[rook_ast::OrderByExpr],
+        child_schema: &[ColumnInfo],
+        column_names: &[String],
+        bind_names: &[String],
+        child_types: &[DataType],
+    ) -> RookResult<SortKeys> {
+        let mut sort_keys: Vec<(usize, bool)> = Vec::new();
+        let mut extra_projections: Vec<(Expr, String, DataType)> = Vec::new();
+        let mut has_complex = false;
+
+        for ob in order_by {
+            match &ob.expr {
+                rook_ast::ExprNode::Column(name) => {
+                    let idx = resolve_column(child_schema, None, name)?.ok_or_else(|| {
+                        RookError::NotFound {
+                            entity: "Column",
+                            name: name.clone(),
+                        }
+                    })?;
+                    sort_keys.push((idx, !ob.ascending));
                 }
-                self.note_cte(&c.name, || inner_op.explain());
-                self.note(|| format!("CTE '{}' materialised: {} row(s)", c.name, tuples.len()));
-
-                // 2. Register the materialised tuples so CteScan leaves can find
-                //    them, with the column types the body declared.
-                let key = c.name.to_ascii_lowercase();
-                let types = inner_op
-                    .schema()
-                    .iter()
-                    .map(|ci| ci.data_type.clone())
-                    .collect();
-                cte_registry.insert(key.clone(), tuples);
-                let shadowed = self.cte_types.borrow_mut().insert(key.clone(), types);
-
-                // 3. Plan the outer query (which may contain CteScan leaves that
-                //    reference the CTE we just registered).
-                let outer = self.plan_internal(&c.outer, cte_registry);
-                let mut cte_types = self.cte_types.borrow_mut();
-                match shadowed {
-                    Some(types) => cte_types.insert(key, types),
-                    None => cte_types.remove(&key),
-                };
-                outer
-            }
-
-            LogicalPlan::Insert(inp) => {
-                // VALUES form: the logical planner already expanded rows to
-                // full table arity; feed them via a constant-producing child.
-                let child: Box<dyn PhysicalOperator> = if !inp.values_rows.is_empty() {
-                    let table_schema = self.resolve_table_schema(&inp.table)?;
-                    let schema: Vec<ColumnInfo> = table_schema
-                        .iter()
-                        .map(|c| ColumnInfo {
-                            merged: false,
-                            name: c.name.clone(),
-                            data_type: c.data_type.clone(),
-                            table: Some(inp.table.clone()),
+                rook_ast::ExprNode::Compound(parts) => {
+                    let name = parts.last().cloned().unwrap_or_default();
+                    // Under a join, `b.id` is b's `id`, not the first `id`.
+                    let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
+                    let idx = resolve_column(child_schema, table, &name)?
+                        .or_else(|| {
+                            column_names
+                                .iter()
+                                .position(|n| n.eq_ignore_ascii_case(&name))
                         })
-                        .collect();
-                    let compiled = inp
-                        .values_rows
-                        .iter()
-                        .map(|row| {
-                            row.iter()
-                                .map(|node| expr_from_ast(node, &[]))
-                                .collect::<RookResult<Vec<_>>>()
-                        })
-                        .collect::<RookResult<Vec<_>>>()?;
-                    Box::new(ValuesOperator::new(compiled, schema))
-                } else {
-                    self.plan_internal(&inp.child, cte_registry)?
-                };
-
-                // INSERT INTO t (cols) SELECT ...: place each selected value
-                // in its listed column; the rest take their DEFAULT or NULL.
-                // (The VALUES form arrives already expanded.)
-                let target = if inp.values_rows.is_empty() && !inp.columns.is_empty() {
-                    let table_schema = self.resolve_table_schema(&inp.table)?;
-                    if child.schema().len() != inp.columns.len() {
-                        return Err(RookError::TypeMismatch(format!(
-                            "INSERT lists {} column(s) but the SELECT returns {}",
-                            inp.columns.len(),
-                            child.schema().len()
+                        .ok_or(RookError::NotFound {
+                            entity: "Column",
+                            name,
+                        })?;
+                    sort_keys.push((idx, !ob.ascending));
+                }
+                rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Int(pos)) => {
+                    let pos_usize = *pos as usize;
+                    if pos_usize >= 1 && pos_usize <= column_names.len() {
+                        sort_keys.push((pos_usize - 1, !ob.ascending));
+                    } else {
+                        return Err(RookError::Internal(format!(
+                            "ORDER BY position {} is out of range (1..={})",
+                            pos,
+                            column_names.len()
                         )));
                     }
-                    let positions = inp
-                        .columns
-                        .iter()
-                        .map(|name| {
-                            table_schema
-                                .iter()
-                                .position(|c| c.name.eq_ignore_ascii_case(name))
-                                .ok_or_else(|| RookError::NotFound {
-                                    entity: "Column",
-                                    name: format!("{}.{}", inp.table, name),
-                                })
-                        })
-                        .collect::<RookResult<Vec<usize>>>()?;
-                    let defaults = table_schema
-                        .iter()
-                        .map(|c| c.constraints.default.clone())
-                        .collect();
-                    Some((positions, defaults))
-                } else {
-                    None
-                };
-                let insert = InsertOperator::new(
-                    child,
-                    inp.table.clone(),
-                    self.db_name.clone(),
-                    std::sync::Arc::clone(&self.catalog),
-                );
-                Ok(Box::new(match target {
-                    Some((positions, defaults)) => insert.with_target_columns(positions, defaults),
-                    None => insert,
-                }))
-            }
-
-            LogicalPlan::CteScan(cs) => {
-                // Retrieve the pre-materialised tuples from the CTE registry.
-                // For recursive CTEs, `plan_recursive_cte` updates the registry before
-                // each iteration, so the operator always sees the latest working table.
-                let tuples = cte_registry
-                    .get(&cs.name.to_ascii_lowercase())
-                    .cloned()
-                    .ok_or_else(|| {
-                        RookError::Internal(format!(
-                            "CTE '{}' not found in registry during physical planning",
-                            cs.name
-                        ))
-                    })?;
-
-                // Build the schema for CteScanOperator from the CteScan node.
-                // The CTE name serves as the table qualifier so that table-qualified
-                // references (e.g. `my_cte.col`) and NATURAL JOIN disambiguation work
-                // correctly when a CTE is on the right side of a join.
-                // An alias (`FROM c x`) replaces the name, as it does for tables.
-                // Columns take the types the CTE body declared; a recursive CTE,
-                // whose rows come from more than one plan, keeps the untyped
-                // VARCHAR placeholder.
-                let cte_table_name = cs.alias.clone().unwrap_or_else(|| cs.name.clone());
-                let cte_types = self.cte_types.borrow();
-                let types = cte_types
-                    .get(&cs.name.to_ascii_lowercase())
-                    .filter(|types| types.len() == cs.schema.columns.len());
-                let schema: Vec<super::tuple::ColumnInfo> = cs
-                    .schema
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| super::tuple::ColumnInfo {
-                        merged: false,
-                        name: c.name.clone(),
-                        data_type: types
-                            .map(|types| types[i].clone())
-                            .unwrap_or(DataType::Varchar(u16::MAX)),
-                        table: Some(cte_table_name.clone()),
-                    })
-                    .collect();
-
-                Ok(Box::new(CteScanOperator::new(tuples, schema)))
+                }
+                complex_expr => {
+                    // Complex sort expression: project as a hidden column
+                    let (phys_expr, data_type) = self.plan_projection_expr(
+                        complex_expr,
+                        bind_names,
+                        child_types,
+                        child_schema,
+                    )?;
+                    let col_name = format!("__sort_col_{}", extra_projections.len());
+                    let sort_idx = column_names.len() + extra_projections.len();
+                    sort_keys.push((sort_idx, !ob.ascending));
+                    extra_projections.push((phys_expr, col_name.clone(), data_type));
+                    has_complex = true;
+                }
             }
         }
+
+        Ok((sort_keys, extra_projections, has_complex))
+    }
+
+    /// Sort by hidden columns that hold complex expressions, then strip them.
+    fn plan_sort_with_hidden_columns(
+        &self,
+        s: &LogicalSort,
+        child: Box<dyn PhysicalOperator>,
+        child_schema: &[ColumnInfo],
+        column_count: usize,
+        extra_projections: Vec<(Expr, String, DataType)>,
+        sort_keys: Vec<(usize, bool)>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        // Option 1: Project all existing columns + extra sort columns
+        let mut all_projections: Vec<(Expr, String, DataType)> = child_schema
+            .iter()
+            .map(|ci| {
+                let expr = Expr::Column {
+                    table: None,
+                    column: ci.name.clone(),
+                };
+                (expr, ci.name.clone(), ci.data_type.clone())
+            })
+            .collect();
+        all_projections.extend(extra_projections);
+        let child_with_extra = Box::new(ProjectionOperator::new(child, all_projections));
+
+        let mut sort_op = SortOperator::new(child_with_extra, sort_keys)
+            .with_spill(self.catalog.engine().sort_spill());
+        if let Some(limit) = s.limit {
+            sort_op = sort_op.with_limit(limit as usize);
+        }
+
+        // Strip the extra sort columns
+        let result_schema: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
+        let indices: Vec<usize> = (0..column_count).collect();
+
+        if let Some(limit) = s.limit {
+            let limited = Box::new(LimitOperator::new(Box::new(sort_op), limit as usize, 0));
+            Ok(Box::new(ProjectionOperator::from_indices(
+                limited,
+                &indices,
+                &result_schema,
+            )?))
+        } else {
+            Ok(Box::new(ProjectionOperator::from_indices(
+                Box::new(sort_op),
+                &indices,
+                &result_schema,
+            )?))
+        }
+    }
+
+    /// Sort by plain columns, or skip the sort when the child already yields that order.
+    fn plan_sort_on_columns(
+        &self,
+        s: &LogicalSort,
+        child: Box<dyn PhysicalOperator>,
+        column_names: &[String],
+        sort_keys: Vec<(usize, bool)>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        // Simple case: all sort keys are column references
+        let already_sorted = if let Some(child_order) = child.ordering() {
+            sort_keys.len() <= child_order.len()
+                && sort_keys
+                    .iter()
+                    .zip(&child_order)
+                    .all(|(req, actual)| req == actual)
+        } else {
+            false
+        };
+
+        if already_sorted {
+            self.note(|| {
+                let keys: Vec<String> = sort_keys
+                    .iter()
+                    .map(|&(idx, descending)| {
+                        let dir = if descending { "DESC" } else { "ASC" };
+                        format!("{} {}", column_names[idx], dir)
+                    })
+                    .collect();
+                format!(
+                    "Sort eliminated: {} already yields rows ordered by {}",
+                    child.name(),
+                    keys.join(", ")
+                )
+            });
+            if let Some(limit) = s.limit {
+                Ok(Box::new(LimitOperator::new(child, limit as usize, 0)))
+            } else {
+                Ok(child)
+            }
+        } else {
+            let mut sort_op =
+                SortOperator::new(child, sort_keys).with_spill(self.catalog.engine().sort_spill());
+            if let Some(limit) = s.limit {
+                sort_op = sort_op.with_limit(limit as usize);
+            }
+
+            if let Some(limit) = s.limit {
+                Ok(Box::new(LimitOperator::new(
+                    Box::new(sort_op),
+                    limit as usize,
+                    0,
+                )))
+            } else {
+                Ok(Box::new(sort_op))
+            }
+        }
+    }
+
+    /// UNION / INTERSECT / EXCEPT of two plans.
+    fn plan_set_op(
+        &self,
+        s: &LogicalSetOp,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        let left = self.plan_internal(&s.left, cte_registry)?;
+        let right = self.plan_internal(&s.right, cte_registry)?;
+
+        if left.schema().len() != right.schema().len() {
+            return Err(RookError::Internal(format!(
+                "Set operation queries must have the same number of columns: {} vs {}",
+                left.schema().len(),
+                right.schema().len()
+            )));
+        }
+
+        let op_type = match s.op {
+            rook_ast::logical::SetOpType::Union => PhysicalSetOpType::Union,
+            rook_ast::logical::SetOpType::Intersect => PhysicalSetOpType::Intersect,
+            rook_ast::logical::SetOpType::Except => PhysicalSetOpType::Except,
+        };
+
+        Ok(Box::new(SetOpOperator::new(left, right, op_type, s.all)))
+    }
+
+    /// A subquery: a derived table in FROM, or a scalar subquery.
+    fn plan_subquery(
+        &self,
+        sq: &LogicalSubquery,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        // For FROM-clause subqueries (derived tables), plan the inner query
+        // and optionally wrap in SubqueryExecOperator in table (passthrough) mode.
+        let inner = self.plan_internal(&sq.subquery, cte_registry)?;
+
+        // If the subquery has an alias, it's a derived table in FROM clause.
+        // Just return the inner plan directly — it acts as a scan of the subquery result.
+        if sq.alias.is_some() {
+            return Ok(inner);
+        }
+
+        // No alias means this is likely a scalar subquery used in an expression.
+        // Wrap it in SubqueryExecOperator in Scalar mode.
+        Ok(Box::new(SubqueryExecOperator::new(
+            inner,
+            PhysicalSubqueryType::Scalar,
+            None,
+        )))
+    }
+
+    /// A WITH clause: materialise the CTE body, then plan the outer query.
+    fn plan_cte(
+        &self,
+        c: &LogicalCte,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        // 1. Materialise the CTE inner plan into an in-memory Vec<Tuple>.
+        //
+        // We fully execute the inner plan now (before planning the outer
+        // query) so that any CteScan leaves in the outer query can look
+        // up the cached tuples in O(1) without re-executing the CTE body.
+        let mut inner_op = self.plan_internal(&c.inner, cte_registry)?;
+        let mut tuples = Vec::new();
+        while let Some(tuple) = inner_op.next()? {
+            tuples.push(tuple);
+        }
+        self.note_cte(&c.name, || inner_op.explain());
+        self.note(|| format!("CTE '{}' materialised: {} row(s)", c.name, tuples.len()));
+
+        // 2. Register the materialised tuples so CteScan leaves can find
+        //    them, with the column types the body declared.
+        let key = c.name.to_ascii_lowercase();
+        let types = inner_op
+            .schema()
+            .iter()
+            .map(|ci| ci.data_type.clone())
+            .collect();
+        cte_registry.insert(key.clone(), tuples);
+        let shadowed = self.cte_types.borrow_mut().insert(key.clone(), types);
+
+        // 3. Plan the outer query (which may contain CteScan leaves that
+        //    reference the CTE we just registered).
+        let outer = self.plan_internal(&c.outer, cte_registry);
+        let mut cte_types = self.cte_types.borrow_mut();
+        match shadowed {
+            Some(types) => cte_types.insert(key, types),
+            None => cte_types.remove(&key),
+        };
+        outer
+    }
+
+    /// INSERT, from VALUES rows or from a SELECT.
+    fn plan_insert(
+        &self,
+        inp: &LogicalInsert,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        // VALUES form: the logical planner already expanded rows to
+        // full table arity; feed them via a constant-producing child.
+        let child: Box<dyn PhysicalOperator> = if !inp.values_rows.is_empty() {
+            let table_schema = self.resolve_table_schema(&inp.table)?;
+            let schema: Vec<ColumnInfo> = table_schema
+                .iter()
+                .map(|c| ColumnInfo {
+                    merged: false,
+                    name: c.name.clone(),
+                    data_type: c.data_type.clone(),
+                    table: Some(inp.table.clone()),
+                })
+                .collect();
+            let compiled = inp
+                .values_rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|node| expr_from_ast(node, &[]))
+                        .collect::<RookResult<Vec<_>>>()
+                })
+                .collect::<RookResult<Vec<_>>>()?;
+            Box::new(ValuesOperator::new(compiled, schema))
+        } else {
+            self.plan_internal(&inp.child, cte_registry)?
+        };
+
+        // INSERT INTO t (cols) SELECT ...: place each selected value
+        // in its listed column; the rest take their DEFAULT or NULL.
+        // (The VALUES form arrives already expanded.)
+        let target = if inp.values_rows.is_empty() && !inp.columns.is_empty() {
+            let table_schema = self.resolve_table_schema(&inp.table)?;
+            if child.schema().len() != inp.columns.len() {
+                return Err(RookError::TypeMismatch(format!(
+                    "INSERT lists {} column(s) but the SELECT returns {}",
+                    inp.columns.len(),
+                    child.schema().len()
+                )));
+            }
+            let positions = inp
+                .columns
+                .iter()
+                .map(|name| {
+                    table_schema
+                        .iter()
+                        .position(|c| c.name.eq_ignore_ascii_case(name))
+                        .ok_or_else(|| RookError::NotFound {
+                            entity: "Column",
+                            name: format!("{}.{}", inp.table, name),
+                        })
+                })
+                .collect::<RookResult<Vec<usize>>>()?;
+            let defaults = table_schema
+                .iter()
+                .map(|c| c.constraints.default.clone())
+                .collect();
+            Some((positions, defaults))
+        } else {
+            None
+        };
+        let insert = InsertOperator::new(
+            child,
+            inp.table.clone(),
+            self.db_name.clone(),
+            std::sync::Arc::clone(&self.catalog),
+        );
+        Ok(Box::new(match target {
+            Some((positions, defaults)) => insert.with_target_columns(positions, defaults),
+            None => insert,
+        }))
+    }
+
+    /// A scan over the tuples a CTE materialised.
+    fn plan_cte_scan(
+        &self,
+        cs: &LogicalCteScan,
+        cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
+        // Retrieve the pre-materialised tuples from the CTE registry.
+        // For recursive CTEs, `plan_recursive_cte` updates the registry before
+        // each iteration, so the operator always sees the latest working table.
+        let tuples = cte_registry
+            .get(&cs.name.to_ascii_lowercase())
+            .cloned()
+            .ok_or_else(|| {
+                RookError::Internal(format!(
+                    "CTE '{}' not found in registry during physical planning",
+                    cs.name
+                ))
+            })?;
+
+        // Build the schema for CteScanOperator from the CteScan node.
+        // The CTE name serves as the table qualifier so that table-qualified
+        // references (e.g. `my_cte.col`) and NATURAL JOIN disambiguation work
+        // correctly when a CTE is on the right side of a join.
+        // An alias (`FROM c x`) replaces the name, as it does for tables.
+        // Columns take the types the CTE body declared; a recursive CTE,
+        // whose rows come from more than one plan, keeps the untyped
+        // VARCHAR placeholder.
+        let cte_table_name = cs.alias.clone().unwrap_or_else(|| cs.name.clone());
+        let cte_types = self.cte_types.borrow();
+        let types = cte_types
+            .get(&cs.name.to_ascii_lowercase())
+            .filter(|types| types.len() == cs.schema.columns.len());
+        let schema: Vec<super::tuple::ColumnInfo> = cs
+            .schema
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| super::tuple::ColumnInfo {
+                merged: false,
+                name: c.name.clone(),
+                data_type: types
+                    .map(|types| types[i].clone())
+                    .unwrap_or(DataType::Varchar(u16::MAX)),
+                table: Some(cte_table_name.clone()),
+            })
+            .collect();
+
+        Ok(Box::new(CteScanOperator::new(tuples, schema)))
     }
 }
 
