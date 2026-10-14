@@ -1,8 +1,8 @@
 use super::super::explain::PlanNode;
 use std::io;
-use std::path::PathBuf;
 
-use crate::backend::heap::heap_manager::{HeapManager, HeapScanIterator};
+use crate::backend::cache::{CachedIndex, HeapHandle};
+use crate::backend::heap::heap_manager::HeapScanIterator;
 use crate::backend::index::btree::BTree;
 
 use super::super::tuple::{ColumnInfo, Tuple};
@@ -17,8 +17,8 @@ use crate::types::value::DataValue;
 ///
 /// Deserialises raw tuple bytes into `Tuple` values using the table's schema.
 pub struct SeqScanOperator {
-    /// The HeapManager provides file access.
-    heap_manager: HeapManager,
+    /// The table's heap, checked out of the engine's cache.
+    heap_manager: HeapHandle,
     /// The scan iterator (reads pages sequentially).
     scan_iter: HeapScanIterator,
     /// Column metadata for the scanned table (view column names + physical DataTypes).
@@ -45,7 +45,7 @@ impl SeqScanOperator {
     /// `heap_manager` must be already opened/created for the target table.
     /// `column_info` should contain the table's column metadata (from the catalog).
     /// The DataTypes in `column_info` are used both for deserialisation and labeling.
-    pub fn new(heap_manager: HeapManager, column_info: Vec<ColumnInfo>) -> Self {
+    pub fn new(heap_manager: HeapHandle, column_info: Vec<ColumnInfo>) -> Self {
         let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
         let identity: Vec<usize> = (0..column_info.len()).collect();
         let scan_iter = heap_manager.scan();
@@ -72,7 +72,7 @@ impl SeqScanOperator {
     /// After deserialisation using `schema_types`, values are reordered according
     /// to `column_mapping` so that each view column gets the correct data value.
     pub fn new_with_mapping(
-        heap_manager: HeapManager,
+        heap_manager: HeapHandle,
         schema_types: Vec<DataType>,
         column_info: Vec<ColumnInfo>,
         column_mapping: Vec<usize>,
@@ -268,17 +268,10 @@ pub enum IndexScanMode {
 /// In both modes, the operator materializes all matching tuples on the
 /// first `next()` call, then yields them one at a time.
 pub struct IndexScanOperator {
-    /// B+ Tree index for key lookups, when this scan owns its handle.
-    btree: Option<BTree>,
-    /// Engine, index file and key types, when lookups go through the
-    /// engine's cached handle.
-    cached_index: Option<(
-        std::sync::Arc<crate::backend::engine::Engine>,
-        PathBuf,
-        Vec<DataType>,
-    )>,
+    /// The index, read through the engine's cached handle.
+    index: CachedIndex,
     /// Heap manager for fetching actual tuple data from (page_id, slot_id).
-    heap_manager: HeapManager,
+    heap_manager: HeapHandle,
     /// The scan mode (point lookup or range scan).
     mode: IndexScanMode,
     /// Column metadata for the full table schema.
@@ -300,56 +293,22 @@ pub struct IndexScanOperator {
 }
 
 impl IndexScanOperator {
-    /// Create a new index scan operator.
+    /// Create an index scan that looks keys up in `index`.
     ///
-    /// `btree` is an opened B+ Tree index.
     /// `heap_manager` provides access to the heap file for fetching tuple data.
-    /// `mode` specifies point lookup or range scan.
+    /// `mode` specifies point lookup, range or full scan.
     /// `column_info` contains the full table schema (used for output tuple deserialization).
     /// `indexed_cols` specifies the column indices of the index keys in `column_info`.
     pub fn new(
-        btree: BTree,
-        heap_manager: HeapManager,
+        index: CachedIndex,
+        heap_manager: HeapHandle,
         mode: IndexScanMode,
         column_info: Vec<ColumnInfo>,
         indexed_cols: Vec<usize>,
     ) -> Self {
         let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
         Self {
-            btree: Some(btree),
-            cached_index: None,
-            heap_manager,
-            mode,
-            column_info,
-            decoder: crate::types::RowDecoder::new(&schema_types),
-            indexed_cols,
-            results: Vec::new(),
-            pos: 0,
-            ready: std::collections::VecDeque::new(),
-            loaded: false,
-            described: None,
-        }
-    }
-
-    /// Create an index scan that looks keys up through the process-wide
-    /// cached handle for `idx_path` (see `cache::with_btree`) instead of
-    /// opening the index file for this one scan.
-    ///
-    /// The cached handle is the one DML maintains, so the scan reads the same
-    /// pages DML writes and reuses pages already cached by earlier queries.
-    pub fn with_cached_index(
-        engine: std::sync::Arc<crate::backend::engine::Engine>,
-        idx_path: PathBuf,
-        key_types: Vec<DataType>,
-        heap_manager: HeapManager,
-        mode: IndexScanMode,
-        column_info: Vec<ColumnInfo>,
-        indexed_cols: Vec<usize>,
-    ) -> Self {
-        let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
-        Self {
-            btree: None,
-            cached_index: Some((engine, idx_path, key_types)),
+            index,
             heap_manager,
             mode,
             column_info,
@@ -383,35 +342,10 @@ impl IndexScanOperator {
         }
     }
 
-    /// Look the keys up in the owned tree, or in the cached handle.
+    /// Look the keys up in the index.
     fn search_index(&mut self) -> io::Result<Vec<(u32, u32)>> {
-        if self.btree.is_none()
-            && let Some((engine, path, key_types)) = &self.cached_index
-        {
-            let open = || -> io::Result<BTree> {
-                let mut btree = BTree::open(path.clone())?;
-                btree.set_key_types(key_types.clone());
-                Ok(btree)
-            };
-            let mode = &self.mode;
-            let hit = crate::backend::cache::with_btree(engine, path, open, |btree| {
-                // A handle cached with other key types would compare keys
-                // differently; leave it alone and use a private one.
-                if btree.key_types() != key_types.as_slice() {
-                    return Ok(None);
-                }
-                Self::lookup(mode, btree).map(Some)
-            })?;
-            if let Some(tids) = hit {
-                return Ok(tids);
-            }
-            self.btree = Some(open()?);
-        }
-        let btree = self
-            .btree
-            .as_mut()
-            .ok_or_else(|| io::Error::other("index scan has no index handle"))?;
-        Self::lookup(&self.mode, btree)
+        let mode = &self.mode;
+        self.index.read(|btree| Self::lookup(mode, btree))
     }
 
     /// Query the B+ Tree and materialize the matching heap tuple locations.

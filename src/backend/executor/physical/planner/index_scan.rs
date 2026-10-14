@@ -11,7 +11,6 @@ use super::super::operators::{IndexScanMode, IndexScanOperator, PhysicalOperator
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
 use crate::backend::error::{RookError, RookResult};
-use crate::backend::heap::HeapManager;
 use crate::types::Comparable;
 use crate::types::{DataType, DataValue};
 
@@ -138,7 +137,6 @@ impl PhysicalPlanner {
                 return Ok(None);
             }
 
-            crate::backend::cache::checkpoint();
             // Key type(s) come from the INDEXED column(s) (NOT the first table
             // column). The index itself is not opened here: the scan looks keys
             // up through the cached handle, which keeps the file open and its
@@ -156,14 +154,15 @@ impl PhysicalPlanner {
                 vec![DataType::Int]
             };
 
-            // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
-            let heap_manager = HeapManager::open(heap_path.clone()).map_err(|e| {
-                RookError::Io(e).with_context(format!(
-                    "opening heap {} for table '{}'",
-                    heap_path.display(),
-                    ts.table
-                ))
-            })?;
+            let heap_manager =
+                crate::backend::cache::lease_heap_owned(self.catalog.engine(), &heap_path)
+                    .map_err(|e| {
+                        RookError::Io(e).with_context(format!(
+                            "opening heap {} for table '{}'",
+                            heap_path.display(),
+                            ts.table
+                        ))
+                    })?;
 
             let indexed_cols: Vec<usize> = best_col_names
                 .iter()
@@ -175,10 +174,12 @@ impl PhysicalPlanner {
                 .collect();
 
             return Ok(Some(Box::new(
-                IndexScanOperator::with_cached_index(
-                    std::sync::Arc::clone(self.catalog.engine()),
-                    idx_path,
-                    key_types,
+                IndexScanOperator::new(
+                    crate::backend::cache::CachedIndex::new(
+                        std::sync::Arc::clone(self.catalog.engine()),
+                        idx_path,
+                        key_types,
+                    ),
                     heap_manager,
                     mode,
                     column_info,

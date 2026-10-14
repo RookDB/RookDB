@@ -195,18 +195,59 @@ impl std::ops::DerefMut for HeapLease<'_> {
 
 impl Drop for HeapLease<'_> {
     fn drop(&mut self) {
-        if let Some(mut entry) = self.entry.take() {
-            entry.ops_since_flush += 1;
-            lock(&self.engine.heaps)
-                .entry(self.key.clone())
-                .or_insert(entry);
+        if let Some(entry) = self.entry.take() {
+            check_in(self.engine, std::mem::take(&mut self.key), entry);
         }
     }
 }
 
-/// Check the engine's cached `HeapManager` for `path` out of the cache,
-/// opening it on a miss. A handle whose file was replaced is discarded.
-pub fn lease_heap<'a>(engine: &'a Engine, path: &Path) -> io::Result<HeapLease<'a>> {
+/// A [`HeapLease`] that owns its reference to the engine, for a holder that
+/// outlives the borrow of the catalog: a query operator keeps one for the
+/// whole query. It can also wrap a manager opened outside any engine, which
+/// is then simply dropped.
+pub struct HeapHandle {
+    engine: Option<Arc<Engine>>,
+    key: PathBuf,
+    entry: Option<CachedHeap>,
+}
+
+impl std::ops::Deref for HeapHandle {
+    type Target = HeapManager;
+    fn deref(&self) -> &HeapManager {
+        &self.entry.as_ref().expect("handle holds a manager").manager
+    }
+}
+
+impl std::ops::DerefMut for HeapHandle {
+    fn deref_mut(&mut self) -> &mut HeapManager {
+        &mut self.entry.as_mut().expect("handle holds a manager").manager
+    }
+}
+
+impl Drop for HeapHandle {
+    fn drop(&mut self) {
+        if let (Some(engine), Some(entry)) = (&self.engine, self.entry.take()) {
+            check_in(engine, std::mem::take(&mut self.key), entry);
+        }
+    }
+}
+
+impl From<HeapManager> for HeapHandle {
+    fn from(manager: HeapManager) -> Self {
+        HeapHandle {
+            engine: None,
+            key: PathBuf::new(),
+            entry: Some(CachedHeap {
+                manager,
+                ops_since_flush: 0,
+            }),
+        }
+    }
+}
+
+/// Take the engine's cached manager for `path` out of the cache, opening it
+/// on a miss. A handle whose file was replaced is discarded.
+fn check_out(engine: &Engine, path: &Path) -> io::Result<(PathBuf, CachedHeap)> {
     let key = canonical(path);
     let cached = {
         let mut cache = lock(&engine.heaps);
@@ -225,8 +266,32 @@ pub fn lease_heap<'a>(engine: &'a Engine, path: &Path) -> io::Result<HeapLease<'
             ops_since_flush: 0,
         },
     };
+    Ok((key, entry))
+}
+
+/// Put a checked-out manager back, unless another one was cached meanwhile.
+fn check_in(engine: &Engine, key: PathBuf, mut entry: CachedHeap) {
+    entry.ops_since_flush += 1;
+    lock(&engine.heaps).entry(key).or_insert(entry);
+}
+
+/// Check the engine's cached `HeapManager` for `path` out of the cache,
+/// opening it on a miss. A handle whose file was replaced is discarded.
+pub fn lease_heap<'a>(engine: &'a Engine, path: &Path) -> io::Result<HeapLease<'a>> {
+    let (key, entry) = check_out(engine, path)?;
     Ok(HeapLease {
         engine,
+        key,
+        entry: Some(entry),
+    })
+}
+
+/// [`lease_heap`] for a holder that keeps the manager past the catalog
+/// borrow, such as a query operator.
+pub fn lease_heap_owned(engine: &Arc<Engine>, path: &Path) -> io::Result<HeapHandle> {
+    let (key, entry) = check_out(engine, path)?;
+    Ok(HeapHandle {
+        engine: Some(Arc::clone(engine)),
         key,
         entry: Some(entry),
     })
@@ -272,6 +337,16 @@ pub fn with_btree<T, E>(
     open: impl FnOnce() -> Result<crate::backend::index::btree::BTree, E>,
     f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> Result<T, E>,
 ) -> Result<T, E> {
+    btree_call(engine, path, open, f, true)
+}
+
+fn btree_call<T, E>(
+    engine: &Engine,
+    path: &Path,
+    open: impl FnOnce() -> Result<crate::backend::index::btree::BTree, E>,
+    f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> Result<T, E>,
+    mutation: bool,
+) -> Result<T, E> {
     let key = canonical(path);
     let mut cache = lock(&engine.btrees);
 
@@ -281,14 +356,68 @@ pub fn with_btree<T, E>(
     }
     let (tree, ops) = cache.get_mut(&key).expect("just inserted");
     let out = f(tree)?;
-    *ops += 1;
-    if *ops >= BTREE_SYNC_INTERVAL {
-        if let Err(e) = tree.sync() {
-            log::warn!("[cache] btree sync {:?} failed: {}", key, e);
+    if mutation {
+        *ops += 1;
+        if *ops >= BTREE_SYNC_INTERVAL {
+            if let Err(e) = tree.sync() {
+                log::warn!("[cache] btree sync {:?} failed: {}", key, e);
+            }
+            *ops = 0;
         }
-        *ops = 0;
     }
     Ok(out)
+}
+
+/// An index a query reads through the engine's cached handle, so it sees
+/// the pages DML has written without a checkpoint and keeps them cached
+/// across queries.
+pub struct CachedIndex {
+    engine: Arc<Engine>,
+    path: PathBuf,
+    key_types: Vec<crate::types::DataType>,
+}
+
+impl CachedIndex {
+    pub fn new(engine: Arc<Engine>, path: PathBuf, key_types: Vec<crate::types::DataType>) -> Self {
+        CachedIndex {
+            engine,
+            path,
+            key_types,
+        }
+    }
+
+    /// Run the read `f` against the cached tree. A tree cached with other key
+    /// types compares keys differently and stays as it is for the writers
+    /// that opened it: its pages are written out and `f` reads through a
+    /// private handle instead.
+    pub fn read<T>(
+        &self,
+        f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let open = || -> io::Result<crate::backend::index::btree::BTree> {
+            let mut btree = crate::backend::index::btree::BTree::open(self.path.clone())?;
+            btree.set_key_types(self.key_types.clone());
+            Ok(btree)
+        };
+        let mut f = Some(f);
+        let hit = btree_call(
+            &self.engine,
+            &self.path,
+            open,
+            |btree| {
+                if btree.key_types() != self.key_types.as_slice() {
+                    btree.write_through()?;
+                    return Ok(None);
+                }
+                (f.take().expect("called once"))(btree).map(Some)
+            },
+            false,
+        )?;
+        match hit {
+            Some(out) => Ok(out),
+            None => (f.take().expect("called once"))(&mut open()?),
+        }
+    }
 }
 
 /// fsync every cached B+ Tree with pending mutations and drop the handles.

@@ -20,8 +20,6 @@ use crate::types::datatype::DataType;
 use self::helpers::infer_expr_type_from_ast;
 use crate::backend::catalog::types::Catalog;
 use crate::backend::error::{RookError, RookResult};
-use crate::backend::heap::heap_manager::HeapManager;
-use crate::backend::index::btree::BTree;
 use crate::statistics::estimator::{Estimator, StatsSource};
 
 pub mod helpers;
@@ -806,10 +804,12 @@ impl PhysicalPlanner {
                 ci.table = Some(sys_table_name.clone());
             }
             let schema_types: Vec<DataType> = sys_schema.to_vec();
-            // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
-            let heap_manager = HeapManager::open(heap_path).map_err(|e| {
-                RookError::Io(e).with_context(format!("Failed to open system table '{}'", sys_name))
-            })?;
+            let heap_manager =
+                crate::backend::cache::lease_heap_owned(self.catalog.engine(), &heap_path)
+                    .map_err(|e| {
+                        RookError::Io(e)
+                            .with_context(format!("Failed to open system table '{}'", sys_name))
+                    })?;
             return Ok(Box::new(
                 SeqScanOperator::new_with_mapping(
                     heap_manager,
@@ -847,55 +847,59 @@ impl PhysicalPlanner {
         }
 
         // Try loading named indexes from sys_indexes
-        let named_indexes = crate::backend::executor::create_index::load_table_indexes(
+        let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
             self.catalog.engine(),
             &self.db_name,
             &ts.table,
         )
         .unwrap_or_default();
 
-        if !named_indexes.is_empty() {
+        let heap_manager = crate::backend::cache::lease_heap_owned(
+            self.catalog.engine(),
+            &heap_path,
+        )
+        .map_err(|e| {
+            RookError::Io(e).with_context(format!("Failed to open heap for table '{}'", ts.table))
+        })?;
+
+        if let Some((first_idx_name, idx_cols, _)) = named_indexes.first() {
             // Use the first named index for the full scan
-            let first_idx_name = &named_indexes[0].0;
             let index_path =
                 self.catalog
                     .engine()
                     .paths()
                     .index(&self.db_name, &ts.table, first_idx_name);
 
-            if index_path.exists() {
-                crate::backend::cache::checkpoint();
-                let mut btree = BTree::open(index_path).map_err(|e| {
-                    RookError::Io(e)
-                        .with_context(format!("Failed to open index for table '{}'", ts.table))
-                })?;
+            // The key types are those of the indexed columns, in index order.
+            let key_types: Option<Vec<DataType>> = idx_cols
+                .iter()
+                .map(|name| {
+                    table_schema
+                        .iter()
+                        .find(|c| c.name.eq_ignore_ascii_case(name))
+                        .map(|c| c.data_type.clone())
+                })
+                .collect();
 
-                // Set the key type from the indexed column (NOT the first table column)
-                let idx_col_name = &named_indexes[0].1;
-                if let Some(idx_col) = table_schema
+            if index_path.exists()
+                && let Some(key_types) = key_types
+            {
+                let indexed_cols: Vec<usize> = idx_cols
                     .iter()
-                    .find(|c| c.name.eq_ignore_ascii_case(idx_col_name))
-                {
-                    btree.set_key_type(idx_col.data_type.clone());
-                } else if let Some(first_col) = table_schema.first() {
-                    btree.set_key_type(first_col.data_type.clone());
-                }
-
-                // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
-                let heap_manager = HeapManager::open(heap_path).map_err(|e| {
-                    RookError::Io(e)
-                        .with_context(format!("Failed to open heap for table '{}'", ts.table))
-                })?;
-
-                let indexed_cols: Vec<usize> = column_info
-                    .iter()
-                    .position(|c| c.name.eq_ignore_ascii_case(idx_col_name))
-                    .into_iter()
+                    .filter_map(|name| {
+                        column_info
+                            .iter()
+                            .position(|c| c.name.eq_ignore_ascii_case(name))
+                    })
                     .collect();
 
                 return Ok(Box::new(
                     IndexScanOperator::new(
-                        btree,
+                        crate::backend::cache::CachedIndex::new(
+                            std::sync::Arc::clone(self.catalog.engine()),
+                            index_path,
+                            key_types,
+                        ),
                         heap_manager,
                         IndexScanMode::FullScan,
                         column_info,
@@ -905,11 +909,6 @@ impl PhysicalPlanner {
                 ));
             }
         }
-
-        // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
-        let heap_manager = HeapManager::open(heap_path).map_err(|e| {
-            RookError::Io(e).with_context(format!("Failed to open heap for table '{}'", ts.table))
-        })?;
 
         // Decode only the columns the query reads.
         let wanted: Option<Vec<usize>> = self.read_columns.borrow().as_ref().map(|names| {

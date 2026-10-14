@@ -227,24 +227,19 @@ impl PhysicalPlanner {
                         && let Some(outer_key_idx) =
                             resolve_outer_key(&left_schema, outer_table.as_deref(), outer_col)
                     {
-                        crate::backend::cache::checkpoint();
-                        let mut btree = crate::backend::index::btree::BTree::open(idx_path.clone())
-                            .map_err(|e| {
-                                RookError::Io(e).with_context(format!(
-                                    "opening index {} for table '{}'",
-                                    idx_path.display(),
-                                    inner_ts.table
-                                ))
-                            })?;
-                        if let Some(idx_col) = right_schema
+                        let key_type = right_schema
                             .iter()
                             .find(|c| c.name.eq_ignore_ascii_case(inner_col))
-                        {
-                            btree.set_key_type(idx_col.data_type.clone());
-                        }
-                        // Owned handle: the operator keeps it for the whole query, so it cannot be leased from the engine cache.
-                        let heap_manager = crate::backend::heap::heap_manager::HeapManager::open(
-                            heap_path.clone(),
+                            .map(|c| c.data_type.clone())
+                            .unwrap_or(DataType::Int);
+                        let index = crate::backend::cache::CachedIndex::new(
+                            std::sync::Arc::clone(self.catalog.engine()),
+                            idx_path,
+                            vec![key_type],
+                        );
+                        let heap_manager = crate::backend::cache::lease_heap_owned(
+                            self.catalog.engine(),
+                            &heap_path,
                         )
                         .map_err(|e| {
                             RookError::Io(e).with_context(format!(
@@ -263,7 +258,7 @@ impl PhysicalPlanner {
                         return Ok(wrap(Box::new(
                             IndexNestedLoopJoinOperator::new(
                                 left,
-                                btree,
+                                index,
                                 heap_manager,
                                 outer_key_idx,
                                 right_schema,

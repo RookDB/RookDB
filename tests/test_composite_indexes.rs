@@ -257,7 +257,9 @@ fn composite_index_tracks_dml() {
         vec![vec!["40"]]
     );
 
-    // Direct index inspection: exactly the surviving combos resolve.
+    // Direct index inspection: exactly the surviving combos resolve. The
+    // file is read past the engine's cached handle, so write that out first.
+    storage_manager::backend::cache::checkpoint();
     let idx_path = common::path("database/base/ddb/orders.idx_cr.idx");
     let mut btree = storage_manager::backend::index::btree::BTree::open(idx_path).unwrap();
     btree.set_key_types(vec![DataType::Int, DataType::Varchar(30)]);

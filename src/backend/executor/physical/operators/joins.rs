@@ -5,9 +5,8 @@ use super::super::explain::PlanNode;
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
+use crate::backend::cache::{CachedIndex, HeapHandle};
 use crate::backend::error::{RookError, RookResult};
-use crate::backend::heap::heap_manager::HeapManager;
-use crate::backend::index::btree::BTree;
 
 use crate::types::DataType;
 use crate::types::value::DataValue;
@@ -1489,8 +1488,8 @@ impl PhysicalOperator for HashJoinOperator {
 /// Supports INNER and LEFT joins.
 pub struct IndexNestedLoopJoinOperator {
     outer: Box<dyn PhysicalOperator>,
-    btree: BTree,
-    heap_manager: HeapManager,
+    index: CachedIndex,
+    heap_manager: HeapHandle,
     outer_key_idx: usize,
     inner_schema: Vec<ColumnInfo>,
     inner_schema_types: Vec<DataType>,
@@ -1511,8 +1510,8 @@ pub struct IndexNestedLoopJoinOperator {
 impl IndexNestedLoopJoinOperator {
     pub fn new(
         outer: Box<dyn PhysicalOperator>,
-        btree: BTree,
-        heap_manager: HeapManager,
+        index: CachedIndex,
+        heap_manager: HeapHandle,
         outer_key_idx: usize,
         inner_schema: Vec<ColumnInfo>,
         residual_predicate: Option<Predicate>,
@@ -1525,7 +1524,7 @@ impl IndexNestedLoopJoinOperator {
 
         Self {
             outer,
-            btree,
+            index,
             heap_manager,
             outer_key_idx,
             inner_schema,
@@ -1617,8 +1616,10 @@ impl PhysicalOperator for IndexNestedLoopJoinOperator {
                         .and_then(|v| v.clone());
                     match key_opt {
                         Some(key_val) => {
-                            let tids =
-                                self.btree.search_range(&key_val, &key_val).map_err(|e| {
+                            let tids = self
+                                .index
+                                .read(|btree| btree.search_range(&key_val, &key_val))
+                                .map_err(|e| {
                                     RookError::Internal(format!(
                                         "Index lookup failed in INLJ: {}",
                                         e
