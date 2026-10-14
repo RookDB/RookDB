@@ -13,6 +13,17 @@ pub const SLOT_FLAG_DELETED: u16 = 0b0000_0000_0000_0001;
 // Page size in bytes (8 KB)
 pub mod page_lock;
 
+/// Bumped whenever any slot on any page becomes dead. An insert's "no dead
+/// slot before here" hint is valid only while this has not moved; a stale hint
+/// can only cost a reusable slot (the row is appended instead), never
+/// correctness.
+static DEAD_SLOT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current dead-slot epoch (see [`Page::insert_from`]).
+pub fn dead_slot_epoch() -> u64 {
+    DEAD_SLOT_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // Represents a single database page
 pub struct Page {
     // Raw page bytes
@@ -88,6 +99,9 @@ impl Page {
     }
 
     pub fn set_slot(&mut self, slot_id: u32, slot: Slot) {
+        if slot.is_dead() {
+            DEAD_SLOT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let base = (PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE) as usize;
         self.data[base..base + 4].copy_from_slice(&slot.offset.to_le_bytes());
         self.data[base + 4..base + 6].copy_from_slice(&slot.length.to_le_bytes());
@@ -144,8 +158,17 @@ impl Page {
     /// one, and return its slot id. A reused slot's old bytes stay on the
     /// page until compaction.
     pub fn insert(&mut self, data: &[u8]) -> std::io::Result<u32> {
+        self.insert_from(data, 0)
+    }
+
+    /// [`Page::insert`] that looks for a dead slot to reuse only from slot
+    /// `scan_from` on: the caller knows slots before it are all live, so a page
+    /// that fills by appending never rescans its whole directory. After the
+    /// insert, slots `0..=returned id` are all live.
+    pub fn insert_from(&mut self, data: &[u8], scan_from: u32) -> std::io::Result<u32> {
         let free = page_free_space(self)?;
-        let reused = (0..self.slot_count()).find(|&i| self.slot(i).is_some_and(|s| s.is_dead()));
+        let reused =
+            (scan_from..self.slot_count()).find(|&i| self.slot(i).is_some_and(|s| s.is_dead()));
         let required = data.len() as u32 + if reused.is_some() { 0 } else { ITEM_ID_SIZE };
         if free < required {
             return Err(std::io::Error::new(
@@ -471,5 +494,19 @@ mod tests {
 
         let result = get_slot_entry(&page, 0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn insert_from_skips_the_known_live_prefix_and_still_reuses_dead_slots() {
+        let mut page = Page::new();
+        init_page(&mut page);
+        for i in 0..4u8 {
+            assert_eq!(page.insert(&[i + 1; 4]).unwrap(), i as u32);
+        }
+        assert!(page.mark_deleted(1));
+        // The hint claims 0..2 are live: slot 1 is not seen, a new slot is used.
+        assert_eq!(page.insert_from(&[9; 4], 2).unwrap(), 4);
+        // Without the hint the dead slot is reused.
+        assert_eq!(page.insert_from(&[8; 4], 0).unwrap(), 1);
     }
 }

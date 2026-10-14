@@ -206,6 +206,10 @@ pub struct HeapManager {
     /// Buffer pool view of this file (one per underlying file, shared by every manager on it).
     pub pool: SharedPool,
     fsm: FSM,
+    /// Where the last insert landed: (page, slots before this one are all
+    /// live, dead-slot epoch at that time). In memory only; see
+    /// [`Page::insert_from`].
+    insert_hint: Option<(u32, u32, u64)>,
 }
 
 impl HeapManager {
@@ -297,7 +301,11 @@ impl HeapManager {
         // Create FSM fork
         let fsm = FSM::open(fsm_path.clone(), 2)?; // 2 pages initially
 
-        let mut manager = Self { pool, fsm };
+        let mut manager = Self {
+            pool,
+            fsm,
+            insert_hint: None,
+        };
 
         // Set heap page count to 2 (Page 0 + Page 1)
         manager.update_header(|h| {
@@ -397,7 +405,11 @@ impl HeapManager {
 
         log::trace!("[HeapManager::open] Successfully opened HeapManager");
 
-        Ok(Self { pool, fsm })
+        Ok(Self {
+            pool,
+            fsm,
+            insert_hint: None,
+        })
     }
 
     /// Insert a tuple using FSM-guided page selection.
@@ -495,7 +507,17 @@ impl HeapManager {
             }
 
             // Insert tuple into slotted page (via buffer pool)
-            let inserted = pool.get_page_mut(frame_id).insert(tuple_data);
+            let epoch = crate::page::dead_slot_epoch();
+            let scan_from = match self.insert_hint {
+                Some((p, clean, e)) if p == page_id && e == epoch => clean,
+                _ => 0,
+            };
+            let inserted = pool
+                .get_page_mut(frame_id)
+                .insert_from(tuple_data, scan_from);
+            if let Ok(slot) = &inserted {
+                self.insert_hint = Some((page_id, slot + 1, epoch));
+            }
             let new_free = inserted
                 .is_ok()
                 .then(|| page_free_space(pool.get_page(frame_id)));

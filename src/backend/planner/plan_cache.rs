@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 
-use crate::backend::executor::{insert_row, parse_text_row, parse_text_value};
+use crate::backend::executor::{parse_text_row, parse_text_value};
 use crate::catalog::Catalog;
 use rook_ast::QueryPlan;
 use rook_ast::logical::LogicalPlan;
@@ -340,7 +340,10 @@ impl CachedInsert {
             }
         }
 
-        // Execute row by row
+        // Execute row by row against one resolved table.
+        let target =
+            crate::backend::executor::load_csv::InsertTarget::new(catalog, db_name, &self.table)
+                .map_err(|e| e.to_string())?;
         let mut offset = 0;
         let mut inserted_count = 0;
 
@@ -363,7 +366,7 @@ impl CachedInsert {
                 row
             };
 
-            insert_row(catalog, db_name, &self.table, &row).map_err(|e| e.to_string())?;
+            target.insert_row(&row).map_err(|e| e.to_string())?;
             inserted_count += 1;
         }
 

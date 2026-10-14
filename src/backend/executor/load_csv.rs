@@ -58,7 +58,57 @@ pub fn insert_row(
     table_name: &str,
     values: &[Option<DataValue>],
 ) -> RookResult<(u32, u32)> {
-    let columns = table_columns(catalog, db_name, table_name)?;
+    InsertTarget::new(catalog, db_name, table_name)?.insert_row(values)
+}
+
+/// What an INSERT statement resolves once about its table, so a multi-row
+/// statement does not repeat the catalog lookups, the schema copy and the
+/// path building for every row.
+pub struct InsertTarget<'a> {
+    catalog: &'a Catalog,
+    db_name: &'a str,
+    table_name: &'a str,
+    columns: &'a [Column],
+    schema: Vec<crate::types::DataType>,
+    table_path: std::path::PathBuf,
+}
+
+impl<'a> InsertTarget<'a> {
+    pub fn new(catalog: &'a Catalog, db_name: &'a str, table_name: &'a str) -> RookResult<Self> {
+        let columns = table_columns(catalog, db_name, table_name)?;
+        Ok(Self {
+            catalog,
+            db_name,
+            table_name,
+            columns,
+            schema: columns.iter().map(|c| c.data_type.clone()).collect(),
+            table_path: catalog.engine().paths().heap(db_name, table_name),
+        })
+    }
+
+    pub fn columns(&self) -> &'a [Column] {
+        self.columns
+    }
+
+    /// [`insert_row`] against the resolved table.
+    pub fn insert_row(&self, values: &[Option<DataValue>]) -> RookResult<(u32, u32)> {
+        insert_row_resolved(self, values)
+    }
+}
+
+fn insert_row_resolved(
+    target: &InsertTarget<'_>,
+    values: &[Option<DataValue>],
+) -> RookResult<(u32, u32)> {
+    let InsertTarget {
+        catalog,
+        db_name,
+        table_name,
+        columns,
+        schema,
+        table_path,
+    } = target;
+    let (catalog, db_name, table_name, columns) = (*catalog, *db_name, *table_name, *columns);
     if values.len() != columns.len() {
         return Err(RookError::TypeMismatch(format!(
             "table '{}' has {} columns but {} values were supplied",
@@ -80,19 +130,16 @@ pub fn insert_row(
 
     crate::backend::constraint::validate_row_insert(catalog, db_name, table_name, &row)?;
 
-    let schema: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
-    let bytes = serialize_nullable_typed_row(&schema, &row).map_err(RookError::TypeMismatch)?;
+    let bytes = serialize_nullable_typed_row(schema, &row).map_err(RookError::TypeMismatch)?;
 
-    let table_path = catalog.engine().paths().heap(db_name, table_name);
-    let (page_id, slot_id) =
-        crate::backend::cache::with_heap(catalog.engine(), &table_path, |hm| {
-            hm.insert_tuple(&bytes)
-        })
-        .map_err(|e| match e.kind() {
-            // A row the heap refuses (empty or larger than a page).
-            io::ErrorKind::InvalidInput => RookError::TypeMismatch(e.to_string()),
-            _ => RookError::Io(e),
-        })?;
+    let (page_id, slot_id) = crate::backend::cache::with_heap(catalog.engine(), table_path, |hm| {
+        hm.insert_tuple(&bytes)
+    })
+    .map_err(|e| match e.kind() {
+        // A row the heap refuses (empty or larger than a page).
+        io::ErrorKind::InvalidInput => RookError::TypeMismatch(e.to_string()),
+        _ => RookError::Io(e),
+    })?;
 
     if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
         catalog.engine(),
@@ -252,6 +299,8 @@ pub fn load_csv(
     let mut skipped = 0u32;
     let mut failed = 0u32;
 
+    let target = InsertTarget::new(catalog, db_name, table_name)
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e.to_string()))?;
     for line in first_row.into_iter().map(Ok).chain(lines) {
         line_idx += 1;
         let line = match line {
@@ -282,7 +331,7 @@ pub fn load_csv(
 
         let result = parse_text_row(columns, &refs)
             .map_err(RookError::TypeMismatch)
-            .and_then(|row| insert_row(catalog, db_name, table_name, &row));
+            .and_then(|row| target.insert_row(&row));
         match result {
             Ok(_) => inserted += 1,
             Err(e) => {
