@@ -224,7 +224,9 @@ pub(super) fn create_table(
     // checker uses them as its fast path instead of an O(n) heap scan per
     // row; the FK child index stays non-unique (it accelerates parent-side
     // referencing checks, which are existence probes).
+    // A name another index of the database already has is not reused.
     let index = |name: String, cols: &[String], unique: bool, primary: bool| {
+        let name = crate::backend::system_table::free_index_name(catalog.engine(), db, &name);
         create_index_with_flags(catalog, db, &params.table, &name, cols, unique, primary)
     };
     for col in &params.columns {
@@ -825,6 +827,16 @@ pub(super) fn create_index(
     db: &str,
     params: &CreateIndexPlan,
 ) -> RookResult<StatementResult> {
+    if params.if_not_exists
+        && !params.index_name.is_empty()
+        && crate::backend::system_table::index_owner(catalog.engine(), db, &params.index_name)
+            .is_some()
+    {
+        return Ok(StatementResult::message(format!(
+            "Index '{}' already exists (IF NOT EXISTS specified, skipping).",
+            params.index_name
+        )));
+    }
     let count = crate::backend::executor::create_index::create_index(
         catalog,
         db,

@@ -500,6 +500,41 @@ pub(crate) fn table_indexes(
         .collect()
 }
 
+/// The table of database `db` that owns an index called `name` (compared
+/// case-insensitively), if any. Index names are unique per database.
+pub(crate) fn index_owner(
+    engine: &crate::backend::engine::Engine,
+    db: &str,
+    name: &str,
+) -> Option<String> {
+    load_saved_indexes(engine)
+        .into_iter()
+        .find(|ix| ix.db.eq_ignore_ascii_case(db) && ix.name.eq_ignore_ascii_case(name))
+        .map(|ix| ix.table)
+}
+
+/// `base` if no index of `db` has that name, else `base_2`, `base_3`, ...
+/// For the indexes a constraint creates, which must not take a user's name.
+pub(crate) fn free_index_name(
+    engine: &crate::backend::engine::Engine,
+    db: &str,
+    base: &str,
+) -> String {
+    let taken: Vec<String> = load_saved_indexes(engine)
+        .into_iter()
+        .filter(|ix| ix.db.eq_ignore_ascii_case(db))
+        .map(|ix| ix.name)
+        .collect();
+    let is_taken = |n: &str| taken.iter().any(|t| t.eq_ignore_ascii_case(n));
+    if !is_taken(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|i| format!("{}_{}", base, i))
+        .find(|n| !is_taken(n))
+        .expect("an unused suffix exists")
+}
+
 /// Read every `sys_indexes` row with its table's database and name.
 fn load_saved_indexes(engine: &crate::backend::engine::Engine) -> Vec<SavedIndex> {
     use crate::types::DataValue;

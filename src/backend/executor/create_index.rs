@@ -360,6 +360,13 @@ pub fn create_index_with_flags(
         index_name.to_string()
     };
 
+    // Index names are unique per database (DROP INDEX finds one by name alone).
+    if crate::backend::system_table::index_owner(catalog.engine(), db_name, &resolved_name)
+        .is_some()
+    {
+        return Err(format!("Index '{}' already exists", resolved_name).into());
+    }
+
     // 4. Build paths — use index-name-based files
     let heap_path = catalog.engine().paths().heap(db_name, table_name);
     let idx_path = index_file_path(catalog.engine(), db_name, table_name, &resolved_name);
@@ -560,6 +567,13 @@ pub(crate) fn ensure_columns_index(
             ix.is_primary,
         ),
         None => (new_name, columns.to_vec(), unique, false),
+    };
+    let fresh_name;
+    let name = if listed.is_none() {
+        fresh_name = crate::backend::system_table::free_index_name(engine, db_name, name);
+        fresh_name.as_str()
+    } else {
+        name
     };
     if listed.is_some() {
         // The row is written again by create_index_with_flags.
