@@ -429,7 +429,7 @@ pub fn delete_column_constraints(
             );
             // A CHECK row stores its expression: it goes if it mentions the column.
             let mentions = if is_check {
-                rename_identifier_in_expr(row_columns, column_name, "\u{0}") != *row_columns
+                expr_mentions_identifier(row_columns, column_name)
             } else {
                 let lists = |list: &str| {
                     split_column_list(list)
@@ -472,44 +472,81 @@ pub fn delete_column_constraints(
     Ok(count)
 }
 
-/// Replace every occurrence of the identifier `old_name` in a SQL expression
-/// with `new_name`, leaving string literals and longer identifiers untouched.
+/// The tokens of a stored CHECK expression, or `None` when it does not
+/// tokenize as SQL.
+fn expr_tokens(expr: &str) -> Option<Vec<sqlparser::tokenizer::Token>> {
+    let dialect = sqlparser::dialect::GenericDialect {};
+    let tokens = sqlparser::tokenizer::Tokenizer::new(&dialect, expr)
+        .tokenize()
+        .ok()?;
+    Some(
+        tokens
+            .into_iter()
+            .filter(|t| !matches!(t, sqlparser::tokenizer::Token::EOF))
+            .collect(),
+    )
+}
+
+/// Whether the token at `i` names the column `name`: a word, quoted or not,
+/// that is neither a function name (followed by `(`) nor a table qualifier
+/// (followed by `.`).
+fn is_column_token(tokens: &[sqlparser::tokenizer::Token], i: usize, name: &str) -> bool {
+    use sqlparser::tokenizer::Token;
+    let Token::Word(word) = &tokens[i] else {
+        return false;
+    };
+    if !word.value.eq_ignore_ascii_case(name) {
+        return false;
+    }
+    let next = tokens[i + 1..]
+        .iter()
+        .find(|t| !matches!(t, Token::Whitespace(_)));
+    !matches!(next, Some(Token::LParen) | Some(Token::Period))
+}
+
+/// Whether a stored CHECK expression refers to the column `name`.
+pub fn expr_mentions_identifier(expr: &str, name: &str) -> bool {
+    match expr_tokens(expr) {
+        Some(tokens) => (0..tokens.len()).any(|i| is_column_token(&tokens, i, name)),
+        None => false,
+    }
+}
+
+/// Rename the column `old_name` to `new_name` in a stored CHECK expression.
+///
+/// The expression is tokenized as SQL, so string literals, quoted names,
+/// function names and table qualifiers are told apart; every other token is
+/// written back as it was. The new name keeps the old reference's quoting,
+/// and is quoted when it is not a plain identifier.
 pub fn rename_identifier_in_expr(expr: &str, old_name: &str, new_name: &str) -> String {
-    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    use sqlparser::tokenizer::Token;
+    let Some(tokens) = expr_tokens(expr) else {
+        return expr.to_string();
+    };
+    let plain = new_name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && new_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
     let mut out = String::with_capacity(expr.len());
-    let mut chars = expr.char_indices().peekable();
-    while let Some((start, c)) = chars.next() {
-        if c == '\'' {
-            // Copy a string literal verbatim ('' is an escaped quote).
-            out.push(c);
-            while let Some((_, q)) = chars.next() {
-                out.push(q);
-                if q == '\'' {
-                    if matches!(chars.peek(), Some((_, '\''))) {
-                        out.push('\'');
-                        chars.next();
-                    } else {
-                        break;
+    for (i, token) in tokens.iter().enumerate() {
+        match token {
+            Token::Word(word) if is_column_token(&tokens, i, old_name) => {
+                let quote = word.quote_style.or((!plain).then_some('"'));
+                match quote {
+                    Some(q) => {
+                        let close = if q == '[' { ']' } else { q };
+                        let escaped = new_name.replace(close, &format!("{close}{close}"));
+                        out.push(q);
+                        out.push_str(&escaped);
+                        out.push(close);
                     }
+                    None => out.push_str(new_name),
                 }
             }
-        } else if is_ident(c) {
-            let mut end = start + c.len_utf8();
-            while let Some(&(i, n)) = chars.peek() {
-                if !is_ident(n) {
-                    break;
-                }
-                end = i + n.len_utf8();
-                chars.next();
-            }
-            let word = &expr[start..end];
-            if word.eq_ignore_ascii_case(old_name) {
-                out.push_str(new_name);
-            } else {
-                out.push_str(word);
-            }
-        } else {
-            out.push(c);
+            other => out.push_str(&other.to_string()),
         }
     }
     out
@@ -1057,6 +1094,35 @@ pub fn rename_table_in_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_rename_tells_columns_from_literals_functions_and_qualifiers() {
+        let r = |e: &str| rename_identifier_in_expr(e, "a", "b");
+        assert_eq!(r("a > 0 AND a < 10"), "b > 0 AND b < 10");
+        assert_eq!(r("abc > a"), "abc > b");
+        assert_eq!(r("name <> 'a'"), "name <> 'a'");
+        assert_eq!(r("t.a > 0"), "t.b > 0");
+        assert_eq!(r("a(x) > 0"), "a(x) > 0");
+        assert_eq!(r("A >= 1"), "b >= 1");
+    }
+
+    #[test]
+    fn check_rename_handles_quoted_names() {
+        assert_eq!(
+            rename_identifier_in_expr("\"my col\" > 0", "my col", "your col"),
+            "\"your col\" > 0"
+        );
+        // A name that is not a plain identifier gets quoted.
+        assert_eq!(
+            rename_identifier_in_expr("a > 0", "a", "new col"),
+            "\"new col\" > 0"
+        );
+        assert!(expr_mentions_identifier("\"my col\" > 0", "my col"));
+        assert!(!expr_mentions_identifier(
+            "lower(name) = 'my col'",
+            "my col"
+        ));
+    }
     use crate::catalog::types::*;
 
     #[allow(dead_code)]

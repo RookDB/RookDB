@@ -142,3 +142,25 @@ fn rename_column_renames_index_columns() {
         [vec![Some(DataValue::Int(4))]]
     );
 }
+
+#[test]
+fn rename_column_keeps_a_check_on_a_quoted_name_enforced() {
+    let _ws = common::TestWorkspace::new("alteridx", "check_quoted");
+    let mut s = session();
+    ok(&mut s, "CREATE DATABASE app");
+    ok(&mut s, "USE app");
+    ok(
+        &mut s,
+        r#"CREATE TABLE t (id INT, "my col" INT, CHECK ("my col" > 0 AND id <> 99))"#,
+    );
+    ok(
+        &mut s,
+        r#"ALTER TABLE t RENAME COLUMN "my col" TO "your col""#,
+    );
+    ok(&mut s, "INSERT INTO t VALUES (1, 5)");
+    let err = run(&mut s, "INSERT INTO t VALUES (2, -1)").expect_err("CHECK still holds");
+    assert!(err.contains("CHECK"), "{}", err);
+    let err = run(&mut s, "INSERT INTO t VALUES (99, 1)").expect_err("CHECK still holds");
+    assert!(err.contains("CHECK"), "{}", err);
+    assert_eq!(rows(&mut s, r#"SELECT "your col" FROM t"#).len(), 1);
+}
