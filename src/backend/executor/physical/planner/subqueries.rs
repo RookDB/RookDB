@@ -7,6 +7,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::super::engine::execute_shared;
+use super::super::expr::correlated::{
+    CorrelatedSubquery, OuterBinding, SubqueryUse, ref_key, rewrite_pred, rewrite_select,
+};
+use super::super::expr::predicate::SubqueryKind;
 use super::super::expr::{
     ComparisonOp, Expr, Predicate, expr_from_ast, predicate_from_ast, resolve_column,
 };
@@ -503,113 +507,69 @@ impl PhysicalPlanner {
     }
 }
 
-// ── Correlated subquery detection and building ────────────────────────────────
+// ── Correlated subquery detection ─────────────────────────────────────────────
 
 impl PhysicalPlanner {
-    /// Check if a predicate (from an inner query's SELECT) references columns
-    /// belonging to an **outer** table (i.e., columns that are NOT in any of
-    /// the inner FROM tables). If so, the subquery is correlated.
-    fn is_predicate_correlated(
-        &self,
-        pred_node: Option<&rook_ast::PredicateNode>,
-        scope: &InnerScope,
-    ) -> bool {
-        let Some(node) = pred_node else {
-            return false;
-        };
-        self.pred_contains_outer_ref(node, scope)
-    }
-
-    /// Recursively walk a predicate tree looking for any column reference that
-    /// does not belong to the inner query's tables.
-    fn pred_contains_outer_ref(&self, node: &rook_ast::PredicateNode, scope: &InnerScope) -> bool {
-        match node {
-            rook_ast::PredicateNode::BinaryOp { left, right, .. } => {
-                self.pred_contains_outer_ref(left, scope)
-                    || self.pred_contains_outer_ref(right, scope)
-            }
-            rook_ast::PredicateNode::Not(inner) => self.pred_contains_outer_ref(inner, scope),
-            rook_ast::PredicateNode::Compare { left, right, .. } => {
-                self.expr_is_outer_ref(left, scope) || self.expr_is_outer_ref(right, scope)
-            }
-            rook_ast::PredicateNode::IsNull(expr) | rook_ast::PredicateNode::IsNotNull(expr) => {
-                self.expr_is_outer_ref(expr, scope)
-            }
-            rook_ast::PredicateNode::Between { expr, low, high } => {
-                self.expr_is_outer_ref(expr, scope)
-                    || self.expr_is_outer_ref(low, scope)
-                    || self.expr_is_outer_ref(high, scope)
-            }
-            rook_ast::PredicateNode::InList { expr, list } => {
-                self.expr_is_outer_ref(expr, scope)
-                    || list.iter().any(|e| self.expr_is_outer_ref(e, scope))
-            }
-            rook_ast::PredicateNode::Like { expr, .. } => self.expr_is_outer_ref(expr, scope),
-            rook_ast::PredicateNode::IsDistinctFrom { left, right } => {
-                self.expr_is_outer_ref(left, scope) || self.expr_is_outer_ref(right, scope)
-            }
-            rook_ast::PredicateNode::IsBoolean { expr, .. } => self.expr_is_outer_ref(expr, scope),
-            // EXISTS and IN-subquery inside a predicate are not expected here
-            rook_ast::PredicateNode::Exists(_) | rook_ast::PredicateNode::InSubquery { .. } => {
-                false
-            }
-        }
-    }
-
-    /// Check whether an expression node references an outer table column.
+    /// Whether a column reference names a column of the enclosing query.
     ///
-    /// A `Compound([table, col])` is an outer ref if `table` does not match any
-    /// of the inner table names. A simple `Column(name)` is assumed to be an
-    /// inner ref unless proven otherwise (conservative heuristic).
+    /// A qualified name is outer when its qualifier is not one of the
+    /// subquery's relations; an unqualified name is outer when no relation of
+    /// the subquery has such a column (innermost scope wins).
     fn expr_is_outer_ref(&self, expr: &rook_ast::ExprNode, scope: &InnerScope) -> bool {
         match expr {
-            rook_ast::ExprNode::Compound(parts) => {
-                if let Some(table_part) = parts.first() {
-                    !scope
-                        .qualifiers
-                        .iter()
-                        .any(|t| t.eq_ignore_ascii_case(table_part))
-                } else {
-                    false
-                }
-            }
-            // Simple Column refs: if the column name exists in an inner table
-            // schema, it's an inner ref. Otherwise conservatively assume it's
-            // an outer ref — this handles cases like `x = outer.col` where `x`
-            // is an unqualified inner column and `outer.col` is compound.
+            rook_ast::ExprNode::Compound(parts) if parts.len() >= 2 => !scope
+                .qualifiers
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(&parts[parts.len() - 2])),
             rook_ast::ExprNode::Column(name) => {
-                // Check if it's a column in any inner table
                 !scope.columns.iter().any(|c| c.eq_ignore_ascii_case(name))
             }
-            rook_ast::ExprNode::Constant(_) | rook_ast::ExprNode::ScalarSubquery(_) => false,
-            rook_ast::ExprNode::Function { .. } => false,
-            rook_ast::ExprNode::Binary { left, right, .. } => {
-                self.expr_is_outer_ref(left, scope) || self.expr_is_outer_ref(right, scope)
-            }
-            rook_ast::ExprNode::Cast { expr: inner, .. } => self.expr_is_outer_ref(inner, scope),
-            rook_ast::ExprNode::Compare { left, right, .. }
-            | rook_ast::ExprNode::Logical { left, right, .. } => {
-                self.expr_is_outer_ref(left, scope) || self.expr_is_outer_ref(right, scope)
-            }
-            rook_ast::ExprNode::Not(inner)
-            | rook_ast::ExprNode::IsNull(inner)
-            | rook_ast::ExprNode::IsNotNull(inner) => self.expr_is_outer_ref(inner, scope),
-            rook_ast::ExprNode::Case {
-                when_then_pairs,
-                else_result,
-            } => {
-                for (when, then) in when_then_pairs {
-                    if self.expr_is_outer_ref(when, scope) || self.expr_is_outer_ref(then, scope) {
-                        return true;
-                    }
-                }
-                if let Some(else_node) = else_result {
-                    self.expr_is_outer_ref(else_node, scope)
-                } else {
-                    false
-                }
+            _ => false,
+        }
+    }
+
+    /// The outer columns a subquery names, as lower-cased (qualifier, name),
+    /// in first-use order. Looks through the SELECT list, WHERE, JOIN ... ON,
+    /// GROUP BY and HAVING (where output aliases are also in scope).
+    fn outer_refs(&self, select: &rook_ast::SelectPlan) -> Vec<OuterRef> {
+        let scope = self.inner_scope(select);
+        let mut having_scope = InnerScope {
+            qualifiers: scope.qualifiers.clone(),
+            columns: scope.columns.clone(),
+        };
+        for p in &select.projections {
+            if let rook_ast::SelectExpr::ExprWithAlias { alias, .. } = p {
+                having_scope.columns.push(alias.clone());
             }
         }
+        let mut refs: Vec<OuterRef> = Vec::new();
+        let mut probe = select.clone();
+        rewrite_select(&mut probe, &mut |node, having| {
+            let scope = if having { &having_scope } else { &scope };
+            if self.expr_is_outer_ref(node, scope)
+                && let Some(key) = ref_key(node)
+                && !refs.contains(&key)
+            {
+                refs.push(key);
+            }
+            None
+        });
+        refs
+    }
+
+    /// Whether `pred` names an outer column, given the subquery's `scope`.
+    fn pred_has_outer_ref(&self, pred: &rook_ast::PredicateNode, scope: &InnerScope) -> bool {
+        let mut found = false;
+        let mut probe = pred.clone();
+        rewrite_pred(&mut probe, false, &mut |node, _| {
+            found |= self.expr_is_outer_ref(node, scope);
+            None
+        });
+        found
+    }
+
+    pub(crate) fn is_subquery_correlated(&self, select: &rook_ast::SelectPlan) -> bool {
+        !self.outer_refs(select).is_empty()
     }
 
     /// The scope a subquery's FROM clause (including JOINed relations) opens.
@@ -691,11 +651,6 @@ impl PhysicalPlanner {
         inner_planner.plan(&logical_plan)
     }
 
-    pub(crate) fn is_subquery_correlated(&self, select: &rook_ast::SelectPlan) -> bool {
-        let scope = self.inner_scope(select);
-        self.is_predicate_correlated(select.selection.as_ref(), &scope)
-    }
-
     fn resolve_inner_scan_and_columns(
         &self,
         select: &rook_ast::SelectPlan,
@@ -747,84 +702,284 @@ impl PhysicalPlanner {
             Ok((inner_base, inner_table_alias, inner_col_names))
         }
     }
+}
 
-    /// Build a correlated EXISTS subquery with per-row execution.
+// ── Correlated subquery building ──────────────────────────────────────────────
+
+/// What the caller does with the subquery's result.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Exists,
+    In,
+    Scalar,
+}
+
+/// A correlated subquery in the simple shape: one table, WHERE a conjunction
+/// of `inner_col <op> outer_col` terms and outer-free filters. Its inner plan
+/// is built once and re-run per outer row with the parameters rebound.
+struct SimpleCorrelation {
+    /// The table scan with the WHERE filter applied.
+    filtered: Box<dyn PhysicalOperator>,
+    params: Vec<Rc<RefCell<Option<DataValue>>>>,
+    outer_indices: Vec<usize>,
+}
+
+fn flatten_and<'a>(node: &'a rook_ast::PredicateNode, out: &mut Vec<&'a rook_ast::PredicateNode>) {
+    match node {
+        rook_ast::PredicateNode::BinaryOp {
+            left,
+            op: rook_ast::BinaryOp::And,
+            right,
+        } => {
+            flatten_and(left, out);
+            flatten_and(right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// `outer <op> inner` read as `inner <flipped op> outer`.
+fn flip(op: rook_ast::ComparisonOp) -> rook_ast::ComparisonOp {
+    use rook_ast::ComparisonOp as C;
+    match op {
+        C::Lt => C::Gt,
+        C::Le => C::Ge,
+        C::Gt => C::Lt,
+        C::Ge => C::Le,
+        other => other,
+    }
+}
+
+fn physical_op(op: rook_ast::ComparisonOp) -> ComparisonOp {
+    match op {
+        rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
+        rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
+        rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
+        rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
+        rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
+        rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
+    }
+}
+
+impl PhysicalPlanner {
+    /// Plan the subquery's own table scan filtered by its WHERE clause, if the
+    /// subquery has the simple shape for `shape`; `None` sends it to the
+    /// general path, which runs it as a full plan per outer key.
+    fn try_simple_correlation(
+        &self,
+        select: &rook_ast::SelectPlan,
+        outer_schema: &[ColumnInfo],
+        shape: Shape,
+    ) -> RookResult<Option<SimpleCorrelation>> {
+        if select.from.len() != 1 || !select.joins.is_empty() || select.distinct {
+            return Ok(None);
+        }
+        let has_aggregates = !select.group_by.is_empty()
+            || select.having.is_some()
+            || select
+                .projections
+                .iter()
+                .any(crate::planner::helpers::contains_aggregate);
+        if shape != Shape::Scalar && (has_aggregates || select.limit.is_some()) {
+            return Ok(None);
+        }
+        if shape == Shape::In
+            && !matches!(
+                select.projections.as_slice(),
+                [rook_ast::SelectExpr::UnnamedExpr(_)]
+                    | [rook_ast::SelectExpr::ExprWithAlias { .. }]
+            )
+        {
+            return Ok(None);
+        }
+        // Outer references anywhere but WHERE are not bound by this path.
+        let mut rest = select.clone();
+        rest.selection = None;
+        if !self.outer_refs(&rest).is_empty() {
+            return Ok(None);
+        }
+        let Some(selection) = &select.selection else {
+            return Ok(None);
+        };
+
+        let scope = self.inner_scope(select);
+        let mut conjuncts = Vec::new();
+        flatten_and(selection, &mut conjuncts);
+        // (inner column, outer reference, comparison read as inner <op> outer)
+        let mut correlations: Vec<(String, OuterRef, rook_ast::ComparisonOp)> = Vec::new();
+        let mut locals: Vec<&rook_ast::PredicateNode> = Vec::new();
+        for c in conjuncts {
+            if !self.pred_has_outer_ref(c, &scope) {
+                locals.push(c);
+                continue;
+            }
+            let rook_ast::PredicateNode::Compare { left, op, right } = c else {
+                return Ok(None);
+            };
+            let side = |e: &rook_ast::ExprNode| match e {
+                rook_ast::ExprNode::Column(_) | rook_ast::ExprNode::Compound(_) => {
+                    ref_key(e).map(|k| (self.expr_is_outer_ref(e, &scope), k))
+                }
+                _ => None,
+            };
+            match (side(left), side(right)) {
+                (Some((false, (_, inner))), Some((true, outer))) => {
+                    correlations.push((inner, outer, *op))
+                }
+                (Some((true, outer)), Some((false, (_, inner)))) => {
+                    correlations.push((inner, outer, flip(*op)))
+                }
+                _ => return Ok(None),
+            }
+        }
+        if correlations.is_empty() {
+            return Ok(None);
+        }
+
+        let (inner_base, _, _) = self.resolve_inner_scan_and_columns(select)?;
+        let names = super::super::expr::binding_names(inner_base.schema());
+        let mut params = Vec::new();
+        let mut outer_indices = Vec::new();
+        let mut filter: Option<Predicate> = None;
+        let mut and = |p: Predicate| {
+            filter = Some(match filter.take() {
+                None => p,
+                Some(acc) => Predicate::and(acc, p),
+            })
+        };
+        for (inner_col, (outer_qual, outer_name), op) in correlations {
+            let idx = resolve_column(outer_schema, outer_qual.as_deref(), &outer_name)?
+                .ok_or_else(|| RookError::NotFound {
+                    entity: "Column",
+                    name: outer_name.clone(),
+                })?;
+            let param = Rc::new(RefCell::new(None));
+            and(Predicate::Compare(
+                Expr::Column {
+                    table: None,
+                    column: inner_col,
+                },
+                physical_op(op),
+                Expr::CorrelatedParam(param.clone()),
+            ));
+            params.push(param);
+            outer_indices.push(idx);
+        }
+        for local in locals {
+            match predicate_from_ast(local, &names) {
+                Ok(p) => and(p),
+                Err(_) => return Ok(None),
+            }
+        }
+        let filter = filter.expect("at least one correlation");
+        Ok(Some(SimpleCorrelation {
+            filtered: Box::new(FilterOperator::new(inner_base, filter)),
+            params,
+            outer_indices,
+        }))
+    }
+
+    /// Bind a subquery for the general path: resolve each outer column it
+    /// names against `outer_schema`, and check it plans (so mistakes surface
+    /// while planning, not on the first outer row). Returns the subquery and
+    /// the schema of its result.
+    fn build_general_correlated(
+        &self,
+        select: &rook_ast::SelectPlan,
+        outer_schema: &[ColumnInfo],
+        usage: SubqueryUse,
+    ) -> RookResult<(Rc<CorrelatedSubquery>, Vec<ColumnInfo>)> {
+        let mut bindings = Vec::new();
+        for (qualifier, name) in self.outer_refs(select) {
+            let index =
+                resolve_column(outer_schema, qualifier.as_deref(), &name)?.ok_or_else(|| {
+                    RookError::NotFound {
+                        entity: "Column",
+                        name: name.clone(),
+                    }
+                })?;
+            bindings.push(OuterBinding {
+                qualifier,
+                name,
+                index,
+            });
+        }
+        let nulls = vec![None; bindings.len()];
+        let sub = CorrelatedSubquery::new(
+            select.clone(),
+            bindings,
+            std::sync::Arc::clone(&self.catalog),
+            self.db_name.clone(),
+            usage,
+        );
+        let query_plan = rook_ast::QueryPlan::Select(sub.bound_select(&nulls));
+        let logical = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
+            .map_err(|e| {
+                RookError::Internal(e.message).with_context("Failed to plan correlated subquery")
+            })?;
+        let probe =
+            PhysicalPlanner::new(std::sync::Arc::clone(&self.catalog), self.db_name.clone())
+                .plan(&logical)?;
+        let schema = probe.schema().to_vec();
+        Ok((Rc::new(sub), schema))
+    }
+
+    /// Project a non-aggregate subquery's SELECT list over `child`.
+    fn project_select_list(
+        &self,
+        select: &rook_ast::SelectPlan,
+        child: Box<dyn PhysicalOperator>,
+    ) -> RookResult<(Box<dyn PhysicalOperator>, DataType)> {
+        let child_schema = child.schema();
+        let col_names = super::super::expr::binding_names(child_schema);
+        let col_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
+        let mut projections = Vec::new();
+        for p in &select.projections {
+            match p {
+                rook_ast::SelectExpr::UnnamedExpr(e) => {
+                    let (expr, dt) =
+                        self.plan_projection_expr(e, &col_names, &col_types, child_schema)?;
+                    projections.push((expr, "".to_string(), dt));
+                }
+                rook_ast::SelectExpr::ExprWithAlias { expr: e, alias } => {
+                    let (expr, dt) =
+                        self.plan_projection_expr(e, &col_names, &col_types, child_schema)?;
+                    projections.push((expr, alias.clone(), dt));
+                }
+                _ => {}
+            }
+        }
+        let dt = projections
+            .first()
+            .map(|(_, _, dt)| dt.clone())
+            .unwrap_or(DataType::Int);
+        Ok((Box::new(ProjectionOperator::new(child, projections)), dt))
+    }
+
+    /// Build a correlated EXISTS subquery.
     fn build_correlated_exists(
         &self,
         subquery_info: &rook_ast::SubqueryInfo,
         outer_schema: &[ColumnInfo],
     ) -> RookResult<Predicate> {
         let select = &subquery_info.select;
-
-        let (inner_base, inner_table_alias, inner_col_names) =
-            self.resolve_inner_scan_and_columns(select)?;
-
-        let correlation_pairs = if let Some(ref selection) = select.selection {
-            self.extract_all_correlations(selection, &inner_table_alias, &inner_col_names)?
-        } else {
-            return Err(RookError::Internal(
-                "Correlated EXISTS subquery has no WHERE clause".to_string(),
-            ));
-        };
-
-        if correlation_pairs.is_empty() {
-            return Err(RookError::Internal(
-                "No correlation found in EXISTS subquery".to_string(),
-            ));
-        }
-
-        let mut params = Vec::new();
-        let mut outer_indices = Vec::new();
-        let mut filter_predicate: Option<Predicate> = None;
-
-        for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
-            let outer_col_idx =
-                resolve_column(outer_schema, outer_col_name.0.as_deref(), &outer_col_name.1)?
-                    .ok_or_else(|| RookError::NotFound {
-                        entity: "Column",
-                        name: outer_col_name.1.clone(),
-                    })?;
-
-            let param = Rc::new(RefCell::new(None));
-            let phys_comparison = match comp_op {
-                rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
-                rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
-                rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
-                rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
-                rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
-                rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
-            };
-
-            let col_pred = Predicate::Compare(
-                Expr::Column {
-                    table: None,
-                    column: inner_col_name.clone(),
-                },
-                phys_comparison,
-                Expr::CorrelatedParam(param.clone()),
-            );
-
-            filter_predicate = Some(match filter_predicate {
-                None => col_pred,
-                Some(acc) => Predicate::and(acc, col_pred),
+        if let Some(simple) = self.try_simple_correlation(select, outer_schema, Shape::Exists)? {
+            self.note(|| "Correlated EXISTS subquery: evaluated per outer row".to_string());
+            return Ok(Predicate::CorrelatedExists {
+                inner_plan: Rc::new(RefCell::new(simple.filtered)),
+                params: simple.params,
+                outer_col_indices: simple.outer_indices,
             });
-
-            params.push(param);
-            outer_indices.push(outer_col_idx);
         }
-
-        let filter_op: Box<dyn PhysicalOperator> =
-            Box::new(FilterOperator::new(inner_base, filter_predicate.unwrap()));
-        let inner_plan_rc = Rc::new(RefCell::new(filter_op));
-
-        Ok(Predicate::CorrelatedExists {
-            inner_plan: inner_plan_rc,
-            params,
-            outer_col_indices: outer_indices,
+        let (sub, _) = self.build_general_correlated(select, outer_schema, SubqueryUse::Exists)?;
+        self.note(|| "Correlated EXISTS subquery: full plan per distinct outer key".to_string());
+        Ok(Predicate::CorrelatedSubquery {
+            sub,
+            kind: SubqueryKind::Exists,
         })
     }
 
-    /// Build a correlated IN (subquery) with per-row execution.
+    /// Build a correlated IN (subquery).
     fn build_correlated_in_subquery(
         &self,
         subquery: &rook_ast::SubqueryInfo,
@@ -833,138 +988,49 @@ impl PhysicalPlanner {
         outer_schema: &[ColumnInfo],
     ) -> RookResult<Predicate> {
         let select = &subquery.select;
-
-        let (inner_base, inner_table_alias, inner_col_names) =
-            self.resolve_inner_scan_and_columns(select)?;
-
-        let correlation_pairs = if let Some(ref selection) = select.selection {
-            self.extract_all_correlations(selection, &inner_table_alias, &inner_col_names)?
-        } else {
-            return Err(RookError::Internal(
-                "Correlated IN subquery has no WHERE clause".to_string(),
-            ));
-        };
-
-        if correlation_pairs.is_empty() {
-            return Err(RookError::Internal(
-                "No correlation found in IN subquery".to_string(),
-            ));
-        }
-
-        let mut params = Vec::new();
-        let mut outer_indices = Vec::new();
-        let mut filter_predicate: Option<Predicate> = None;
-
-        for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
-            let outer_col_idx =
-                resolve_column(outer_schema, outer_col_name.0.as_deref(), &outer_col_name.1)?
-                    .ok_or_else(|| RookError::NotFound {
-                        entity: "Column",
-                        name: outer_col_name.1.clone(),
-                    })?;
-
-            let param = Rc::new(RefCell::new(None));
-            let phys_comparison = match comp_op {
-                rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
-                rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
-                rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
-                rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
-                rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
-                rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
-            };
-
-            let col_pred = Predicate::Compare(
-                Expr::Column {
-                    table: None,
-                    column: inner_col_name.clone(),
-                },
-                phys_comparison,
-                Expr::CorrelatedParam(param.clone()),
-            );
-
-            filter_predicate = Some(match filter_predicate {
-                None => col_pred,
-                Some(acc) => Predicate::and(acc, col_pred),
+        if let Some(simple) = self.try_simple_correlation(select, outer_schema, Shape::In)? {
+            let (projected, _) = self.project_select_list(select, simple.filtered)?;
+            self.note(|| "Correlated IN subquery: evaluated per outer row".to_string());
+            return Ok(Predicate::CorrelatedInSubquery {
+                inner_plan: Rc::new(RefCell::new(projected)),
+                params: simple.params,
+                outer_col_indices: simple.outer_indices,
+                lhs_expr,
+                negated,
             });
-
-            params.push(param);
-            outer_indices.push(outer_col_idx);
         }
-
-        let filter_op: Box<dyn PhysicalOperator> =
-            Box::new(FilterOperator::new(inner_base, filter_predicate.unwrap()));
-        let inner_plan_rc = Rc::new(RefCell::new(filter_op));
-
-        Ok(Predicate::CorrelatedInSubquery {
-            inner_plan: inner_plan_rc,
-            params,
-            outer_col_indices: outer_indices,
-            lhs_expr,
-            negated,
+        let (sub, _) = self.build_general_correlated(select, outer_schema, SubqueryUse::Rows)?;
+        self.note(|| "Correlated IN subquery: full plan per distinct outer key".to_string());
+        Ok(Predicate::CorrelatedSubquery {
+            sub,
+            kind: SubqueryKind::In {
+                lhs: lhs_expr,
+                negated,
+            },
         })
     }
 
-    /// Build a correlated scalar subquery with per-row execution.
+    /// Build a correlated scalar subquery.
     pub(crate) fn build_correlated_scalar_subquery(
         &self,
         subquery_info: &rook_ast::SubqueryInfo,
         outer_schema: &[ColumnInfo],
     ) -> RookResult<(Expr, DataType)> {
         let select = &subquery_info.select;
-
-        let (inner_base, inner_table_alias, inner_col_names) =
-            self.resolve_inner_scan_and_columns(select)?;
-
-        let correlation_pairs = if let Some(ref selection) = select.selection {
-            self.extract_all_correlations(selection, &inner_table_alias, &inner_col_names)?
-        } else {
-            return Err(RookError::Internal(
-                "Correlated scalar subquery has no WHERE clause".to_string(),
-            ));
+        let Some(simple) = self.try_simple_correlation(select, outer_schema, Shape::Scalar)? else {
+            let (sub, schema) =
+                self.build_general_correlated(select, outer_schema, SubqueryUse::Rows)?;
+            let dt = schema
+                .first()
+                .map(|c| c.data_type.clone())
+                .unwrap_or(DataType::Int);
+            return Ok((Expr::SubqueryScalar(sub), dt));
         };
-
-        let mut params = Vec::new();
-        let mut outer_indices = Vec::new();
-        let mut filter_predicate: Option<Predicate> = None;
-
-        for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
-            let outer_col_idx =
-                resolve_column(outer_schema, outer_col_name.0.as_deref(), &outer_col_name.1)?
-                    .ok_or_else(|| RookError::NotFound {
-                        entity: "Column",
-                        name: outer_col_name.1.clone(),
-                    })?;
-
-            let param = Rc::new(RefCell::new(None));
-            let phys_comparison = match comp_op {
-                rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
-                rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
-                rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
-                rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
-                rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
-                rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
-            };
-
-            let col_pred = Predicate::Compare(
-                Expr::Column {
-                    table: None,
-                    column: inner_col_name.clone(),
-                },
-                phys_comparison,
-                Expr::CorrelatedParam(param.clone()),
-            );
-
-            filter_predicate = Some(match filter_predicate {
-                None => col_pred,
-                Some(acc) => Predicate::and(acc, col_pred),
-            });
-
-            params.push(param);
-            outer_indices.push(outer_col_idx);
-        }
-
-        let filtered_op: Box<dyn PhysicalOperator> =
-            Box::new(FilterOperator::new(inner_base, filter_predicate.unwrap()));
+        let SimpleCorrelation {
+            filtered: filtered_op,
+            params,
+            outer_indices,
+        } = simple;
 
         let has_aggregates = !select.group_by.is_empty()
             || select.having.is_some()
@@ -996,32 +1062,7 @@ impl PhysicalPlanner {
                 .unwrap_or(DataType::Int);
             (agg_op, dt)
         } else {
-            let child_schema = filtered_op.schema();
-            let col_names = super::super::expr::binding_names(child_schema);
-            let col_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
-            let mut projections = Vec::new();
-            for p in &select.projections {
-                match p {
-                    rook_ast::SelectExpr::UnnamedExpr(e) => {
-                        let (expr, dt) =
-                            self.plan_projection_expr(e, &col_names, &col_types, child_schema)?;
-                        projections.push((expr, "".to_string(), dt));
-                    }
-                    rook_ast::SelectExpr::ExprWithAlias { expr: e, alias } => {
-                        let (expr, dt) =
-                            self.plan_projection_expr(e, &col_names, &col_types, child_schema)?;
-                        projections.push((expr, alias.clone(), dt));
-                    }
-                    _ => {}
-                }
-            }
-            let dt = projections
-                .first()
-                .map(|(_, _, dt)| dt.clone())
-                .unwrap_or(DataType::Int);
-            let proj_op: Box<dyn PhysicalOperator> =
-                Box::new(ProjectionOperator::new(filtered_op, projections));
-            (proj_op, dt)
+            self.project_select_list(select, filtered_op)?
         };
 
         if let Some(ref l) = select.limit {
@@ -1032,203 +1073,13 @@ impl PhysicalPlanner {
             ));
         }
 
-        let inner_plan_rc = Rc::new(RefCell::new(op));
         Ok((
             Expr::CorrelatedScalarSubquery {
-                inner_plan: inner_plan_rc,
+                inner_plan: Rc::new(RefCell::new(op)),
                 params,
                 outer_col_indices: outer_indices,
             },
             data_type,
         ))
-    }
-
-    /// Extract all (inner_column_name, outer_column_name, comparison_op) pairs
-    /// from a predicate that compares inner-table columns to outer-table columns.
-    ///
-    /// Walks the predicate tree, collecting ALL Compare nodes that reference
-    /// both an inner and an outer column. For AND-connected comparisons, all
-    /// pairs are returned. For OR-connected comparisons, returns the first found
-    /// (simpler single-column EXISTS fallback).
-    fn extract_all_correlations(
-        &self,
-        node: &rook_ast::PredicateNode,
-        inner_table_name: &str,
-        inner_col_names: &[String],
-    ) -> RookResult<Vec<(String, OuterRef, rook_ast::ComparisonOp)>> {
-        let mut pairs = Vec::new();
-        self.collect_correlations(node, inner_table_name, inner_col_names, &mut pairs)?;
-        if pairs.is_empty() {
-            return Err(RookError::Internal(
-                "No correlation found in subquery predicate".to_string(),
-            ));
-        }
-        Ok(pairs)
-    }
-
-    /// Recursively collect correlation pairs from a predicate tree.
-    fn collect_correlations(
-        &self,
-        node: &rook_ast::PredicateNode,
-        inner_table_name: &str,
-        inner_col_names: &[String],
-        pairs: &mut Vec<(String, OuterRef, rook_ast::ComparisonOp)>,
-    ) -> RookResult<()> {
-        match node {
-            rook_ast::PredicateNode::Compare { left, op, right } => {
-                if let Ok((inner_name, outer_name)) =
-                    self.resolve_inner_outer_columns(left, right, inner_table_name, inner_col_names)
-                {
-                    pairs.push((inner_name, outer_name, *op));
-                }
-                // If not a valid correlation, just skip it (not an error)
-                Ok(())
-            }
-            rook_ast::PredicateNode::BinaryOp { left, op, right } => {
-                match op {
-                    rook_ast::BinaryOp::And => {
-                        // AND: collect correlations from both sides
-                        self.collect_correlations(left, inner_table_name, inner_col_names, pairs)?;
-                        self.collect_correlations(right, inner_table_name, inner_col_names, pairs)?;
-                        Ok(())
-                    }
-                    rook_ast::BinaryOp::Or => {
-                        // OR: complex — just try to extract single from either side
-                        if let Ok(mut single_pairs) =
-                            self.extract_all_correlations(left, inner_table_name, inner_col_names)
-                            && !single_pairs.is_empty()
-                        {
-                            pairs.append(&mut single_pairs);
-                            return Ok(());
-                        }
-                        if let Ok(mut single_pairs) =
-                            self.extract_all_correlations(right, inner_table_name, inner_col_names)
-                        {
-                            pairs.append(&mut single_pairs);
-                        }
-                        Ok(())
-                    }
-                }
-            }
-            _ => Ok(()), // Skip non-comparison predicates
-        }
-    }
-
-    /// Legacy wrapper: extract a single (inner_column_name, outer_column_name, comparison_op)
-    /// from the first valid correlation found.
-    #[allow(dead_code)]
-    fn extract_correlation_from_predicate(
-        &self,
-        node: &rook_ast::PredicateNode,
-        inner_table_name: &str,
-        inner_col_names: &[String],
-    ) -> RookResult<(String, OuterRef, rook_ast::ComparisonOp)> {
-        let pairs = self.extract_all_correlations(node, inner_table_name, inner_col_names)?;
-        if pairs.is_empty() {
-            return Err(RookError::Internal(
-                "Correlated subquery predicate must contain a column comparison".to_string(),
-            ));
-        }
-        Ok(pairs[0].clone())
-    }
-
-    /// Figure out which of `left` / `right` is the inner column and which is
-    /// the outer column reference.
-    fn resolve_inner_outer_columns(
-        &self,
-        left: &rook_ast::ExprNode,
-        right: &rook_ast::ExprNode,
-        inner_table_name: &str,
-        inner_col_names: &[String],
-    ) -> RookResult<(String, OuterRef)> {
-        // Check (left = inner, right = outer)
-        if let Some(inner_name) =
-            self.extract_column_name_if_inner(left, inner_table_name, inner_col_names)
-            && let Some(outer_name) =
-                self.extract_column_name_if_outer(right, inner_table_name, inner_col_names)
-        {
-            return Ok((inner_name, outer_name));
-        }
-
-        // Check (left = outer, right = inner)
-        if let Some(inner_name) =
-            self.extract_column_name_if_inner(right, inner_table_name, inner_col_names)
-            && let Some(outer_name) =
-                self.extract_column_name_if_outer(left, inner_table_name, inner_col_names)
-        {
-            return Ok((inner_name, outer_name));
-        }
-
-        Err(RookError::Internal(
-            "Could not resolve inner/outer columns in correlated subquery predicate".to_string(),
-        ))
-    }
-
-    /// If `expr` references an inner table column, return the column name.
-    fn extract_column_name_if_inner(
-        &self,
-        expr: &rook_ast::ExprNode,
-        inner_table_name: &str,
-        inner_col_names: &[String],
-    ) -> Option<String> {
-        let stripped = inner_table_name
-            .strip_prefix("__cte__:")
-            .unwrap_or(inner_table_name);
-        match expr {
-            rook_ast::ExprNode::Compound(parts) if parts.len() >= 2 => {
-                if parts[0].eq_ignore_ascii_case(inner_table_name)
-                    || parts[0].eq_ignore_ascii_case(stripped)
-                {
-                    return Some(parts[1].clone());
-                }
-                None
-            }
-            rook_ast::ExprNode::Column(name) => {
-                // Unqualified column — check if it exists in inner table
-                if inner_col_names.iter().any(|c| c.eq_ignore_ascii_case(name)) {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// If `expr` references an outer table column, return its qualifier (if
-    /// written) and name.
-    fn extract_column_name_if_outer(
-        &self,
-        expr: &rook_ast::ExprNode,
-        inner_table_name: &str,
-        inner_col_names: &[String],
-    ) -> Option<OuterRef> {
-        let stripped = inner_table_name
-            .strip_prefix("__cte__:")
-            .unwrap_or(inner_table_name);
-        match expr {
-            rook_ast::ExprNode::Compound(parts) if parts.len() >= 2 => {
-                // Outer reference: table prefix does NOT match inner table
-                if !parts[0].eq_ignore_ascii_case(inner_table_name)
-                    && !parts[0].eq_ignore_ascii_case(stripped)
-                {
-                    Some((
-                        Some(parts[parts.len() - 2].clone()),
-                        parts[parts.len() - 1].clone(),
-                    ))
-                } else {
-                    None
-                }
-            }
-            rook_ast::ExprNode::Column(name) => {
-                // Unqualified column — outer if it's NOT in the inner table
-                if !inner_col_names.iter().any(|c| c.eq_ignore_ascii_case(name)) {
-                    Some((None, name.clone()))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
     }
 }

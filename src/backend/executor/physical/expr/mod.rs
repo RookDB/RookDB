@@ -4,6 +4,7 @@
 //! This module also re-exports the predicate sub-module.
 
 pub mod convert;
+pub mod correlated;
 pub mod predicate;
 
 #[cfg(test)]
@@ -53,6 +54,9 @@ pub enum Expr {
         params: Vec<Rc<RefCell<Option<DataValue>>>>,
         outer_col_indices: Vec<usize>,
     },
+    /// A correlated scalar subquery run as a full plan per outer key (the
+    /// general case: joins, expressions over outer columns, ...).
+    SubqueryScalar(Rc<correlated::CorrelatedSubquery>),
     /// `CASE WHEN cond1 THEN expr1 [WHEN cond2 THEN expr2] [ELSE exprN] END`.
     Case {
         when_then_pairs: Vec<(Expr, Expr)>,
@@ -94,6 +98,7 @@ impl std::fmt::Debug for Expr {
             Expr::Div(l, r) => f.debug_tuple("Div").field(l).field(r).finish(),
             Expr::Cast(e, dt) => f.debug_tuple("Cast").field(e).field(dt).finish(),
             Expr::CorrelatedParam(p) => f.debug_tuple("CorrelatedParam").field(p).finish(),
+            Expr::SubqueryScalar(sub) => f.debug_tuple("SubqueryScalar").field(sub).finish(),
             Expr::CorrelatedScalarSubquery {
                 inner_plan: _,
                 params,
@@ -170,6 +175,14 @@ impl Expr {
                         }
                         Ok(val)
                     }
+                }
+            }
+            Expr::SubqueryScalar(sub) => {
+                let rows = sub.rows(tuple)?;
+                match rows.len() {
+                    0 => Ok(None),
+                    1 => Ok(rows[0].values.first().cloned().flatten()),
+                    _ => Err("Scalar subquery returned more than one row".to_string()),
                 }
             }
             Expr::Column { table, column } => {

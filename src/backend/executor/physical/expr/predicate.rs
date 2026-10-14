@@ -38,6 +38,17 @@ pub enum ComparisonOp {
 
 // ── Predicates ────────────────────────────────────────────────────────────────
 
+/// What a [`Predicate::CorrelatedSubquery`] asks of its subquery.
+#[derive(Clone, Debug)]
+pub enum SubqueryKind {
+    Exists,
+    /// `lhs [NOT] IN (subquery)`, comparing against the first output column.
+    In {
+        lhs: Expr,
+        negated: bool,
+    },
+}
+
 /// A predicate that can be evaluated against a deserialised tuple.
 ///
 /// Manual `Debug` impl because `CorrelatedExists`/`CorrelatedInSubquery` contain
@@ -88,6 +99,12 @@ pub enum Predicate {
         outer_col_indices: Vec<usize>,
         lhs_expr: Expr,
         negated: bool,
+    },
+    /// A correlated EXISTS / IN subquery run as a full plan per outer key (the
+    /// general case: joins, GROUP BY, LIMIT, expressions over outer columns).
+    CorrelatedSubquery {
+        sub: Rc<super::correlated::CorrelatedSubquery>,
+        kind: SubqueryKind,
     },
     /// `a IS DISTINCT FROM b` — NULL-safe inequality.
     /// Returns true when values differ or one is NULL (NULL IS DISTINCT FROM non-NULL → true).
@@ -151,6 +168,11 @@ impl std::fmt::Debug for Predicate {
                 .field("outer_col_indices", outer_col_indices)
                 .field("lhs_expr", lhs_expr)
                 .field("negated", negated)
+                .finish(),
+            Predicate::CorrelatedSubquery { sub, kind } => f
+                .debug_struct("CorrelatedSubquery")
+                .field("sub", sub)
+                .field("kind", kind)
                 .finish(),
             Predicate::IsDistinctFrom(l, r) => {
                 f.debug_tuple("IsDistinctFrom").field(l).field(r).finish()
@@ -289,40 +311,11 @@ pub fn evaluate_predicate(
 
         Predicate::InSubqueryResult(expr, values, negated) => {
             let val = expr.evaluate(tuple, schema)?;
-            match val {
-                None => Ok(None), // NULL IN (...) → UNKNOWN
-                Some(dv) => {
-                    use std::cmp::Ordering;
-                    let found = values.iter().any(|v| match v {
-                        Some(stored) => compare_nullable(Some(stored), Some(&dv))
-                            .unwrap_or(None)
-                            .map(|o| o == Ordering::Equal)
-                            .unwrap_or(false),
-                        None => false,
-                    });
-                    let has_nulls = values.iter().any(|v| v.is_none());
-                    if *negated {
-                        // NOT IN with NULLs in the value list must return UNKNOWN
-                        // per SQL-99 three-valued logic.
-                        // x NOT IN (a, b, NULL) = x != a AND x != b AND x != NULL
-                        // x != NULL → UNKNOWN, so if any value is NULL, the AND
-                        // with UNKNOWN produces UNKNOWN unless we found a match.
-                        if found {
-                            Ok(Some(false)) // NOT IN failed because match found
-                        } else if has_nulls {
-                            Ok(None) // UNKNOWN because NULL in list
-                        } else {
-                            Ok(Some(true)) // definitely not in list
-                        }
-                    } else if found {
-                        Ok(Some(true))
-                    } else if has_nulls {
-                        Ok(None)
-                    } else {
-                        Ok(Some(false))
-                    }
-                }
-            }
+            in_result(
+                val.as_ref(),
+                values.iter().map(|v| Ok(v.as_ref())),
+                *negated,
+            )
         }
 
         Predicate::CorrelatedExists {
@@ -355,66 +348,41 @@ pub fn evaluate_predicate(
             lhs_expr,
             negated,
         } => {
-            // Evaluate the left-hand side expression against the outer tuple
             let lhs_val = lhs_expr.evaluate(tuple, schema)?;
-            match lhs_val {
-                None => Ok(None), // NULL IN (...) → UNKNOWN
-                Some(lhs_dv) => {
-                    // Set all correlated parameters from the outer tuple
-                    for (param, idx) in params.iter().zip(outer_col_indices.iter()) {
-                        let outer_val = tuple.values.get(*idx).and_then(|v| v.clone());
-                        *param.borrow_mut() = outer_val;
-                    }
-
-                    // Execute the inner plan and check if any value matches
-                    let mut plan_ref = inner_plan.borrow_mut();
-                    plan_ref
-                        .reset()
-                        .map_err(|e| format!("Correlated IN reset error: {}", e))?;
-
-                    let mut found = false;
-                    let mut saw_null = false;
-                    while let Some(inner_tuple) = plan_ref
-                        .next()
-                        .map_err(|e| format!("Correlated IN error: {}", e))?
-                    {
-                        match inner_tuple.values.into_iter().next().flatten() {
-                            Some(val) => {
-                                let is_equal = compare_nullable(Some(&val), Some(&lhs_dv))
-                                    .map_err(|e| e.to_string())?
-                                    .map(|o| o == Ordering::Equal)
-                                    .unwrap_or(false);
-                                if is_equal {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            None => {
-                                saw_null = true;
-                            }
-                        }
-                    }
-
-                    if *negated {
-                        if found {
-                            Ok(Some(false))
-                        } else if saw_null {
-                            Ok(None)
-                        } else {
-                            Ok(Some(true))
-                        }
-                    } else {
-                        if found {
-                            Ok(Some(true))
-                        } else if saw_null {
-                            Ok(None)
-                        } else {
-                            Ok(Some(false))
-                        }
-                    }
-                }
+            for (param, idx) in params.iter().zip(outer_col_indices.iter()) {
+                let outer_val = tuple.values.get(*idx).and_then(|v| v.clone());
+                *param.borrow_mut() = outer_val;
             }
+            let mut plan_ref = inner_plan.borrow_mut();
+            plan_ref
+                .reset()
+                .map_err(|e| format!("Correlated IN reset error: {}", e))?;
+            in_result(
+                lhs_val.as_ref(),
+                std::iter::from_fn(|| {
+                    plan_ref
+                        .next()
+                        .map_err(|e| format!("Correlated IN error: {}", e))
+                        .transpose()
+                        .map(|r| r.map(|t| t.values.into_iter().next().flatten()))
+                }),
+                *negated,
+            )
         }
+
+        Predicate::CorrelatedSubquery { sub, kind } => match kind {
+            SubqueryKind::Exists => Ok(Some(!sub.rows(tuple)?.is_empty())),
+            SubqueryKind::In { lhs, negated } => {
+                let lhs_val = lhs.evaluate(tuple, schema)?;
+                let rows = sub.rows(tuple)?;
+                in_result(
+                    lhs_val.as_ref(),
+                    rows.iter()
+                        .map(|t| Ok(t.values.first().and_then(|v| v.as_ref()))),
+                    *negated,
+                )
+            }
+        },
 
         Predicate::IsDistinctFrom(left, right) => {
             let lv = left.evaluate(tuple, schema)?;
@@ -504,5 +472,40 @@ fn like_match_inner(t: &[char], p: &[char], escape_char: Option<char>) -> bool {
         ([_tc, tr @ ..], ['_', pr @ ..]) => like_match_inner(tr, pr, escape_char),
         // Regular character comparison
         ([tc, tr @ ..], [pc, pr @ ..]) => tc == pc && like_match_inner(tr, pr, escape_char),
+    }
+}
+
+/// SQL three-valued `lhs [NOT] IN (values)`.
+///
+/// A NULL `lhs` is UNKNOWN against any non-empty set and plain false (true for
+/// NOT IN) against an empty one; a NULL in the set turns "no match" into
+/// UNKNOWN.
+fn in_result<T: std::borrow::Borrow<DataValue>>(
+    lhs: Option<&DataValue>,
+    values: impl Iterator<Item = Result<Option<T>, String>>,
+    negated: bool,
+) -> Result<Option<bool>, String> {
+    let mut saw_null = false;
+    for value in values {
+        let Some(lhs) = lhs else {
+            return Ok(None);
+        };
+        match value? {
+            Some(v) => {
+                let equal = compare_nullable(Some(v.borrow()), Some(lhs))
+                    .map_err(|e| e.to_string())?
+                    .map(|o| o == Ordering::Equal)
+                    .unwrap_or(false);
+                if equal {
+                    return Ok(Some(!negated));
+                }
+            }
+            None => saw_null = true,
+        }
+    }
+    if lhs.is_some() && saw_null {
+        Ok(None)
+    } else {
+        Ok(Some(negated))
     }
 }
