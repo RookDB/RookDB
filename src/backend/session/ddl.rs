@@ -1032,7 +1032,12 @@ pub(super) fn rename_index_files_for_table(
 
     let old_legacy = engine.paths().legacy_index(db, old_name);
     let new_legacy = engine.paths().legacy_index(db, new_name);
+    crate::backend::cache::flush_and_evict_btree(engine, &old_legacy);
     let _ = std::fs::rename(&old_legacy, &new_legacy);
+    let _ = std::fs::rename(
+        crate::backend::index::btree::root_sidecar_path(&old_legacy),
+        crate::backend::index::btree::root_sidecar_path(&new_legacy),
+    );
     let _ = std::fs::rename(
         engine.paths().legacy_index_meta(db, old_name),
         engine.paths().legacy_index_meta(db, new_name),
@@ -1044,8 +1049,13 @@ pub(super) fn rename_index_files_for_table(
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
             if let Some(suffix) = fname.strip_prefix(&prefix)
-                && (fname.ends_with(".idx") || fname.ends_with(".idx.meta"))
+                && (fname.ends_with(".idx")
+                    || fname.ends_with(".idx.meta")
+                    || fname.ends_with(".idx.root"))
             {
+                if fname.ends_with(".idx") {
+                    crate::backend::cache::flush_and_evict_btree(engine, &entry.path());
+                }
                 let new_fname = base_path.join(format!("{}.{}", new_name, suffix));
                 let _ = std::fs::rename(entry.path(), &new_fname);
             }

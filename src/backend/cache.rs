@@ -237,6 +237,19 @@ pub fn sync_and_clear_btrees(engine: &Engine) {
     }
 }
 
+/// Write out and drop the cached B+ Tree for `path`, so a file about to be
+/// renamed holds every page the tree has changed. Without this a tree opened
+/// under the new name read the pages as they were on disk, missing the
+/// entries still waiting in the old handle's frames.
+pub fn flush_and_evict_btree(engine: &Engine, path: &Path) {
+    let key = canonical(path);
+    if let Some((mut tree, _)) = lock(&engine.btrees).remove(&key)
+        && let Err(e) = tree.sync()
+    {
+        log::warn!("[cache] btree flush {:?} failed: {}", key, e);
+    }
+}
+
 /// Drop a cached B+ Tree handle without syncing (file replaced/removed).
 pub fn evict_btree(engine: &Engine, path: &Path) {
     let key = canonical(path);

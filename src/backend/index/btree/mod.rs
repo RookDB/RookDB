@@ -46,6 +46,7 @@ pub(crate) use codec::{
 };
 use codec::{CHILD_SIZE, LEAF_HEADER, PAGE_HEADER, PAGE_TYPE_LEAF, VALUE_SIZE};
 pub use node::BTreeNode;
+pub(crate) use codec::root_sidecar_path;
 use node::NodeView;
 use order::{KeyOrder, LeafInsertSlot};
 

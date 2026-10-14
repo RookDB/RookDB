@@ -451,8 +451,12 @@ fn rename_index_file(
     new: &str,
 ) {
     let old_path = engine.paths().index(db, table, old);
-    crate::backend::cache::evict_btree(engine, &old_path);
+    crate::backend::cache::flush_and_evict_btree(engine, &old_path);
     let _ = std::fs::rename(&old_path, engine.paths().index(db, table, new));
+    let _ = std::fs::rename(
+        crate::backend::index::btree::root_sidecar_path(&old_path),
+        crate::backend::index::btree::root_sidecar_path(&engine.paths().index(db, table, new)),
+    );
     let _ = std::fs::rename(
         engine.paths().index_meta(db, table, old),
         engine.paths().index_meta(db, table, new),
