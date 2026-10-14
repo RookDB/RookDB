@@ -311,6 +311,9 @@ fn add_column_backfill_then_insert_is_durable() {
         }
         std::fs::remove_file(&dat_path).unwrap();
         std::fs::rename(&tmp, &dat_path).unwrap();
+        // A file replaced on disk is announced to the engine's caches.
+        storage_manager::backend::cache::release_file(&dat_path).unwrap();
+        storage_manager::backend::cache::release_file(&tmp).unwrap();
     }
 
     let new_inode = std::fs::metadata(&dat_path).unwrap().ino();

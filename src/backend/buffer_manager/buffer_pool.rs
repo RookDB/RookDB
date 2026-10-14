@@ -144,18 +144,6 @@ fn write_all_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
     }
 }
 
-/// `(device, inode)` of an open file, where the platform exposes one.
-#[cfg(unix)]
-fn file_ident(file: &File) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    file.metadata().ok().map(|m| (m.dev(), m.ino()))
-}
-
-#[cfg(not(unix))]
-fn file_ident(_file: &File) -> Option<(u64, u64)> {
-    None
-}
-
 // ─── Frame store ─────────────────────────────────────────────────────────
 
 /// Opaque identifier for a frame within the store.
@@ -583,8 +571,6 @@ pub struct BufferPool {
     file_id: Option<u32>,
     file_path: Option<PathBuf>,
     file: Option<Arc<File>>,
-    /// `(device, inode)` of the file, read once when it is attached.
-    file_ident: Option<(u64, u64)>,
     /// Total number of pages in the managed file (from header).
     total_pages: u32,
 }
@@ -607,7 +593,6 @@ impl BufferPool {
             file_id: None,
             file_path: None,
             file: None,
-            file_ident: None,
             total_pages: 0,
         }
     }
@@ -620,7 +605,6 @@ impl BufferPool {
 
     fn attach_file(&mut self, file: File, path: PathBuf) {
         self.detach_file();
-        self.file_ident = file_ident(&file);
         let file = Arc::new(file);
         self.file_id = Some(self.store.lock().attach(file.clone()));
         self.file = Some(file);
@@ -692,34 +676,6 @@ impl BufferPool {
     /// Used for external scans such as the FSM rebuild.
     pub(crate) fn try_clone_file(&self) -> io::Result<File> {
         self.file.as_ref().ok_or_else(no_file)?.try_clone()
-    }
-
-    /// Check if the underlying open file handle is stale compared to the file
-    /// currently at `path` on disk (e.g. if the file was replaced by rename/swap).
-    pub fn is_file_stale(&self, path: &Path) -> bool {
-        if let Some(open_file) = &self.file {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                // The open handle's identity never changes, so it is read
-                // once when the file is attached; only the path is re-checked.
-                let ident = self.file_ident.or_else(|| file_ident(open_file));
-                if let (Some((dev, ino)), Ok(disk_meta)) = (ident, std::fs::metadata(path)) {
-                    return ino != disk_meta.ino() || dev != disk_meta.dev();
-                }
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                if let (Ok(open_meta), Ok(disk_meta)) =
-                    (open_file.metadata(), std::fs::metadata(path))
-                {
-                    return open_meta.file_index() != disk_meta.file_index()
-                        || open_meta.volume_serial_number() != disk_meta.volume_serial_number();
-                }
-            }
-        }
-        false
     }
 
     /// Return the total number of pages tracked by this pool.

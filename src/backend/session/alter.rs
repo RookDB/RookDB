@@ -477,8 +477,7 @@ fn rename_table(
     let old_dat = catalog.engine().paths().heap(db, old_name);
     let new_dat = catalog.engine().paths().heap(db, new_name);
     // The open-table handle is keyed by path: drop it before the file moves.
-    let _ = crate::backend::cache::evict_heap(catalog.engine(), &old_dat);
-    crate::backend::buffer_manager::shared_pool::invalidate(&old_dat);
+    crate::backend::cache::release_file(&old_dat)?;
     let _ = std::fs::rename(&old_dat, &new_dat);
     let _ = std::fs::rename(
         catalog.engine().paths().heap_fsm(db, old_name),
@@ -611,10 +610,8 @@ fn rewrite_rows(
     );
 
     // The cached handles still describe the replaced file.
-    crate::backend::buffer_manager::shared_pool::invalidate(Path::new(&dat_path));
-    let _ = crate::backend::cache::evict_heap(engine, Path::new(&dat_path));
-    let _ = crate::backend::cache::evict_heap(engine, Path::new(&tmp_path));
-    crate::backend::buffer_manager::shared_pool::invalidate(Path::new(&tmp_path));
+    crate::backend::cache::release_file(Path::new(&dat_path))?;
+    crate::backend::cache::release_file(Path::new(&tmp_path))?;
 
     remove_index_files_for_table(engine, db, table, None);
     Ok(())

@@ -783,12 +783,6 @@ impl HeapManager {
         Ok(())
     }
 
-    /// Check if the underlying heap file on disk was replaced (e.g. by rename/swap).
-    pub fn is_file_stale(&self, path: &std::path::Path) -> bool {
-        let pool = Self::lock_pool(&self.pool);
-        pool.is_file_stale(path)
-    }
-
     // ─────────────────────────────────────────────────────────────────────
     // Private Helper Methods
     // ─────────────────────────────────────────────────────────────────────

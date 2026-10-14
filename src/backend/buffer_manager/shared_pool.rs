@@ -73,17 +73,7 @@ pub fn get_or_create(file_path: &Path) -> io::Result<SharedPool> {
         reg.retain(|_, weak| weak.upgrade().is_some());
         reg.get(&key).and_then(Weak::upgrade)
     }) {
-        let is_stale = {
-            let pool = shared.lock().unwrap_or_else(|p| p.into_inner());
-            pool.is_file_stale(file_path)
-        };
-        if is_stale {
-            with_registry(|reg| {
-                reg.remove(&key);
-            });
-        } else {
-            return Ok(shared);
-        }
+        return Ok(shared);
     }
 
     let file = std::fs::OpenOptions::new()
@@ -103,6 +93,17 @@ pub fn register_pool(file_path: &Path, pool: BufferPool) -> SharedPool {
         reg.insert(key, Arc::downgrade(&shared));
     });
     shared
+}
+
+/// Whether `pool` is still the registered pool of `file_path`: false once the
+/// file was released or recreated, so a handle that predates that is stale.
+pub fn is_current(file_path: &Path, pool: &SharedPool) -> bool {
+    let key = canonical_key(file_path);
+    with_registry(|reg| {
+        reg.get(&key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, pool))
+    })
 }
 
 /// Forget the cached pool for `file_path`.

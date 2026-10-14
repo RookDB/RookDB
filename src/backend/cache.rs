@@ -125,12 +125,6 @@ pub fn with_heap<T>(
     // Fast path: existing entry.
     {
         let mut cache = lock(&engine.heaps);
-        if let Some(entry) = cache.get(&key)
-            && entry.manager.is_file_stale(path)
-        {
-            cache.remove(&key);
-            crate::backend::buffer_manager::shared_pool::invalidate(path);
-        }
         if let Some(entry) = cache.get_mut(&key) {
             let result = f(&mut entry.manager)?;
             entry.ops_since_flush += 1;
@@ -145,12 +139,6 @@ pub fn with_heap<T>(
     // Miss: open outside the map lock, then insert (double-check).
     let mut manager = HeapManager::open(path.to_path_buf())?;
     let mut cache = lock(&engine.heaps);
-    if let Some(entry) = cache.get(&key)
-        && entry.manager.is_file_stale(path)
-    {
-        cache.remove(&key);
-        crate::backend::buffer_manager::shared_pool::invalidate(path);
-    }
     if let Some(entry) = cache.get_mut(&key) {
         // Raced with another opener in between; use the resident one.
         let result = f(&mut entry.manager)?;
@@ -246,19 +234,10 @@ impl From<HeapManager> for HeapHandle {
 }
 
 /// Take the engine's cached manager for `path` out of the cache, opening it
-/// on a miss. A handle whose file was replaced is discarded.
+/// on a miss.
 fn check_out(engine: &Engine, path: &Path) -> io::Result<(PathBuf, CachedHeap)> {
     let key = canonical(path);
-    let cached = {
-        let mut cache = lock(&engine.heaps);
-        if let Some(entry) = cache.get(&key)
-            && entry.manager.is_file_stale(path)
-        {
-            cache.remove(&key);
-            crate::backend::buffer_manager::shared_pool::invalidate(path);
-        }
-        cache.remove(&key)
-    };
+    let cached = { lock(&engine.heaps).remove(&key) };
     let entry = match cached {
         Some(entry) => entry,
         None => CachedHeap {
@@ -269,14 +248,18 @@ fn check_out(engine: &Engine, path: &Path) -> io::Result<(PathBuf, CachedHeap)> 
     Ok((key, entry))
 }
 
-/// Put a checked-out manager back, unless another one was cached meanwhile.
+/// Put a checked-out manager back, unless another one was cached meanwhile
+/// or its file was released while it was out.
 fn check_in(engine: &Engine, key: PathBuf, mut entry: CachedHeap) {
+    if !crate::backend::buffer_manager::shared_pool::is_current(&key, &entry.manager.pool) {
+        return;
+    }
     entry.ops_since_flush += 1;
     lock(&engine.heaps).entry(key).or_insert(entry);
 }
 
 /// Check the engine's cached `HeapManager` for `path` out of the cache,
-/// opening it on a miss. A handle whose file was replaced is discarded.
+/// opening it on a miss.
 pub fn lease_heap<'a>(engine: &'a Engine, path: &Path) -> io::Result<HeapLease<'a>> {
     let (key, entry) = check_out(engine, path)?;
     Ok(HeapLease {
@@ -497,6 +480,21 @@ pub fn checkpoint_engine(engine: &Engine) {
         due
     };
     flush_caches(engine, due);
+}
+
+/// Write out and drop every cached handle on `path` (heap manager, B-tree
+/// and shared buffer pool) in every open engine.
+///
+/// Whoever renames, removes or replaces a table or index file calls this,
+/// before or after the move: the caches never check the disk themselves, so
+/// a handle left behind would keep reading and writing the old file.
+pub fn release_file(path: &Path) -> io::Result<()> {
+    for engine in crate::backend::engine::open_engines() {
+        evict_heap(&engine, path)?;
+        flush_and_evict_btree(&engine, path);
+    }
+    crate::backend::buffer_manager::shared_pool::invalidate(path);
+    Ok(())
 }
 
 /// Drop the cached manager for `path` in whichever open engine holds it.

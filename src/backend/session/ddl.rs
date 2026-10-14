@@ -639,8 +639,7 @@ pub(super) fn drop_table(
     }
     let dat_path = catalog.engine().paths().heap(db, table);
     // The engine's open-table handle must not outlive the file.
-    let _ = crate::backend::cache::evict_heap(catalog.engine(), &dat_path);
-    crate::backend::buffer_manager::shared_pool::invalidate(&dat_path);
+    let _ = crate::backend::cache::release_file(&dat_path);
     let _ = std::fs::remove_file(&dat_path);
     let _ = std::fs::remove_file(catalog.engine().paths().heap_fsm(db, table));
     crate::backend::cache::drop_statistics(catalog.engine(), db, table);
