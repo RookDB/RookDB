@@ -7,7 +7,7 @@ use std::io::{self};
 
 use super::codec::{
     BTREE_PAGE_SIZE, CHILD_SIZE, KEY_LEN_SIZE, LEAF_HEADER, PAGE_HEADER, PAGE_TYPE_INTERNAL,
-    PAGE_TYPE_LEAF, VALUE_SIZE, total_keys_size,
+    PAGE_TYPE_LEAF, VALUE_SIZE,
 };
 
 // ─── NodeView ────────────────────────────────────────────────────────────────
@@ -128,13 +128,16 @@ impl<'a> NodeView<'a> {
     pub(crate) fn has_uniform_keys(&self, width: usize) -> bool {
         let entry = KEY_LEN_SIZE + width;
         let start = self.keys_start();
-        if start + self.num_keys * entry > self.buf.len() {
+        let Some(area) = self.buf.get(start..start + self.num_keys * entry) else {
             return false;
-        }
-        (0..self.num_keys).all(|i| {
-            let off = start + i * entry;
-            u16::from_le_bytes([self.buf[off], self.buf[off + 1]]) as usize == width
-        })
+        };
+        // Every descent runs this on every node it visits, so the loop is
+        // kept free of branches and bounds checks rather than stopping at
+        // the first mismatch, which a healthy page never has.
+        let prefix = (width as u16).to_le_bytes();
+        area.chunks_exact(entry).fold(0u8, |diff, key| {
+            diff | (key[0] ^ prefix[0]) | (key[1] ^ prefix[1])
+        }) == 0
     }
 
     /// Key `i` as a sign-extended integer. Only valid on a page for which
@@ -170,7 +173,7 @@ impl<'a> NodeView<'a> {
         Ok(end)
     }
 
-    /// Same capacity rule as [`BTreeNode::has_space_for`].
+    /// Whether the node can take one more entry with a key of this size.
     pub(crate) fn has_space_for(&self, encoded_key_size: usize) -> io::Result<bool> {
         let pointer = if self.is_leaf { VALUE_SIZE } else { CHILD_SIZE };
         Ok(self.used_bytes()? + pointer + encoded_key_size <= BTREE_PAGE_SIZE)
@@ -469,32 +472,6 @@ impl BTreeNode {
                 io::ErrorKind::InvalidData,
                 format!("Unknown page type: {}", page_type),
             )),
-        }
-    }
-
-    /// Check whether this node can accept another entry of the given key size.
-    pub(crate) fn has_space_for(&self, encoded_key_size: usize) -> bool {
-        match self {
-            BTreeNode::Internal {
-                num_keys,
-                keys,
-                children: _,
-            } => {
-                let nk = *num_keys as usize;
-                let used = PAGE_HEADER
-                    + (nk + 1) * CHILD_SIZE  // children
-                    + total_keys_size(keys); // keys
-                let needed = CHILD_SIZE + encoded_key_size; // one more child + one key
-                used + needed <= BTREE_PAGE_SIZE
-            }
-            BTreeNode::Leaf { num_keys, keys, .. } => {
-                let nk = *num_keys as usize;
-                let used = LEAF_HEADER
-                    + nk * VALUE_SIZE  // values
-                    + total_keys_size(keys); // keys
-                let needed = VALUE_SIZE + encoded_key_size; // one more value + one key
-                used + needed <= BTREE_PAGE_SIZE
-            }
         }
     }
 }

@@ -122,8 +122,3 @@ pub(crate) fn encoded_key_size(encoded: &[u8]) -> usize {
     let len = u16::from_le_bytes([encoded[0], encoded[1]]) as usize;
     KEY_LEN_SIZE + len
 }
-
-/// Get the total byte size of n keys stored sequentially.
-pub(crate) fn total_keys_size(keys: &[Vec<u8>]) -> usize {
-    keys.iter().map(|k| k.len()).sum()
-}

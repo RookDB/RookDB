@@ -459,6 +459,24 @@ impl BufferPool {
         Ok(())
     }
 
+    /// Borrow a page's bytes in place, loading the page on a miss.
+    ///
+    /// Nothing is copied out of the frame. The borrow of the pool keeps the
+    /// frame where it is for as long as the slice lives, so no pin is left
+    /// behind.
+    pub fn page_bytes(&mut self, page_id: u32) -> io::Result<&[u8]> {
+        let frame_id = self.fetch_page(page_id)?;
+        self.unpin(frame_id, false);
+        Ok(&self.frames[frame_id.0].page.data)
+    }
+
+    /// Borrow a page's bytes for editing in place and mark the page dirty.
+    pub fn page_bytes_mut(&mut self, page_id: u32) -> io::Result<&mut [u8]> {
+        let frame_id = self.fetch_page(page_id)?;
+        self.unpin(frame_id, true);
+        Ok(&mut self.frames[frame_id.0].page.data)
+    }
+
     /// Access a pinned page by frame ID.
     pub fn get_page(&self, frame_id: FrameId) -> &Page {
         &self.frames[frame_id.0].page
@@ -751,6 +769,40 @@ mod tests {
         assert_eq!(pool.occupied_count(), 0);
         assert_eq!(pool.pinned_count(), 0);
         assert_eq!(pool.dirty_count(), 0);
+    }
+
+    #[test]
+    fn test_page_bytes_borrow_the_frame_without_pinning() {
+        let path = unique_temp_path();
+        create_test_file(&path, 4).expect("create test file");
+        let mut pool = BufferPool::new(2);
+        pool.open(&path).expect("open pool");
+
+        // A read leaves the page clean and unpinned.
+        let lower = pool.page_bytes(1).expect("page bytes")[0..4].to_vec();
+        assert_eq!(pool.pinned_count(), 0);
+        assert_eq!(pool.dirty_count(), 0);
+
+        // An edit lands in the frame itself and marks it dirty.
+        pool.page_bytes_mut(1).expect("page bytes")[100] = 0xAB;
+        assert_eq!(pool.pinned_count(), 0);
+        assert_eq!(pool.dirty_count(), 1);
+        assert_eq!(pool.page_bytes(1).unwrap()[100], 0xAB);
+        assert_eq!(pool.page_bytes(1).unwrap()[0..4], lower[..]);
+
+        // Evicting the page writes the edit back; reading it again reloads it.
+        pool.page_bytes(2).unwrap();
+        pool.page_bytes(3).unwrap();
+        pool.page_bytes(2).unwrap();
+        assert_eq!(pool.dirty_count(), 0);
+        assert_eq!(pool.page_bytes(1).unwrap()[100], 0xAB);
+
+        // A page that was never allocated is still an error.
+        assert!(pool.page_bytes(9).is_err());
+        assert!(pool.page_bytes_mut(9).is_err());
+
+        drop(pool);
+        fs::remove_file(&path).ok();
     }
 
     #[test]

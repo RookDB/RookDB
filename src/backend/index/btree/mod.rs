@@ -38,19 +38,20 @@ use std::path::PathBuf;
 
 mod codec;
 mod node;
+mod order;
 
 pub(crate) use codec::{
-    BTREE_PAGE_SIZE, KEY_LEN_SIZE, decode_key, encode_key, encode_key_multi, read_root_sidecar,
+    BTREE_PAGE_SIZE, decode_key, encode_key, encode_key_multi, read_root_sidecar,
     write_root_sidecar,
 };
-use codec::{CHILD_SIZE, LEAF_HEADER, PAGE_HEADER, VALUE_SIZE};
+use codec::{CHILD_SIZE, LEAF_HEADER, PAGE_HEADER, PAGE_TYPE_LEAF, VALUE_SIZE};
 pub use node::BTreeNode;
-use node::{NodeView, int_from_le};
+use node::NodeView;
+use order::{KeyOrder, LeafInsertSlot};
 
 use crate::backend::buffer_manager::buffer_pool::BufferPool;
 use crate::backend::disk::file_identity_from_file;
 use crate::backend::page::page_lock::PageWriteLock;
-use crate::types::Comparable;
 use crate::types::DataType;
 use crate::types::value::DataValue;
 
@@ -302,95 +303,6 @@ impl BTree {
         }
     }
 
-    /// Compare two encoded keys segment-by-segment using `key_types`.
-    ///
-    /// Encoded keys are opaque `[len][bytes]` concatenations; decoding each
-    /// segment with its declared type preserves value ordering (plain byte
-    /// comparison would not — little-endian integers sort wrong as bytes).
-    ///
-    /// Single-column trees store bare segments (legacy format); composite
-    /// trees wrap the whole key in an envelope (see `encode_key_multi`).
-    fn cmp_encoded_keys(&self, a: &[u8], b: &[u8]) -> io::Result<Ordering> {
-        use std::cmp::Ordering as O;
-        if self.key_types.len() == 1 {
-            let (va, _) = decode_key(a, &self.key_types[0])?;
-            let (vb, _) = decode_key(b, &self.key_types[0])?;
-            return va
-                .compare(&vb)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
-        }
-        // Composite: strip the outer envelope from both sides, then walk
-        // inner segments in lockstep.
-        if a.len() < KEY_LEN_SIZE || b.len() < KEY_LEN_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Truncated composite key envelope",
-            ));
-        }
-        let mut ia = KEY_LEN_SIZE;
-        let mut ib = KEY_LEN_SIZE;
-        let mut seg = 0usize;
-        loop {
-            match (ia >= a.len(), ib >= b.len()) {
-                (true, true) => return Ok(O::Equal),
-                (true, false) => return Ok(O::Less),
-                (false, true) => return Ok(O::Greater),
-                (false, false) => {}
-            }
-            // Segments align positionally: type for the current segment index.
-            let ty = &self.key_types[seg % self.key_types.len()];
-            let (va, ca) = decode_key(&a[ia..], ty)?;
-            let (vb, cb) = decode_key(&b[ib..], ty)?;
-            let c = va
-                .compare(&vb)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-            if c != O::Equal {
-                return Ok(c);
-            }
-            ia += ca;
-            ib += cb;
-            seg += 1;
-        }
-    }
-
-    /// Compare an encoded key against a slice of typed values (one per key
-    /// segment). Used by range bounds and lookups supplied as values.
-    fn cmp_encoded_vs_values(&self, encoded: &[u8], values: &[DataValue]) -> io::Result<Ordering> {
-        use std::cmp::Ordering as O;
-        debug_assert_eq!(
-            values.len(),
-            self.key_types.len(),
-            "value/key arity mismatch"
-        );
-        if self.key_types.len() == 1 {
-            let (ev, _) = decode_key(encoded, &self.key_types[0])?;
-            return ev
-                .compare(&values[0])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
-        }
-        if encoded.len() < KEY_LEN_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Truncated composite key envelope",
-            ));
-        }
-        let mut off = KEY_LEN_SIZE;
-        for (i, v) in values.iter().enumerate() {
-            if off >= encoded.len() {
-                return Ok(O::Less);
-            }
-            let (ev, consumed) = decode_key(&encoded[off..], &self.key_types[i])?;
-            let c = ev
-                .compare(v)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-            if c != O::Equal {
-                return Ok(c);
-            }
-            off += consumed;
-        }
-        Ok(O::Equal)
-    }
-
     /// Scan all entries in the B+ Tree by traversing the leaf linked list.
     ///
     /// Returns every `(page_id, slot_id)` pair stored in the index,
@@ -404,8 +316,7 @@ impl BTree {
         // Scan all leaves via the doubly-linked list
         let mut current = first_leaf;
         loop {
-            let buf = self.pool.read_page_bytes(current)?;
-            let view = NodeView::parse(&buf)?;
+            let view = NodeView::parse(self.pool.page_bytes(current)?)?;
             if !view.is_leaf() {
                 unreachable!("Expected leaf node in scan_all");
             }
@@ -424,85 +335,12 @@ impl BTree {
     fn find_leftmost_leaf(&mut self, page_id: u32) -> io::Result<u32> {
         let mut page_id = page_id;
         loop {
-            let buf = self.pool.read_page_bytes(page_id)?;
-            let view = NodeView::parse(&buf)?;
+            let view = NodeView::parse(self.pool.page_bytes(page_id)?)?;
             if view.is_leaf() {
                 return Ok(page_id);
             }
             page_id = view.child(0);
         }
-    }
-
-    /// Key width in bytes when this is a single-column integer index.
-    fn int_key_width(&self) -> Option<usize> {
-        match self.key_types.as_slice() {
-            [DataType::SmallInt] => Some(2),
-            [DataType::Int] => Some(4),
-            [DataType::BigInt] => Some(8),
-            _ => None,
-        }
-    }
-
-    /// Key width when `view` can be binary-searched as plain integers: a
-    /// single-column integer index whose keys on this page all have the
-    /// declared width. Comparing them as `i64` matches `DataValue::compare`,
-    /// which widens SMALLINT/INT/BIGINT before comparing.
-    fn int_layout(&self, view: &NodeView<'_>) -> Option<usize> {
-        let width = self.int_key_width()?;
-        view.has_uniform_keys(width).then_some(width)
-    }
-
-    /// [`BTree::int_layout`] plus the integer held by `encoded_key`, when the
-    /// encoded key has exactly the declared width.
-    fn int_fast_path(&self, view: &NodeView<'_>, encoded_key: &[u8]) -> Option<(usize, i64)> {
-        let width = self.int_layout(view)?;
-        if encoded_key.len() != KEY_LEN_SIZE + width
-            || u16::from_le_bytes([encoded_key[0], encoded_key[1]]) as usize != width
-        {
-            return None;
-        }
-        Some((width, int_from_le(&encoded_key[KEY_LEN_SIZE..])))
-    }
-
-    /// Pick the child of an internal node to descend into for `encoded_key`:
-    /// the child left of the first separator greater than the key, or the
-    /// last child when no separator is greater. Returns `(index, page_id)`.
-    fn pick_child(&self, view: &NodeView<'_>, encoded_key: &[u8]) -> io::Result<(usize, u32)> {
-        if let Some((width, target)) = self.int_fast_path(view, encoded_key) {
-            let child_idx = view.int_partition_point(width, |k| k <= target);
-            return Ok((child_idx, view.child(child_idx)));
-        }
-
-        let mut child_idx = view.num_keys();
-        for (i, entry) in view.keys().enumerate() {
-            let (_, key) = entry?;
-            if self.cmp_encoded_keys(key, encoded_key)? == Ordering::Greater {
-                child_idx = i;
-                break;
-            }
-        }
-        Ok((child_idx, view.child(child_idx)))
-    }
-
-    /// Pick the leftmost child that can hold `encoded_key`: the child left of
-    /// the first separator that is not less than the key. Duplicates of a key
-    /// can sit on both sides of an equal separator, so readers start here and
-    /// walk right along the leaf chain.
-    fn pick_child_lower(&self, view: &NodeView<'_>, encoded_key: &[u8]) -> io::Result<u32> {
-        if let Some((width, target)) = self.int_fast_path(view, encoded_key) {
-            let child_idx = view.int_partition_point(width, |k| k < target);
-            return Ok(view.child(child_idx));
-        }
-
-        let mut child_idx = view.num_keys();
-        for (i, entry) in view.keys().enumerate() {
-            let (_, key) = entry?;
-            if self.cmp_encoded_keys(key, encoded_key)? != Ordering::Less {
-                child_idx = i;
-                break;
-            }
-        }
-        Ok(view.child(child_idx))
     }
 
     /// Return the total number of pages in the index file.
@@ -512,10 +350,11 @@ impl BTree {
 
     // ─── Page I/O ──────────────────────────────────────────────────────────
 
-    /// Read a node page via the buffer pool (cached in memory on hits).
+    /// Decode a node page into an owned node. Only the paths that
+    /// restructure a node (splits) or print it need one; everything else
+    /// reads the page in the pool through a [`NodeView`].
     fn read_node(&mut self, page_id: u32) -> io::Result<BTreeNode> {
-        let buf = self.pool.read_page_bytes(page_id)?;
-        BTreeNode::deserialize(&buf)
+        BTreeNode::deserialize(self.pool.page_bytes(page_id)?)
     }
 
     /// Write a node page through the buffer pool (marks page dirty).
@@ -587,13 +426,13 @@ impl BTree {
 
         // Scan the leaf and subsequent leaves
         let mut current_leaf = leaf_id;
+        let order = KeyOrder::new(&self.key_types);
         loop {
-            let buf = self.pool.read_page_bytes(current_leaf)?;
-            let view = NodeView::parse(&buf)?;
+            let view = NodeView::parse(self.pool.page_bytes(current_leaf)?)?;
             if !view.is_leaf() {
                 unreachable!("Expected leaf node in range scan");
             }
-            if let (Some(width), [low_value], [high_value]) = (self.int_layout(&view), low, high)
+            if let (Some(width), [low_value], [high_value]) = (order.int_layout(&view), low, high)
                 && let (Some(low_int), Some(high_int)) =
                     (int_value(low_value), int_value(high_value))
             {
@@ -615,8 +454,8 @@ impl BTree {
 
             for (i, entry) in view.keys().enumerate() {
                 let (_, key) = entry?;
-                let cmp_low = self.cmp_encoded_vs_values(key, low)?;
-                let cmp_high = self.cmp_encoded_vs_values(key, high)?;
+                let cmp_low = order.cmp_encoded_vs_values(key, low)?;
+                let cmp_high = order.cmp_encoded_vs_values(key, high)?;
                 if cmp_low != Ordering::Less && cmp_high != Ordering::Greater {
                     results.push(view.value(i));
                 } else if cmp_high == Ordering::Greater {
@@ -669,13 +508,13 @@ impl BTree {
     ) -> io::Result<Vec<(u32, u32)>> {
         let mut leaf_id = self.find_first_leaf(page_id, encoded_key)?;
         let mut results = Vec::new();
+        let order = KeyOrder::new(&self.key_types);
         // Duplicates can span several leaves: keep walking the chain until a
         // larger key shows up.
         loop {
-            let buf = self.pool.read_page_bytes(leaf_id)?;
-            let view = NodeView::parse(&buf)?;
+            let view = NodeView::parse(self.pool.page_bytes(leaf_id)?)?;
             let mut past_key = false;
-            if let Some((width, target)) = self.int_fast_path(&view, encoded_key) {
+            if let Some((width, target)) = order.int_fast_path(&view, encoded_key) {
                 let first = view.int_partition_point(width, |k| k < target);
                 for i in first..view.num_keys() {
                     if view.int_key(i, width) != target {
@@ -687,7 +526,7 @@ impl BTree {
             } else {
                 for (i, entry) in view.keys().enumerate() {
                     let (_, key) = entry?;
-                    let cmp = self.cmp_encoded_keys(key, encoded_key)?;
+                    let cmp = order.cmp_encoded_keys(key, encoded_key)?;
                     if cmp == Ordering::Equal {
                         results.push(view.value(i));
                     } else if cmp == Ordering::Greater {
@@ -741,86 +580,33 @@ impl BTree {
         value_slot_id: u32,
     ) -> io::Result<bool> {
         let mut leaf_id = self.find_first_leaf(page_id, encoded_key)?;
+        let order = KeyOrder::new(&self.key_types);
         // Entries for one key can span several leaves, so walk the chain until
         // the entry is found or a larger key shows the key is exhausted.
-        let (mut buf, num_keys, index, key_off, key_len, used) = loop {
-            let buf = self.pool.read_page_bytes(leaf_id)?;
-            let (num_keys, found, used, past_key, next_leaf) =
-                self.locate_leaf_entry(&buf, encoded_key, value_page_id, value_slot_id)?;
-            if let Some((index, key_off, key_len)) = found {
-                break (buf, num_keys, index, key_off, key_len, used);
+        let (num_keys, index, key_off, key_len, used) = loop {
+            let view = NodeView::parse(self.pool.page_bytes(leaf_id)?)?;
+            let leaf =
+                order.locate_leaf_entry(&view, encoded_key, (value_page_id, value_slot_id))?;
+            if let Some((index, key_off, key_len)) = leaf.found {
+                break (leaf.num_keys, index, key_off, key_len, leaf.used);
             }
-            if past_key || next_leaf == 0 {
+            if leaf.past_key || leaf.next_leaf == 0 {
                 return Ok(false); // Key not found
             }
-            leaf_id = next_leaf;
+            leaf_id = leaf.next_leaf;
         };
 
-        // Close the 8-byte gap left by the value (this also slides the keys
-        // before the removed one), then the gap left by the key itself.
+        // Edit the page where it sits in the pool. Close the 8-byte gap left
+        // by the value (this also slides the keys before the removed one),
+        // then the gap left by the key itself.
+        let buf = self.pool.page_bytes_mut(leaf_id)?;
         let value_off = LEAF_HEADER + index * VALUE_SIZE;
         buf.copy_within(value_off + VALUE_SIZE..key_off, value_off);
         buf.copy_within(key_off + key_len..used, key_off - VALUE_SIZE);
         let new_used = used - VALUE_SIZE - key_len;
         buf[new_used..used].fill(0);
         buf[4..8].copy_from_slice(&((num_keys - 1) as u32).to_le_bytes());
-
-        self.pool.write_page_bytes(leaf_id, &buf)?;
         Ok(true)
-    }
-
-    /// Locate the entry matching both the key and the heap location in one
-    /// leaf page. Returns `(num_keys, (index, key offset, key len), end of the
-    /// key area, whether a larger key was seen, next leaf)`.
-    #[allow(clippy::type_complexity)]
-    fn locate_leaf_entry(
-        &self,
-        buf: &[u8],
-        encoded_key: &[u8],
-        value_page_id: u32,
-        value_slot_id: u32,
-    ) -> io::Result<(usize, Option<(usize, usize, usize)>, usize, bool, u32)> {
-        {
-            let view = NodeView::parse(buf)?;
-            let mut found: Option<(usize, usize, usize)> = None; // (index, offset, len)
-            let mut past_key = false;
-            let mut used = view.keys_start();
-            let fast = self.int_fast_path(&view, encoded_key);
-            if let Some((width, target)) = fast {
-                let entry = KEY_LEN_SIZE + width;
-                used = view.keys_start() + view.num_keys() * entry;
-                let first = view.int_partition_point(width, |k| k < target);
-                for i in first..view.num_keys() {
-                    if view.int_key(i, width) != target {
-                        past_key = true;
-                        break;
-                    }
-                    if view.value(i) == (value_page_id, value_slot_id) {
-                        found = Some((i, view.keys_start() + i * entry, entry));
-                        break;
-                    }
-                }
-            }
-            for (i, entry) in view.keys().enumerate() {
-                if fast.is_some() {
-                    break;
-                }
-                let (off, key) = entry?;
-                used = off + key.len();
-                if found.is_some() || past_key {
-                    continue;
-                }
-                let cmp = self.cmp_encoded_keys(key, encoded_key)?;
-                if cmp == Ordering::Equal && view.value(i) == (value_page_id, value_slot_id) {
-                    // Exact match — remove this specific entry
-                    found = Some((i, off, key.len()));
-                } else if cmp == Ordering::Greater {
-                    // Key not in this leaf (past sorted position)
-                    past_key = true;
-                }
-            }
-            Ok((view.num_keys(), found, used, past_key, view.next_leaf()))
-        }
     }
 
     // ─── Public Insert API ─────────────────────────────────────────────────
@@ -899,11 +685,11 @@ impl BTree {
         encoded_key: &[u8],
     ) -> io::Result<Option<(u32, u32)>> {
         let mut leaf_id = self.find_first_leaf(page_id, encoded_key)?;
+        let order = KeyOrder::new(&self.key_types);
         loop {
-            let buf = self.pool.read_page_bytes(leaf_id)?;
-            let view = NodeView::parse(&buf)?;
+            let view = NodeView::parse(self.pool.page_bytes(leaf_id)?)?;
 
-            if let Some((width, target)) = self.int_fast_path(&view, encoded_key) {
+            if let Some((width, target)) = order.int_fast_path(&view, encoded_key) {
                 let first = view.int_partition_point(width, |k| k < target);
                 if first < view.num_keys() {
                     let hit = view.int_key(first, width) == target;
@@ -912,7 +698,7 @@ impl BTree {
             } else {
                 for (i, entry) in view.keys().enumerate() {
                     let (_, key) = entry?;
-                    let cmp = self.cmp_encoded_keys(key, encoded_key)?;
+                    let cmp = order.cmp_encoded_keys(key, encoded_key)?;
                     if cmp == Ordering::Equal {
                         return Ok(Some(view.value(i)));
                     }
@@ -935,13 +721,13 @@ impl BTree {
     /// the key may continue into the following leaves.
     fn find_first_leaf(&mut self, page_id: u32, encoded_key: &[u8]) -> io::Result<u32> {
         let mut page_id = page_id;
+        let order = KeyOrder::new(&self.key_types);
         loop {
-            let buf = self.pool.read_page_bytes(page_id)?;
-            let view = NodeView::parse(&buf)?;
+            let view = NodeView::parse(self.pool.page_bytes(page_id)?)?;
             if view.is_leaf() {
                 return Ok(page_id);
             }
-            page_id = self.pick_child_lower(&view, encoded_key)?;
+            page_id = order.pick_child_lower(&view, encoded_key)?;
         }
     }
 
@@ -960,12 +746,15 @@ impl BTree {
         value_page_id: u32,
         value_slot_id: u32,
     ) -> io::Result<Option<(Vec<u8>, u32)>> {
-        let buf = self.pool.read_page_bytes(page_id)?;
-        let view = NodeView::parse(&buf)?;
+        let order = KeyOrder::new(&self.key_types);
+        let view = NodeView::parse(self.pool.page_bytes(page_id)?)?;
 
         if view.is_leaf() {
-            if view.has_space_for(encoded_key.len())? {
-                self.insert_into_leaf(page_id, buf, encoded_key, value_page_id, value_slot_id)?;
+            // One pass over the leaf finds both the position and the space
+            // left, so the common insert never decodes or copies the page.
+            let slot = order.leaf_insert_slot(&view, encoded_key)?;
+            if slot.used + VALUE_SIZE + encoded_key.len() <= BTREE_PAGE_SIZE {
+                self.insert_into_leaf(page_id, slot, encoded_key, value_page_id, value_slot_id)?;
                 Ok(None)
             } else {
                 let (new_key, new_leaf_id) =
@@ -974,8 +763,7 @@ impl BTree {
             }
         } else {
             // Internal node — find child to descend into
-            let (child_idx, child_id) = self.pick_child(&view, encoded_key)?;
-            drop(buf);
+            let (child_idx, child_id) = order.pick_child(&view, encoded_key)?;
 
             // Acquire write lock for the child before modifying
             let file_id = self.file_id;
@@ -989,8 +777,9 @@ impl BTree {
             if let Some((promoted_key, new_child_id)) = result {
                 // Re-read node to check space with the actual promoted key size
                 // (the promoted key may have a different size than encoded_key for varlen types)
-                let current_node = self.read_node(page_id)?;
-                if current_node.has_space_for(promoted_key.len()) {
+                let has_space = NodeView::parse(self.pool.page_bytes(page_id)?)?
+                    .has_space_for(promoted_key.len())?;
+                if has_space {
                     self.insert_into_internal(page_id, child_idx, &promoted_key, new_child_id)?;
                     Ok(None)
                 } else {
@@ -1004,56 +793,28 @@ impl BTree {
         }
     }
 
-    /// Insert a key-value pair into a leaf node (assumes space is available).
+    /// Insert a key-value pair into a leaf node at `slot`, editing the page
+    /// where it sits in the pool.
     ///
-    /// Supports duplicate keys: if the key already exists, the new entry is
-    /// inserted alongside existing entries with the same key, preserving
-    /// the sorted order and allowing multiple values per key.
+    /// Supports duplicate keys: `slot` (from [`KeyOrder::leaf_insert_slot`])
+    /// places the new entry after existing entries with the same key,
+    /// preserving the sorted order and allowing multiple values per key.
     fn insert_into_leaf(
         &mut self,
         page_id: u32,
-        mut buf: Vec<u8>,
+        slot: LeafInsertSlot,
         encoded_key: &[u8],
         value_page_id: u32,
         value_slot_id: u32,
     ) -> io::Result<()> {
-        // Find the insertion position and the end of the key area.
-        // For duplicate keys, insert AFTER all entries with the same key
-        // so that the sort order is: key < == == < <
-        let (num_keys, insert_pos, key_off, used) = {
-            let view = NodeView::parse(&buf)?;
-            if !view.is_leaf() {
-                unreachable!("insert_into_leaf called on non-leaf");
-            }
-            let mut insert_at: Option<(usize, usize)> = None; // (index, offset)
-            let mut used = view.keys_start();
-            let fast = self.int_fast_path(&view, encoded_key);
-            if let Some((width, target)) = fast {
-                let entry = KEY_LEN_SIZE + width;
-                used = view.keys_start() + view.num_keys() * entry;
-                let pos = view.int_partition_point(width, |k| k <= target);
-                if pos < view.num_keys() {
-                    insert_at = Some((pos, view.keys_start() + pos * entry));
-                }
-            }
-            for (i, entry) in view.keys().enumerate() {
-                if fast.is_some() {
-                    break;
-                }
-                let (off, key) = entry?;
-                used = off + key.len();
-                if insert_at.is_none()
-                    && self.cmp_encoded_keys(key, encoded_key)? == Ordering::Greater
-                {
-                    insert_at = Some((i, off));
-                }
-            }
-            let (pos, off) = insert_at.unwrap_or((view.num_keys(), used));
-            (view.num_keys(), pos, off, used)
-        };
-
+        let LeafInsertSlot {
+            num_keys,
+            index: insert_pos,
+            key_off,
+            used,
+        } = slot;
         let key_len = encoded_key.len();
-        if used + VALUE_SIZE + key_len > buf.len() {
+        if used + VALUE_SIZE + key_len > BTREE_PAGE_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "insert_into_leaf: entry does not fit in the leaf page",
@@ -1062,6 +823,7 @@ impl BTree {
 
         // Shift bytes right, back to front, to open 8 bytes in the value
         // array and `key_len` bytes in the key area, then fill both gaps.
+        let buf = self.pool.page_bytes_mut(page_id)?;
         let keys_start = LEAF_HEADER + num_keys * VALUE_SIZE;
         let value_off = LEAF_HEADER + insert_pos * VALUE_SIZE;
         buf.copy_within(key_off..used, key_off + VALUE_SIZE + key_len);
@@ -1071,8 +833,6 @@ impl BTree {
         buf[value_off..value_off + 4].copy_from_slice(&value_page_id.to_le_bytes());
         buf[value_off + 4..value_off + VALUE_SIZE].copy_from_slice(&value_slot_id.to_le_bytes());
         buf[4..8].copy_from_slice(&((num_keys + 1) as u32).to_le_bytes());
-
-        self.pool.write_page_bytes(page_id, &buf)?;
         Ok(())
     }
 
@@ -1133,9 +893,10 @@ impl BTree {
         let mut all_values = old_values;
 
         let target_encoded = encoded_key.to_vec();
+        let order = KeyOrder::new(&self.key_types);
         let mut insert_pos = all_keys.len();
         for (i, key) in all_keys.iter().enumerate() {
-            let cmp = self.cmp_encoded_keys(key, encoded_key)?;
+            let cmp = order.cmp_encoded_keys(key, encoded_key)?;
             if cmp == Ordering::Greater {
                 insert_pos = i;
                 break;
@@ -1218,15 +979,14 @@ impl BTree {
         };
         self.write_node(new_leaf_id, &right_node)?;
 
-        // If there was a next leaf, update its prev_leaf to point to the new sibling
+        // If there was a next leaf, update its prev_leaf to point to the new
+        // sibling, in place in the pool.
         if old_next_leaf != 0
             && old_next_leaf < self.total_pages
-            && let Ok(mut next_node) = self.read_node(old_next_leaf)
+            && let Ok(next) = self.pool.page_bytes_mut(old_next_leaf)
+            && next[0..4] == PAGE_TYPE_LEAF.to_le_bytes()
         {
-            if let BTreeNode::Leaf { prev_leaf, .. } = &mut next_node {
-                *prev_leaf = new_leaf_id;
-            }
-            self.write_node(old_next_leaf, &next_node)?;
+            next[12..16].copy_from_slice(&new_leaf_id.to_le_bytes());
         }
 
         Ok((promoted_key, new_leaf_id))
