@@ -1,102 +1,146 @@
-//! CLOCK Buffer Pool — A fixed-capacity page cache with CLOCK-sweep eviction.
+//! Global CLOCK buffer pool.
 //!
 //! # Design
 //!
-//! The buffer pool manages a fixed number of **frames**, each holding one cached
-//! `Page`. Frames are indexed by `FrameId`. A `HashMap<u32, FrameId>` provides
-//! O(1) lookup from page number to frame.
+//! All page caching in the process goes through **one** frame store (the
+//! global [`Store`]) with a single memory budget, [`shared_pool_capacity`]
+//! frames of `PAGE_SIZE` bytes in total, however many tables and indexes are
+//! open. A frame is addressed by `(file_id, page_id)`: every attached file
+//! gets a fresh `file_id` from a counter that is never reused, so a file
+//! replaced on disk (TRUNCATE, rewrite, DROP, index rebuild) gets a new
+//! identity and can never see frames cached for its predecessor.
+//!
+//! [`BufferPool`] is a lightweight per-file *view* onto the store. It keeps
+//! only per-file state (page count, path, file identity); the frames, the
+//! `(file_id, page_id) -> frame` table, the CLOCK hand and the file handles
+//! used to write victims back live in the store.
 //!
 //! ## CLOCK-sweep eviction
 //!
-//! Each frame has a `clock_bit`. The CLOCK hand sweeps through frames cyclically:
-//! - If the frame at the hand is **pinned** (pin_count > 0), skip it.
-//! - If `clock_bit` is 1, clear it to 0 and advance.
-//! - If `clock_bit` is 0 and the frame is unpinned, **evict** it (write back if
-//!   dirty) and reuse for the new page.
+//! Each frame has a `clock_bit`. The hand sweeps all frames, whichever file
+//! they belong to:
+//! - a **pinned** frame (pin_count > 0) is skipped;
+//! - a frame with `clock_bit == 1` gets the bit cleared and a second chance;
+//! - a frame with `clock_bit == 0` is the victim: it is written back to *its*
+//!   file if dirty, and its buffer is reused for the incoming page (a miss
+//!   reads straight into it, with no allocation).
 //!
-//! ## FrameGuard (RAII)
+//! Frames are created lazily up to the budget, so an idle process holds no
+//! page memory.
 //!
-//! `FrameGuard` wraps a pinned frame and automatically unpins it on drop. It
-//! provides `get_page()` and `get_page_mut()` for accessing the underlying page.
-//! Callers should hold a `FrameGuard` for the minimum time needed.
+//! ## Borrowing
+//!
+//! `page_bytes` / `page_bytes_mut` return [`PageRef`] / [`PageMut`], guards
+//! that keep the frame pinned for as long as the borrow lives. `get_page`
+//! on a `FrameId` relies on the pin taken by `fetch_page`.
+//!
+//! ## Locking
+//!
+//! The store is behind one mutex that is taken for each pool operation (and
+//! held across the disk read/write of a miss or an eviction). The engine is
+//! single-user, so this costs an uncontended lock per page access.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::page::{PAGE_SIZE, Page, init_page};
 
-/// Opaque identifier for a frame within the buffer pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FrameId(usize);
+// ─── Fx-style hasher ─────────────────────────────────────────────────────
 
-impl FrameId {
-    pub fn index(&self) -> usize {
-        self.0
+/// A tiny multiplicative hasher (the FxHash scheme) for the frame table.
+/// Keys are small integers chosen by the engine, so SipHash's DoS resistance
+/// buys nothing here and costs ~20 ns per lookup.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FxHasher {
+    hash: u64,
+}
+
+const FX_SEED: u64 = 0x517c_c1b7_2722_0a95;
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
     }
 }
 
-/// RAII guard that holds a pinned frame and auto-unpins on drop.
-///
-/// Obtained from `BufferPool::fetch_page_guarded()`. Provides access to the
-/// underlying page and automatically unpins (optionally dirty) when dropped.
-///
-/// # Example
-///
-/// ```ignore
-/// let guard = pool.fetch_page_guarded(1)?;
-/// {
-///     let page = guard.get_page();
-///     // read from page
-/// }
-/// let page_mut = guard.get_page_mut();
-/// page_mut.data[..4].copy_from_slice(&val.to_le_bytes());
-/// // guard drops here → auto-unpins with is_dirty=true
-/// ```
-pub struct FrameGuard<'a> {
-    pool: &'a mut BufferPool,
-    frame_id: FrameId,
-    /// Set to true if the page was modified; used on drop to mark dirty.
-    is_dirty: bool,
-}
-
-impl<'a> FrameGuard<'a> {
-    /// Create a new frame guard.
-    pub(crate) fn new(pool: &'a mut BufferPool, frame_id: FrameId) -> Self {
-        Self {
-            pool,
-            frame_id,
-            is_dirty: false,
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut buf = [0u8; 8];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            self.add(u64::from_le_bytes(buf));
         }
     }
-
-    /// Access the underlying page (read-only).
-    pub fn get_page(&self) -> &Page {
-        &self.pool.frames[self.frame_id.0].page
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
     }
-
-    /// Access the underlying page (mutable). Marks the page as dirty on drop.
-    pub fn get_page_mut(&mut self) -> &mut Page {
-        self.is_dirty = true;
-        self.pool.frames[self.frame_id.0].clock_bit = true;
-        &mut self.pool.frames[self.frame_id.0].page
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
     }
-
-    /// The frame ID held by this guard.
-    pub fn frame_id(&self) -> FrameId {
-        self.frame_id
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
     }
-
-    /// Explicitly mark the page as dirty (or not).
-    pub fn mark_dirty(&mut self, dirty: bool) {
-        self.is_dirty = dirty;
+    #[inline]
+    fn finish(&self) -> u64 {
+        // hashbrown takes the bucket from the low bits and a tag from the
+        // high bits; the multiply leaves the low bits weak, so fold.
+        self.hash.rotate_left(26)
     }
 }
 
-impl<'a> Drop for FrameGuard<'a> {
-    fn drop(&mut self) {
-        self.pool.unpin(self.frame_id, self.is_dirty);
+type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+
+// ─── Positional file I/O ─────────────────────────────────────────────────
+
+fn read_full_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    let mut done = 0;
+    while done < buf.len() {
+        #[cfg(unix)]
+        let res = std::os::unix::fs::FileExt::read_at(file, &mut buf[done..], offset + done as u64);
+        #[cfg(windows)]
+        let res =
+            std::os::windows::fs::FileExt::seek_read(file, &mut buf[done..], offset + done as u64);
+        match res {
+            Ok(0) => break,
+            Ok(n) => done += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(done)
+}
+
+fn write_all_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::write_all_at(file, buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        let mut done = 0;
+        while done < buf.len() {
+            match std::os::windows::fs::FileExt::seek_write(
+                file,
+                &buf[done..],
+                offset + done as u64,
+            ) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => done += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -112,130 +156,509 @@ fn file_ident(_file: &File) -> Option<(u64, u64)> {
     None
 }
 
-/// A single frame in the buffer pool.
+// ─── Frame store ─────────────────────────────────────────────────────────
+
+/// Opaque identifier for a frame within the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameId(usize);
+
+impl FrameId {
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+#[inline]
+fn frame_key(file_id: u32, page_id: u32) -> u64 {
+    ((file_id as u64) << 32) | page_id as u64
+}
+
+/// A single frame.
 struct Frame {
-    /// The page number this frame holds (`u32::MAX` if empty/free).
-    page_id: u32,
-    /// The cached page data.
-    page: Page,
-    /// Whether the page has been modified since last written to disk.
+    /// `frame_key(file_id, page_id)` of the cached page (valid if occupied).
+    key: u64,
+    /// The page buffer. Boxed so its address is stable while the frame
+    /// vector grows; the buffer is kept across evictions and reused.
+    page: Box<Page>,
     is_dirty: bool,
     /// Number of outstanding pins. A pinned frame cannot be evicted.
     pin_count: usize,
-    /// CLOCK-sweep reference bit. Set on each access, cleared by the hand.
+    /// CLOCK reference bit. Set on each access, cleared by the hand.
     clock_bit: bool,
-    /// Whether this frame is occupied (holds a valid page).
     occupied: bool,
 }
 
-impl Frame {
-    fn new() -> Self {
+/// Per-file bookkeeping inside the store.
+struct FileEntry {
+    /// Handle used to read misses and write victims back.
+    file: Arc<File>,
+    /// Number of dirty frames of this file.
+    dirty: usize,
+    /// Frames that became dirty since the last flush. May hold stale
+    /// indices (evicted or already written); consumers re-check the frame.
+    dirty_list: Vec<usize>,
+    /// Number of frames of this file currently in the table.
+    resident: usize,
+    /// Pages were written since the last fsync.
+    unsynced: bool,
+}
+
+struct Inner {
+    frames: Vec<Frame>,
+    /// Indices of unoccupied frames (their buffers are kept for reuse).
+    free: Vec<usize>,
+    table: FxMap<u64, usize>,
+    files: FxMap<u32, FileEntry>,
+    hand: usize,
+    capacity: usize,
+    next_file_id: u32,
+}
+
+/// A frame store with one memory budget. The process has a single global
+/// instance; `BufferPool::new` builds private ones for isolated use.
+pub struct Store {
+    inner: Mutex<Inner>,
+}
+
+impl Store {
+    fn new(capacity: usize) -> Self {
         Self {
-            page_id: u32::MAX,
-            // No buffer until the frame is first filled: every load path
-            // (`fetch_page`, `new_page`, `allocate_raw_page`) moves a complete
-            // page in, and a `FrameId` is only handed out for a filled frame.
-            // Allocating `PAGE_SIZE` per frame up front made opening a pool
-            // cost ~2 ms per 256 frames, paid on every index scan.
-            page: Page { data: Vec::new() },
-            is_dirty: false,
-            pin_count: 0,
-            clock_bit: false,
-            occupied: false,
+            inner: Mutex::new(Inner {
+                frames: Vec::new(),
+                free: Vec::new(),
+                table: FxMap::default(),
+                files: FxMap::default(),
+                hand: 0,
+                capacity: capacity.max(1),
+                next_file_id: 1,
+            }),
+        }
+    }
+
+    /// The process-wide store, sized by [`shared_pool_capacity`].
+    pub fn global() -> &'static Arc<Store> {
+        static GLOBAL: OnceLock<Arc<Store>> = OnceLock::new();
+        GLOBAL.get_or_init(|| {
+            Arc::new(Store::new(
+                crate::backend::buffer_manager::shared_pool::shared_pool_capacity(),
+            ))
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl Inner {
+    fn attach(&mut self, file: Arc<File>) -> u32 {
+        let id = self.next_file_id;
+        self.next_file_id += 1;
+        self.files.insert(
+            id,
+            FileEntry {
+                file,
+                dirty: 0,
+                dirty_list: Vec::new(),
+                resident: 0,
+                unsynced: false,
+            },
+        );
+        id
+    }
+
+    /// Drop every frame of `file_id` (dirty ones are discarded: callers
+    /// flush first) and forget the file.
+    fn detach(&mut self, file_id: u32) {
+        if let Some(entry) = self.files.remove(&file_id)
+            && entry.resident > 0
+        {
+            for idx in 0..self.frames.len() {
+                let f = &mut self.frames[idx];
+                if f.occupied && (f.key >> 32) as u32 == file_id {
+                    self.table.remove(&f.key);
+                    f.occupied = false;
+                    f.is_dirty = false;
+                    f.pin_count = 0;
+                    f.clock_bit = false;
+                    self.free.push(idx);
+                }
+            }
+        }
+    }
+
+    fn mark_dirty(&mut self, idx: usize) {
+        let f = &mut self.frames[idx];
+        if !f.is_dirty {
+            f.is_dirty = true;
+            if let Some(e) = self.files.get_mut(&((f.key >> 32) as u32)) {
+                e.dirty += 1;
+                e.dirty_list.push(idx);
+            }
+        }
+    }
+
+    /// Write one dirty frame to its file and mark it clean.
+    fn write_frame(&mut self, idx: usize) -> io::Result<()> {
+        let f = &mut self.frames[idx];
+        let file_id = (f.key >> 32) as u32;
+        let page_id = f.key as u32;
+        if let Some(e) = self.files.get_mut(&file_id) {
+            write_all_at(&e.file, &f.page.data, page_id as u64 * PAGE_SIZE as u64)?;
+            e.unsynced = true;
+            if f.is_dirty {
+                e.dirty = e.dirty.saturating_sub(1);
+            }
+        }
+        f.is_dirty = false;
+        Ok(())
+    }
+
+    /// Write all dirty frames of a file.
+    fn write_dirty(&mut self, file_id: u32) -> io::Result<()> {
+        let list = match self.files.get_mut(&file_id) {
+            Some(e) if e.dirty > 0 => std::mem::take(&mut e.dirty_list),
+            _ => return Ok(()),
+        };
+        for (i, &idx) in list.iter().enumerate() {
+            let f = &self.frames[idx];
+            if !(f.occupied && f.is_dirty && (f.key >> 32) as u32 == file_id) {
+                continue;
+            }
+            if let Err(e) = self.write_frame(idx) {
+                if let Some(entry) = self.files.get_mut(&file_id) {
+                    entry.dirty_list.extend_from_slice(&list[i..]);
+                }
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Find a frame that can take a new page: a free one, a new one while
+    /// under budget, or a CLOCK victim (written back first if dirty).
+    /// The returned frame is unoccupied and not in the free list.
+    fn acquire_frame(&mut self) -> io::Result<usize> {
+        if let Some(idx) = self.free.pop() {
+            return Ok(idx);
+        }
+        if self.frames.len() < self.capacity {
+            self.frames.push(Frame {
+                key: 0,
+                page: Box::new(Page::new()),
+                is_dirty: false,
+                pin_count: 0,
+                clock_bit: false,
+                occupied: false,
+            });
+            return Ok(self.frames.len() - 1);
+        }
+
+        let n = self.frames.len();
+        for _ in 0..2 * n {
+            let idx = self.hand;
+            self.hand = (self.hand + 1) % n;
+            let f = &mut self.frames[idx];
+            if !f.occupied || f.pin_count > 0 {
+                continue;
+            }
+            if f.clock_bit {
+                f.clock_bit = false;
+                continue;
+            }
+            if f.is_dirty {
+                self.write_frame(idx)?;
+            }
+            let f = &mut self.frames[idx];
+            self.table.remove(&f.key);
+            if let Some(e) = self.files.get_mut(&((f.key >> 32) as u32)) {
+                e.resident = e.resident.saturating_sub(1);
+            }
+            f.occupied = false;
+            f.clock_bit = false;
+            return Ok(idx);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "BufferPool: all frames are pinned — cannot evict",
+        ))
+    }
+
+    /// Put a filled, acquired frame into the table.
+    fn install(&mut self, idx: usize, file_id: u32, page_id: u32, pins: usize) {
+        let key = frame_key(file_id, page_id);
+        let f = &mut self.frames[idx];
+        f.key = key;
+        f.is_dirty = false;
+        f.pin_count = pins;
+        f.clock_bit = true;
+        f.occupied = true;
+        self.table.insert(key, idx);
+        if let Some(e) = self.files.get_mut(&file_id) {
+            e.resident += 1;
+        }
+    }
+
+    fn release_unused(&mut self, idx: usize) {
+        self.free.push(idx);
+    }
+
+    /// Pin the frame holding `(file_id, page_id)`, loading it on a miss
+    /// straight into the buffer of the frame that was evicted for it.
+    fn fetch(&mut self, file_id: u32, page_id: u32, total_pages: u32) -> io::Result<usize> {
+        if let Some(&idx) = self.table.get(&frame_key(file_id, page_id)) {
+            let f = &mut self.frames[idx];
+            f.pin_count += 1;
+            f.clock_bit = true;
+            return Ok(idx);
+        }
+        let idx = self.acquire_frame()?;
+        let res = self.load(idx, file_id, page_id, total_pages);
+        match res {
+            Ok(()) => {
+                self.install(idx, file_id, page_id, 1);
+                Ok(idx)
+            }
+            Err(e) => {
+                self.release_unused(idx);
+                Err(e)
+            }
+        }
+    }
+
+    fn load(&mut self, idx: usize, file_id: u32, page_id: u32, total_pages: u32) -> io::Result<()> {
+        let entry = self.files.get(&file_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no open file")
+        })?;
+        let page = &mut self.frames[idx].page;
+        let offset = page_id as u64 * PAGE_SIZE as u64;
+        let n = read_full_at(&entry.file, &mut page.data, offset)?;
+        if n == page.data.len() {
+            return Ok(());
+        }
+        if n > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ));
+        }
+        // Past the end of the file. An allocated page that has not reached
+        // disk yet reads as an empty page. A page id that was never
+        // allocated is a stale pointer (from the FSM or an index): fail
+        // instead of inventing a blank page that could later be written
+        // past end of file.
+        if page_id >= total_pages {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "page {} does not exist (file has {} pages)",
+                    page_id, total_pages
+                ),
+            ));
+        }
+        init_page(page);
+        Ok(())
+    }
+
+    fn unpin(&mut self, idx: usize, dirty: bool) {
+        let f = &mut self.frames[idx];
+        if f.pin_count > 0 {
+            f.pin_count -= 1;
+        }
+        if dirty {
+            self.mark_dirty(idx);
         }
     }
 }
 
-/// The CLOCK buffer pool.
+// ─── Guards ──────────────────────────────────────────────────────────────
+
+/// A page's bytes borrowed in place; the frame stays pinned until drop.
+pub struct PageRef<'a> {
+    store: &'a Store,
+    idx: usize,
+    ptr: *const u8,
+    len: usize,
+}
+
+impl Deref for PageRef<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: the frame is pinned, so it is neither evicted nor reused;
+        // its buffer is never reallocated, and the owning view is mutably
+        // borrowed for `'a`, so nothing else touches the bytes.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for PageRef<'_> {
+    fn drop(&mut self) {
+        self.store.lock().unpin(self.idx, false);
+    }
+}
+
+/// A page's bytes borrowed for editing; marks the page dirty on drop.
+pub struct PageMut<'a> {
+    store: &'a Store,
+    idx: usize,
+    ptr: *mut u8,
+    len: usize,
+}
+
+impl Deref for PageMut<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: see `PageRef`.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl DerefMut for PageMut<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        // SAFETY: see `PageRef`; the guard is the only accessor.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for PageMut<'_> {
+    fn drop(&mut self) {
+        self.store.lock().unpin(self.idx, true);
+    }
+}
+
+/// RAII guard that holds a pinned frame and auto-unpins on drop.
 ///
-/// Manages a fixed set of frames. Automatically loads pages from disk on
-/// cache misses and evicts unpinned pages when capacity is reached.
+/// Obtained from `BufferPool::fetch_page_guarded()`. Provides access to the
+/// underlying page and unpins (optionally dirty) when dropped.
+pub struct FrameGuard<'a> {
+    pool: &'a mut BufferPool,
+    frame_id: FrameId,
+    /// Set to true if the page was modified; used on drop to mark dirty.
+    is_dirty: bool,
+}
+
+impl<'a> FrameGuard<'a> {
+    pub(crate) fn new(pool: &'a mut BufferPool, frame_id: FrameId) -> Self {
+        Self {
+            pool,
+            frame_id,
+            is_dirty: false,
+        }
+    }
+
+    /// Access the underlying page (read-only).
+    pub fn get_page(&self) -> &Page {
+        self.pool.get_page(self.frame_id)
+    }
+
+    /// Access the underlying page (mutable). Marks the page as dirty on drop.
+    pub fn get_page_mut(&mut self) -> &mut Page {
+        self.is_dirty = true;
+        self.pool.get_page_mut(self.frame_id)
+    }
+
+    /// The frame ID held by this guard.
+    pub fn frame_id(&self) -> FrameId {
+        self.frame_id
+    }
+
+    /// Explicitly mark the page as dirty (or not).
+    pub fn mark_dirty(&mut self, dirty: bool) {
+        self.is_dirty = dirty;
+    }
+}
+
+impl Drop for FrameGuard<'_> {
+    fn drop(&mut self) {
+        self.pool.unpin(self.frame_id, self.is_dirty);
+    }
+}
+
+// ─── Per-file view ───────────────────────────────────────────────────────
+
+/// One file's window onto a [`Store`].
 pub struct BufferPool {
-    /// Fixed-size array of frames.
-    frames: Vec<Frame>,
-    /// Fast page_id → frame_index lookup.
-    frame_table: HashMap<u32, usize>,
-    /// Current CLOCK hand position.
-    clock_hand: usize,
-    /// Maximum number of frames.
-    capacity: usize,
-    /// Path to the managed file (lazily opened).
-    file_path: Option<std::path::PathBuf>,
-    /// Cached file handle for I/O.
-    pub(crate) file: Option<File>,
-    /// `(device, inode)` of `file`, read once when the handle is attached.
+    store: Arc<Store>,
+    /// Id of the attached file in the store (`None` until a file is attached).
+    file_id: Option<u32>,
+    file_path: Option<PathBuf>,
+    file: Option<Arc<File>>,
+    /// `(device, inode)` of the file, read once when it is attached.
     file_ident: Option<(u64, u64)>,
     /// Total number of pages in the managed file (from header).
     total_pages: u32,
-    /// Pages were written to the file since the last fsync.
-    unsynced: bool,
+}
+
+fn no_file() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no open file")
 }
 
 impl BufferPool {
-    /// Create a new buffer pool with the given capacity (in frames).
-    ///
-    /// A reasonable default capacity for small databases is 64 frames (512 KB).
-    /// Larger databases should use 1024+ frames (8 MB+).
+    /// Create a view on a private store with its own budget of `capacity`
+    /// frames (isolated use and tests). Files used by the engine attach to
+    /// the global store via [`BufferPool::with_file`].
     pub fn new(capacity: usize) -> Self {
-        let mut frames = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            frames.push(Frame::new());
-        }
+        Self::on_store(Arc::new(Store::new(capacity)))
+    }
 
+    fn on_store(store: Arc<Store>) -> Self {
         Self {
-            frames,
-            frame_table: HashMap::new(),
-            clock_hand: 0,
-            capacity,
+            store,
+            file_id: None,
             file_path: None,
             file: None,
-            unsynced: false,
             file_ident: None,
             total_pages: 0,
         }
     }
 
-    /// Create a buffer pool with an already-open file handle.
+    /// A second, empty view on the same store as `self`.
+    #[cfg(test)]
+    fn sibling(&self) -> Self {
+        Self::on_store(self.store.clone())
+    }
+
+    fn attach_file(&mut self, file: File, path: PathBuf) {
+        self.detach_file();
+        self.file_ident = file_ident(&file);
+        let file = Arc::new(file);
+        self.file_id = Some(self.store.lock().attach(file.clone()));
+        self.file = Some(file);
+        self.file_path = Some(path);
+    }
+
+    /// Flush and forget the attached file and all its frames.
+    fn detach_file(&mut self) {
+        if self.file_id.is_some() {
+            if let Err(e) = self.flush_all() {
+                log::error!("BufferPool: error flushing on detach: {}", e);
+            }
+            let id = self.file_id.take().unwrap();
+            self.store.lock().detach(id);
+        }
+        self.file = None;
+    }
+
+    /// Attach an already-open heap file to the global store.
     ///
     /// Reads the header page to determine the total number of pages.
-    /// This is used by HeapManager to share its opened file with the pool.
-    pub fn with_file(capacity: usize, mut file: File, file_path: PathBuf) -> io::Result<Self> {
-        let mut pool = Self::new(capacity);
-
-        // Read header page to get page count
-        let file_size = file.metadata()?.len();
-        if file_size >= PAGE_SIZE as u64 {
-            let mut header = Page::new();
-            file.seek(SeekFrom::Start(0))?;
-            file.read_exact(&mut header.data)?;
-            pool.total_pages = u32::from_le_bytes(header.data[0..4].try_into().unwrap());
-        }
-
-        pool.file_path = Some(file_path);
-        pool.file_ident = file_ident(&file);
-        pool.file = Some(file);
+    pub fn with_file(mut file: File, file_path: PathBuf) -> io::Result<Self> {
+        let mut pool = Self::on_store(Store::global().clone());
+        pool.total_pages = read_header_pages(&mut file)?.unwrap_or(0);
+        pool.attach_file(file, file_path);
         log::info!(
-            "BufferPool created with capacity={}, file has {} pages",
-            pool.capacity,
+            "BufferPool attached to global store, file has {} pages",
             pool.total_pages
         );
-
         Ok(pool)
     }
 
-    /// Create a buffer pool for a raw page file (such as a B+ Tree .idx file)
-    /// where total pages is derived directly from file size, not a heap header.
-    pub fn with_file_raw(
-        capacity: usize,
-        file: File,
-        file_path: PathBuf,
-        total_pages: u32,
-    ) -> Self {
-        let mut pool = Self::new(capacity);
-        pool.file_path = Some(file_path);
-        pool.file_ident = file_ident(&file);
-        pool.file = Some(file);
+    /// Attach a raw page file (such as a B+ Tree .idx file) to the global
+    /// store; the page count comes from the caller, not a heap header.
+    pub fn with_file_raw(file: File, file_path: PathBuf, total_pages: u32) -> Self {
+        let mut pool = Self::on_store(Store::global().clone());
         pool.total_pages = total_pages;
+        pool.attach_file(file, file_path);
         pool
     }
 
@@ -249,35 +672,26 @@ impl BufferPool {
             .create(true)
             .truncate(false)
             .open(path)?;
-
-        // Read header page to get page count
-        let file_size = file.metadata()?.len();
-        if file_size >= PAGE_SIZE as u64 {
-            let mut header = Page::new();
-            file.seek(SeekFrom::Start(0))?;
-            file.read_exact(&mut header.data)?;
-            // Page count is stored in first 4 bytes of the header
-            self.total_pages = u32::from_le_bytes(header.data[0..4].try_into().unwrap());
-        } else {
-            // File is empty or too small — treat as new
-            self.total_pages = 0;
-        }
-
-        self.file_path = Some(path.to_path_buf());
-        self.file_ident = file_ident(&file);
-        self.file = Some(file);
-        log::info!(
-            "BufferPool opened with capacity={}, file has {} pages",
-            self.capacity,
-            self.total_pages
-        );
-
+        // File is empty or too small — treat as new
+        self.total_pages = read_header_pages(&mut file)?.unwrap_or(0);
+        self.attach_file(file, path.to_path_buf());
         Ok(())
     }
 
     /// Check if the pool has a file open.
     pub fn is_open(&self) -> bool {
         self.file.is_some()
+    }
+
+    /// The underlying file handle, if a file is attached.
+    pub(crate) fn file_handle(&self) -> Option<&File> {
+        self.file.as_deref()
+    }
+
+    /// A duplicate of the underlying file handle (shares the file offset).
+    /// Used for external scans such as the FSM rebuild.
+    pub(crate) fn try_clone_file(&self) -> io::Result<File> {
+        self.file.as_ref().ok_or_else(no_file)?.try_clone()
     }
 
     /// Check if the underlying open file handle is stale compared to the file
@@ -313,248 +727,233 @@ impl BufferPool {
         self.total_pages
     }
 
+    fn id(&self) -> io::Result<u32> {
+        self.file_id.ok_or_else(no_file)
+    }
+
     // ─── Core Page Fetch API ─────────────────────────────────────────────
 
     /// Fetch a page from the buffer pool, pinning it in memory.
     ///
     /// If the page is not already cached, it will be loaded from disk,
-    /// potentially evicting an unpinned page.
+    /// potentially evicting an unpinned page (of any file).
     ///
     /// Returns a `FrameId` that can be used with `get_page()` / `get_page_mut()`.
     /// Call `unpin()` when done to allow eviction.
     pub fn fetch_page(&mut self, page_id: u32) -> io::Result<FrameId> {
-        // 1. Check if already cached
-        if let Some(&frame_idx) = self.frame_table.get(&page_id) {
-            let frame = &mut self.frames[frame_idx];
-            frame.pin_count += 1;
-            frame.clock_bit = true;
-            return Ok(FrameId(frame_idx));
-        }
-
-        // 2. Cache miss — find or evict a frame
-        let frame_idx = self.evict_frame()?;
-
-        // 3. Load page data from disk into a temporary buffer first
-        //    (resolves borrow conflict: frames is borrowed after file I/O completes)
-        let mut temp_page = Page::new();
-        self.read_page_from_disk(&mut temp_page, page_id)?;
-
-        // 4. Store the loaded page in the frame
-        {
-            let frame = &mut self.frames[frame_idx];
-            frame.page_id = page_id;
-            frame.page = temp_page;
-            frame.is_dirty = false;
-            frame.pin_count = 1;
-            frame.clock_bit = true;
-            frame.occupied = true;
-        }
-
-        // 5. Update lookup table
-        self.frame_table.insert(page_id, frame_idx);
-
-        Ok(FrameId(frame_idx))
+        let id = self.id()?;
+        let idx = self.store.lock().fetch(id, page_id, self.total_pages)?;
+        Ok(FrameId(idx))
     }
 
-    /// Allocate a new page (extend the file).
+    /// Allocate a new page (extend the file) and header count.
     ///
     /// Returns `(page_id, frame_id)` for the newly created page.
     pub fn new_page(&mut self) -> io::Result<(u32, FrameId)> {
+        let fid = self.id()?;
         let page_id = self.total_pages;
+        let mut g = self.store.lock();
 
-        // 1. Evict first, BEFORE modifying the file (avoids borrow conflict with file)
-        let frame_idx = self.evict_frame()?;
+        // Evict first, BEFORE modifying the file.
+        let idx = g.acquire_frame()?;
+        let res = (|| -> io::Result<()> {
+            let file = g.files.get(&fid).ok_or_else(no_file)?.file.clone();
+            let page = &mut g.frames[idx].page;
+            init_page(page);
 
-        // 2. Get file handle AFTER eviction (separate mutable borrow)
-        let file: &mut File = self.file.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no open file")
-        })?;
+            // Append to file
+            let mut f: &File = &file;
+            f.seek(SeekFrom::End(0))?;
+            f.write_all(&page.data)?;
+            f.flush()?;
 
-        // 3. Create initialized page
-        let mut page = Page::new();
-        init_page(&mut page);
+            // Update header page count on disk
+            let header_buf = (page_id + 1).to_le_bytes();
+            f.seek(SeekFrom::Start(0))?;
+            f.write_all(&header_buf)?;
+            f.flush()?;
 
-        // 4. Append to file
-        file.seek(SeekFrom::End(0))?;
-        file.write_all(&page.data)?;
-        file.flush()?;
-
-        // 5. Update header page count on disk
-        self.total_pages = page_id + 1;
-        let mut header_buf = [0u8; 8];
-        header_buf[0..4].copy_from_slice(&self.total_pages.to_le_bytes());
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&header_buf[0..4])?;
-        file.flush()?;
-
-        // A resident header page must agree with the file, or flushing it
-        // later would write the old count back.
-        if let Some(&header_idx) = self.frame_table.get(&0) {
-            self.frames[header_idx].page.data[0..4]
-                .copy_from_slice(&self.total_pages.to_le_bytes());
+            // A resident header page must agree with the file, or flushing
+            // it later would write the old count back.
+            if let Some(&h) = g.table.get(&frame_key(fid, 0)) {
+                g.frames[h].page.data[0..4].copy_from_slice(&header_buf);
+            }
+            Ok(())
+        })();
+        if let Err(e) = res {
+            g.release_unused(idx);
+            return Err(e);
         }
-
-        // 6. Store in pool (not dirty — already written to disk)
-        let frame = &mut self.frames[frame_idx];
-        frame.page_id = page_id;
-        frame.page = page;
-        frame.is_dirty = false;
-        frame.pin_count = 1;
-        frame.clock_bit = true;
-        frame.occupied = true;
-
-        self.frame_table.insert(page_id, frame_idx);
-
-        Ok((page_id, FrameId(frame_idx)))
+        self.total_pages = page_id + 1;
+        // Not dirty — already written to disk.
+        g.install(idx, fid, page_id, 1);
+        Ok((page_id, FrameId(idx)))
     }
 
     /// Allocate a new raw page (without initializing heap headers or rewriting page 0).
     /// Used for index files where page 0 is a B+ Tree node.
     pub fn allocate_raw_page(&mut self, data: &[u8]) -> io::Result<u32> {
+        let fid = self.id()?;
         let page_id = self.total_pages;
+        let mut g = self.store.lock();
 
-        // 1. Evict first if needed
-        let frame_idx = self.evict_frame()?;
-
-        // 2. Append to file
-        let file: &mut File = self.file.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no open file")
-        })?;
-        file.seek(SeekFrom::End(0))?;
-        file.write_all(data)?;
-        file.flush()?;
-
+        let idx = g.acquire_frame()?;
+        let res = (|| -> io::Result<()> {
+            let file = g.files.get(&fid).ok_or_else(no_file)?.file.clone();
+            let mut f: &File = &file;
+            f.seek(SeekFrom::End(0))?;
+            f.write_all(data)?;
+            f.flush()?;
+            let page = &mut g.frames[idx].page;
+            page.data.fill(0);
+            page.data[..data.len()].copy_from_slice(data);
+            Ok(())
+        })();
+        if let Err(e) = res {
+            g.release_unused(idx);
+            return Err(e);
+        }
         self.total_pages = page_id + 1;
-
-        // 3. Store in pool
-        let mut page = Page::new();
-        page.data[..data.len()].copy_from_slice(data);
-        let frame = &mut self.frames[frame_idx];
-        frame.page_id = page_id;
-        frame.page = page;
-        frame.is_dirty = false;
-        frame.pin_count = 0;
-        frame.clock_bit = true;
-        frame.occupied = true;
-
-        self.frame_table.insert(page_id, frame_idx);
+        g.install(idx, fid, page_id, 0);
         Ok(page_id)
     }
 
     /// Read raw page bytes using the buffer pool cache.
     /// Hits return without any disk I/O!
     pub fn read_page_bytes(&mut self, page_id: u32) -> io::Result<Vec<u8>> {
-        let frame_id = self.fetch_page(page_id)?;
-        let data = self.get_page(frame_id).data.clone();
-        self.unpin(frame_id, false);
-        Ok(data)
+        Ok(self.page_bytes(page_id)?.to_vec())
     }
 
     /// Write raw page bytes through the buffer pool (marks page dirty).
     pub fn write_page_bytes(&mut self, page_id: u32, data: &[u8]) -> io::Result<()> {
-        let frame_id = self.fetch_page(page_id)?;
-        let page = self.get_page_mut(frame_id);
-        page.data[..data.len()].copy_from_slice(data);
-        self.unpin(frame_id, true);
+        self.page_bytes_mut(page_id)?[..data.len()].copy_from_slice(data);
         Ok(())
     }
 
     /// Borrow a page's bytes in place, loading the page on a miss.
     ///
-    /// Nothing is copied out of the frame. The borrow of the pool keeps the
-    /// frame where it is for as long as the slice lives, so no pin is left
-    /// behind.
-    pub fn page_bytes(&mut self, page_id: u32) -> io::Result<&[u8]> {
-        let frame_id = self.fetch_page(page_id)?;
-        self.unpin(frame_id, false);
-        Ok(&self.frames[frame_id.0].page.data)
+    /// Nothing is copied out of the frame. The frame stays pinned until the
+    /// returned guard is dropped.
+    pub fn page_bytes(&mut self, page_id: u32) -> io::Result<PageRef<'_>> {
+        let id = self.id()?;
+        let mut g = self.store.lock();
+        let idx = g.fetch(id, page_id, self.total_pages)?;
+        let data = &g.frames[idx].page.data;
+        let (ptr, len) = (data.as_ptr(), data.len());
+        drop(g);
+        Ok(PageRef {
+            store: &self.store,
+            idx,
+            ptr,
+            len,
+        })
     }
 
-    /// Borrow a page's bytes for editing in place and mark the page dirty.
-    pub fn page_bytes_mut(&mut self, page_id: u32) -> io::Result<&mut [u8]> {
-        let frame_id = self.fetch_page(page_id)?;
-        self.unpin(frame_id, true);
-        Ok(&mut self.frames[frame_id.0].page.data)
+    /// Borrow a page's bytes for editing in place; the page is marked dirty
+    /// when the guard drops.
+    pub fn page_bytes_mut(&mut self, page_id: u32) -> io::Result<PageMut<'_>> {
+        let id = self.id()?;
+        let mut g = self.store.lock();
+        let idx = g.fetch(id, page_id, self.total_pages)?;
+        let data = &mut g.frames[idx].page.data;
+        let (ptr, len) = (data.as_mut_ptr(), data.len());
+        drop(g);
+        Ok(PageMut {
+            store: &self.store,
+            idx,
+            ptr,
+            len,
+        })
     }
 
     /// Access a pinned page by frame ID.
     pub fn get_page(&self, frame_id: FrameId) -> &Page {
-        &self.frames[frame_id.0].page
+        let ptr: *const Page = &*self.store.lock().frames[frame_id.0].page;
+        // SAFETY: the caller holds a pin from `fetch_page`/`new_page`, so
+        // the frame is not evicted; the boxed page never moves.
+        unsafe { &*ptr }
     }
 
     /// Mutably access a pinned page by frame ID.
     pub fn get_page_mut(&mut self, frame_id: FrameId) -> &mut Page {
-        let frame = &mut self.frames[frame_id.0];
-        frame.clock_bit = true;
-        &mut frame.page
+        let ptr: *mut Page = {
+            let mut g = self.store.lock();
+            let f = &mut g.frames[frame_id.0];
+            f.clock_bit = true;
+            &mut *f.page
+        };
+        // SAFETY: as for `get_page`; `&mut self` makes this view the only
+        // accessor of its own frames.
+        unsafe { &mut *ptr }
     }
 
     /// Unpin a frame, optionally marking it as dirty.
-    ///
-    /// If `is_dirty` is true and the frame was not already dirty, it will be
-    /// marked so the eviction algorithm knows to write it back.
     pub fn unpin(&mut self, frame_id: FrameId, is_dirty: bool) {
-        let frame = &mut self.frames[frame_id.0];
-        if frame.pin_count > 0 {
-            frame.pin_count -= 1;
-        }
-        if is_dirty {
-            frame.is_dirty = true;
-        }
+        self.store.lock().unpin(frame_id.0, is_dirty);
     }
 
     // ─── Flush API ───────────────────────────────────────────────────────
 
     /// Flush a specific page to disk if it is dirty.
     pub fn flush_page(&mut self, page_id: u32) -> io::Result<()> {
-        if let Some(&frame_idx) = self.frame_table.get(&page_id)
-            && self.frames[frame_idx].is_dirty
+        let id = self.id()?;
+        let mut g = self.store.lock();
+        if let Some(&idx) = g.table.get(&frame_key(id, page_id))
+            && g.frames[idx].is_dirty
         {
-            self.write_page_to_disk(frame_idx)?;
+            g.write_frame(idx)?;
         }
         Ok(())
     }
 
-    /// Whether any frame holds unflushed modifications.
-    ///
-    /// Lets callers skip flush cycles entirely when the pool is clean —
-    /// repeated checkpoints during read workloads stay free.
+    /// Whether any frame of this file holds unflushed modifications.
     pub fn has_dirty(&self) -> bool {
-        self.frames.iter().any(|f| f.occupied && f.is_dirty)
+        self.file_id.is_some_and(|id| {
+            self.store
+                .lock()
+                .files
+                .get(&id)
+                .is_some_and(|e| e.dirty > 0)
+        })
     }
 
-    /// Write all dirty pages to the file without fsync.
+    /// Write all dirty pages of this file without fsync.
     ///
     /// The pages become visible to direct-I/O readers and survive a process
     /// crash; `flush_all` makes them survive a power loss.
     pub fn write_dirty(&mut self) -> io::Result<()> {
-        for i in 0..self.capacity {
-            if self.frames[i].occupied && self.frames[i].is_dirty {
-                self.write_page_to_disk(i)?;
-                self.unsynced = true;
-            }
+        match self.file_id {
+            Some(id) => self.store.lock().write_dirty(id),
+            None => Ok(()),
         }
-        Ok(())
     }
 
-    /// Flush all dirty pages to disk and fsync.
+    /// Flush all dirty pages to disk and fsync (if anything was written
+    /// since the last fsync).
     pub fn flush_all(&mut self) -> io::Result<()> {
-        self.write_dirty()?;
-        if self.unsynced
-            && let Some(ref mut file) = self.file
-        {
-            file.flush()?;
+        let Some(id) = self.file_id else {
+            return Ok(());
+        };
+        let to_sync = {
+            let mut g = self.store.lock();
+            g.write_dirty(id)?;
+            match g.files.get_mut(&id) {
+                Some(e) if e.unsynced => {
+                    e.unsynced = false;
+                    Some(e.file.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(file) = to_sync {
+            let mut f: &File = &file;
+            f.flush()?;
             file.sync_all()?;
         }
-        self.unsynced = false;
         Ok(())
     }
 
     /// Fetch a page and return a `FrameGuard` that auto-unpins on drop.
-    ///
-    /// This is the recommended way to fetch pages as it prevents forgetting
-    /// to call `unpin()`. Mark the frame dirty via `guard.mark_dirty(true)`
-    /// or by calling `guard.get_page_mut()` (which auto-marks dirty).
     pub fn fetch_page_guarded(&mut self, page_id: u32) -> io::Result<FrameGuard<'_>> {
         let frame_id = self.fetch_page(page_id)?;
         Ok(FrameGuard::new(self, frame_id))
@@ -562,156 +961,58 @@ impl BufferPool {
 
     // ─── Statistics ──────────────────────────────────────────────────────
 
-    /// Number of frames currently occupied.
-    pub fn occupied_count(&self) -> usize {
-        self.frames.iter().filter(|f| f.occupied).count()
-    }
-
-    /// Number of frames currently pinned.
-    pub fn pinned_count(&self) -> usize {
-        self.frames.iter().filter(|f| f.pin_count > 0).count()
-    }
-
-    /// Number of dirty frames.
-    pub fn dirty_count(&self) -> usize {
-        self.frames
+    fn count_frames(&self, pred: impl Fn(&Frame) -> bool) -> usize {
+        let Some(id) = self.file_id else { return 0 };
+        let g = self.store.lock();
+        g.frames
             .iter()
-            .filter(|f| f.occupied && f.is_dirty)
+            .filter(|f| f.occupied && (f.key >> 32) as u32 == id && pred(f))
             .count()
     }
 
-    /// Total capacity of the pool.
+    /// Number of frames of this file currently resident.
+    pub fn occupied_count(&self) -> usize {
+        self.count_frames(|_| true)
+    }
+
+    /// Number of this file's frames currently pinned.
+    pub fn pinned_count(&self) -> usize {
+        self.count_frames(|f| f.pin_count > 0)
+    }
+
+    /// Number of this file's dirty frames.
+    pub fn dirty_count(&self) -> usize {
+        self.count_frames(|f| f.is_dirty)
+    }
+
+    /// Frame budget of the store this view belongs to.
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.store.lock().capacity
     }
 
-    /// Current cache hit rate metrics.
+    /// Fraction of the store's budget this file occupies.
     pub fn utilization(&self) -> f64 {
-        self.occupied_count() as f64 / self.capacity as f64
+        self.occupied_count() as f64 / self.capacity() as f64
     }
+}
 
-    // ─── Internal Helpers ────────────────────────────────────────────────
-
-    /// CLOCK-sweep eviction: find a frame to reuse.
-    ///
-    /// Algorithm:
-    /// 1. Start at `clock_hand` and cycle through frames.
-    /// 2. Skip pinned frames (pin_count > 0).
-    /// 3. If clock_bit is 1, clear it to 0 and advance.
-    /// 4. If clock_bit is 0, evict this frame (write back if dirty).
-    ///
-    /// Returns the index of the evicted (now available) frame.
-    fn evict_frame(&mut self) -> io::Result<usize> {
-        loop {
-            for _ in 0..self.capacity {
-                let idx = self.clock_hand;
-                self.clock_hand = (self.clock_hand + 1) % self.capacity;
-
-                if !self.frames[idx].occupied {
-                    // Free slot — reuse immediately
-                    return Ok(idx);
-                }
-
-                if self.frames[idx].pin_count > 0 {
-                    // Pinned — skip
-                    continue;
-                }
-
-                if self.frames[idx].clock_bit {
-                    // Recently used — clear bit and keep looking
-                    self.frames[idx].clock_bit = false;
-                    continue;
-                }
-
-                // Evict this frame
-                if self.frames[idx].is_dirty {
-                    self.write_page_to_disk(idx)?;
-                }
-
-                // Remove from lookup table
-                let page_id = self.frames[idx].page_id;
-                self.frame_table.remove(&page_id);
-
-                // Reset the frame
-                self.frames[idx].occupied = false;
-                self.frames[idx].is_dirty = false;
-                self.frames[idx].pin_count = 0;
-                self.frames[idx].clock_bit = false;
-                self.frames[idx].page_id = u32::MAX;
-
-                return Ok(idx);
-            }
-
-            // If we cycled through all frames without finding a victim,
-            // all unpinned frames were recently used and got their bits cleared.
-            // Try one more full sweep — this time we'll find victims.
-            // If still nothing, all frames are pinned (deadlock).
-            let all_pinned = self.frames.iter().all(|f| f.pin_count > 0);
-            if all_pinned {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "BufferPool: all frames are pinned — cannot evict",
-                ));
-            }
-        }
+/// Page count from a heap file's header page, `None` if the file is too
+/// small to have one.
+fn read_header_pages(file: &mut File) -> io::Result<Option<u32>> {
+    let file_size = file.metadata()?.len();
+    if file_size < PAGE_SIZE as u64 {
+        return Ok(None);
     }
-
-    /// Read a page from disk into the given Page struct.
-    fn read_page_from_disk(&mut self, page: &mut Page, page_id: u32) -> io::Result<()> {
-        let file = self.file.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no open file")
-        })?;
-
-        let offset = page_id as u64 * PAGE_SIZE as u64;
-        let file_size = file.metadata()?.len();
-
-        if offset >= file_size {
-            // An allocated page that has not reached disk yet reads as an
-            // empty page. A page id that was never allocated is a stale
-            // pointer (from the FSM or an index): fail instead of inventing
-            // a blank page that could later be written past end of file.
-            if page_id >= self.total_pages {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!(
-                        "page {} does not exist (file has {} pages)",
-                        page_id, self.total_pages
-                    ),
-                ));
-            }
-            init_page(page);
-            return Ok(());
-        }
-
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut page.data)?;
-
-        Ok(())
-    }
-
-    /// Write a frame's page to disk.
-    fn write_page_to_disk(&mut self, frame_idx: usize) -> io::Result<()> {
-        let file = self.file.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no open file")
-        })?;
-
-        let page_id = self.frames[frame_idx].page_id;
-        let offset = page_id as u64 * PAGE_SIZE as u64;
-
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(&self.frames[frame_idx].page.data)?;
-
-        self.frames[frame_idx].is_dirty = false;
-
-        Ok(())
-    }
+    let mut header = [0u8; 4];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    Ok(Some(u32::from_le_bytes(header)))
 }
 
 impl Drop for BufferPool {
     fn drop(&mut self) {
-        if let Err(e) = self.flush_all() {
-            log::error!("BufferPool: error flushing on drop: {}", e);
-        }
+        // Flushes, then releases this file's frames to the shared budget.
+        self.detach_file();
     }
 }
 
@@ -1095,5 +1396,98 @@ mod tests {
         pool.unpin(f2, false);
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_budget_is_shared_between_files() {
+        let (pa, pb) = (unique_temp_path(), unique_temp_path());
+        create_test_file(&pa, 8).unwrap();
+        create_test_file(&pb, 8).unwrap();
+        let mut a = BufferPool::new(4);
+        a.open(&pa).unwrap();
+        let mut b = a.sibling();
+        b.open(&pb).unwrap();
+
+        // File A dirties two pages and fills three of the four frames.
+        a.page_bytes_mut(1).unwrap()[100] = 0xA1;
+        a.page_bytes_mut(2).unwrap()[100] = 0xA2;
+        a.page_bytes(3).unwrap();
+        assert_eq!(a.occupied_count() + b.occupied_count(), 3);
+
+        // File B reads five pages: the total never exceeds the budget and
+        // A's dirty pages are written back to A's file when evicted.
+        for page in 1..6 {
+            b.page_bytes(page).unwrap();
+            assert!(a.occupied_count() + b.occupied_count() <= 4);
+        }
+        assert_eq!(a.dirty_count(), 0);
+        assert!(!a.has_dirty());
+        assert_eq!(a.page_bytes(1).unwrap()[100], 0xA1);
+        assert_eq!(a.page_bytes(2).unwrap()[100], 0xA2);
+
+        // Frames of the same page id in two files do not collide.
+        assert_ne!(a.page_bytes(1).unwrap()[100], b.page_bytes(1).unwrap()[100]);
+
+        drop(a);
+        drop(b);
+        fs::remove_file(&pa).ok();
+        fs::remove_file(&pb).ok();
+    }
+
+    #[test]
+    fn test_drop_releases_frames_and_new_identity_sees_no_stale_pages() {
+        let path = unique_temp_path();
+        create_test_file(&path, 4).unwrap();
+        let mut a = BufferPool::new(4);
+        a.open(&path).unwrap();
+        let mut b = a.sibling();
+        a.page_bytes_mut(1).unwrap()[200] = 0x77;
+        a.flush_all().unwrap();
+        drop(a);
+
+        // Dropping the view released its frames to the budget.
+        {
+            let g = b.store.lock();
+            assert!(g.table.is_empty());
+        }
+
+        // Replace the file on disk; a view attached afterwards reads the
+        // new contents, never a frame cached for the old file.
+        fs::remove_file(&path).unwrap();
+        create_test_file(&path, 4).unwrap();
+        b.open(&path).unwrap();
+        assert_eq!(b.page_bytes(1).unwrap()[200], 0);
+        drop(b);
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_pinned_guard_blocks_eviction_across_files() {
+        let (pa, pb) = (unique_temp_path(), unique_temp_path());
+        create_test_file(&pa, 4).unwrap();
+        create_test_file(&pb, 4).unwrap();
+        let mut a = BufferPool::new(1);
+        a.open(&pa).unwrap();
+        let mut b = a.sibling();
+        b.open(&pb).unwrap();
+        let held = a.fetch_page(1).unwrap();
+        // The only frame is pinned by file A: B cannot get one.
+        assert!(b.page_bytes(1).is_err());
+        a.unpin(held, false);
+        assert!(b.page_bytes(1).is_ok());
+        drop(a);
+        drop(b);
+        fs::remove_file(&pa).ok();
+        fs::remove_file(&pb).ok();
+    }
+
+    #[test]
+    fn test_fx_hasher_distinguishes_keys() {
+        use std::hash::BuildHasher;
+        let bh = BuildHasherDefault::<FxHasher>::default();
+        let hashes: std::collections::HashSet<u64> = (0..10_000u64)
+            .map(|i| bh.hash_one(frame_key((i % 7) as u32, (i / 7) as u32)))
+            .collect();
+        assert_eq!(hashes.len(), 10_000);
     }
 }

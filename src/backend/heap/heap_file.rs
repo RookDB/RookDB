@@ -27,7 +27,7 @@ impl HeapFile {
         let pool = crate::backend::cache::with_heap(engine, path, |hm| Ok(Arc::clone(&hm.pool)))?;
         let identity = {
             let guard = pool.lock().unwrap_or_else(|p| p.into_inner());
-            let file = guard.file.as_ref().ok_or_else(|| {
+            let file = guard.file_handle().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no file")
             })?;
             crate::backend::disk::file_identity_from_file(file)?

@@ -21,14 +21,13 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use super::buffer_pool::BufferPool;
 
-/// Frames per shared pool.
+/// Frames in the global buffer pool: the one memory budget for every table
+/// and index in the process.
 ///
-/// The historical default was 64 frames (512 KiB) — far too small for
-/// million-row tables, where every append stream evicted the whole pool
-/// thousands of times per second. The default is now 4096 frames (32 MiB)
-/// and can be overridden with `ROOK_POOL_FRAMES` (e.g. 16384 = 128 MiB).
+/// The default is 8192 frames (64 MiB) in total; override it with
+/// `ROOK_POOL_FRAMES` (e.g. 32768 = 256 MiB). Read once, at first use.
 pub fn shared_pool_capacity() -> usize {
-    const DEFAULT: usize = 4096;
+    const DEFAULT: usize = 8192;
     static CACHED: OnceLock<usize> = OnceLock::new();
     *CACHED.get_or_init(|| {
         std::env::var("ROOK_POOL_FRAMES")
@@ -91,7 +90,7 @@ pub fn get_or_create(file_path: &Path) -> io::Result<SharedPool> {
         .read(true)
         .write(true)
         .open(file_path)?;
-    let pool = BufferPool::with_file(shared_pool_capacity(), file, file_path.to_path_buf())?;
+    let pool = BufferPool::with_file(file, file_path.to_path_buf())?;
     Ok(register_pool(file_path, pool))
 }
 

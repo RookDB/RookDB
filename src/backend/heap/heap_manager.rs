@@ -287,8 +287,7 @@ impl HeapManager {
 
         // Register a brand-new shared pool for this (re-created) file,
         // replacing any registry entry left over from a previous file.
-        let pool =
-            BufferPool::with_file(shared_pool::shared_pool_capacity(), file, file_path.clone())?;
+        let pool = BufferPool::with_file(file, file_path.clone())?;
         let pool = shared_pool::register_pool(&file_path, pool);
 
         // Derive FSM path
@@ -367,14 +366,9 @@ impl HeapManager {
             let mut guard = pool.lock().unwrap_or_else(|p| p.into_inner());
             // The rebuild reads the file, so pages still in the pool go out first.
             guard.write_dirty()?;
-            let mut file = guard.file.take().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no file")
-            })?;
+            let mut file = guard.try_clone_file()?;
             file.seek(SeekFrom::Start(0))?;
-            let fsm = FSM::build_from_heap(&mut file, fsm_path.clone())?;
-            // Return file to the pool
-            guard.file = Some(file);
-            fsm
+            FSM::build_from_heap(&mut file, fsm_path.clone())?
         } else {
             FSM::open(fsm_path.clone(), header.page_count)?
         };

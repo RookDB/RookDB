@@ -40,13 +40,13 @@ mod codec;
 mod node;
 mod order;
 
+pub(crate) use codec::root_sidecar_path;
 pub(crate) use codec::{
     BTREE_PAGE_SIZE, decode_key, encode_key, encode_key_multi, read_root_sidecar,
     write_root_sidecar,
 };
 use codec::{CHILD_SIZE, LEAF_HEADER, PAGE_HEADER, PAGE_TYPE_LEAF, VALUE_SIZE};
 pub use node::BTreeNode;
-pub(crate) use codec::root_sidecar_path;
 use node::NodeView;
 use order::{KeyOrder, LeafInsertSlot};
 
@@ -57,9 +57,6 @@ use crate::types::DataType;
 use crate::types::value::DataValue;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-
-/// Default capacity for an index buffer pool in 8 KB frames.
-pub const INDEX_POOL_CAPACITY: usize = 256;
 
 /// Largest encoded key an index accepts: a third of a leaf's payload, so a
 /// byte-balanced split always yields two halves that fit and every internal
@@ -182,7 +179,7 @@ impl BTree {
         // Persist the root pointer sidecar so reopen lands on the real root.
         write_root_sidecar(&file_path, 0)?;
 
-        let pool = BufferPool::with_file_raw(INDEX_POOL_CAPACITY, file, file_path.clone(), 1);
+        let pool = BufferPool::with_file_raw(file, file_path.clone(), 1);
 
         log::info!("[BTree::create] Created with 1 page, root=0");
         Ok(Self {
@@ -212,8 +209,7 @@ impl BTree {
         let file_size = file.metadata()?.len();
         let total_pages = (file_size as usize / BTREE_PAGE_SIZE) as u32;
 
-        let pool =
-            BufferPool::with_file_raw(INDEX_POOL_CAPACITY, file, file_path.clone(), total_pages);
+        let pool = BufferPool::with_file_raw(file, file_path.clone(), total_pages);
 
         // The key_type is not stored in the file yet — callers must provide it
         // In a full implementation, type info would be stored in a header page.
@@ -317,7 +313,8 @@ impl BTree {
         // Scan all leaves via the doubly-linked list
         let mut current = first_leaf;
         loop {
-            let view = NodeView::parse(self.pool.page_bytes(current)?)?;
+            let bytes = self.pool.page_bytes(current)?;
+            let view = NodeView::parse(&bytes)?;
             if !view.is_leaf() {
                 unreachable!("Expected leaf node in scan_all");
             }
@@ -336,7 +333,8 @@ impl BTree {
     fn find_leftmost_leaf(&mut self, page_id: u32) -> io::Result<u32> {
         let mut page_id = page_id;
         loop {
-            let view = NodeView::parse(self.pool.page_bytes(page_id)?)?;
+            let bytes = self.pool.page_bytes(page_id)?;
+            let view = NodeView::parse(&bytes)?;
             if view.is_leaf() {
                 return Ok(page_id);
             }
@@ -355,7 +353,7 @@ impl BTree {
     /// restructure a node (splits) or print it need one; everything else
     /// reads the page in the pool through a [`NodeView`].
     fn read_node(&mut self, page_id: u32) -> io::Result<BTreeNode> {
-        BTreeNode::deserialize(self.pool.page_bytes(page_id)?)
+        BTreeNode::deserialize(&self.pool.page_bytes(page_id)?)
     }
 
     /// Write a node page through the buffer pool (marks page dirty).
@@ -429,7 +427,8 @@ impl BTree {
         let mut current_leaf = leaf_id;
         let order = KeyOrder::new(&self.key_types);
         loop {
-            let view = NodeView::parse(self.pool.page_bytes(current_leaf)?)?;
+            let bytes = self.pool.page_bytes(current_leaf)?;
+            let view = NodeView::parse(&bytes)?;
             if !view.is_leaf() {
                 unreachable!("Expected leaf node in range scan");
             }
@@ -513,7 +512,8 @@ impl BTree {
         // Duplicates can span several leaves: keep walking the chain until a
         // larger key shows up.
         loop {
-            let view = NodeView::parse(self.pool.page_bytes(leaf_id)?)?;
+            let bytes = self.pool.page_bytes(leaf_id)?;
+            let view = NodeView::parse(&bytes)?;
             let mut past_key = false;
             if let Some((width, target)) = order.int_fast_path(&view, encoded_key) {
                 let first = view.int_partition_point(width, |k| k < target);
@@ -585,7 +585,8 @@ impl BTree {
         // Entries for one key can span several leaves, so walk the chain until
         // the entry is found or a larger key shows the key is exhausted.
         let (num_keys, index, key_off, key_len, used) = loop {
-            let view = NodeView::parse(self.pool.page_bytes(leaf_id)?)?;
+            let bytes = self.pool.page_bytes(leaf_id)?;
+            let view = NodeView::parse(&bytes)?;
             let leaf =
                 order.locate_leaf_entry(&view, encoded_key, (value_page_id, value_slot_id))?;
             if let Some((index, key_off, key_len)) = leaf.found {
@@ -600,7 +601,7 @@ impl BTree {
         // Edit the page where it sits in the pool. Close the 8-byte gap left
         // by the value (this also slides the keys before the removed one),
         // then the gap left by the key itself.
-        let buf = self.pool.page_bytes_mut(leaf_id)?;
+        let mut buf = self.pool.page_bytes_mut(leaf_id)?;
         let value_off = LEAF_HEADER + index * VALUE_SIZE;
         buf.copy_within(value_off + VALUE_SIZE..key_off, value_off);
         buf.copy_within(key_off + key_len..used, key_off - VALUE_SIZE);
@@ -688,7 +689,8 @@ impl BTree {
         let mut leaf_id = self.find_first_leaf(page_id, encoded_key)?;
         let order = KeyOrder::new(&self.key_types);
         loop {
-            let view = NodeView::parse(self.pool.page_bytes(leaf_id)?)?;
+            let bytes = self.pool.page_bytes(leaf_id)?;
+            let view = NodeView::parse(&bytes)?;
 
             if let Some((width, target)) = order.int_fast_path(&view, encoded_key) {
                 let first = view.int_partition_point(width, |k| k < target);
@@ -724,7 +726,8 @@ impl BTree {
         let mut page_id = page_id;
         let order = KeyOrder::new(&self.key_types);
         loop {
-            let view = NodeView::parse(self.pool.page_bytes(page_id)?)?;
+            let bytes = self.pool.page_bytes(page_id)?;
+            let view = NodeView::parse(&bytes)?;
             if view.is_leaf() {
                 return Ok(page_id);
             }
@@ -748,12 +751,24 @@ impl BTree {
         value_slot_id: u32,
     ) -> io::Result<Option<(Vec<u8>, u32)>> {
         let order = KeyOrder::new(&self.key_types);
-        let view = NodeView::parse(self.pool.page_bytes(page_id)?)?;
+        // Decide from the page in place, then release it (and its pin)
+        // before anything below touches the pool again.
+        let (leaf_slot, child_idx, child_id) = {
+            let bytes = self.pool.page_bytes(page_id)?;
+            let view = NodeView::parse(&bytes)?;
+            if view.is_leaf() {
+                // One pass over the leaf finds both the position and the
+                // space left, so the common insert never decodes or copies
+                // the page.
+                (Some(order.leaf_insert_slot(&view, encoded_key)?), 0, 0)
+            } else {
+                // Internal node — find child to descend into
+                let (child_idx, child_id) = order.pick_child(&view, encoded_key)?;
+                (None, child_idx, child_id)
+            }
+        };
 
-        if view.is_leaf() {
-            // One pass over the leaf finds both the position and the space
-            // left, so the common insert never decodes or copies the page.
-            let slot = order.leaf_insert_slot(&view, encoded_key)?;
+        if let Some(slot) = leaf_slot {
             if slot.used + VALUE_SIZE + encoded_key.len() <= BTREE_PAGE_SIZE {
                 self.insert_into_leaf(page_id, slot, encoded_key, value_page_id, value_slot_id)?;
                 Ok(None)
@@ -763,9 +778,6 @@ impl BTree {
                 Ok(Some((new_key, new_leaf_id)))
             }
         } else {
-            // Internal node — find child to descend into
-            let (child_idx, child_id) = order.pick_child(&view, encoded_key)?;
-
             // Acquire write lock for the child before modifying
             let file_id = self.file_id;
             let _lock = PageWriteLock::acquire(file_id, child_id);
@@ -778,7 +790,7 @@ impl BTree {
             if let Some((promoted_key, new_child_id)) = result {
                 // Re-read node to check space with the actual promoted key size
                 // (the promoted key may have a different size than encoded_key for varlen types)
-                let has_space = NodeView::parse(self.pool.page_bytes(page_id)?)?
+                let has_space = NodeView::parse(&self.pool.page_bytes(page_id)?)?
                     .has_space_for(promoted_key.len())?;
                 if has_space {
                     self.insert_into_internal(page_id, child_idx, &promoted_key, new_child_id)?;
@@ -824,7 +836,7 @@ impl BTree {
 
         // Shift bytes right, back to front, to open 8 bytes in the value
         // array and `key_len` bytes in the key area, then fill both gaps.
-        let buf = self.pool.page_bytes_mut(page_id)?;
+        let mut buf = self.pool.page_bytes_mut(page_id)?;
         let keys_start = LEAF_HEADER + num_keys * VALUE_SIZE;
         let value_off = LEAF_HEADER + insert_pos * VALUE_SIZE;
         buf.copy_within(key_off..used, key_off + VALUE_SIZE + key_len);
@@ -984,7 +996,7 @@ impl BTree {
         // sibling, in place in the pool.
         if old_next_leaf != 0
             && old_next_leaf < self.total_pages
-            && let Ok(next) = self.pool.page_bytes_mut(old_next_leaf)
+            && let Ok(mut next) = self.pool.page_bytes_mut(old_next_leaf)
             && next[0..4] == PAGE_TYPE_LEAF.to_le_bytes()
         {
             next[12..16].copy_from_slice(&new_leaf_id.to_le_bytes());
