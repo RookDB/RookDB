@@ -509,3 +509,61 @@ fn correlated_subquery_outer_reference_is_checked_for_ambiguity() {
         [[8]]
     );
 }
+
+#[test]
+fn quoted_table_names_keep_their_spelling_and_survive_a_reload() {
+    let (_ws, mut s) = setup("quoted_table");
+    ok(
+        &mut s,
+        r#"CREATE TABLE "My Table" (id INT PRIMARY KEY, v INT)"#,
+    );
+    ok(&mut s, r#"INSERT INTO "My Table" VALUES (1, 10), (2, 20)"#);
+    ok(&mut s, r#"UPDATE "My Table" SET v = 11 WHERE id = 1"#);
+    ok(
+        &mut s,
+        r#"CREATE TABLE child (cid INT, pid INT, FOREIGN KEY (pid) REFERENCES "My Table" (id))"#,
+    );
+    ok(&mut s, "INSERT INTO child VALUES (1, 2)");
+    assert!(run(&mut s, "INSERT INTO child VALUES (2, 99)").is_err());
+    assert_eq!(
+        ints(ok(
+            &mut s,
+            r#"SELECT t.v FROM "My Table" t JOIN child ON child.pid = t.id"#
+        )),
+        [[20]]
+    );
+    assert_eq!(
+        ints(ok(
+            &mut s,
+            r#"SELECT "My Table".v FROM "My Table" ORDER BY "My Table".id"#
+        )),
+        [[11], [20]]
+    );
+
+    // Reload from disk.
+    let mut s = Session::new(common::load_catalog());
+    ok(&mut s, "USE app");
+    assert_eq!(
+        ints(ok(&mut s, r#"SELECT v FROM "My Table" ORDER BY id"#)),
+        [[11], [20]]
+    );
+    assert!(run(&mut s, "INSERT INTO child VALUES (3, 98)").is_err());
+    ok(&mut s, r#"DELETE FROM "My Table" WHERE id = 1"#);
+    assert_eq!(ints(ok(&mut s, r#"SELECT id FROM "My Table""#)), [[2]]);
+    ok(&mut s, r#"ALTER TABLE "My Table" RENAME TO "Other Name""#);
+    assert_eq!(ints(ok(&mut s, r#"SELECT id FROM "Other Name""#)), [[2]]);
+    ok(&mut s, "DROP TABLE child");
+    ok(&mut s, r#"TRUNCATE TABLE "Other Name""#);
+    assert!(ints(ok(&mut s, r#"SELECT id FROM "Other Name""#)).is_empty());
+    ok(&mut s, r#"DROP TABLE "Other Name""#);
+    assert!(run(&mut s, r#"SELECT * FROM "Other Name""#).is_err());
+}
+
+#[test]
+fn table_names_a_file_cannot_hold_are_rejected() {
+    let (_ws, mut s) = setup("bad_table_names");
+    for name in [r#""a/b""#, r#""a:b""#, r#""a|b""#, r#""..""#, r#""a*b""#] {
+        let err = run(&mut s, &format!("CREATE TABLE {} (id INT)", name)).unwrap_err();
+        assert!(err.contains("Invalid table name"), "{}: {}", name, err);
+    }
+}

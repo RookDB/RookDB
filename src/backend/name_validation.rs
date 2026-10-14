@@ -7,14 +7,17 @@
 //! Every CREATE/DROP entry point validates names through [`validate_identifier`]
 //! before any filesystem work happens.
 
-/// Characters that must never appear in a database/table/index identifier.
-const FORBIDDEN_CHARS: &[char] = &['/', '\\', '\0'];
+/// Characters that must never appear in a database/table/index identifier:
+/// path separators and NUL, plus the ones a file name cannot hold on Windows
+/// (a quoted identifier may contain any character).
+const FORBIDDEN_CHARS: &[char] = &['/', '\\', '\0', '<', '>', ':', '"', '|', '?', '*'];
 
 /// Validate a database, table, or index name for safe use in file paths.
 ///
 /// Rejects:
 /// - empty names
-/// - names containing `/`, `\`, or NUL (path traversal / separator attacks)
+/// - names containing `/`, `\`, NUL, or `<>:"|?*` (path traversal / characters
+///   a file name cannot hold)
 /// - names containing `..` path segments (e.g. `..`, `../etc`, `a/../b`)
 /// - names starting with `.` (hidden files such as `.git`, `..foo`)
 /// - names consisting solely of dots
