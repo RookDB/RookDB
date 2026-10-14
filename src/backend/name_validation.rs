@@ -7,6 +7,8 @@
 //! Every CREATE/DROP entry point validates names through [`validate_identifier`]
 //! before any filesystem work happens.
 
+use crate::backend::error::{RookError, RookResult};
+
 /// Characters that must never appear in a database/table/index identifier:
 /// path separators and NUL, plus the ones a file name cannot hold on Windows
 /// (a quoted identifier may contain any character).
@@ -24,31 +26,33 @@ const FORBIDDEN_CHARS: &[char] = &['/', '\\', '\0', '<', '>', ':', '"', '|', '?'
 /// - control characters
 ///
 /// Returns `Ok(())` or an error describing the first problem found.
-pub fn validate_identifier(name: &str) -> Result<(), String> {
+pub fn validate_identifier(name: &str) -> RookResult<()> {
     if name.is_empty() {
-        return Err("Identifier cannot be empty".to_string());
+        return Err(RookError::InvalidIdentifier(
+            "Identifier cannot be empty".to_string(),
+        ));
     }
 
     if name.len() > 255 {
-        return Err(format!(
+        return Err(RookError::InvalidIdentifier(format!(
             "Identifier '{}' exceeds the 255 character limit",
             name
-        ));
+        )));
     }
 
     if let Some(ch) = name.chars().find(|c| FORBIDDEN_CHARS.contains(c)) {
-        return Err(format!(
+        return Err(RookError::InvalidIdentifier(format!(
             "Identifier '{}' contains forbidden character {:?}",
             escape_control(name),
             ch
-        ));
+        )));
     }
 
     if name.starts_with('.') {
-        return Err(format!(
+        return Err(RookError::InvalidIdentifier(format!(
             "Identifier '{}' cannot start with a dot",
             escape_control(name)
-        ));
+        )));
     }
 
     // Reject any "." or ".." path segment (covers "..", "a/..", "a..b" is fine,
@@ -57,35 +61,38 @@ pub fn validate_identifier(name: &str) -> Result<(), String> {
         || name.split('/').any(|seg| seg == "..")
         || name.split('\\').any(|seg| seg == "..")
     {
-        return Err(format!(
+        return Err(RookError::InvalidIdentifier(format!(
             "Identifier '{}' cannot contain '..' path segments",
             escape_control(name)
-        ));
+        )));
     }
 
     if name.chars().any(|c| c.is_control()) {
-        return Err(format!(
+        return Err(RookError::InvalidIdentifier(format!(
             "Identifier '{}' contains control characters",
             escape_control(name)
-        ));
+        )));
     }
 
     Ok(())
 }
 
 /// Validate a database name (same rules as [`validate_identifier`]).
-pub fn validate_database_name(name: &str) -> Result<(), String> {
-    validate_identifier(name).map_err(|e| format!("Invalid database name: {}", e))
+pub fn validate_database_name(name: &str) -> RookResult<()> {
+    validate_identifier(name)
+        .map_err(|e| RookError::InvalidIdentifier(format!("Invalid database name: {}", e)))
 }
 
 /// Validate a table name (same rules as [`validate_identifier`]).
-pub fn validate_table_name(name: &str) -> Result<(), String> {
-    validate_identifier(name).map_err(|e| format!("Invalid table name: {}", e))
+pub fn validate_table_name(name: &str) -> RookResult<()> {
+    validate_identifier(name)
+        .map_err(|e| RookError::InvalidIdentifier(format!("Invalid table name: {}", e)))
 }
 
 /// Validate an index name.
-pub fn validate_index_name(name: &str) -> Result<(), String> {
-    validate_identifier(name).map_err(|e| format!("Invalid index name: {}", e))
+pub fn validate_index_name(name: &str) -> RookResult<()> {
+    validate_identifier(name)
+        .map_err(|e| RookError::InvalidIdentifier(format!("Invalid index name: {}", e)))
 }
 
 fn escape_control(s: &str) -> String {
@@ -163,10 +170,10 @@ mod tests {
     #[test]
     fn typed_helpers_prefix_errors() {
         let err = validate_database_name("x/y").unwrap_err();
-        assert!(err.starts_with("Invalid database name"));
+        assert!(err.to_string().starts_with("Invalid database name"));
         let err = validate_table_name("x/y").unwrap_err();
-        assert!(err.starts_with("Invalid table name"));
+        assert!(err.to_string().starts_with("Invalid table name"));
         let err = validate_index_name("").unwrap_err();
-        assert!(err.starts_with("Invalid index name"));
+        assert!(err.to_string().starts_with("Invalid index name"));
     }
 }

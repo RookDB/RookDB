@@ -59,7 +59,8 @@ pub enum RookError {
     NotFound { entity: &'static str, name: String },
     /// A bare column name matches columns of more than one joined input.
     AmbiguousColumn(String),
-    /// A name failed path-safety validation (see `name_validation`).
+    /// A name failed path-safety validation (see `name_validation`); holds
+    /// the full human-readable reason.
     InvalidIdentifier(String),
     /// A value could not be interpreted for its column's data type.
     TypeMismatch(String),
@@ -138,7 +139,7 @@ impl fmt::Display for RookError {
             RookError::AmbiguousColumn(name) => {
                 write!(f, "Column reference '{}' is ambiguous", name)
             }
-            RookError::InvalidIdentifier(name) => write!(f, "Invalid identifier '{}'", name),
+            RookError::InvalidIdentifier(message) => f.write_str(message),
             RookError::TypeMismatch(message) => f.write_str(message),
             RookError::Io(e) => write!(f, "I/O error: {}", e),
             RookError::Contextual { context, source } => write!(f, "{}: {}", context, source),

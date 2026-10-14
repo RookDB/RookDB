@@ -113,7 +113,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
     // Validate database name (path-safety: reject separators, '..', NUL, …)
     if let Err(e) = crate::backend::name_validation::validate_database_name(db_name) {
         log::info!("{}", e);
-        debug_print_catalog(&e);
+        debug_print_catalog(&e.to_string());
         return false;
     }
 
