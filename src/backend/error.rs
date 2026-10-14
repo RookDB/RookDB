@@ -57,6 +57,16 @@ pub enum RookError {
     },
     /// A referenced database / table / column does not exist.
     NotFound { entity: &'static str, name: String },
+    /// A named object is missing from its container, e.g. a table that is not
+    /// in a database: `"{entity} '{name}' not found in {container_kind} '{container}'"`.
+    NotFoundIn {
+        entity: &'static str,
+        name: String,
+        container_kind: &'static str,
+        container: String,
+    },
+    /// An object being created already exists (database, table, view, column).
+    AlreadyExists(String),
     /// A bare column name matches columns of more than one joined input.
     AmbiguousColumn(String),
     /// A name failed path-safety validation (see `name_validation`); holds
@@ -145,6 +155,16 @@ impl RookError {
         }
     }
 
+    /// Show a top-level [`RookError::Io`] without its `I/O error:` prefix
+    /// (as [`RookError::Storage`]), for callers that re-render an error the
+    /// way the bare `io::Error` text used to read.
+    pub fn bare_io(self) -> Self {
+        match self {
+            RookError::Io(source) => RookError::storage_bare(source),
+            other => other,
+        }
+    }
+
     /// Attach human-readable context to this error, preserving its variant
     /// semantics (see [`RookError::Contextual`]). Contexts chain when applied
     /// repeatedly: the most recent context renders first.
@@ -163,6 +183,17 @@ impl fmt::Display for RookError {
             RookError::NotFound { entity, name } => {
                 write!(f, "{} '{}' not found", entity, name)
             }
+            RookError::NotFoundIn {
+                entity,
+                name,
+                container_kind,
+                container,
+            } => write!(
+                f,
+                "{} '{}' not found in {} '{}'",
+                entity, name, container_kind, container
+            ),
+            RookError::AlreadyExists(message) => f.write_str(message),
             RookError::AmbiguousColumn(name) => {
                 write!(f, "Column reference '{}' is ambiguous", name)
             }
@@ -280,6 +311,32 @@ mod tests {
         assert!(std::error::Error::source(&e).is_some());
         let bare = RookError::storage_bare(std::io::Error::other("boom"));
         assert_eq!(bare.to_string(), "boom");
+    }
+
+    #[test]
+    fn not_found_in_and_already_exists_render_their_sentences() {
+        let e = RookError::NotFoundIn {
+            entity: "Table",
+            name: "t".into(),
+            container_kind: "database",
+            container: "db".into(),
+        };
+        assert_eq!(e.to_string(), "Table 't' not found in database 'db'");
+        let e = RookError::AlreadyExists("Table 't' already exists".into());
+        assert_eq!(e.to_string(), "Table 't' already exists");
+        let io = RookError::from(std::io::Error::other("disk")).bare_io();
+        assert_eq!(io.to_string(), "disk");
+        assert!(io.is_io());
+    }
+
+    #[test]
+    fn context_trait_keeps_kind() {
+        let r: Result<(), std::io::Error> = Err(std::io::Error::other("x"));
+        let e = r.context("Failed to open").unwrap_err();
+        assert!(e.is_io());
+        assert_eq!(e.to_string(), "Failed to open: x");
+        let r: RookResult<()> = Err(RookError::TypeMismatch("bad".into()));
+        assert_eq!(r.context("ctx").unwrap_err().to_string(), "ctx: bad");
     }
 
     #[test]

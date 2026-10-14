@@ -1,6 +1,5 @@
 //! Database, table, view and index definition statements, and VACUUM.
 
-use std::io;
 use std::str::FromStr;
 
 use rook_ast::{
@@ -10,7 +9,7 @@ use rook_ast::{
 
 use super::names::{save_table_constraint, select_plan_references_table};
 use super::{Session, StatementResult};
-use crate::backend::error::{RookError, RookResult};
+use crate::backend::error::{ConstraintKind, ResultContext, RookError, RookResult};
 use crate::backend::executor::create_index::{
     create_index_with_flags, ensure_fk_parent_indexes, ensure_parent_column_index,
 };
@@ -130,12 +129,23 @@ pub(super) fn create_table(
     db: &str,
     params: &CreateTablePlan,
 ) -> RookResult<StatementResult> {
-    let not_created = |line: String| {
-        RookError::Internal(format!(
-            "{}\nTable '{}' was not created.",
-            line, params.table
-        ))
-    };
+    fn not_created<E: Into<RookError>>(table: &str, cause: E) -> RookError {
+        let suffix = |message: String| format!("{}\nTable '{}' was not created.", message, table);
+        match cause.into() {
+            RookError::ConstraintViolation {
+                kind,
+                table: constrained,
+                column,
+                message,
+            } => RookError::ConstraintViolation {
+                kind,
+                table: constrained,
+                column,
+                message: suffix(message),
+            },
+            other => RookError::Internal(suffix(other.to_string())),
+        }
+    }
 
     // Validate everything before touching the catalog or creating files: a
     // table must never be created with part of its definition missing.
@@ -153,7 +163,9 @@ pub(super) fn create_table(
     let mut columns = Vec::new();
     for col in &params.columns {
         let data_type = DataType::from_str(&col.data_type).map_err(|err| {
-            not_created(format!(
+            not_created(
+                &params.table,
+                format!(
                 "Unknown type '{}': {}. Supported: SMALLINT, INT, BIGINT, REAL, DOUBLE PRECISION, NUMERIC(p,s), DECIMAL(p,s), BOOLEAN, CHAR(n), CHARACTER(n), VARCHAR(n), DATE, TIME, TIMESTAMP, BIT(n)",
                 col.data_type, err
             ))
@@ -170,10 +182,13 @@ pub(super) fn create_table(
             _ => None,
         }) {
             default = default_value(&data_type, expr).map_err(|e| {
-                not_created(format!(
-                    "Invalid DEFAULT for column '{}' of type {}: {}",
-                    col.name, col.data_type, e
-                ))
+                not_created(
+                    &params.table,
+                    format!(
+                        "Invalid DEFAULT for column '{}' of type {}: {}",
+                        col.name, col.data_type, e
+                    ),
+                )
             })?;
         }
 
@@ -204,11 +219,11 @@ pub(super) fn create_table(
         } = tc
         {
             check_foreign_key(catalog, db, params, fk_cols, ref_table, ref_columns)
-                .map_err(not_created)?;
+                .map_err(|e| not_created(&params.table, e))?;
         }
     }
 
-    check_forward_references(catalog, db, params).map_err(not_created)?;
+    check_forward_references(catalog, db, params).map_err(|e| not_created(&params.table, e))?;
 
     catalog_create_table(catalog, db, &params.table, columns);
     let mut lines = vec![format!("Table '{}' created successfully.", params.table)];
@@ -359,7 +374,7 @@ fn check_forward_references(
     catalog: &Catalog,
     db: &str,
     params: &CreateTablePlan,
-) -> Result<(), String> {
+) -> RookResult<()> {
     let referencing = crate::backend::constraint::loaders::load_referencing_foreign_keys(
         catalog.engine(),
         db,
@@ -378,18 +393,28 @@ fn check_forward_references(
                 .any(|col| col.name.eq_ignore_ascii_case(c))
         });
         if let Some(col) = missing {
-            return Err(format!(
-                "Column '{}' referenced by a foreign key of '{}' does not exist in table '{}'",
-                col, fk.child_table, params.table
+            return Err(RookError::constraint(
+                ConstraintKind::ForeignKey,
+                &params.table,
+                None,
+                format!(
+                    "Column '{}' referenced by a foreign key of '{}' does not exist in table '{}'",
+                    col, fk.child_table, params.table
+                ),
             ));
         }
         if !keys.iter().any(|k| same_columns(k, &fk.parent_cols)) {
-            return Err(format!(
-                "The foreign key of '{}' references '{}' ({}), which would not be a PRIMARY KEY or UNIQUE key of '{}'",
-                fk.child_table,
-                params.table,
-                fk.parent_cols.join(", "),
-                params.table
+            return Err(RookError::constraint(
+                ConstraintKind::ForeignKey,
+                &params.table,
+                None,
+                format!(
+                    "The foreign key of '{}' references '{}' ({}), which would not be a PRIMARY KEY or UNIQUE key of '{}'",
+                    fk.child_table,
+                    params.table,
+                    fk.parent_cols.join(", "),
+                    params.table
+                ),
             ));
         }
     }
@@ -409,16 +434,21 @@ fn check_foreign_key(
     fk_cols: &[String],
     ref_table: &str,
     ref_columns: &[String],
-) -> Result<(), String> {
+) -> RookResult<()> {
     let list = |cols: &[String]| cols.join(", ");
     if fk_cols.len() != ref_columns.len() {
-        return Err(format!(
-            "FOREIGN KEY ({}) has {} column(s) but REFERENCES {} ({}) lists {}",
-            list(fk_cols),
-            fk_cols.len(),
-            ref_table,
-            list(ref_columns),
-            ref_columns.len()
+        return Err(RookError::constraint(
+            ConstraintKind::ForeignKey,
+            &params.table,
+            None,
+            format!(
+                "FOREIGN KEY ({}) has {} column(s) but REFERENCES {} ({}) lists {}",
+                list(fk_cols),
+                fk_cols.len(),
+                ref_table,
+                list(ref_columns),
+                ref_columns.len()
+            ),
         ));
     }
     for col in fk_cols {
@@ -427,9 +457,14 @@ fn check_foreign_key(
             .iter()
             .any(|c| c.name.eq_ignore_ascii_case(col))
         {
-            return Err(format!(
-                "FOREIGN KEY column '{}' does not exist in table '{}'",
-                col, params.table
+            return Err(RookError::constraint(
+                ConstraintKind::ForeignKey,
+                &params.table,
+                None,
+                format!(
+                    "FOREIGN KEY column '{}' does not exist in table '{}'",
+                    col, params.table
+                ),
             ));
         }
     }
@@ -478,21 +513,31 @@ fn check_foreign_key(
 
     for col in ref_columns {
         if !parent_columns.iter().any(|c| c.eq_ignore_ascii_case(col)) {
-            return Err(format!(
-                "Column '{}' referenced by FOREIGN KEY ({}) does not exist in table '{}'",
-                col,
-                list(fk_cols),
-                ref_table
+            return Err(RookError::constraint(
+                ConstraintKind::ForeignKey,
+                &params.table,
+                None,
+                format!(
+                    "Column '{}' referenced by FOREIGN KEY ({}) does not exist in table '{}'",
+                    col,
+                    list(fk_cols),
+                    ref_table
+                ),
             ));
         }
     }
     if !unique_sets.iter().any(|s| same_columns(s, ref_columns)) {
-        return Err(format!(
-            "FOREIGN KEY ({}) references '{}' ({}), which is not a PRIMARY KEY or UNIQUE key of '{}'",
-            list(fk_cols),
-            ref_table,
-            list(ref_columns),
-            ref_table
+        return Err(RookError::constraint(
+            ConstraintKind::ForeignKey,
+            &params.table,
+            None,
+            format!(
+                "FOREIGN KEY ({}) references '{}' ({}), which is not a PRIMARY KEY or UNIQUE key of '{}'",
+                list(fk_cols),
+                ref_table,
+                list(ref_columns),
+                ref_table
+            ),
         ));
     }
     Ok(())
@@ -505,12 +550,12 @@ pub(super) fn drop_table(
     table: &str,
     if_exists: bool,
     cascade: bool,
-) -> io::Result<StatementResult> {
+) -> RookResult<StatementResult> {
     if !catalog.databases.contains_key(db) {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db),
-        ));
+        return Err(RookError::NotFound {
+            entity: "Database",
+            name: db.to_string(),
+        });
     }
     if !catalog.databases[db].tables.contains_key(table) {
         if if_exists {
@@ -519,10 +564,12 @@ pub(super) fn drop_table(
                 table
             )));
         }
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found in database '{}'", table, db),
-        ));
+        return Err(RookError::NotFoundIn {
+            entity: "Table",
+            name: table.to_string(),
+            container_kind: "database",
+            container: db.to_string(),
+        });
     }
 
     // Views that read the table
@@ -536,14 +583,11 @@ pub(super) fn drop_table(
         .map(|(name, _)| name.clone())
         .collect();
     if !ref_views.is_empty() && !cascade {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "Cannot drop table '{}' because it is referenced by views: {}",
-                table,
-                ref_views.join(", ")
-            ),
-        ));
+        return Err(RookError::Internal(format!(
+            "Cannot drop table '{}' because it is referenced by views: {}",
+            table,
+            ref_views.join(", ")
+        )));
     }
 
     // Foreign keys that reference the table (RESTRICT check)
@@ -552,11 +596,13 @@ pub(super) fn drop_table(
         db,
         table,
     )
-    .map_err(|e| io::Error::other(format!("Failed to check referencing foreign keys: {}", e)))?;
+    .context("Failed to check referencing foreign keys")?;
     if !ref_fks.is_empty() && !cascade {
         let child_tbls: Vec<String> = ref_fks.iter().map(|fk| fk.child_table.clone()).collect();
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+        return Err(RookError::constraint(
+            ConstraintKind::ForeignKey,
+            table,
+            None,
             format!(
                 "Cannot drop table '{}' because it is referenced by foreign keys in: {}",
                 table,
@@ -641,18 +687,21 @@ fn drop_fk_child_index(catalog: &Catalog, db: &str, child: &str, child_cols: &[S
 }
 
 /// TRUNCATE: replaces the table's heap with an empty one.
-pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<StatementResult> {
-    let db_obj = catalog.databases.get(db).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db),
-        )
-    })?;
+pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> RookResult<StatementResult> {
+    let db_obj = catalog
+        .databases
+        .get(db)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db.to_string(),
+        })?;
     if !db_obj.tables.contains_key(table) {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found in database '{}'", table, db),
-        ));
+        return Err(RookError::NotFoundIn {
+            entity: "Table",
+            name: table.to_string(),
+            container_kind: "database",
+            container: db.to_string(),
+        });
     }
 
     // Emptying a referenced parent would orphan its children.
@@ -661,8 +710,10 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<S
         .map(|fk| fk.child_table.clone())
         .find(|child| !child.eq_ignore_ascii_case(table))
     {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(RookError::constraint(
+            ConstraintKind::ForeignKey,
+            table,
+            None,
             format!(
                 "Cannot truncate table '{}': it is referenced by a foreign key on '{}'",
                 table, child
@@ -673,9 +724,8 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> io::Result<S
     let indexes = crate::backend::system_table::table_indexes(catalog.engine(), db, table);
     let dat_path = catalog.engine().paths().heap(db, table);
     let mut hm = crate::heap::HeapManager::create(std::path::PathBuf::from(&dat_path))
-        .map_err(|e| io::Error::other(format!("Failed to create table file: {}", e)))?;
-    hm.flush()
-        .map_err(|e| io::Error::other(format!("Failed to flush table file: {}", e)))?;
+        .context("Failed to create table file")?;
+    hm.flush().context("Failed to flush table file")?;
     drop(hm);
 
     // The index files point at the old rows: build them again, empty.
@@ -692,29 +742,27 @@ pub(super) fn create_view(
     catalog: &mut Catalog,
     db: &str,
     view: &rook_ast::CreateViewPlan,
-) -> io::Result<StatementResult> {
-    let query_json = serde_json::to_string(&view.query)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let db_obj = catalog.databases.get_mut(db).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db),
-        )
-    })?;
+) -> RookResult<StatementResult> {
+    let query_json =
+        serde_json::to_string(&view.query).map_err(|e| RookError::Internal(e.to_string()))?;
+    let db_obj = catalog
+        .databases
+        .get_mut(db)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db.to_string(),
+        })?;
     if db_obj.tables.contains_key(&view.name) {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("A table named '{}' already exists", view.name),
-        ));
+        return Err(RookError::AlreadyExists(format!(
+            "A table named '{}' already exists",
+            view.name
+        )));
     }
     if db_obj.views.contains_key(&view.name) && !view.or_replace {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "View '{}' already exists (use OR REPLACE to modify)",
-                view.name
-            ),
-        ));
+        return Err(RookError::AlreadyExists(format!(
+            "View '{}' already exists (use OR REPLACE to modify)",
+            view.name
+        )));
     }
     db_obj.views.insert(
         view.name.clone(),
@@ -732,13 +780,14 @@ pub(super) fn drop_view(
     db: &str,
     view_name: &str,
     if_exists: bool,
-) -> io::Result<StatementResult> {
-    let db_obj = catalog.databases.get_mut(db).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db),
-        )
-    })?;
+) -> RookResult<StatementResult> {
+    let db_obj = catalog
+        .databases
+        .get_mut(db)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db.to_string(),
+        })?;
     if db_obj.views.remove(view_name).is_none() {
         if if_exists {
             return Ok(StatementResult::message(format!(
@@ -746,10 +795,12 @@ pub(super) fn drop_view(
                 view_name
             )));
         }
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("View '{}' not found in database '{}'", view_name, db),
-        ));
+        return Err(RookError::NotFoundIn {
+            entity: "View",
+            name: view_name.to_string(),
+            container_kind: "database",
+            container: db.to_string(),
+        });
     }
     crate::catalog::save_catalog(catalog)?;
     Ok(StatementResult::message(format!(
@@ -764,32 +815,28 @@ pub(super) fn create_table_as_select(
     catalog: &mut Catalog,
     db: &str,
     ctas: &rook_ast::CreateTableAsSelectPlan,
-) -> io::Result<StatementResult> {
+) -> RookResult<StatementResult> {
     if !catalog.databases.contains_key(db) {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db),
-        ));
+        return Err(RookError::NotFound {
+            entity: "Database",
+            name: db.to_string(),
+        });
     }
     if catalog.databases[db].tables.contains_key(&ctas.table) {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("Table '{}' already exists", ctas.table),
-        ));
+        return Err(RookError::AlreadyExists(format!(
+            "Table '{}' already exists",
+            ctas.table
+        )));
     }
 
     let query_plan = rook_ast::QueryPlan::Select(*ctas.query.clone());
-    let logical = crate::planner::plan_query(&query_plan, catalog, db).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Failed to plan SELECT query: {}", e),
-        )
-    })?;
+    let logical = crate::planner::plan_query(&query_plan, catalog, db)
+        .map_err(|e| RookError::Internal(format!("Failed to plan SELECT query: {}", e)))?;
     let (tuples, output_schema) =
         crate::backend::executor::physical::engine::execute_plan_collect_with_schema(
             &logical, catalog, db,
         )
-        .map_err(|e| io::Error::other(format!("Failed to execute SELECT query: {}", e)))?;
+        .context("Failed to execute SELECT query")?;
 
     let columns: Vec<Column> = output_schema
         .iter()
@@ -801,8 +848,7 @@ pub(super) fn create_table_as_select(
         })
         .collect();
     if columns.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(RookError::Internal(
             "Cannot determine column types for CREATE TABLE AS SELECT".to_string(),
         ));
     }
@@ -977,7 +1023,7 @@ pub(crate) fn rebuild_indexes(
     table: &str,
     indexes: &[crate::backend::system_table::SavedIndex],
     dropped: Option<&str>,
-) -> io::Result<Vec<String>> {
+) -> RookResult<Vec<String>> {
     remove_index_files_for_table(catalog.engine(), db, table, None);
     let mut lines = Vec::new();
     for ix in indexes {
@@ -1007,7 +1053,9 @@ pub(crate) fn rebuild_indexes(
             ix.is_unique,
             ix.is_primary,
         )
-        .map_err(|e| io::Error::other(format!("Failed to rebuild index '{}': {}", ix.name, e)))?;
+        .map_err(|e| {
+            RookError::Internal(format!("Failed to rebuild index '{}': {}", ix.name, e))
+        })?;
     }
     Ok(lines)
 }
@@ -1050,12 +1098,12 @@ pub(super) fn drop_index(
     index_name: &str,
     table_name: &str,
     if_exists: bool,
-) -> io::Result<StatementResult> {
+) -> RookResult<StatementResult> {
     if !catalog.databases.contains_key(db) {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db),
-        ));
+        return Err(RookError::NotFound {
+            entity: "Database",
+            name: db.to_string(),
+        });
     }
     let skipped = || {
         StatementResult::message(format!(
@@ -1086,10 +1134,10 @@ pub(super) fn drop_index(
         } else if if_exists {
             return Ok(skipped());
         } else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Index file not found for table '{}'", table_name),
-            ));
+            return Err(RookError::Internal(format!(
+                "Index file not found for table '{}'",
+                table_name
+            )));
         }
         forget(table_name);
         lines.push(format!(
@@ -1102,10 +1150,10 @@ pub(super) fn drop_index(
     // No table name: find the index file by scanning the database directory.
     let base_dir = catalog.engine().paths().database_dir(db);
     let entries = std::fs::read_dir(&base_dir).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database directory '{}' not found", base_dir.display()),
-        )
+        RookError::Internal(format!(
+            "Database directory '{}' not found",
+            base_dir.display()
+        ))
     })?;
     for entry in entries.flatten() {
         let fname = entry.file_name().to_string_lossy().to_string();
@@ -1132,9 +1180,11 @@ pub(super) fn drop_index(
     if if_exists {
         Ok(skipped())
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Index '{}' not found in database '{}'", index_name, db),
-        ))
+        Err(RookError::NotFoundIn {
+            entity: "Index",
+            name: index_name.to_string(),
+            container_kind: "database",
+            container: db.to_string(),
+        })
     }
 }

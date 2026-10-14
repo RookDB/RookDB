@@ -1,6 +1,5 @@
 //! ALTER TABLE.
 
-use std::io;
 use std::path::{Path, PathBuf};
 
 use rook_ast::{AlterTableAction, AlterTablePlan, ColumnConstraint};
@@ -9,6 +8,7 @@ use super::StatementResult;
 use super::ddl::{
     default_value, rebuild_indexes, remove_index_files_for_table, rename_index_files_for_table,
 };
+use crate::backend::error::{ConstraintKind, ResultContext, RookError, RookResult};
 use crate::catalog::Catalog;
 use crate::catalog::types::Column;
 use crate::heap::HeapManager;
@@ -18,28 +18,32 @@ pub(super) fn alter_table(
     catalog: &mut Catalog,
     db: &str,
     alter: &AlterTablePlan,
-) -> io::Result<StatementResult> {
-    let db_obj = catalog.databases.get(db).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Database '{}' not found", db),
-        )
-    })?;
-    let mut updated_table = db_obj.tables.get(&alter.table).cloned().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table '{}' not found", alter.table),
-        )
-    })?;
+) -> RookResult<StatementResult> {
+    let db_obj = catalog
+        .databases
+        .get(db)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db.to_string(),
+        })?;
+    let mut updated_table =
+        db_obj
+            .tables
+            .get(&alter.table)
+            .cloned()
+            .ok_or_else(|| RookError::NotFound {
+                entity: "Table",
+                name: alter.table.to_string(),
+            })?;
     let mut lines = Vec::new();
     // The table's indexes, rebuilt or renamed below when the change touches
     // their columns.
     let indexes = crate::backend::system_table::table_indexes(catalog.engine(), db, &alter.table);
-    let column_not_found = |column: &str| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Column '{}' not found in table '{}'", column, alter.table),
-        )
+    let column_not_found = |column: &str| RookError::NotFoundIn {
+        entity: "Column",
+        name: column.to_string(),
+        container_kind: "table",
+        container: alter.table.to_string(),
     };
     let find = |columns: &[Column], name: &str| {
         columns
@@ -56,10 +60,7 @@ pub(super) fn alter_table(
             let mut col = Column::new(
                 column_def.name.clone(),
                 column_def.data_type.parse().map_err(|e: String| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("Invalid data type: {}", e),
-                    )
+                    RookError::TypeMismatch(format!("Invalid data type: {}", e))
                 })?,
             );
             // Apply the column's constraints; refuse the ones this path cannot
@@ -82,13 +83,10 @@ pub(super) fn alter_table(
                             ColumnConstraint::Unique => "UNIQUE",
                             _ => "CHECK",
                         };
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "ALTER TABLE ADD COLUMN does not support the constraint '{}'",
-                                name
-                            ),
-                        ));
+                        return Err(RookError::Internal(format!(
+                            "ALTER TABLE ADD COLUMN does not support the constraint '{}'",
+                            name
+                        )));
                     }
                 }
             }
@@ -97,13 +95,10 @@ pub(super) fn alter_table(
                 .iter()
                 .any(|c| c.name.eq_ignore_ascii_case(&column_def.name))
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!(
-                        "Column '{}' already exists in table '{}'",
-                        column_def.name, alter.table
-                    ),
-                ));
+                return Err(RookError::AlreadyExists(format!(
+                    "Column '{}' already exists in table '{}'",
+                    column_def.name, alter.table
+                )));
             }
 
             // Existing rows take the column's DEFAULT (NULL without one).
@@ -119,8 +114,10 @@ pub(super) fn alter_table(
                 &schema(&updated_table.columns),
                 |mut row| {
                     if reject_rows {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
+                        return Err(RookError::constraint(
+                            ConstraintKind::NotNull,
+                            &alter.table,
+                            None,
                             format!(
                                 "Cannot add NOT NULL column '{}' without a DEFAULT to a table that has rows",
                                 column_def.name
@@ -146,8 +143,10 @@ pub(super) fn alter_table(
                                 .any(|c| c.eq_ignore_ascii_case(column))
                     })
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
+                return Err(RookError::constraint(
+                    ConstraintKind::ForeignKey,
+                    &alter.table,
+                    None,
                     format!(
                         "Cannot drop column '{}' of table '{}': it is referenced by a foreign key on '{}'",
                         column, alter.table, fk.child_table
@@ -202,19 +201,16 @@ pub(super) fn alter_table(
             if Path::new(&dat_path).exists() {
                 let heap =
                     crate::backend::cache::lease_heap(catalog.engine(), Path::new(&dat_path))
-                        .map_err(|e| {
-                            io::Error::other(format!(
-                                "Failed to open heap for SET NOT NULL validation: {}",
-                                e
-                            ))
-                        })?;
+                        .context("Failed to open heap for SET NOT NULL validation")?;
                 for result in heap.scan() {
                     let (_, _, row_bytes) = result?;
                     if crate::types::null_bitmap::is_column_null_in_row(&row_bytes, col_idx)
                         .unwrap_or(false)
                     {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
+                        return Err(RookError::constraint(
+                            ConstraintKind::NotNull,
+                            &alter.table,
+                            None,
                             format!(
                                 "Table '{}' contains NULL values in column '{}'; cannot alter to NOT NULL",
                                 alter.table, column
@@ -375,12 +371,12 @@ fn rename_table(
     old_name: &str,
     new_name: &str,
     table: crate::catalog::types::Table,
-) -> io::Result<StatementResult> {
+) -> RookResult<StatementResult> {
     if catalog.databases[db].tables.contains_key(new_name) {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("Table '{}' already exists", new_name),
-        ));
+        return Err(RookError::AlreadyExists(format!(
+            "Table '{}' already exists",
+            new_name
+        )));
     }
     // Foreign keys store the parent's name: remember who references this
     // table so those rows can follow the rename.
@@ -468,11 +464,8 @@ fn schema(columns: &[Column]) -> Vec<DataType> {
     columns.iter().map(|c| c.data_type.clone()).collect()
 }
 
-fn invalid_default(column: &str, err: impl std::fmt::Display) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("Invalid DEFAULT for column '{}': {}", column, err),
-    )
+fn invalid_default(column: &str, err: impl std::fmt::Display) -> RookError {
+    RookError::TypeMismatch(format!("Invalid DEFAULT for column '{}': {}", column, err))
 }
 
 /// Rewrite every row of a table for a new schema: each row is decoded with
@@ -487,41 +480,32 @@ fn rewrite_rows(
     table: &str,
     old_schema: &[DataType],
     new_schema: &[DataType],
-    mut change: impl FnMut(Vec<Option<DataValue>>) -> io::Result<Vec<Option<DataValue>>>,
-) -> io::Result<()> {
+    mut change: impl FnMut(Vec<Option<DataValue>>) -> RookResult<Vec<Option<DataValue>>>,
+) -> RookResult<()> {
     let dat_path = engine.paths().heap(db, table);
     if !Path::new(&dat_path).exists() {
         return Ok(());
     }
 
     let old_heap = crate::backend::cache::lease_heap(engine, Path::new(&dat_path))
-        .map_err(|e| io::Error::other(format!("Failed to open heap for backfill: {}", e)))?;
+        .context("Failed to open heap for backfill")?;
     let mut rows: Vec<Vec<u8>> = Vec::new();
     for result in old_heap.scan() {
         let (_, _, row_bytes) = result?;
-        let old_row = deserialize_nullable_row(old_schema, &row_bytes).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to deserialize row during backfill: {}", e),
-            )
-        })?;
+        let old_row = deserialize_nullable_row(old_schema, &row_bytes)
+            .context("Failed to deserialize row during backfill")?;
         let new_row = change(old_row)?;
         rows.push(
-            serialize_nullable_typed_row(new_schema, &new_row).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to serialize row during backfill: {}", e),
-                )
-            })?,
+            serialize_nullable_typed_row(new_schema, &new_row)
+                .context("Failed to serialize row during backfill")?,
         );
     }
     drop(old_heap);
 
     let tmp_path = crate::backend::paths::with_suffix(&dat_path, ".backfill");
     {
-        let mut tmp_heap = HeapManager::create(PathBuf::from(&tmp_path)).map_err(|e| {
-            io::Error::other(format!("Failed to create temp heap for backfill: {}", e))
-        })?;
+        let mut tmp_heap = HeapManager::create(PathBuf::from(&tmp_path))
+            .context("Failed to create temp heap for backfill")?;
         for row in &rows {
             tmp_heap.insert_tuple(row)?;
         }
@@ -529,12 +513,9 @@ fn rewrite_rows(
     }
 
     let fsm_path = engine.paths().heap_fsm(db, table);
-    std::fs::remove_file(&dat_path).map_err(|e| {
-        io::Error::other(format!("Failed to remove old heap during backfill: {}", e))
-    })?;
+    std::fs::remove_file(&dat_path).context("Failed to remove old heap during backfill")?;
     let _ = std::fs::remove_file(&fsm_path);
-    std::fs::rename(&tmp_path, &dat_path)
-        .map_err(|e| io::Error::other(format!("Failed to rename backfill heap: {}", e)))?;
+    std::fs::rename(&tmp_path, &dat_path).context("Failed to rename backfill heap")?;
     let _ = std::fs::rename(
         crate::backend::paths::with_suffix(&tmp_path, ".fsm"),
         &fsm_path,

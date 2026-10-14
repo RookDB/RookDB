@@ -105,12 +105,12 @@ impl Session {
             _ => {
                 let db = self.db()?.to_string();
                 self.execute_ddl(&db, &plan)
-                    .map_err(|e| RookError::Internal(e.to_string()).with_context("Error"))
+                    .map_err(|e| e.bare_io().with_context("Error"))
             }
         }
     }
 
-    fn execute_ddl(&mut self, db: &str, plan: &QueryPlan) -> std::io::Result<StatementResult> {
+    fn execute_ddl(&mut self, db: &str, plan: &QueryPlan) -> RookResult<StatementResult> {
         let catalog = Arc::make_mut(&mut self.catalog);
         match plan {
             QueryPlan::DropTable(p) => {
@@ -124,7 +124,7 @@ impl Session {
             QueryPlan::DropIndex(p) => {
                 ddl::drop_index(catalog, db, &p.index_name, &p.table_name, p.if_exists)
             }
-            other => Err(std::io::Error::other(format!(
+            other => Err(RookError::Internal(format!(
                 "Unsupported statement: {}",
                 other.statement_type()
             ))),
