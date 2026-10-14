@@ -2,15 +2,16 @@
 
 use std::path::{Path, PathBuf};
 
-use rook_ast::{AlterTableAction, AlterTablePlan, ColumnConstraint};
+use rook_ast::{AlterTableAction, AlterTablePlan, ColumnConstraint, ColumnDef, DefaultValue};
 
 use super::StatementResult;
 use super::ddl::{
     default_value, rebuild_indexes, remove_index_files_for_table, rename_index_files_for_table,
 };
 use crate::backend::error::{ConstraintKind, ResultContext, RookError, RookResult};
+use crate::backend::system_table::SavedIndex;
 use crate::catalog::Catalog;
-use crate::catalog::types::Column;
+use crate::catalog::types::{Column, Table};
 use crate::heap::HeapManager;
 use crate::types::{DataType, DataValue, deserialize_nullable_row, serialize_nullable_typed_row};
 
@@ -39,199 +40,293 @@ pub(super) fn alter_table(
     // The table's indexes, rebuilt or renamed below when the change touches
     // their columns.
     let indexes = crate::backend::system_table::table_indexes(catalog.engine(), db, &alter.table);
-    let column_not_found = |column: &str| RookError::NotFoundIn {
-        entity: "Column",
-        name: column.to_string(),
-        container_kind: "table",
-        container: alter.table.to_string(),
-    };
-    let find = |columns: &[Column], name: &str| {
-        columns
-            .iter()
-            .position(|c| c.name.eq_ignore_ascii_case(name))
-            .ok_or_else(|| column_not_found(name))
-    };
 
     match &alter.action {
         AlterTableAction::RenameTable { new_name } => {
             return rename_table(catalog, db, &alter.table, new_name, updated_table);
         }
         AlterTableAction::AddColumn { column_def } => {
-            let mut col = Column::new(
-                column_def.name.clone(),
-                column_def.data_type.parse().map_err(|e: String| {
-                    RookError::TypeMismatch(format!("Invalid data type: {}", e))
-                })?,
-            );
-            // Apply the column's constraints; refuse the ones this path cannot
-            // honour rather than dropping them.
-            for constraint in &column_def.constraints {
-                match constraint {
-                    ColumnConstraint::NotNull => {
-                        col.nullable = false;
-                        col.constraints.not_null = true;
-                    }
-                    // Explicitly nullable: the default.
-                    ColumnConstraint::Null => {}
-                    ColumnConstraint::Default(expr) => {
-                        col.constraints.default = default_value(&col.data_type, expr)
-                            .map_err(|e| invalid_default(&col.name, e))?;
-                    }
-                    unsupported => {
-                        let name = match unsupported {
-                            ColumnConstraint::PrimaryKey => "PRIMARY KEY",
-                            ColumnConstraint::Unique => "UNIQUE",
-                            _ => "CHECK",
-                        };
-                        return Err(RookError::Internal(format!(
-                            "ALTER TABLE ADD COLUMN does not support the constraint '{}'",
-                            name
-                        )));
-                    }
-                }
-            }
-            if updated_table
-                .columns
-                .iter()
-                .any(|c| c.name.eq_ignore_ascii_case(&column_def.name))
-            {
-                return Err(RookError::AlreadyExists(format!(
-                    "Column '{}' already exists in table '{}'",
-                    column_def.name, alter.table
-                )));
-            }
-
-            // Existing rows take the column's DEFAULT (NULL without one).
-            let fill = col.constraints.default.clone();
-            let reject_rows = col.constraints.not_null && fill.is_none();
-            let old_schema = schema(&updated_table.columns);
-            updated_table.columns.push(col);
-            rewrite_rows(
-                catalog.engine(),
-                db,
-                &alter.table,
-                &old_schema,
-                &schema(&updated_table.columns),
-                |mut row| {
-                    if reject_rows {
-                        return Err(RookError::constraint(
-                            ConstraintKind::NotNull,
-                            &alter.table,
-                            None,
-                            format!(
-                                "Cannot add NOT NULL column '{}' without a DEFAULT to a table that has rows",
-                                column_def.name
-                            ),
-                        ));
-                    }
-                    row.push(fill.clone());
-                    Ok(row)
-                },
-            )?;
+            add_column(catalog, db, &alter.table, &mut updated_table, column_def)?
         }
         AlterTableAction::DropColumn { column } => {
-            let pos = find(&updated_table.columns, column)?;
-            // A key that another table references cannot lose a column.
-            if let Some(fk) =
-                crate::backend::cache::referencing_fks(catalog.engine(), db, &alter.table)
-                    .iter()
-                    .find(|fk| {
-                        !fk.child_table.eq_ignore_ascii_case(&alter.table)
-                            && fk
-                                .parent_cols
-                                .iter()
-                                .any(|c| c.eq_ignore_ascii_case(column))
-                    })
-            {
-                return Err(RookError::constraint(
-                    ConstraintKind::ForeignKey,
-                    &alter.table,
-                    None,
-                    format!(
-                        "Cannot drop column '{}' of table '{}': it is referenced by a foreign key on '{}'",
-                        column, alter.table, fk.child_table
-                    ),
-                ));
-            }
-            let old_schema = schema(&updated_table.columns);
-            updated_table.columns.remove(pos);
-            rewrite_rows(
-                catalog.engine(),
-                db,
-                &alter.table,
-                &old_schema,
-                &schema(&updated_table.columns),
-                |mut row| {
-                    row.remove(pos);
-                    Ok(row)
-                },
-            )?;
+            drop_column(catalog, db, &alter.table, &mut updated_table, column)?
         }
         AlterTableAction::RenameColumn { old_name, new_name } => {
-            let pos = find(&updated_table.columns, old_name)?;
-            updated_table.columns[pos].name = new_name.clone();
-            // CHECK expressions are re-emitted from the catalog on save.
-            for c in updated_table.columns.iter_mut() {
-                if let Some(expr) = c.constraints.check.take() {
-                    c.constraints.check =
-                        Some(crate::backend::system_table::rename_identifier_in_expr(
-                            &expr, old_name, new_name,
-                        ));
-                }
-            }
+            rename_column(&mut updated_table, &alter.table, old_name, new_name)?
         }
         AlterTableAction::SetDefault {
             column,
             default_expr,
-        } => {
-            let pos = find(&updated_table.columns, column)?;
-            let col = &mut updated_table.columns[pos];
-            col.constraints.default = default_value(&col.data_type, default_expr)
-                .map_err(|e| invalid_default(column, e))?;
-        }
+        } => set_default(&mut updated_table, &alter.table, column, default_expr)?,
         AlterTableAction::DropDefault { column } => {
-            let pos = find(&updated_table.columns, column)?;
-            updated_table.columns[pos].constraints.default = None;
+            drop_default(&mut updated_table, &alter.table, column)?
         }
         AlterTableAction::SetNotNull { column } => {
-            let col_idx = find(&updated_table.columns, column)?;
-            // Existing rows must have a value; the null bitmap answers that
-            // without decoding the row.
-            let dat_path = catalog.engine().paths().heap(db, &alter.table);
-            if Path::new(&dat_path).exists() {
-                let heap =
-                    crate::backend::cache::lease_heap(catalog.engine(), Path::new(&dat_path))
-                        .context("Failed to open heap for SET NOT NULL validation")?;
-                for result in heap.scan() {
-                    let (_, _, row_bytes) = result?;
-                    if crate::types::null_bitmap::is_column_null_in_row(&row_bytes, col_idx)
-                        .unwrap_or(false)
-                    {
-                        return Err(RookError::constraint(
-                            ConstraintKind::NotNull,
-                            &alter.table,
-                            None,
-                            format!(
-                                "Table '{}' contains NULL values in column '{}'; cannot alter to NOT NULL",
-                                alter.table, column
-                            ),
-                        ));
-                    }
-                }
-            }
-            let col = &mut updated_table.columns[col_idx];
-            col.nullable = false;
-            col.constraints.not_null = true;
+            set_not_null(catalog, db, &alter.table, &mut updated_table, column)?
         }
         AlterTableAction::DropNotNull { column } => {
-            let pos = find(&updated_table.columns, column)?;
-            let col = &mut updated_table.columns[pos];
-            col.nullable = true;
-            col.constraints.not_null = false;
+            drop_not_null(&mut updated_table, &alter.table, column)?
         }
     }
 
-    // Update sys_constraints metadata for column operations
+    update_constraint_metadata(catalog, db, alter, &mut lines);
+
+    if let Some(d) = catalog.databases.get_mut(db) {
+        d.tables.insert(alter.table.clone(), updated_table);
+    }
+    if let Err(e) = crate::catalog::save_catalog(catalog) {
+        lines.push(format!(
+            "[AlterTable] Warning: failed to save catalog after altering table '{}': {}",
+            alter.table, e
+        ));
+    }
+
+    reindex_after_alter(catalog, db, alter, &indexes, &mut lines)?;
+
+    lines.push(format!(
+        "Altered table '{}': {:?}.",
+        alter.table, alter.action
+    ));
+    Ok(StatementResult::lines(lines))
+}
+
+/// Find a column by name (case-insensitive) in `table`'s column list.
+fn find_column(columns: &[Column], table: &str, name: &str) -> RookResult<usize> {
+    columns
+        .iter()
+        .position(|c| c.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| RookError::NotFoundIn {
+            entity: "Column",
+            name: name.to_string(),
+            container_kind: "table",
+            container: table.to_string(),
+        })
+}
+
+/// ADD COLUMN: build the column, then backfill existing rows with its DEFAULT.
+fn add_column(
+    catalog: &mut Catalog,
+    db: &str,
+    table: &str,
+    updated_table: &mut Table,
+    column_def: &ColumnDef,
+) -> RookResult<()> {
+    let mut col = Column::new(
+        column_def.name.clone(),
+        column_def
+            .data_type
+            .parse()
+            .map_err(|e: String| RookError::TypeMismatch(format!("Invalid data type: {}", e)))?,
+    );
+    // Apply the column's constraints; refuse the ones this path cannot
+    // honour rather than dropping them.
+    for constraint in &column_def.constraints {
+        match constraint {
+            ColumnConstraint::NotNull => {
+                col.nullable = false;
+                col.constraints.not_null = true;
+            }
+            // Explicitly nullable: the default.
+            ColumnConstraint::Null => {}
+            ColumnConstraint::Default(expr) => {
+                col.constraints.default = default_value(&col.data_type, expr)
+                    .map_err(|e| invalid_default(&col.name, e))?;
+            }
+            unsupported => {
+                let name = match unsupported {
+                    ColumnConstraint::PrimaryKey => "PRIMARY KEY",
+                    ColumnConstraint::Unique => "UNIQUE",
+                    _ => "CHECK",
+                };
+                return Err(RookError::Internal(format!(
+                    "ALTER TABLE ADD COLUMN does not support the constraint '{}'",
+                    name
+                )));
+            }
+        }
+    }
+    if updated_table
+        .columns
+        .iter()
+        .any(|c| c.name.eq_ignore_ascii_case(&column_def.name))
+    {
+        return Err(RookError::AlreadyExists(format!(
+            "Column '{}' already exists in table '{}'",
+            column_def.name, table
+        )));
+    }
+
+    // Existing rows take the column's DEFAULT (NULL without one).
+    let fill = col.constraints.default.clone();
+    let reject_rows = col.constraints.not_null && fill.is_none();
+    let old_schema = schema(&updated_table.columns);
+    updated_table.columns.push(col);
+    rewrite_rows(
+        catalog.engine(),
+        db,
+        table,
+        &old_schema,
+        &schema(&updated_table.columns),
+        |mut row| {
+            if reject_rows {
+                return Err(RookError::constraint(
+                    ConstraintKind::NotNull,
+                    table,
+                    None,
+                    format!(
+                        "Cannot add NOT NULL column '{}' without a DEFAULT to a table that has rows",
+                        column_def.name
+                    ),
+                ));
+            }
+            row.push(fill.clone());
+            Ok(row)
+        },
+    )?;
+    Ok(())
+}
+
+/// DROP COLUMN: refuse a column another table references, then rewrite the rows.
+fn drop_column(
+    catalog: &mut Catalog,
+    db: &str,
+    table: &str,
+    updated_table: &mut Table,
+    column: &str,
+) -> RookResult<()> {
+    let pos = find_column(&updated_table.columns, table, column)?;
+    // A key that another table references cannot lose a column.
+    if let Some(fk) = crate::backend::cache::referencing_fks(catalog.engine(), db, table)
+        .iter()
+        .find(|fk| {
+            !fk.child_table.eq_ignore_ascii_case(table)
+                && fk
+                    .parent_cols
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(column))
+        })
+    {
+        return Err(RookError::constraint(
+            ConstraintKind::ForeignKey,
+            table,
+            None,
+            format!(
+                "Cannot drop column '{}' of table '{}': it is referenced by a foreign key on '{}'",
+                column, table, fk.child_table
+            ),
+        ));
+    }
+    let old_schema = schema(&updated_table.columns);
+    updated_table.columns.remove(pos);
+    rewrite_rows(
+        catalog.engine(),
+        db,
+        table,
+        &old_schema,
+        &schema(&updated_table.columns),
+        |mut row| {
+            row.remove(pos);
+            Ok(row)
+        },
+    )?;
+    Ok(())
+}
+
+/// RENAME COLUMN: rename it and re-emit CHECK expressions that name it.
+fn rename_column(
+    updated_table: &mut Table,
+    table: &str,
+    old_name: &str,
+    new_name: &str,
+) -> RookResult<()> {
+    let pos = find_column(&updated_table.columns, table, old_name)?;
+    updated_table.columns[pos].name = new_name.to_string();
+    // CHECK expressions are re-emitted from the catalog on save.
+    for c in updated_table.columns.iter_mut() {
+        if let Some(expr) = c.constraints.check.take() {
+            c.constraints.check = Some(crate::backend::system_table::rename_identifier_in_expr(
+                &expr, old_name, new_name,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// ALTER COLUMN SET DEFAULT.
+fn set_default(
+    updated_table: &mut Table,
+    table: &str,
+    column: &str,
+    default_expr: &DefaultValue,
+) -> RookResult<()> {
+    let pos = find_column(&updated_table.columns, table, column)?;
+    let col = &mut updated_table.columns[pos];
+    col.constraints.default =
+        default_value(&col.data_type, default_expr).map_err(|e| invalid_default(column, e))?;
+    Ok(())
+}
+
+/// ALTER COLUMN DROP DEFAULT.
+fn drop_default(updated_table: &mut Table, table: &str, column: &str) -> RookResult<()> {
+    let pos = find_column(&updated_table.columns, table, column)?;
+    updated_table.columns[pos].constraints.default = None;
+    Ok(())
+}
+
+/// ALTER COLUMN SET NOT NULL: refuse when existing rows hold NULLs.
+fn set_not_null(
+    catalog: &mut Catalog,
+    db: &str,
+    table: &str,
+    updated_table: &mut Table,
+    column: &str,
+) -> RookResult<()> {
+    let col_idx = find_column(&updated_table.columns, table, column)?;
+    // Existing rows must have a value; the null bitmap answers that
+    // without decoding the row.
+    let dat_path = catalog.engine().paths().heap(db, table);
+    if Path::new(&dat_path).exists() {
+        let heap = crate::backend::cache::lease_heap(catalog.engine(), Path::new(&dat_path))
+            .context("Failed to open heap for SET NOT NULL validation")?;
+        for result in heap.scan() {
+            let (_, _, row_bytes) = result?;
+            if crate::types::null_bitmap::is_column_null_in_row(&row_bytes, col_idx)
+                .unwrap_or(false)
+            {
+                return Err(RookError::constraint(
+                    ConstraintKind::NotNull,
+                    table,
+                    None,
+                    format!(
+                        "Table '{}' contains NULL values in column '{}'; cannot alter to NOT NULL",
+                        table, column
+                    ),
+                ));
+            }
+        }
+    }
+    let col = &mut updated_table.columns[col_idx];
+    col.nullable = false;
+    col.constraints.not_null = true;
+    Ok(())
+}
+
+/// ALTER COLUMN DROP NOT NULL.
+fn drop_not_null(updated_table: &mut Table, table: &str, column: &str) -> RookResult<()> {
+    let pos = find_column(&updated_table.columns, table, column)?;
+    let col = &mut updated_table.columns[pos];
+    col.nullable = true;
+    col.constraints.not_null = false;
+    Ok(())
+}
+
+/// Update sys_constraints metadata for column operations; failures become warnings.
+fn update_constraint_metadata(
+    catalog: &Catalog,
+    db: &str,
+    alter: &AlterTablePlan,
+    lines: &mut Vec<String>,
+) {
     match &alter.action {
         AlterTableAction::DropColumn { column } => {
             if let Err(e) = crate::backend::system_table::delete_column_constraints(
@@ -275,94 +370,88 @@ pub(super) fn alter_table(
         }
         _ => {}
     }
+}
 
-    if let Some(d) = catalog.databases.get_mut(db) {
-        d.tables.insert(alter.table.clone(), updated_table);
-    }
-    if let Err(e) = crate::catalog::save_catalog(catalog) {
-        lines.push(format!(
-            "[AlterTable] Warning: failed to save catalog after altering table '{}': {}",
-            alter.table, e
-        ));
-    }
-
+/// Re-index after the change: rebuild the indexes of moved rows, or rename
+/// the key columns of the indexes that name a renamed column.
+fn reindex_after_alter(
+    catalog: &mut Catalog,
+    db: &str,
+    alter: &AlterTablePlan,
+    indexes: &[SavedIndex],
+    lines: &mut Vec<String>,
+) -> RookResult<()> {
     match &alter.action {
         // The rows moved: index them again.
         AlterTableAction::AddColumn { .. } => {
-            lines.extend(rebuild_indexes(catalog, db, &alter.table, &indexes, None)?);
+            lines.extend(rebuild_indexes(catalog, db, &alter.table, indexes, None)?);
         }
         AlterTableAction::DropColumn { column } => {
             lines.extend(rebuild_indexes(
                 catalog,
                 db,
                 &alter.table,
-                &indexes,
+                indexes,
                 Some(column),
             )?);
         }
-        // The rows stay put; only the recorded key columns change. An index
-        // named after its columns by CREATE TABLE (`pk_t_a`, `fk_t_a`,
-        // `fkp_t_a`, ...) takes the new column name too.
         AlterTableAction::RenameColumn { old_name, new_name } => {
-            for ix in &indexes {
-                let columns = ix.column_list();
-                if !columns.iter().any(|c| c.eq_ignore_ascii_case(old_name)) {
-                    continue;
-                }
-                let renamed: Vec<String> = columns
-                    .iter()
-                    .map(|c| {
-                        if c.eq_ignore_ascii_case(old_name) {
-                            new_name.clone()
-                        } else {
-                            c.clone()
-                        }
-                    })
-                    .collect();
-                let new_index_name = ["pk", "uq", "fk", "fkp"]
-                    .iter()
-                    .find(|prefix| {
-                        ix.name == format!("{}_{}_{}", prefix, alter.table, columns.join("_"))
-                    })
-                    .map(|prefix| format!("{}_{}_{}", prefix, alter.table, renamed.join("_")))
-                    .filter(|name| !indexes.iter().any(|other| other.name == *name))
-                    .unwrap_or_else(|| ix.name.clone());
-                crate::backend::system_table::delete_index_metadata(
-                    catalog.engine(),
-                    db,
-                    &alter.table,
-                    &ix.name,
-                )?;
-                if new_index_name != ix.name {
-                    rename_index_file(
-                        catalog.engine(),
-                        db,
-                        &alter.table,
-                        &ix.name,
-                        &new_index_name,
-                    );
-                }
-                crate::backend::system_table::insert_index_metadata(
-                    catalog.engine(),
-                    db,
-                    &alter.table,
-                    &new_index_name,
-                    &renamed.join(","),
-                    ix.is_unique,
-                    ix.is_primary,
-                )?;
-            }
-            // Cached constraint metadata still names the old column.
-            catalog.engine().invalidate_metadata();
+            reindex_renamed_column(catalog, db, &alter.table, indexes, old_name, new_name)?;
         }
         _ => {}
     }
+    Ok(())
+}
 
-    lines.push(format!(
-        "Altered table '{}': {:?}.",
-        alter.table, alter.action
-    ));
-    Ok(StatementResult::lines(lines))
+/// The rows stay put; only the recorded key columns change. An index named after
+/// its columns by CREATE TABLE (`pk_t_a`, `fk_t_a`, `fkp_t_a`, ...) takes the
+/// new column name too.
+fn reindex_renamed_column(
+    catalog: &mut Catalog,
+    db: &str,
+    table: &str,
+    indexes: &[SavedIndex],
+    old_name: &str,
+    new_name: &str,
+) -> RookResult<()> {
+    for ix in indexes {
+        let columns = ix.column_list();
+        if !columns.iter().any(|c| c.eq_ignore_ascii_case(old_name)) {
+            continue;
+        }
+        let renamed: Vec<String> = columns
+            .iter()
+            .map(|c| {
+                if c.eq_ignore_ascii_case(old_name) {
+                    new_name.to_string()
+                } else {
+                    c.clone()
+                }
+            })
+            .collect();
+        let new_index_name = ["pk", "uq", "fk", "fkp"]
+            .iter()
+            .find(|prefix| ix.name == format!("{}_{}_{}", prefix, table, columns.join("_")))
+            .map(|prefix| format!("{}_{}_{}", prefix, table, renamed.join("_")))
+            .filter(|name| !indexes.iter().any(|other| other.name == *name))
+            .unwrap_or_else(|| ix.name.clone());
+        crate::backend::system_table::delete_index_metadata(catalog.engine(), db, table, &ix.name)?;
+        if new_index_name != ix.name {
+            rename_index_file(catalog.engine(), db, table, &ix.name, &new_index_name);
+        }
+        crate::backend::system_table::insert_index_metadata(
+            catalog.engine(),
+            db,
+            table,
+            &new_index_name,
+            &renamed.join(","),
+            ix.is_unique,
+            ix.is_primary,
+        )?;
+    }
+    // Cached constraint metadata still names the old column.
+    catalog.engine().invalidate_metadata();
+    Ok(())
 }
 
 fn rename_table(
