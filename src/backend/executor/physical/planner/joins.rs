@@ -11,10 +11,10 @@ use super::super::operators::{
     NestedLoopJoinOperator, PhysicalOperator, infer_aggregate_output_type, mark_merged,
 };
 use super::super::tuple::ColumnInfo;
-use super::{PhysicalPlanner, PlannerStats};
-use crate::statistics::estimator::{Estimator, hash_join_cost, index_nested_loop_cost};
 use super::helpers::infer_expr_type_from_ast;
+use super::{PhysicalPlanner, PlannerStats};
 use crate::backend::error::{RookError, RookResult};
+use crate::statistics::estimator::{Estimator, hash_join_cost, index_nested_loop_cost};
 use crate::types::datatype::DataType;
 
 impl PhysicalPlanner {

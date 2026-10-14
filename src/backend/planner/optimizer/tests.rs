@@ -1025,7 +1025,7 @@ fn test_join_ordering_reorders_inner_join() {
             min_tuple_bytes: 20,
             max_tuple_bytes: 100,
             page_breakdown: vec![],
-        ..Default::default()
+            ..Default::default()
         }),
     );
     stats.insert(
@@ -1045,7 +1045,7 @@ fn test_join_ordering_reorders_inner_join() {
             min_tuple_bytes: 20,
             max_tuple_bytes: 100,
             page_breakdown: vec![],
-        ..Default::default()
+            ..Default::default()
         }),
     );
 
@@ -1097,7 +1097,7 @@ fn row_counts(tables: &[(&str, u64)]) -> HashMap<String, Arc<crate::statistics::
                     min_tuple_bytes: 0,
                     max_tuple_bytes: 0,
                     page_breakdown: vec![],
-        ..Default::default()
+                    ..Default::default()
                 }),
             )
         })

@@ -607,13 +607,20 @@ pub fn known_statistics(
     table_name: &str,
 ) -> Option<Arc<crate::statistics::TableStatistics>> {
     let engine = catalog.engine();
-    let columns = &catalog.databases.get(db_name)?.tables.get(table_name)?.columns;
+    let columns = &catalog
+        .databases
+        .get(db_name)?
+        .tables
+        .get(table_name)?
+        .columns;
     let key = (db_name.to_string(), table_name.to_string());
     let cached = lock(&engine.statistics).get(&key).cloned();
     let stats = match cached {
         Some(stats) => stats,
         None => {
-            let stored = Arc::new(load_stored_statistics(engine, db_name, table_name, columns)?);
+            let stored = Arc::new(load_stored_statistics(
+                engine, db_name, table_name, columns,
+            )?);
             lock(&engine.statistics).insert(key, Arc::clone(&stored));
             stored
         }
@@ -658,7 +665,12 @@ pub fn analyze_table(
     let stats = crate::statistics::collect_heap_statistics_for(engine, &path, columns)?;
     // Best effort: statistics that cannot be stored are gathered again later.
     if let Err(e) = store_statistics(engine, db_name, table_name, &stats) {
-        log::debug!("[Statistics] not stored for {}.{}: {}", db_name, table_name, e);
+        log::debug!(
+            "[Statistics] not stored for {}.{}: {}",
+            db_name,
+            table_name,
+            e
+        );
     }
     let arc = Arc::new(stats);
     lock(&engine.statistics).insert(
@@ -692,9 +704,11 @@ fn load_stored_statistics(
     let bytes = std::fs::read(engine.paths().statistics(db_name, table_name)).ok()?;
     let stats: crate::statistics::TableStatistics = serde_json::from_slice(&bytes).ok()?;
     let same_columns = stats.columns.len() == columns.len()
-        && stats.columns.iter().zip(columns).all(|(s, c)| {
-            s.name == c.name && s.data_type == format!("{:?}", c.data_type)
-        });
+        && stats
+            .columns
+            .iter()
+            .zip(columns)
+            .all(|(s, c)| s.name == c.name && s.data_type == format!("{:?}", c.data_type));
     same_columns.then_some(stats)
 }
 

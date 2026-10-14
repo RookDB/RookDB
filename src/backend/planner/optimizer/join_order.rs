@@ -595,9 +595,8 @@ fn greedy_order(sizes: &[f64], conjuncts: &[Option<Conjunct>]) -> Vec<usize> {
             .filter(|r| joined & (1 << r) == 0)
             .min_by(|&a, &b| {
                 link(a).cmp(&link(b)).then(
-                    joined_size(size, joined, a, sizes, conjuncts).total_cmp(&joined_size(
-                        size, joined, b, sizes, conjuncts,
-                    )),
+                    joined_size(size, joined, a, sizes, conjuncts)
+                        .total_cmp(&joined_size(size, joined, b, sizes, conjuncts)),
                 )
             })
             .expect("a relation is left to join");

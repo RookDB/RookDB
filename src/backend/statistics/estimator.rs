@@ -25,8 +25,8 @@ use std::sync::Arc;
 use rook_ast::logical::*;
 use rook_ast::{ComparisonOp, ConstantValue, ExprNode, JoinType, PredicateNode};
 
-use super::column::{ColumnStatistics, numeric_position};
 use super::TableStatistics;
+use super::column::{ColumnStatistics, numeric_position};
 use crate::types::DataValue;
 
 /// Rows assumed for an input nothing is known about.
@@ -131,11 +131,7 @@ impl<'a> Estimator<'a> {
             LogicalPlan::Subquery(sq) => self.rows(&sq.subquery),
             LogicalPlan::Cte(c) => self.rows(&c.outer),
             LogicalPlan::RecursiveCte(rc) => self.rows(&rc.outer),
-            LogicalPlan::CteScan(c) => self
-                .cte_rows
-                .get(&c.name)
-                .copied()
-                .unwrap_or(UNKNOWN_ROWS),
+            LogicalPlan::CteScan(c) => self.cte_rows.get(&c.name).copied().unwrap_or(UNKNOWN_ROWS),
             LogicalPlan::Insert(i) if !i.values_rows.is_empty() => i.values_rows.len() as f64,
             LogicalPlan::Insert(i) => self.rows(&i.child),
         }
@@ -205,9 +201,7 @@ impl<'a> Estimator<'a> {
                     self.position(high, col.stats()),
                     bounds(col.stats()),
                 ) {
-                    (Some(lo), Some(hi), Some((min, max))) => {
-                        fraction_between(lo, hi, min, max)
-                    }
+                    (Some(lo), Some(hi), Some((min, max))) => fraction_between(lo, hi, min, max),
                     _ => RANGE_FACTOR,
                 };
                 Some(range * non_null)
@@ -290,7 +284,9 @@ impl<'a> Estimator<'a> {
                 }
                 let named = |q: &str| {
                     q.eq_ignore_ascii_case(&t.table)
-                        || t.alias.as_deref().is_some_and(|a| q.eq_ignore_ascii_case(a))
+                        || t.alias
+                            .as_deref()
+                            .is_some_and(|a| q.eq_ignore_ascii_case(a))
                 };
                 if qualifier.is_some_and(|q| !named(q)) {
                     return None;
@@ -322,9 +318,11 @@ impl<'a> Estimator<'a> {
         match (c, like) {
             (ConstantValue::Int(v), _) if is_plain_number(like) => Some(*v as f64),
             (ConstantValue::Float(v), _) if is_plain_number(like) => Some(*v),
-            (ConstantValue::Text(s), DataValue::Date(_)) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .ok()
-                .and_then(|d| numeric_position(&DataValue::Date(d))),
+            (ConstantValue::Text(s), DataValue::Date(_)) => {
+                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .ok()
+                    .and_then(|d| numeric_position(&DataValue::Date(d)))
+            }
             (ConstantValue::Text(s), DataValue::Timestamp(_)) => {
                 chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
                     .ok()
@@ -394,9 +392,8 @@ impl<'a> Estimator<'a> {
                 match (l, r) {
                     (None, None) => JOIN_FACTOR,
                     (l, r) => {
-                        let ndv = |side: Option<(usize, Column)>| {
-                            side.map(|(i, c)| c.distinct(rows[i]))
-                        };
+                        let ndv =
+                            |side: Option<(usize, Column)>| side.map(|(i, c)| c.distinct(rows[i]));
                         let widest = ndv(l).unwrap_or(1.0).max(ndv(r).unwrap_or(1.0));
                         1.0 / widest
                     }
@@ -514,7 +511,10 @@ fn is_plain_number(v: &DataValue) -> bool {
 
 /// The column's minimum and maximum on the number line.
 fn bounds(c: &ColumnStatistics) -> Option<(f64, f64)> {
-    Some((numeric_position(c.min.as_ref()?)?, numeric_position(c.max.as_ref()?)?))
+    Some((
+        numeric_position(c.min.as_ref()?)?,
+        numeric_position(c.max.as_ref()?)?,
+    ))
 }
 
 /// The fraction of values in `min..=max` below `c`.

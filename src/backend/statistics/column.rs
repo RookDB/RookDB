@@ -175,7 +175,9 @@ pub fn numeric_position(value: &DataValue) -> Option<f64> {
         DataValue::Real(v) => v.0 as f64,
         DataValue::DoublePrecision(v) => v.0,
         DataValue::Numeric(v) => v.unscaled as f64 / 10f64.powi(v.scale as i32),
-        DataValue::Date(d) => d.signed_duration_since(chrono::NaiveDate::default()).num_days() as f64,
+        DataValue::Date(d) => d
+            .signed_duration_since(chrono::NaiveDate::default())
+            .num_days() as f64,
         DataValue::Time(t) => t.num_seconds_from_midnight() as f64 + t.nanosecond() as f64 / 1e9,
         DataValue::Timestamp(t) => t.and_utc().timestamp_micros() as f64,
         DataValue::Bool(_) | DataValue::Char(_) | DataValue::Varchar(_) | DataValue::Bit(_) => {

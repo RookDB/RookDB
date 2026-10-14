@@ -18,8 +18,8 @@ use crate::backend::heap::HeapFile;
 use crate::catalog::types::Column;
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, page_free_space};
 
-pub use column::ColumnStatistics;
 use column::ColumnCollector;
+pub use column::ColumnStatistics;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageStatistics {
