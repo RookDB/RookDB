@@ -24,6 +24,7 @@
 //! | TIMESTAMP | 8 | µs since Unix epoch, i64 LE |
 //! | BIT(n) | ceil(n/8) | packed MSB-first |
 
+use crate::backend::error::{RookError, RookResult};
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -209,14 +210,12 @@ impl fmt::Display for DataValue {
     }
 }
 
-pub fn parse_numeric_literal(
-    input: &str,
-    precision: u8,
-    scale: u8,
-) -> Result<NumericValue, String> {
+pub fn parse_numeric_literal(input: &str, precision: u8, scale: u8) -> RookResult<NumericValue> {
     let raw = crate::types::validation::strip_enclosing_quotes(input);
     if raw.is_empty() {
-        return Err("NUMERIC value cannot be empty".to_string());
+        return Err(RookError::TypeMismatch(
+            "NUMERIC value cannot be empty".to_string(),
+        ));
     }
 
     let (sign, body) = if let Some(rest) = raw.strip_prefix('-') {
@@ -231,29 +230,29 @@ pub fn parse_numeric_literal(
     let int_part = parts.next().unwrap_or("");
     let frac_part = parts.next();
     if parts.next().is_some() {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "Invalid NUMERIC value '{}': too many decimal points",
             raw
-        ));
+        )));
     }
     if !int_part.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "Invalid NUMERIC value '{}': invalid integer digits",
             raw
-        ));
+        )));
     }
     let frac = frac_part.unwrap_or("");
     if !frac.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "Invalid NUMERIC value '{}': invalid fractional digits",
             raw
-        ));
+        )));
     }
     if frac.len() > scale as usize {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "NUMERIC({}, {}) value '{}' has too many fractional digits",
             precision, scale, raw
-        ));
+        )));
     }
 
     let mut combined = String::new();
@@ -272,28 +271,28 @@ pub fn parse_numeric_literal(
         normalized.len()
     };
     if effective_digits > precision as usize {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "NUMERIC({}, {}) value '{}' exceeds precision {}",
             precision, scale, raw, precision
-        ));
+        )));
     }
 
-    let unscaled_abs = combined
-        .parse::<i128>()
-        .map_err(|_| format!("NUMERIC value '{}' is out of supported range", raw))?;
+    let unscaled_abs = combined.parse::<i128>().map_err(|_| {
+        RookError::TypeMismatch(format!("NUMERIC value '{}' is out of supported range", raw))
+    })?;
     Ok(NumericValue {
         unscaled: sign * unscaled_abs,
         scale,
     })
 }
 
-fn encode_numeric_bcd(value: &NumericValue, precision: u8) -> Result<Vec<u8>, String> {
+fn encode_numeric_bcd(value: &NumericValue, precision: u8) -> RookResult<Vec<u8>> {
     let mut digits = value.unscaled.abs().to_string();
     if digits.len() > precision as usize {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "NUMERIC value '{}' exceeds precision {}",
             value.unscaled, precision
-        ));
+        )));
     }
     if digits.len() < precision as usize {
         digits = format!(
@@ -321,13 +320,13 @@ fn encode_numeric_bcd(value: &NumericValue, precision: u8) -> Result<Vec<u8>, St
     Ok(out)
 }
 
-fn decode_numeric_bcd(bytes: &[u8], precision: u8, scale: u8) -> Result<NumericValue, String> {
+fn decode_numeric_bcd(bytes: &[u8], precision: u8, scale: u8) -> RookResult<NumericValue> {
     let expected = ((precision as usize) + 1).div_ceil(2);
     if bytes.len() < expected {
-        return Err(format!(
+        return Err(RookError::TypeMismatch(format!(
             "NUMERIC({}, {}) requires {} bytes",
             precision, scale, expected
-        ));
+        )));
     }
 
     let mut nibbles = Vec::with_capacity(expected * 2);
@@ -340,19 +339,25 @@ fn decode_numeric_bcd(bytes: &[u8], precision: u8, scale: u8) -> Result<NumericV
     let digits_slice = &nibbles[start..start + precision as usize];
     let sign_nibble = nibbles[start + precision as usize];
     if !digits_slice.iter().all(|d| *d <= 9) {
-        return Err("NUMERIC payload contains invalid BCD digit".to_string());
+        return Err(RookError::TypeMismatch(
+            "NUMERIC payload contains invalid BCD digit".to_string(),
+        ));
     }
     let mut digits = String::with_capacity(precision as usize);
     for d in digits_slice {
         digits.push((b'0' + *d) as char);
     }
-    let abs_val = digits
-        .parse::<i128>()
-        .map_err(|_| "NUMERIC decoded value is out of range".to_string())?;
+    let abs_val = digits.parse::<i128>().map_err(|_| {
+        RookError::TypeMismatch("NUMERIC decoded value is out of range".to_string())
+    })?;
     let sign = match sign_nibble {
         0x0C => 1_i128,
         0x0D => -1_i128,
-        _ => return Err("NUMERIC payload has invalid sign nibble".to_string()),
+        _ => {
+            return Err(RookError::TypeMismatch(
+                "NUMERIC payload has invalid sign nibble".to_string(),
+            ));
+        }
     };
     Ok(NumericValue {
         unscaled: sign * abs_val,
@@ -413,11 +418,13 @@ impl DataValue {
     ///
     /// For variable-length data (`Varchar`), the byte slice explicitly
     /// delimits the exact payload, as extracted from the row's offset geometry.
-    pub fn from_bytes(ty: &DataType, bytes: &[u8]) -> Result<Self, String> {
+    pub fn from_bytes(ty: &DataType, bytes: &[u8]) -> RookResult<Self> {
         match ty {
             DataType::SmallInt => {
                 if bytes.len() < 2 {
-                    return Err("SMALLINT requires 2 bytes".to_string());
+                    return Err(RookError::TypeMismatch(
+                        "SMALLINT requires 2 bytes".to_string(),
+                    ));
                 }
                 Ok(DataValue::SmallInt(i16::from_le_bytes([
                     bytes[0], bytes[1],
@@ -425,7 +432,7 @@ impl DataValue {
             }
             DataType::Int => {
                 if bytes.len() < 4 {
-                    return Err("INT requires 4 bytes".to_string());
+                    return Err(RookError::TypeMismatch("INT requires 4 bytes".to_string()));
                 }
                 Ok(DataValue::Int(i32::from_le_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3],
@@ -433,7 +440,9 @@ impl DataValue {
             }
             DataType::BigInt => {
                 if bytes.len() < 8 {
-                    return Err("BIGINT requires 8 bytes".to_string());
+                    return Err(RookError::TypeMismatch(
+                        "BIGINT requires 8 bytes".to_string(),
+                    ));
                 }
                 Ok(DataValue::BigInt(i64::from_le_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -441,7 +450,7 @@ impl DataValue {
             }
             DataType::Real => {
                 if bytes.len() < 4 {
-                    return Err("REAL requires 4 bytes".to_string());
+                    return Err(RookError::TypeMismatch("REAL requires 4 bytes".to_string()));
                 }
                 Ok(DataValue::Real(OrderedF32(f32::from_le_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3],
@@ -449,7 +458,9 @@ impl DataValue {
             }
             DataType::DoublePrecision => {
                 if bytes.len() < 8 {
-                    return Err("DOUBLE PRECISION requires 8 bytes".to_string());
+                    return Err(RookError::TypeMismatch(
+                        "DOUBLE PRECISION requires 8 bytes".to_string(),
+                    ));
                 }
                 Ok(DataValue::DoublePrecision(OrderedF64(f64::from_le_bytes(
                     [
@@ -512,54 +523,69 @@ impl DataValue {
             }
             DataType::Bool => {
                 if bytes.is_empty() {
-                    return Err("BOOLEAN requires 1 byte".to_string());
+                    return Err(RookError::TypeMismatch(
+                        "BOOLEAN requires 1 byte".to_string(),
+                    ));
                 }
                 Ok(DataValue::Bool(bytes[0] != 0))
             }
             DataType::Char(n) => {
                 let len = *n as usize;
                 if bytes.len() < len {
-                    return Err(format!("CHAR({}) requires {} bytes", n, len));
+                    return Err(RookError::TypeMismatch(format!(
+                        "CHAR({}) requires {} bytes",
+                        n, len
+                    )));
                 }
-                let value = String::from_utf8(bytes[..len].to_vec())
-                    .map_err(|_| "CHAR payload is not valid UTF-8".to_string())?;
+                let value = String::from_utf8(bytes[..len].to_vec()).map_err(|_| {
+                    RookError::TypeMismatch("CHAR payload is not valid UTF-8".to_string())
+                })?;
                 Ok(DataValue::Char(value))
             }
             DataType::Character(n) => {
                 let len = *n as usize;
                 if bytes.len() < len {
-                    return Err(format!("CHARACTER({}) requires {} bytes", n, len));
+                    return Err(RookError::TypeMismatch(format!(
+                        "CHARACTER({}) requires {} bytes",
+                        n, len
+                    )));
                 }
-                let value = String::from_utf8(bytes[..len].to_vec())
-                    .map_err(|_| "CHARACTER payload is not valid UTF-8".to_string())?;
+                let value = String::from_utf8(bytes[..len].to_vec()).map_err(|_| {
+                    RookError::TypeMismatch("CHARACTER payload is not valid UTF-8".to_string())
+                })?;
                 Ok(DataValue::Char(value))
             }
             DataType::Varchar(max_len) => {
                 let payload_len = bytes.len();
                 if payload_len > *max_len as usize {
-                    return Err(format!(
+                    return Err(RookError::TypeMismatch(format!(
                         "VARCHAR payload length {} exceeds declared limit {}",
                         payload_len, max_len
-                    ));
+                    )));
                 }
-                let value = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| "VARCHAR payload is not valid UTF-8".to_string())?;
+                let value = String::from_utf8(bytes.to_vec()).map_err(|_| {
+                    RookError::TypeMismatch("VARCHAR payload is not valid UTF-8".to_string())
+                })?;
                 Ok(DataValue::Varchar(value))
             }
             DataType::Date => {
                 if bytes.len() < 4 {
-                    return Err("DATE requires 4 bytes".to_string());
+                    return Err(RookError::TypeMismatch("DATE requires 4 bytes".to_string()));
                 }
                 let days = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64;
                 let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
                 let value = epoch
                     .checked_add_signed(Duration::days(days))
-                    .ok_or_else(|| "DATE is outside supported chrono range".to_string())?;
+                    .ok_or_else(|| {
+                        RookError::TypeMismatch(
+                            "DATE is outside supported chrono range".to_string(),
+                        )
+                    })?;
                 Ok(DataValue::Date(value))
             }
             DataType::Time => {
                 if bytes.len() < 8 {
-                    return Err("TIME requires 8 bytes".to_string());
+                    return Err(RookError::TypeMismatch("TIME requires 8 bytes".to_string()));
                 }
                 let micros = i64::from_le_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -568,11 +594,13 @@ impl DataValue {
                 let nanos = ((micros % 1_000_000) * 1_000) as u32;
                 NaiveTime::from_num_seconds_from_midnight_opt(secs, nanos)
                     .map(DataValue::Time)
-                    .ok_or_else(|| "TIME value out of range".to_string())
+                    .ok_or_else(|| RookError::TypeMismatch("TIME value out of range".to_string()))
             }
             DataType::Timestamp => {
                 if bytes.len() < 8 {
-                    return Err("TIMESTAMP requires 8 bytes".to_string());
+                    return Err(RookError::TypeMismatch(
+                        "TIMESTAMP requires 8 bytes".to_string(),
+                    ));
                 }
                 let micros = i64::from_le_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -584,12 +612,19 @@ impl DataValue {
                 epoch
                     .checked_add_signed(Duration::microseconds(micros))
                     .map(DataValue::Timestamp)
-                    .ok_or_else(|| "TIMESTAMP is outside supported chrono range".to_string())
+                    .ok_or_else(|| {
+                        RookError::TypeMismatch(
+                            "TIMESTAMP is outside supported chrono range".to_string(),
+                        )
+                    })
             }
             DataType::Bit(n) => {
                 let needed = (*n as usize).div_ceil(8);
                 if bytes.len() < needed {
-                    return Err(format!("BIT({}) requires {} bytes", n, needed));
+                    return Err(RookError::TypeMismatch(format!(
+                        "BIT({}) requires {} bytes",
+                        n, needed
+                    )));
                 }
                 Ok(DataValue::Bit(unpack_bit_string(
                     &bytes[..needed],
@@ -604,36 +639,36 @@ impl DataValue {
     /// Combines validation ([`validate_value`]) and encoding ([`to_bytes`](Self::to_bytes))
     /// into a single step. Used by the INSERT path to convert user-supplied string
     /// literals directly into storage bytes.
-    pub fn parse_and_encode(ty: &DataType, input: &str) -> Result<Vec<u8>, String> {
+    pub fn parse_and_encode(ty: &DataType, input: &str) -> RookResult<Vec<u8>> {
         let input = input.trim();
-        validate_value(ty, input).map_err(|e| e.to_string())?;
+        validate_value(ty, input).map_err(|e| RookError::TypeMismatch(e.to_string()))?;
 
         match ty {
             DataType::SmallInt => input
                 .parse::<i16>()
                 .map(DataValue::SmallInt)
                 .map(|v| v.to_bytes())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| RookError::TypeMismatch(e.to_string())),
             DataType::Int => input
                 .parse::<i32>()
                 .map(DataValue::Int)
                 .map(|v| v.to_bytes())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| RookError::TypeMismatch(e.to_string())),
             DataType::BigInt => input
                 .parse::<i64>()
                 .map(DataValue::BigInt)
                 .map(|v| v.to_bytes())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| RookError::TypeMismatch(e.to_string())),
             DataType::Real => input
                 .parse::<f32>()
                 .map(|v| DataValue::Real(OrderedF32(v)))
                 .map(|v| v.to_bytes())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| RookError::TypeMismatch(e.to_string())),
             DataType::DoublePrecision => input
                 .parse::<f64>()
                 .map(|v| DataValue::DoublePrecision(OrderedF64(v)))
                 .map(|v| v.to_bytes())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| RookError::TypeMismatch(e.to_string())),
             DataType::Numeric { precision, scale } => {
                 let parsed = parse_numeric_literal(input, *precision, *scale)?;
                 encode_numeric_bcd(&parsed, *precision)
@@ -645,16 +680,19 @@ impl DataValue {
             DataType::Bool => match input.to_ascii_lowercase().as_str() {
                 "true" | "t" | "1" => Ok(DataValue::Bool(true).to_bytes()),
                 "false" | "f" | "0" => Ok(DataValue::Bool(false).to_bytes()),
-                _ => Err(format!(
+                _ => Err(RookError::TypeMismatch(format!(
                     "Invalid BOOLEAN value '{}': expected true/false",
                     input
-                )),
+                ))),
             },
             DataType::Char(n) => {
                 let value = crate::types::validation::strip_enclosing_quotes(input);
                 let mut bytes = value.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
-                    return Err(format!("CHAR({}) value exceeds maximum length {}", n, n));
+                    return Err(RookError::TypeMismatch(format!(
+                        "CHAR({}) value exceeds maximum length {}",
+                        n, n
+                    )));
                 }
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
@@ -663,10 +701,10 @@ impl DataValue {
                 let value = crate::types::validation::strip_enclosing_quotes(input);
                 let mut bytes = value.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
-                    return Err(format!(
+                    return Err(RookError::TypeMismatch(format!(
                         "CHARACTER({}) value exceeds maximum length {}",
                         n, n
-                    ));
+                    )));
                 }
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
@@ -680,7 +718,7 @@ impl DataValue {
                     crate::types::validation::strip_enclosing_quotes(input),
                     "%Y-%m-%d",
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| RookError::TypeMismatch(e.to_string()))?;
                 Ok(DataValue::Date(date).to_bytes())
             }
             DataType::Time => {
@@ -689,14 +727,14 @@ impl DataValue {
                 NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
                     .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M:%S"))
                     .map(|v| DataValue::Time(v).to_bytes())
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| RookError::TypeMismatch(e.to_string()))
             }
             DataType::Timestamp => {
                 let raw = crate::types::validation::strip_enclosing_quotes(input);
                 NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
                     .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
                     .map(|v| DataValue::Timestamp(v).to_bytes())
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| RookError::TypeMismatch(e.to_string()))
             }
             DataType::Bit(_) => {
                 let bits = normalize_bit_literal(input);
@@ -711,30 +749,33 @@ impl DataValue {
     /// For most types this delegates to [`Self::to_bytes`]. For `NUMERIC`/`DECIMAL`
     /// it validates the scale matches before BCD-encoding. For `CHAR`/`CHARACTER`
     /// it applies space-padding to the declared fixed length.
-    pub fn to_bytes_for_type(&self, ty: &DataType) -> Result<Vec<u8>, String> {
+    pub fn to_bytes_for_type(&self, ty: &DataType) -> RookResult<Vec<u8>> {
         match (ty, self) {
             (DataType::Numeric { precision, scale }, DataValue::Numeric(v)) => {
                 if v.scale != *scale {
-                    return Err(format!(
+                    return Err(RookError::TypeMismatch(format!(
                         "NUMERIC scale mismatch: value has scale {}, type requires {}",
                         v.scale, scale
-                    ));
+                    )));
                 }
                 encode_numeric_bcd(v, *precision)
             }
             (DataType::Decimal { precision, scale }, DataValue::Numeric(v)) => {
                 if v.scale != *scale {
-                    return Err(format!(
+                    return Err(RookError::TypeMismatch(format!(
                         "DECIMAL scale mismatch: value has scale {}, type requires {}",
                         v.scale, scale
-                    ));
+                    )));
                 }
                 encode_numeric_bcd(v, *precision)
             }
             (DataType::Char(n), DataValue::Char(v)) => {
                 let mut bytes = v.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
-                    return Err(format!("CHAR({}) value exceeds maximum length {}", n, n));
+                    return Err(RookError::TypeMismatch(format!(
+                        "CHAR({}) value exceeds maximum length {}",
+                        n, n
+                    )));
                 }
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
@@ -742,21 +783,21 @@ impl DataValue {
             (DataType::Character(n), DataValue::Char(v)) => {
                 let mut bytes = v.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
-                    return Err(format!(
+                    return Err(RookError::TypeMismatch(format!(
                         "CHARACTER({}) value exceeds maximum length {}",
                         n, n
-                    ));
+                    )));
                 }
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
             }
             (DataType::Varchar(max_len), DataValue::Varchar(v)) => {
                 if v.len() > *max_len as usize {
-                    return Err(format!(
+                    return Err(RookError::TypeMismatch(format!(
                         "VARCHAR payload length {} exceeds declared limit {}",
                         v.len(),
                         max_len
-                    ));
+                    )));
                 }
                 Ok(self.to_bytes())
             }

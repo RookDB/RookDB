@@ -116,10 +116,7 @@ pub(super) fn use_database(session: &mut Session, db_name: &str) -> StatementRes
 
 /// The value of a column DEFAULT; `None` for NULL. The literal is converted
 /// from its text for the column's type, so no digits are lost on the way.
-pub(super) fn default_value(
-    ty: &DataType,
-    value: &DefaultValue,
-) -> Result<Option<DataValue>, String> {
+pub(super) fn default_value(ty: &DataType, value: &DefaultValue) -> RookResult<Option<DataValue>> {
     let text = match value {
         DefaultValue::Null => return Ok(None),
         DefaultValue::Number(n) | DefaultValue::Text(n) => n.clone(),

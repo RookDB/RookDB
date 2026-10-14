@@ -217,7 +217,7 @@ fn update_rows(
         let new_bytes = match serialize_nullable_typed_row(&schema, &updated_values) {
             Ok(b) => b,
             Err(e) => {
-                return Err(RookError::TypeMismatch(e).with_context("serialization error"));
+                return Err(e.with_context("serialization error"));
             }
         };
 

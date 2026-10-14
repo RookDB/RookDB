@@ -10,6 +10,8 @@
 
 /// Quickly check whether a specific column is NULL from raw row bytes,
 /// without performing a full deserialisation.
+use crate::backend::error::{RookError, RookResult};
+
 ///
 /// Row layout: `[4B header][null_bitmap][var-len offset table][fixed data][var-len data]`
 /// - Header: u16 num_cols, u16 num_varlen
@@ -17,24 +19,26 @@
 ///
 /// Returns `Ok(true)` if the column is NULL, `Ok(false)` if non-NULL,
 /// or `Err` if the row is too short to contain the bitmap.
-pub fn is_column_null_in_row(row_bytes: &[u8], column_index: usize) -> Result<bool, String> {
+pub fn is_column_null_in_row(row_bytes: &[u8], column_index: usize) -> RookResult<bool> {
     if row_bytes.len() < 4 {
-        return Err("Row too short to contain header".to_string());
+        return Err(RookError::Internal(
+            "Row too short to contain header".to_string(),
+        ));
     }
     let num_cols = u16::from_le_bytes([row_bytes[0], row_bytes[1]]) as usize;
     if column_index >= num_cols {
-        return Err(format!(
+        return Err(RookError::Internal(format!(
             "Column index {} out of bounds (num_cols={})",
             column_index, num_cols
-        ));
+        )));
     }
     let bm_size = num_cols.div_ceil(8);
     if row_bytes.len() < 4 + bm_size {
-        return Err(format!(
+        return Err(RookError::Internal(format!(
             "Row too short to contain null bitmap: need {} bytes, got {}",
             4 + bm_size,
             row_bytes.len()
-        ));
+        )));
     }
     let byte_idx = column_index / 8;
     let bit_idx = column_index % 8;
@@ -64,14 +68,14 @@ impl NullBitmap {
     /// [`as_bytes`](Self::as_bytes).
     ///
     /// Returns an error if `raw.len()` does not equal `ceil(column_count / 8)`.
-    pub fn from_bytes(column_count: usize, raw: &[u8]) -> Result<Self, String> {
+    pub fn from_bytes(column_count: usize, raw: &[u8]) -> RookResult<Self> {
         let expected = column_count.div_ceil(8);
         if raw.len() != expected {
-            return Err(format!(
+            return Err(RookError::Internal(format!(
                 "Invalid NULL bitmap length: expected {}, found {}",
                 expected,
                 raw.len()
-            ));
+            )));
         }
         Ok(Self {
             column_count,

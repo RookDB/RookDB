@@ -468,7 +468,7 @@ fn schema(columns: &[Column]) -> Vec<DataType> {
     columns.iter().map(|c| c.data_type.clone()).collect()
 }
 
-fn invalid_default(column: &str, err: String) -> io::Error {
+fn invalid_default(column: &str, err: impl std::fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
         format!("Invalid DEFAULT for column '{}': {}", column, err),

@@ -56,7 +56,7 @@ fn string_temporal_and_bit_constraints() {
 fn varchar_length_prefix_violation_is_rejected() {
     let too_long = vec![6_u8, 0, b'a', b'b', b'c', b'd', b'e', b'f'];
     let err = DataValue::from_bytes(&DataType::Varchar(5), &too_long).unwrap_err();
-    assert!(err.contains("exceeds declared limit"));
+    assert!(err.to_string().contains("exceeds declared limit"));
 }
 
 #[test]

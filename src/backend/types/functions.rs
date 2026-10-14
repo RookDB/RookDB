@@ -786,14 +786,16 @@ pub fn cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionE
     {
         let rounded = round(value, *scale as i32)?;
         let encoded = DataValue::parse_and_encode(target, &value_to_literal(&rounded))
-            .map_err(FunctionError::InvalidArgument)?;
-        return DataValue::from_bytes(target, &encoded).map_err(FunctionError::InvalidArgument);
+            .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
+        return DataValue::from_bytes(target, &encoded)
+            .map_err(|e| FunctionError::InvalidArgument(e.to_string()));
     }
 
     let literal = value_to_literal(value);
-    let encoded =
-        DataValue::parse_and_encode(target, &literal).map_err(FunctionError::InvalidArgument)?;
-    DataValue::from_bytes(target, &encoded).map_err(FunctionError::InvalidArgument)
+    let encoded = DataValue::parse_and_encode(target, &literal)
+        .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
+    DataValue::from_bytes(target, &encoded)
+        .map_err(|e| FunctionError::InvalidArgument(e.to_string()))
 }
 
 /// Convert `value` for storage in a column of type `target`, as INSERT and
@@ -917,9 +919,9 @@ fn cast_to_bit(value: &DataValue, n: u16) -> Result<DataValue, FunctionError> {
         // String types → use parse_and_encode (validates '0'/'1' chars)
         DataValue::Varchar(s) => {
             let encoded = DataValue::parse_and_encode(&DataType::Bit(n), s.trim())
-                .map_err(FunctionError::InvalidArgument)?;
+                .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
             let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
-                .map_err(FunctionError::InvalidArgument)?;
+                .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
             if let DataValue::Bit(bits) = dv {
                 bits
             } else {
@@ -928,9 +930,9 @@ fn cast_to_bit(value: &DataValue, n: u16) -> Result<DataValue, FunctionError> {
         }
         DataValue::Char(s) => {
             let encoded = DataValue::parse_and_encode(&DataType::Bit(n), s.trim_end_matches(' '))
-                .map_err(FunctionError::InvalidArgument)?;
+                .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
             let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
-                .map_err(FunctionError::InvalidArgument)?;
+                .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
             if let DataValue::Bit(bits) = dv {
                 bits
             } else {
@@ -948,7 +950,7 @@ fn cast_to_bit(value: &DataValue, n: u16) -> Result<DataValue, FunctionError> {
                     ))
                 })?;
             let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
-                .map_err(FunctionError::InvalidArgument)?;
+                .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
             if let DataValue::Bit(bits) = dv {
                 bits
             } else {

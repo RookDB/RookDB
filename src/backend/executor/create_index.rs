@@ -15,6 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::backend::error::{RookError, RookResult};
 use crate::backend::index::btree::BTree;
 use crate::catalog::Catalog;
 use crate::catalog::types::Column;
@@ -1027,34 +1028,37 @@ pub fn update_index_on_update(
 /// Parse a raw string value into a `DataValue` for the given `DataType`.
 /// This mirrors the DataValue construction logic in `DataValue::parse_and_encode`
 /// but returns a `DataValue` instead of encoded bytes.
-pub fn parse_string_to_value(ty: &DataType, input: &str) -> Result<DataValue, String> {
+pub fn parse_string_to_value(ty: &DataType, input: &str) -> RookResult<DataValue> {
     let input = crate::types::validation::strip_enclosing_quotes(input);
 
     match ty {
         DataType::SmallInt => input
             .parse::<i16>()
             .map(DataValue::SmallInt)
-            .map_err(|e| format!("Invalid SMALLINT '{}': {}", input, e)),
+            .map_err(|e| RookError::TypeMismatch(format!("Invalid SMALLINT '{}': {}", input, e))),
         DataType::Int => input
             .parse::<i32>()
             .map(DataValue::Int)
-            .map_err(|e| format!("Invalid INT '{}': {}", input, e)),
+            .map_err(|e| RookError::TypeMismatch(format!("Invalid INT '{}': {}", input, e))),
         DataType::BigInt => input
             .parse::<i64>()
             .map(DataValue::BigInt)
-            .map_err(|e| format!("Invalid BIGINT '{}': {}", input, e)),
+            .map_err(|e| RookError::TypeMismatch(format!("Invalid BIGINT '{}': {}", input, e))),
         DataType::Real => input
             .parse::<f32>()
             .map(|v| DataValue::Real(OrderedF32(v)))
-            .map_err(|e| format!("Invalid REAL '{}': {}", input, e)),
+            .map_err(|e| RookError::TypeMismatch(format!("Invalid REAL '{}': {}", input, e))),
         DataType::DoublePrecision => input
             .parse::<f64>()
             .map(|v| DataValue::DoublePrecision(OrderedF64(v)))
-            .map_err(|e| format!("Invalid DOUBLE '{}': {}", input, e)),
+            .map_err(|e| RookError::TypeMismatch(format!("Invalid DOUBLE '{}': {}", input, e))),
         DataType::Bool => match input.to_ascii_lowercase().as_str() {
             "true" | "t" | "1" => Ok(DataValue::Bool(true)),
             "false" | "f" | "0" => Ok(DataValue::Bool(false)),
-            _ => Err(format!("Invalid BOOLEAN '{}': expected true/false", input)),
+            _ => Err(RookError::TypeMismatch(format!(
+                "Invalid BOOLEAN '{}': expected true/false",
+                input
+            ))),
         },
         DataType::Char(_) | DataType::Character(_) => Ok(DataValue::Char(input.to_string())),
         DataType::Varchar(_) => Ok(DataValue::Varchar(input.to_string())),
@@ -1062,21 +1066,23 @@ pub fn parse_string_to_value(ty: &DataType, input: &str) -> Result<DataValue, St
             use chrono::NaiveDate;
             NaiveDate::parse_from_str(input, "%Y-%m-%d")
                 .map(DataValue::Date)
-                .map_err(|e| format!("Invalid DATE '{}': {}", input, e))
+                .map_err(|e| RookError::TypeMismatch(format!("Invalid DATE '{}': {}", input, e)))
         }
         DataType::Time => {
             use chrono::NaiveTime;
             NaiveTime::parse_from_str(input, "%H:%M:%S%.f")
                 .or_else(|_| NaiveTime::parse_from_str(input, "%H:%M:%S"))
                 .map(DataValue::Time)
-                .map_err(|e| format!("Invalid TIME '{}': {}", input, e))
+                .map_err(|e| RookError::TypeMismatch(format!("Invalid TIME '{}': {}", input, e)))
         }
         DataType::Timestamp => {
             use chrono::NaiveDateTime;
             NaiveDateTime::parse_from_str(input, "%Y-%m-%d %H:%M:%S%.f")
                 .or_else(|_| NaiveDateTime::parse_from_str(input, "%Y-%m-%d %H:%M:%S"))
                 .map(DataValue::Timestamp)
-                .map_err(|e| format!("Invalid TIMESTAMP '{}': {}", input, e))
+                .map_err(|e| {
+                    RookError::TypeMismatch(format!("Invalid TIMESTAMP '{}': {}", input, e))
+                })
         }
         DataType::Bit(_) => {
             let bits = crate::types::bit_utils::normalize_bit_literal(input);

@@ -266,7 +266,7 @@ fn roundtrip_bit() {
 #[test]
 fn varchar_length_violation_is_error() {
     let err = DataValue::parse_and_encode(&DataType::Varchar(3), "Alice").unwrap_err();
-    assert!(err.contains("VARCHAR(3)"));
+    assert!(err.to_string().contains("VARCHAR(3)"));
 }
 
 // ── Validation (reject bad literals) ────────────────────────────────────────

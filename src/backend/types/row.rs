@@ -1,3 +1,4 @@
+use crate::backend::error::{RookError, RookResult};
 use crate::types::comparison::value_type_name;
 use crate::types::datatype::DataType;
 use crate::types::null_bitmap::NullBitmap;
@@ -54,16 +55,13 @@ pub fn row_byte_size(schema: &[DataType], values: &[Option<&DataValue>]) -> usiz
 /// Layout: [Header 4B][Null Bitmap][Var-Len Offset Table][Fixed Data][Var-Len Data]
 /// Var-len payloads are stored **without** a length prefix; lengths are derived
 /// from adjacent offset-table entries and the total row size.
-pub fn serialize_nullable_row(
-    schema: &[DataType],
-    values: &[Option<&str>],
-) -> Result<Vec<u8>, String> {
+pub fn serialize_nullable_row(schema: &[DataType], values: &[Option<&str>]) -> RookResult<Vec<u8>> {
     if schema.len() != values.len() {
-        return Err(format!(
+        return Err(RookError::Internal(format!(
             "Schema/value length mismatch: schema={}, values={}",
             schema.len(),
             values.len()
-        ));
+        )));
     }
 
     // Pre-encode all values so we know payload sizes upfront.
@@ -90,13 +88,13 @@ pub fn serialize_nullable_row(
 pub fn serialize_nullable_typed_row(
     schema: &[DataType],
     values: &[Option<DataValue>],
-) -> Result<Vec<u8>, String> {
+) -> RookResult<Vec<u8>> {
     if schema.len() != values.len() {
-        return Err(format!(
+        return Err(RookError::Internal(format!(
             "Schema/value length mismatch: schema={}, values={}",
             schema.len(),
             values.len()
-        ));
+        )));
     }
 
     let mut encoded_values: Vec<Option<Vec<u8>>> = Vec::with_capacity(schema.len());
@@ -106,12 +104,12 @@ pub fn serialize_nullable_typed_row(
         match maybe_val {
             Some(val) => {
                 if !data_value_matches_type(ty, val) {
-                    return Err(format!(
+                    return Err(RookError::Internal(format!(
                         "Type mismatch at column {}: expected {}, got {}",
                         i,
                         ty,
                         value_type_name(val)
-                    ));
+                    )));
                 }
                 encoded_values.push(Some(val.to_bytes_for_type(ty)?));
             }
@@ -134,7 +132,7 @@ fn serialize_encoded(
     schema: &[DataType],
     encoded_values: &[Option<Vec<u8>>],
     bitmap: &NullBitmap,
-) -> Result<Vec<u8>, String> {
+) -> RookResult<Vec<u8>> {
     let physical = PhysicalSchema::from_logical(schema);
     let layout = RowLayout::compute(&physical);
 
@@ -204,7 +202,7 @@ fn serialize_encoded(
 pub fn deserialize_nullable_row(
     schema: &[DataType],
     row_bytes: &[u8],
-) -> Result<Vec<Option<DataValue>>, String> {
+) -> RookResult<Vec<Option<DataValue>>> {
     RowDecoder::new(schema).decode(row_bytes)
 }
 
@@ -274,38 +272,40 @@ impl RowDecoder {
     }
 
     /// Decode one row into a new vector.
-    pub fn decode(&self, row: &[u8]) -> Result<Vec<Option<DataValue>>, String> {
+    pub fn decode(&self, row: &[u8]) -> RookResult<Vec<Option<DataValue>>> {
         let mut out = Vec::with_capacity(self.schema.len());
         self.decode_into(row, &mut out)?;
         Ok(out)
     }
 
     /// Decode one row into `out`, replacing its contents.
-    pub fn decode_into(&self, row: &[u8], out: &mut Vec<Option<DataValue>>) -> Result<(), String> {
+    pub fn decode_into(&self, row: &[u8], out: &mut Vec<Option<DataValue>>) -> RookResult<()> {
         if row.len() < 4 {
-            return Err("Row too short to contain header".to_string());
+            return Err(RookError::Internal(
+                "Row too short to contain header".to_string(),
+            ));
         }
         let num_cols_stored = u16::from_le_bytes([row[0], row[1]]) as usize;
         let num_varlen_stored = u16::from_le_bytes([row[2], row[3]]) as usize;
         if num_cols_stored != self.schema.len() {
-            return Err(format!(
+            return Err(RookError::Internal(format!(
                 "Header column count {} does not match schema length {}",
                 num_cols_stored,
                 self.schema.len()
-            ));
+            )));
         }
         if num_varlen_stored != self.num_varlen {
-            return Err(format!(
+            return Err(RookError::Internal(format!(
                 "Header var-len count {} does not match schema var-len count {}",
                 num_varlen_stored, self.num_varlen
-            ));
+            )));
         }
         if row.len() < self.min_row_size {
-            return Err(format!(
+            return Err(RookError::Internal(format!(
                 "Row ({} bytes) shorter than minimum layout size ({} bytes)",
                 row.len(),
                 self.min_row_size
-            ));
+            )));
         }
 
         out.clear();
@@ -398,18 +398,21 @@ impl Row {
 
     // ── Accessors ─────────────────────────────────────────────────────────────
 
-    pub fn set_value(&mut self, column_index: usize, value: &DataValue) -> Result<(), String> {
+    pub fn set_value(&mut self, column_index: usize, value: &DataValue) -> RookResult<()> {
         if column_index >= self.logical_schema.len() {
-            return Err(format!("Column index {} out of bounds", column_index));
+            return Err(RookError::Internal(format!(
+                "Column index {} out of bounds",
+                column_index
+            )));
         }
         let ty = &self.logical_schema[column_index];
         if !data_value_matches_type(ty, value) {
-            return Err(format!(
+            return Err(RookError::Internal(format!(
                 "Type mismatch at column {}: expected {}, got {}",
                 column_index,
                 ty,
                 value_type_name(value)
-            ));
+            )));
         }
 
         let enc = value.to_bytes_for_type(ty)?;
@@ -454,9 +457,12 @@ impl Row {
         Ok(())
     }
 
-    pub fn set_null(&mut self, column_index: usize) -> Result<(), String> {
+    pub fn set_null(&mut self, column_index: usize) -> RookResult<()> {
         if column_index >= self.logical_schema.len() {
-            return Err(format!("Column index {} out of bounds", column_index));
+            return Err(RookError::Internal(format!(
+                "Column index {} out of bounds",
+                column_index
+            )));
         }
 
         if self.null_bitmap.is_null(column_index) {
@@ -487,9 +493,12 @@ impl Row {
         Ok(())
     }
 
-    pub fn get_value(&self, column_index: usize) -> Result<Option<DataValue>, String> {
+    pub fn get_value(&self, column_index: usize) -> RookResult<Option<DataValue>> {
         if column_index >= self.logical_schema.len() {
-            return Err(format!("Column index {} out of bounds", column_index));
+            return Err(RookError::Internal(format!(
+                "Column index {} out of bounds",
+                column_index
+            )));
         }
 
         if self.null_bitmap.is_null(column_index) {
@@ -540,12 +549,14 @@ impl Row {
         out
     }
 
-    pub fn deserialize(schema: &[DataType], bytes: &[u8]) -> Result<Self, String> {
+    pub fn deserialize(schema: &[DataType], bytes: &[u8]) -> RookResult<Self> {
         let physical = PhysicalSchema::from_logical(schema);
         let layout = RowLayout::compute(&physical);
 
         if bytes.len() < 4 {
-            return Err("Row too short to contain header".to_string());
+            return Err(RookError::Internal(
+                "Row too short to contain header".to_string(),
+            ));
         }
 
         // Validate via full decode first (catches corrupt rows early).

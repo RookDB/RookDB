@@ -130,7 +130,7 @@ fn insert_row_resolved(
 
     crate::backend::constraint::validate_row_insert(catalog, db_name, table_name, &row)?;
 
-    let bytes = serialize_nullable_typed_row(schema, &row).map_err(RookError::TypeMismatch)?;
+    let bytes = serialize_nullable_typed_row(schema, &row)?;
 
     let (page_id, slot_id) = crate::backend::cache::with_heap(catalog.engine(), table_path, |hm| {
         hm.insert_tuple(&bytes)
@@ -177,7 +177,7 @@ pub fn insert_text_row(
     values: &[&str],
 ) -> RookResult<(u32, u32)> {
     let columns = table_columns(catalog, db_name, table_name)?;
-    let row = parse_text_row(columns, values).map_err(RookError::TypeMismatch)?;
+    let row = parse_text_row(columns, values)?;
     insert_row(catalog, db_name, table_name, &row)
 }
 

@@ -53,5 +53,5 @@ fn deserialize_rejects_short_bitmap() {
         DataType::Int,
     ];
     let err = deserialize_nullable_row(&schema, &[0u8]).unwrap_err();
-    assert!(err.contains("Row too short"));
+    assert!(err.to_string().contains("Row too short"));
 }
