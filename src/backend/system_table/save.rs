@@ -8,7 +8,7 @@ use super::*;
 ///
 /// Deletes and recreates all system table files from scratch to prevent
 /// duplicate rows on subsequent saves.
-pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
+pub fn save_catalog_to_system(catalog: &Catalog) -> RookResult<()> {
     // 1. Load existing FOREIGN KEY constraints from sys_constraints before deleting it.
     //
     // CRITICAL: FK rows store the child table's numeric `table_id`.  After system tables

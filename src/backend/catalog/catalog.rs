@@ -73,7 +73,7 @@ pub fn load_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) 
 
 /// Persists the in-memory catalog state to disk.
 /// Returns Ok(()) on success, or an error with a detailed message if something goes wrong.
-pub fn save_catalog(catalog: &Catalog) -> std::io::Result<()> {
+pub fn save_catalog(catalog: &Catalog) -> crate::backend::error::RookResult<()> {
     debug_print_catalog("Saving catalog to system tables.");
     crate::backend::system_table::save_catalog_to_system(catalog)
 }

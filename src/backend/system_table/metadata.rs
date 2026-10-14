@@ -16,10 +16,9 @@ pub fn delete_table_metadata(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     // Resolve table_id from sys_tables
-    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
     let db_id = db_rows
         .iter()
         .find_map(|row| {
@@ -36,14 +35,10 @@ pub fn delete_table_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Database '{}' not found in sys_databases", db_name),
-            )
+            RookError::Internal(format!("Database '{}' not found in sys_databases", db_name))
         })?;
 
-    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?;
     let table_id = tbl_rows
         .iter()
         .find_map(|row| {
@@ -67,10 +62,10 @@ pub fn delete_table_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
-            )
+            RookError::Internal(format!(
+                "Table '{}.{}' not found in sys_tables",
+                db_name, table_name
+            ))
         })?;
 
     let mut total = 0usize;
@@ -102,10 +97,9 @@ pub fn insert_constraint_metadata(
     columns: &str,         // e.g. "id" or "id,name"
     ref_table: Option<&str>, // for FOREIGN KEY
     ref_columns: Option<&str>, // for FOREIGN KEY
-) -> std::io::Result<()> {
+) -> RookResult<()> {
     // 1. Resolve db_name → db_id
-    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
     let db_id = db_rows
         .iter()
         .find_map(|row| {
@@ -122,15 +116,11 @@ pub fn insert_constraint_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Database '{}' not found in sys_databases", db_name),
-            )
+            RookError::Internal(format!("Database '{}' not found in sys_databases", db_name))
         })?;
 
     // 2. Resolve (db_id, table_name) → table_id
-    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?;
     let table_id = tbl_rows
         .iter()
         .find_map(|row| {
@@ -154,15 +144,14 @@ pub fn insert_constraint_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
-            )
+            RookError::Internal(format!(
+                "Table '{}.{}' not found in sys_tables",
+                db_name, table_name
+            ))
         })?;
 
     // 3. Compute next constraint_id by scanning sys_constraints
-    let constr_rows = scan_system_table(engine, "constraints", SYS_CONSTRAINTS_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let constr_rows = scan_system_table(engine, "constraints", SYS_CONSTRAINTS_SCHEMA)?;
     let next_constr_id = constr_rows
         .iter()
         .fold(1i32, |max_id, row| match row.first() {
@@ -203,10 +192,9 @@ pub fn insert_index_metadata(
     column_name: &str,
     is_unique: bool,
     is_primary: bool,
-) -> std::io::Result<()> {
+) -> RookResult<()> {
     // 1. Resolve db_name → db_id from sys_databases
-    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
     let db_id = db_rows
         .iter()
         .find_map(|row| {
@@ -223,15 +211,11 @@ pub fn insert_index_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Database '{}' not found in sys_databases", db_name),
-            )
+            RookError::Internal(format!("Database '{}' not found in sys_databases", db_name))
         })?;
 
     // 2. Resolve (db_id, table_name) → table_id from sys_tables
-    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?;
     let table_id = tbl_rows
         .iter()
         .find_map(|row| {
@@ -255,15 +239,14 @@ pub fn insert_index_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
-            )
+            RookError::Internal(format!(
+                "Table '{}.{}' not found in sys_tables",
+                db_name, table_name
+            ))
         })?;
 
     // 3. Compute next index_id by scanning sys_indexes
-    let idx_rows = scan_system_table(engine, "indexes", SYS_INDEXES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let idx_rows = scan_system_table(engine, "indexes", SYS_INDEXES_SCHEMA)?;
     let next_idx_id = idx_rows.iter().fold(1i32, |max_id, row| match row.first() {
         Some(Some(crate::types::DataValue::Int(id))) => std::cmp::max(max_id, *id + 1),
         _ => max_id,
@@ -296,10 +279,9 @@ pub fn delete_index_metadata(
     db_name: &str,
     table_name: &str,
     index_name: &str,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     // Resolve db_name → db_id
-    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
     let db_id = db_rows
         .iter()
         .find_map(|row| {
@@ -316,15 +298,11 @@ pub fn delete_index_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Database '{}' not found in sys_databases", db_name),
-            )
+            RookError::Internal(format!("Database '{}' not found in sys_databases", db_name))
         })?;
 
     // Resolve (db_id, table_name) → table_id
-    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?;
     let table_id = tbl_rows
         .iter()
         .find_map(|row| {
@@ -348,10 +326,10 @@ pub fn delete_index_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
-            )
+            RookError::Internal(format!(
+                "Table '{}.{}' not found in sys_tables",
+                db_name, table_name
+            ))
         })?;
 
     // Scan sys_indexes to find matching row
@@ -365,8 +343,7 @@ pub fn delete_index_metadata(
 
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;
-        let decoded = crate::types::deserialize_nullable_row(SYS_INDEXES_SCHEMA, &raw_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_INDEXES_SCHEMA, &raw_bytes)?;
         // SYS_INDEXES_SCHEMA: index_id, table_id, name, is_unique, is_primary, columns
         if decoded.len() >= 3 {
             let row_table_id = match &decoded[1] {
@@ -416,7 +393,7 @@ pub fn delete_column_constraints(
     db_name: &str,
     table_name: &str,
     column_name: &str,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     // Resolve db_name → db_id, (db_id, table_name) → table_id
     let (table_id, _db_id) = resolve_table_id(engine, db_name, table_name)?;
 
@@ -430,8 +407,7 @@ pub fn delete_column_constraints(
 
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;
-        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)?;
         // SYS_CONSTRAINTS_SCHEMA: constraint_id, table_id, constraint_type, columns, ref_table, ref_columns
         if decoded.len() >= 4 {
             let row_table_id = match &decoded[1] {
@@ -551,7 +527,7 @@ pub fn rename_column_in_constraints(
     table_name: &str,
     old_name: &str,
     new_name: &str,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     let (table_id, _db_id) = resolve_table_id(engine, db_name, table_name)?;
 
     let constr_path = sys_path(engine, "constraints");
@@ -564,8 +540,7 @@ pub fn rename_column_in_constraints(
 
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;
-        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)?;
 
         if decoded.len() < 4 {
             continue;
@@ -642,8 +617,7 @@ pub fn rename_column_in_constraints(
     }
     for (_page_id, _slot_id, row) in &updates {
         let str_refs: Vec<Option<&str>> = row.iter().map(|opt| opt.as_deref()).collect();
-        let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)?;
         heap.insert_tuple(&tuple_bytes)?;
     }
     heap.flush()?;
@@ -668,7 +642,7 @@ pub fn rename_referenced_table_in_constraints(
     child_tables: &[String],
     old_name: &str,
     new_name: &str,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     let constr_path = sys_path(engine, "constraints");
     if !constr_path.exists() {
         return Ok(0);
@@ -683,8 +657,7 @@ pub fn rename_referenced_table_in_constraints(
 
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;
-        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)?;
         if decoded.len() < 6 {
             continue;
         }
@@ -713,8 +686,7 @@ pub fn rename_referenced_table_in_constraints(
     }
     for (_, _, row) in &updates {
         let str_refs: Vec<Option<&str>> = row.iter().map(|opt| opt.as_deref()).collect();
-        let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)?;
         heap.insert_tuple(&tuple_bytes)?;
     }
     heap.flush()?;
@@ -731,7 +703,7 @@ pub fn rename_referenced_column_in_constraints(
     parent_table: &str,
     old_name: &str,
     new_name: &str,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     let constr_path = sys_path(engine, "constraints");
     if !constr_path.exists() {
         return Ok(0);
@@ -739,8 +711,7 @@ pub fn rename_referenced_column_in_constraints(
     let (_, db_id) = resolve_table_id(engine, db_name, parent_table)?;
     // Only tables of this database can reference it.
     let db_tables: std::collections::HashSet<i32> =
-        scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?
             .iter()
             .filter_map(|row| match (row.first(), row.get(1)) {
                 (
@@ -756,8 +727,7 @@ pub fn rename_referenced_column_in_constraints(
 
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;
-        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)?;
         if decoded.len() < 6 {
             continue;
         }
@@ -807,8 +777,7 @@ pub fn rename_referenced_column_in_constraints(
     }
     for (_, _, row) in &updates {
         let str_refs: Vec<Option<&str>> = row.iter().map(|opt| opt.as_deref()).collect();
-        let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)?;
         heap.insert_tuple(&tuple_bytes)?;
     }
     heap.flush()?;
@@ -825,10 +794,9 @@ pub fn rename_referenced_column_in_constraints(
 pub fn delete_database_metadata(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     // 1. Resolve db_name → db_id
-    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
     let db_id = db_rows
         .iter()
         .find_map(|row| {
@@ -845,15 +813,11 @@ pub fn delete_database_metadata(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Database '{}' not found in sys_databases", db_name),
-            )
+            RookError::Internal(format!("Database '{}' not found in sys_databases", db_name))
         })?;
 
     // 2. Find all tables belonging to this database
-    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?;
     let table_ids: Vec<i32> = tbl_rows
         .iter()
         .filter_map(|row| {
@@ -909,7 +873,7 @@ fn delete_rows_by_column(
     schema: &[DataType],
     column_idx: usize,
     target_id: i32,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     let path = sys_path(engine, name);
     if !path.exists() {
         return Ok(0);
@@ -920,8 +884,7 @@ fn delete_rows_by_column(
 
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;
-        let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)?;
         if let Some(Some(crate::types::DataValue::Int(tid))) = decoded.get(column_idx)
             && *tid == target_id
         {
@@ -954,7 +917,7 @@ fn delete_rows_by_table_id(
     name: &str,
     schema: &[DataType],
     target_table_id: i32,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     delete_rows_by_column(engine, name, schema, 1, target_table_id)
 }
 
@@ -963,10 +926,9 @@ pub fn delete_referencing_foreign_keys(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     parent_table_name: &str,
-) -> std::io::Result<usize> {
+) -> RookResult<usize> {
     // Resolve db_id
-    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
     let db_id = db_rows
         .iter()
         .find_map(|row| {
@@ -983,15 +945,11 @@ pub fn delete_referencing_foreign_keys(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Database '{}' not found in sys_databases", db_name),
-            )
+            RookError::Internal(format!("Database '{}' not found in sys_databases", db_name))
         })?;
 
     // Load sys_tables for the db to create a table_id → db_id mapping
-    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?;
     let mut table_id_to_db_id = std::collections::HashMap::new();
     for row in &tbl_rows {
         if let (
@@ -1013,8 +971,7 @@ pub fn delete_referencing_foreign_keys(
 
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;
-        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)?;
 
         if decoded.len() >= 6 {
             let row_table_id = match &decoded[1] {
@@ -1064,15 +1021,14 @@ pub fn rename_table_in_system(
     db_name: &str,
     old_name: &str,
     new_name: &str,
-) -> std::io::Result<()> {
+) -> RookResult<()> {
     let (table_id, _db_id) = resolve_table_id(engine, db_name, old_name)?;
     let path = sys_path(engine, "tables");
     let mut heap = crate::backend::cache::lease_heap(engine, &path)?;
     let mut found = None;
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;
-        let decoded = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)?;
         if matches!(decoded.first(), Some(Some(crate::types::DataValue::Int(id))) if *id == table_id)
         {
             found = Some((page_id, slot_id, decoded));
@@ -1093,10 +1049,9 @@ pub fn rename_table_in_system(
         Some(file_path),
     ];
     let refs: Vec<Option<&str>> = row.iter().map(|o| o.as_deref()).collect();
-    let bytes = crate::types::serialize_nullable_row(SYS_TABLES_SCHEMA, &refs)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let bytes = crate::types::serialize_nullable_row(SYS_TABLES_SCHEMA, &refs)?;
     heap.insert_tuple(&bytes)?;
-    heap.flush()
+    Ok(heap.flush()?)
 }
 
 #[cfg(test)]

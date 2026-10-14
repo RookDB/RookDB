@@ -12,6 +12,7 @@
 //!
 //! Public paths are unchanged: everything is re-exported from `mod.rs`.
 
+use crate::backend::error::{RookError, RookResult};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -431,9 +432,8 @@ pub fn resolve_table_id(
     engine: &crate::backend::engine::Engine,
     db_name: &str,
     table_name: &str,
-) -> std::io::Result<(i32, i32)> {
-    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+) -> RookResult<(i32, i32)> {
+    let db_rows = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
     let db_id = db_rows
         .iter()
         .find_map(|row| {
@@ -450,14 +450,10 @@ pub fn resolve_table_id(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Database '{}' not found in sys_databases", db_name),
-            )
+            RookError::Internal(format!("Database '{}' not found in sys_databases", db_name))
         })?;
 
-    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tbl_rows = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?;
     let table_id = tbl_rows
         .iter()
         .find_map(|row| {
@@ -481,10 +477,10 @@ pub fn resolve_table_id(
             None
         })
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
-            )
+            RookError::Internal(format!(
+                "Table '{}.{}' not found in sys_tables",
+                db_name, table_name
+            ))
         })?;
 
     Ok((table_id, db_id))
@@ -533,24 +529,24 @@ fn scan_system_table(
     engine: &crate::backend::engine::Engine,
     name: &str,
     schema: &[DataType],
-) -> Result<Vec<Vec<Option<crate::types::DataValue>>>, String> {
+) -> RookResult<Vec<Vec<Option<crate::types::DataValue>>>> {
     let path = sys_path(engine, name);
     if !path.exists() {
         return Ok(Vec::new());
     }
 
     let heap = crate::backend::cache::lease_heap(engine, &path)
-        .map_err(|e| format!("Failed to open {}: {}", name, e))?;
+        .map_err(|e| RookError::storage(format!("Failed to open {}", name), e))?;
 
     let mut rows = Vec::new();
     for result in heap.scan() {
         let (_page_id, _slot_id, raw_bytes) = match result {
             Ok(triple) => triple,
-            Err(e) => return Err(format!("Scan error on {}: {}", name, e)),
+            Err(e) => return Err(RookError::storage(format!("Scan error on {}", name), e)),
         };
 
         let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
-            .map_err(|e| format!("Deserialize error on {}: {}", name, e))?;
+            .map_err(|e| e.with_context(format!("Deserialize error on {}", name)))?;
 
         rows.push(decoded);
     }
@@ -565,15 +561,14 @@ fn insert_system_rows(
     name: &str,
     schema: &[DataType],
     rows: &[Vec<Option<String>>],
-) -> std::io::Result<()> {
+) -> RookResult<()> {
     let path = sys_path(engine, name);
     let mut heap = crate::backend::cache::lease_heap(engine, &path)?;
 
     for row in rows {
         // Convert Vec<Option<String>> into Vec<Option<&str>> for serialisation
         let str_refs: Vec<Option<&str>> = row.iter().map(|opt| opt.as_deref()).collect();
-        let tuple_bytes = crate::types::serialize_nullable_row(schema, &str_refs)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tuple_bytes = crate::types::serialize_nullable_row(schema, &str_refs)?;
         heap.insert_tuple(&tuple_bytes)?;
     }
 
