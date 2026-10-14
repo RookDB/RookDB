@@ -25,7 +25,7 @@ use crate::backend::error::{RookError, RookResult};
 /// Making this injectable allows unit tests to mock the insertion logic
 /// without requiring a real catalog and database files.
 pub(crate) type InsertInserter =
-    Box<dyn FnMut(&[Option<crate::types::DataValue>]) -> Result<(), String>>;
+    Box<dyn FnMut(&[Option<crate::types::DataValue>]) -> RookResult<()>>;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -72,13 +72,9 @@ impl InsertOperator {
         let inserted_pointers = Rc::new(RefCell::new(Vec::new()));
         let ptrs_clone = inserted_pointers.clone();
         let inserter: InsertInserter = Box::new(move |vals| {
-            match crate::backend::executor::load_csv::insert_row(&cat, &db, &tbl, vals) {
-                Ok(ptr) => {
-                    ptrs_clone.borrow_mut().push(ptr);
-                    Ok(())
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let ptr = crate::backend::executor::load_csv::insert_row(&cat, &db, &tbl, vals)?;
+            ptrs_clone.borrow_mut().push(ptr);
+            Ok(())
         });
 
         Self {
@@ -174,7 +170,7 @@ impl PhysicalOperator for InsertOperator {
                 };
                 if let Err(e) = inserted {
                     self.rollback();
-                    return Err(RookError::Internal(e));
+                    return Err(e);
                 }
                 Ok(Some(tuple))
             }
@@ -463,7 +459,11 @@ mod tests {
 
         let mut op = InsertOperator::for_test(
             Box::new(child),
-            Box::new(|_| Err("Constraint violation: duplicate key".to_string())),
+            Box::new(|_| {
+                Err(RookError::Evaluation(
+                    "Constraint violation: duplicate key".to_string(),
+                ))
+            }),
         );
 
         let result = op.next();
@@ -498,7 +498,7 @@ mod tests {
                 *cc.borrow_mut() += 1;
                 if cnt == 1 {
                     // Fail on the second insertion
-                    Err("Disk full".to_string())
+                    Err(RookError::Evaluation("Disk full".to_string()))
                 } else {
                     Ok(())
                 }

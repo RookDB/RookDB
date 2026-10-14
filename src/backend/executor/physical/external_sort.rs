@@ -177,42 +177,45 @@ fn encode_tuple(tuple: &Tuple, out: &mut Vec<u8>) {
 struct RowBytes<'a>(&'a [u8]);
 
 impl<'a> RowBytes<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+    fn take(&mut self, n: usize) -> RookResult<&'a [u8]> {
         if self.0.len() < n {
-            return Err("row is shorter than its fields".to_string());
+            return Err(RookError::Internal(
+                "row is shorter than its fields".to_string(),
+            ));
         }
         let (head, tail) = self.0.split_at(n);
         self.0 = tail;
         Ok(head)
     }
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], String> {
+    fn array<const N: usize>(&mut self) -> RookResult<[u8; N]> {
         Ok(self.take(N)?.try_into().expect("take returns N bytes"))
     }
 
-    fn u32(&mut self) -> Result<u32, String> {
+    fn u32(&mut self) -> RookResult<u32> {
         Ok(u32::from_le_bytes(self.array()?))
     }
 
-    fn string(&mut self) -> Result<String, String> {
+    fn string(&mut self) -> RookResult<String> {
         let len = self.u32()? as usize;
-        String::from_utf8(self.take(len)?.to_vec()).map_err(|_| "text is not UTF-8".to_string())
+        String::from_utf8(self.take(len)?.to_vec())
+            .map_err(|_| RookError::Internal("text is not UTF-8".to_string()))
     }
 
-    fn date(&mut self) -> Result<NaiveDate, String> {
+    fn date(&mut self) -> RookResult<NaiveDate> {
         NaiveDate::from_num_days_from_ce_opt(i32::from_le_bytes(self.array()?))
-            .ok_or_else(|| "date out of range".to_string())
+            .ok_or_else(|| RookError::Internal("date out of range".to_string()))
     }
 
-    fn time(&mut self) -> Result<NaiveTime, String> {
+    fn time(&mut self) -> RookResult<NaiveTime> {
         let (secs, nanos) = (self.u32()?, self.u32()?);
         NaiveTime::from_num_seconds_from_midnight_opt(secs, nanos)
-            .ok_or_else(|| "time out of range".to_string())
+            .ok_or_else(|| RookError::Internal("time out of range".to_string()))
     }
 }
 
 /// The inverse of [`encode_tuple`].
-fn decode_tuple(bytes: &[u8]) -> Result<Tuple, String> {
+fn decode_tuple(bytes: &[u8]) -> RookResult<Tuple> {
     let mut row = RowBytes(bytes);
     let flags = row.array::<1>()?[0];
     let page_id = if flags & 1 != 0 {
@@ -228,7 +231,9 @@ fn decode_tuple(bytes: &[u8]) -> Result<Tuple, String> {
     let columns = row.u32()? as usize;
     // Every value takes at least its tag byte.
     if columns > row.0.len() {
-        return Err("row is shorter than its fields".to_string());
+        return Err(RookError::Internal(
+            "row is shorter than its fields".to_string(),
+        ));
     }
     let mut values = Vec::with_capacity(columns);
     for _ in 0..columns {
@@ -255,12 +260,14 @@ fn decode_tuple(bytes: &[u8]) -> Result<Tuple, String> {
                 row.date()?,
                 row.time()?,
             ))),
-            tag => return Err(format!("unknown value tag {}", tag)),
+            tag => return Err(RookError::Internal(format!("unknown value tag {}", tag))),
         };
         values.push(value);
     }
     if !row.0.is_empty() {
-        return Err("row is longer than its fields".to_string());
+        return Err(RookError::Internal(
+            "row is longer than its fields".to_string(),
+        ));
     }
     Ok(Tuple {
         values,

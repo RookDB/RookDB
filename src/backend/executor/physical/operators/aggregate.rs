@@ -5,7 +5,7 @@ use super::super::explain::PlanNode;
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
-use crate::backend::error::{RookError, RookResult};
+use crate::backend::error::{ResultContext, RookError, RookResult};
 
 use crate::types::comparison::compare_nullable;
 use crate::types::datatype::DataType;
@@ -38,26 +38,26 @@ pub struct AggregateInfo {
 
 // ── PerGroupState ─────────────────────────────────────────────────────────────
 
-fn add_numeric(a: NumericValue, b: NumericValue) -> Result<NumericValue, String> {
+fn add_numeric(a: NumericValue, b: NumericValue) -> RookResult<NumericValue> {
     let target_scale = a.scale.max(b.scale);
-    let scale_val = |unscaled: i128, cur_scale: u8| -> Result<i128, String> {
+    let scale_val = |unscaled: i128, cur_scale: u8| -> RookResult<i128> {
         if cur_scale == target_scale {
             Ok(unscaled)
         } else {
             let diff = (target_scale - cur_scale) as u32;
             let factor = 10_i128
                 .checked_pow(diff)
-                .ok_or_else(|| "Numeric scale overflow".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("Numeric scale overflow".to_string()))?;
             unscaled
                 .checked_mul(factor)
-                .ok_or_else(|| "Numeric scale overflow".to_string())
+                .ok_or_else(|| RookError::Evaluation("Numeric scale overflow".to_string()))
         }
     };
     let a_scaled = scale_val(a.unscaled, a.scale)?;
     let b_scaled = scale_val(b.unscaled, b.scale)?;
     let sum = a_scaled
         .checked_add(b_scaled)
-        .ok_or_else(|| "Numeric addition overflow".to_string())?;
+        .ok_or_else(|| RookError::Evaluation("Numeric addition overflow".to_string()))?;
     Ok(NumericValue {
         unscaled: sum,
         scale: target_scale,
@@ -107,7 +107,7 @@ impl PerGroupState {
         function: AggregateFunction,
         value: Option<&DataValue>,
         distinct: bool,
-    ) -> Result<(), String> {
+    ) -> RookResult<()> {
         self.row_count += 1;
 
         let val = match value {
@@ -205,7 +205,12 @@ impl PerGroupState {
                     }
                     self.has_sum = true;
                 }
-                _ => return Err(format!("Cannot SUM/AVG non-numeric type: {:?}", val)),
+                _ => {
+                    return Err(RookError::Evaluation(format!(
+                        "Cannot SUM/AVG non-numeric type: {:?}",
+                        val
+                    )));
+                }
             }
         }
 
@@ -214,7 +219,7 @@ impl PerGroupState {
                 None => self.min = Some(val.clone()),
                 Some(current) => {
                     let ordering = compare_nullable(Some(val), Some(current))
-                        .map_err(|e| format!("Comparison error in MIN: {}", e))?
+                        .context("Comparison error in MIN")?
                         .unwrap_or(Ordering::Equal);
                     if ordering == Ordering::Less {
                         self.min = Some(val.clone());
@@ -228,7 +233,7 @@ impl PerGroupState {
                 None => self.max = Some(val.clone()),
                 Some(current) => {
                     let ordering = compare_nullable(Some(val), Some(current))
-                        .map_err(|e| format!("Comparison error in MAX: {}", e))?
+                        .context("Comparison error in MAX")?
                         .unwrap_or(Ordering::Equal);
                     if ordering == Ordering::Greater {
                         self.max = Some(val.clone());
@@ -244,7 +249,7 @@ impl PerGroupState {
     ///
     /// A SUM comes out in `info.output_type`, the type the column was declared
     /// with: see [`sum_as_declared`].
-    pub fn finalize(&self, info: &AggregateInfo) -> Result<Option<DataValue>, String> {
+    pub fn finalize(&self, info: &AggregateInfo) -> RookResult<Option<DataValue>> {
         Ok(match info.function {
             AggregateFunction::Count => {
                 if info.input.is_none() {
@@ -302,7 +307,7 @@ enum SumValue {
 /// BIGINT column. A sum whose inputs were not of the type the planner inferred
 /// for them (an integer-typed CASE with a fractional branch, say) keeps the
 /// representation it was accumulated in: narrowing it would lose data.
-fn sum_as_declared(sum: SumValue, declared: &DataType) -> Result<DataValue, String> {
+fn sum_as_declared(sum: SumValue, declared: &DataType) -> RookResult<DataValue> {
     Ok(match (sum, declared) {
         (SumValue::Int(v), DataType::Numeric { .. } | DataType::Decimal { .. }) => {
             DataValue::Numeric(NumericValue {
@@ -314,13 +319,15 @@ fn sum_as_declared(sum: SumValue, declared: &DataType) -> Result<DataValue, Stri
         (SumValue::Int(v), DataType::DoublePrecision) => {
             DataValue::DoublePrecision(OrderedF64(v as f64))
         }
-        (SumValue::Int(v), _) => DataValue::BigInt(
-            i64::try_from(v).map_err(|_| "SUM result is out of range for BIGINT".to_string())?,
-        ),
+        (SumValue::Int(v), _) => DataValue::BigInt(i64::try_from(v).map_err(|_| {
+            RookError::Evaluation("SUM result is out of range for BIGINT".to_string())
+        })?),
         (SumValue::Float(v), DataType::Real) => {
             let narrowed = v as f32;
             if narrowed.is_infinite() && v.is_finite() {
-                return Err("SUM result is out of range for REAL".to_string());
+                return Err(RookError::Evaluation(
+                    "SUM result is out of range for REAL".to_string(),
+                ));
             }
             DataValue::Real(OrderedF32(narrowed))
         }
@@ -518,8 +525,7 @@ impl AggregateOperator {
                         self.group_by_exprs
                             .iter()
                             .map(|expr| expr.evaluate(&tuple, &child_schema))
-                            .collect::<Result<Vec<_>, String>>()
-                            .map_err(RookError::Internal)?
+                            .collect::<RookResult<Vec<_>>>()?
                     };
 
                     // The key is cloned only when it starts a new group.

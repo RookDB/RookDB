@@ -4,7 +4,7 @@ use super::super::explain::PlanNode;
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
-use crate::backend::error::RookResult;
+use crate::backend::error::{RookError, RookResult};
 
 use crate::types::datatype::DataType;
 use crate::types::value::DataValue;
@@ -348,7 +348,7 @@ impl ProjectionOperator {
         child: Box<dyn PhysicalOperator>,
         indices: &[usize],
         names: &[String],
-    ) -> Result<Self, String> {
+    ) -> RookResult<Self> {
         let child_schema = child.schema();
         let mut projections = Vec::with_capacity(indices.len());
         for (i, &idx) in indices.iter().enumerate() {
@@ -361,7 +361,9 @@ impl ProjectionOperator {
             let dt = child_schema
                 .get(idx)
                 .map(|c| c.data_type.clone())
-                .ok_or_else(|| format!("Column index {} out of bounds", idx))?;
+                .ok_or_else(|| {
+                    RookError::Evaluation(format!("Column index {} out of bounds", idx))
+                })?;
             projections.push((
                 Expr::Column {
                     table: None,
@@ -382,7 +384,7 @@ impl ProjectionOperator {
         child: Box<dyn PhysicalOperator>,
         indices: &[usize],
         names: &[String],
-    ) -> Result<Self, String> {
+    ) -> RookResult<Self> {
         Self::new_with_mapping(child, indices, names)
     }
 

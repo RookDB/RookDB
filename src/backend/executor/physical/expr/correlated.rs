@@ -7,6 +7,7 @@
 //! mean what they mean outside a subquery. Results are cached by outer key,
 //! so outer rows that repeat a key do not re-run it.
 
+use crate::backend::error::{ResultContext, RookError, RookResult};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -130,7 +131,7 @@ impl CorrelatedSubquery {
     }
 
     /// The rows the subquery returns for the outer row `tuple`.
-    pub fn rows(&self, tuple: &Tuple) -> Result<Rc<Vec<Tuple>>, String> {
+    pub fn rows(&self, tuple: &Tuple) -> RookResult<Rc<Vec<Tuple>>> {
         let key: OuterKey = self
             .bindings
             .iter()
@@ -141,10 +142,12 @@ impl CorrelatedSubquery {
         }
         let select = self.bound_select(&key);
         let query = rook_ast::QueryPlan::Select(select);
-        let logical = crate::planner::plan_query(&query, &self.catalog, &self.db_name)
-            .map_err(|e| format!("Correlated subquery planning error: {}", e.message))?;
+        let logical =
+            crate::planner::plan_query(&query, &self.catalog, &self.db_name).map_err(|e| {
+                RookError::Evaluation(format!("Correlated subquery planning error: {}", e.message))
+            })?;
         let (rows, _) = execute_shared(&logical, Arc::clone(&self.catalog), &self.db_name)
-            .map_err(|e| format!("Correlated subquery error: {}", e))?;
+            .context("Correlated subquery error")?;
         let rows = Rc::new(rows);
         let mut cache = self.cache.borrow_mut();
         if cache.len() >= CACHE_LIMIT {

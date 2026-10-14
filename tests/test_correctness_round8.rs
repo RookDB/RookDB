@@ -330,9 +330,8 @@ fn d_position_null_returns_null() {
             args,
         }
         .evaluate(&tuple, &schema);
-        assert_eq!(
-            r,
-            Ok(None),
+        assert!(
+            matches!(r, Ok(None)),
             "BUG D CONFIRMED: POSITION with a NULL argument returned {:?} instead of NULL",
             r
         );
@@ -352,9 +351,8 @@ fn d_substring_null_returns_null() {
         ],
     }
     .evaluate(&tuple, &schema);
-    assert_eq!(
-        r,
-        Ok(None),
+    assert!(
+        matches!(r, Ok(None)),
         "BUG D CONFIRMED: SUBSTRING(NULL, 1, 1) returned {:?} instead of NULL",
         r
     );
@@ -369,9 +367,8 @@ fn d_round_null_returns_null() {
         args: vec![Expr::Null, Expr::Constant(DataValue::Int(1))],
     }
     .evaluate(&tuple, &schema);
-    assert_eq!(
-        r,
-        Ok(None),
+    assert!(
+        matches!(r, Ok(None)),
         "BUG D CONFIRMED: ROUND(NULL, 1) returned {:?} instead of NULL",
         r
     );
@@ -389,9 +386,8 @@ fn d_extract_null_returns_null() {
         ],
     }
     .evaluate(&tuple, &schema);
-    assert_eq!(
-        r,
-        Ok(None),
+    assert!(
+        matches!(r, Ok(None)),
         "BUG D CONFIRMED: EXTRACT(YEAR FROM NULL) returned {:?} instead of NULL",
         r
     );
@@ -432,11 +428,11 @@ fn e_sum_overflow_must_not_silently_saturate() {
         scale: 0,
     };
     assert_eq!(
-        st.finalize(&sum_info(numeric)),
-        Ok(Some(DataValue::Numeric(NumericValue {
+        st.finalize(&sum_info(numeric)).unwrap(),
+        Some(DataValue::Numeric(NumericValue {
             unscaled: i64::MAX as i128 + 10,
             scale: 0
-        }))),
+        })),
         "BUG E CONFIRMED: SUM(i64::MAX, 10) is not the exact total"
     );
     // Declared BIGINT, the same total is an error: never a clamped value,

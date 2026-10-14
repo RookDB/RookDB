@@ -3,6 +3,7 @@
 //! Supports SQL-style three-valued logic (True / False / UNKNOWN) and
 //! correlated subqueries via `CorrelatedExists` and `CorrelatedInSubquery`.
 
+use crate::backend::error::{ResultContext, RookResult};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -223,7 +224,7 @@ pub fn evaluate_predicate(
     pred: &Predicate,
     tuple: &Tuple,
     schema: &[ColumnInfo],
-) -> Result<Option<bool>, String> {
+) -> RookResult<Option<bool>> {
     match pred {
         Predicate::AlwaysTrue => Ok(Some(true)),
 
@@ -331,12 +332,10 @@ pub fn evaluate_predicate(
 
             // Execute the inner plan — if any tuple passes, EXISTS is true
             let mut plan_ref = inner_plan.borrow_mut();
-            plan_ref
-                .reset()
-                .map_err(|e| format!("Correlated EXISTS reset error: {}", e))?;
+            plan_ref.reset().context("Correlated EXISTS reset error")?;
             let exists = plan_ref
                 .next()
-                .map_err(|e| format!("Correlated EXISTS error: {}", e))?
+                .context("Correlated EXISTS error")?
                 .is_some();
             Ok(Some(exists))
         }
@@ -354,15 +353,13 @@ pub fn evaluate_predicate(
                 *param.borrow_mut() = outer_val;
             }
             let mut plan_ref = inner_plan.borrow_mut();
-            plan_ref
-                .reset()
-                .map_err(|e| format!("Correlated IN reset error: {}", e))?;
+            plan_ref.reset().context("Correlated IN reset error")?;
             in_result(
                 lhs_val.as_ref(),
                 std::iter::from_fn(|| {
                     plan_ref
                         .next()
-                        .map_err(|e| format!("Correlated IN error: {}", e))
+                        .context("Correlated IN error")
                         .transpose()
                         .map(|r| r.map(|t| t.values.into_iter().next().flatten()))
                 }),
@@ -482,9 +479,9 @@ fn like_match_inner(t: &[char], p: &[char], escape_char: Option<char>) -> bool {
 /// UNKNOWN.
 fn in_result<T: std::borrow::Borrow<DataValue>>(
     lhs: Option<&DataValue>,
-    values: impl Iterator<Item = Result<Option<T>, String>>,
+    values: impl Iterator<Item = RookResult<Option<T>>>,
     negated: bool,
-) -> Result<Option<bool>, String> {
+) -> RookResult<Option<bool>> {
     let mut saw_null = false;
     for value in values {
         let Some(lhs) = lhs else {

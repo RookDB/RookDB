@@ -74,6 +74,10 @@ pub enum RookError {
     InvalidIdentifier(String),
     /// A value could not be interpreted for its column's data type.
     TypeMismatch(String),
+    /// A runtime failure while evaluating an expression: division by zero,
+    /// numeric overflow, an invalid function argument, a subquery that
+    /// returned too many rows.
+    Evaluation(String),
     /// Underlying storage I/O failure.
     Io(std::io::Error),
     /// A storage failure whose message is shown as-is (no `I/O error:`
@@ -199,6 +203,7 @@ impl fmt::Display for RookError {
             }
             RookError::InvalidIdentifier(message) => f.write_str(message),
             RookError::TypeMismatch(message) => f.write_str(message),
+            RookError::Evaluation(message) => f.write_str(message),
             RookError::Io(e) => write!(f, "I/O error: {}", e),
             RookError::Storage {
                 context: Some(context),
@@ -266,6 +271,20 @@ impl<T> ResultContext<T> for Result<T, std::io::Error> {
 impl<T> ResultContext<T> for Result<T, RookError> {
     fn context(self, context: impl Into<String>) -> RookResult<T> {
         self.map_err(|e| e.with_context(context))
+    }
+}
+
+/// Value-function and comparison failures surface as evaluation errors, with
+/// the failing operation named first.
+impl<T> ResultContext<T> for Result<T, crate::types::functions::FunctionError> {
+    fn context(self, context: impl Into<String>) -> RookResult<T> {
+        self.map_err(|e| RookError::Evaluation(format!("{}: {}", context.into(), e)))
+    }
+}
+
+impl<T> ResultContext<T> for Result<T, crate::types::comparison::ComparisonError> {
+    fn context(self, context: impl Into<String>) -> RookResult<T> {
+        self.map_err(|e| RookError::Evaluation(format!("{}: {}", context.into(), e)))
     }
 }
 

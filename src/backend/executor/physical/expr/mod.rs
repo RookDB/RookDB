@@ -16,7 +16,7 @@ pub use predicate::{BooleanTest, ComparisonOp, Predicate, evaluate_predicate};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::backend::error::{RookError, RookResult};
+use crate::backend::error::{ResultContext, RookError, RookResult};
 use crate::types::value::DataValue;
 
 use super::operators::PhysicalOperator;
@@ -140,11 +140,7 @@ impl std::fmt::Debug for Expr {
 impl Expr {
     /// Evaluate this expression against a tuple and schema, returning the resulting value
     /// (or `None` for NULL).
-    pub fn evaluate(
-        &self,
-        tuple: &Tuple,
-        schema: &[ColumnInfo],
-    ) -> Result<Option<DataValue>, String> {
+    pub fn evaluate(&self, tuple: &Tuple, schema: &[ColumnInfo]) -> RookResult<Option<DataValue>> {
         match self {
             Expr::CorrelatedScalarSubquery {
                 inner_plan,
@@ -158,20 +154,22 @@ impl Expr {
                 let mut plan_ref = inner_plan.borrow_mut();
                 plan_ref
                     .reset()
-                    .map_err(|e| format!("Correlated scalar subquery reset error: {}", e))?;
+                    .context("Correlated scalar subquery reset error")?;
                 match plan_ref
                     .next()
-                    .map_err(|e| format!("Correlated scalar subquery error: {}", e))?
+                    .context("Correlated scalar subquery error")?
                 {
                     None => Ok(None),
                     Some(mut t) => {
                         let val = t.values.drain(..).next().flatten();
                         if plan_ref
                             .next()
-                            .map_err(|e| format!("Correlated scalar subquery error: {}", e))?
+                            .context("Correlated scalar subquery error")?
                             .is_some()
                         {
-                            return Err("Scalar subquery returned more than one row".to_string());
+                            return Err(RookError::Evaluation(
+                                "Scalar subquery returned more than one row".to_string(),
+                            ));
                         }
                         Ok(val)
                     }
@@ -182,7 +180,9 @@ impl Expr {
                 match rows.len() {
                     0 => Ok(None),
                     1 => Ok(rows[0].values.first().cloned().flatten()),
-                    _ => Err("Scalar subquery returned more than one row".to_string()),
+                    _ => Err(RookError::Evaluation(
+                        "Scalar subquery returned more than one row".to_string(),
+                    )),
                 }
             }
             Expr::Column { table, column } => {
@@ -239,16 +239,19 @@ impl Expr {
                     lv,
                     rv,
                     |a, b| {
-                        a.checked_add(b)
-                            .ok_or_else(|| "Integer addition overflow".to_string())
+                        a.checked_add(b).ok_or_else(|| {
+                            RookError::Evaluation("Integer addition overflow".to_string())
+                        })
                     },
                     |a, b| {
-                        a.checked_add(b)
-                            .ok_or_else(|| "BigInt addition overflow".to_string())
+                        a.checked_add(b).ok_or_else(|| {
+                            RookError::Evaluation("BigInt addition overflow".to_string())
+                        })
                     },
                     |a, b| {
-                        a.checked_add(b)
-                            .ok_or_else(|| "SmallInt addition overflow".to_string())
+                        a.checked_add(b).ok_or_else(|| {
+                            RookError::Evaluation("SmallInt addition overflow".to_string())
+                        })
                     },
                     |a, b| Ok(a + b),
                     |a, b| Ok(a + b),
@@ -262,16 +265,19 @@ impl Expr {
                     lv,
                     rv,
                     |a, b| {
-                        a.checked_sub(b)
-                            .ok_or_else(|| "Integer subtraction overflow".to_string())
+                        a.checked_sub(b).ok_or_else(|| {
+                            RookError::Evaluation("Integer subtraction overflow".to_string())
+                        })
                     },
                     |a, b| {
-                        a.checked_sub(b)
-                            .ok_or_else(|| "BigInt subtraction overflow".to_string())
+                        a.checked_sub(b).ok_or_else(|| {
+                            RookError::Evaluation("BigInt subtraction overflow".to_string())
+                        })
                     },
                     |a, b| {
-                        a.checked_sub(b)
-                            .ok_or_else(|| "SmallInt subtraction overflow".to_string())
+                        a.checked_sub(b).ok_or_else(|| {
+                            RookError::Evaluation("SmallInt subtraction overflow".to_string())
+                        })
                     },
                     |a, b| Ok(a - b),
                     |a, b| Ok(a - b),
@@ -285,16 +291,19 @@ impl Expr {
                     lv,
                     rv,
                     |a, b| {
-                        a.checked_mul(b)
-                            .ok_or_else(|| "Integer multiplication overflow".to_string())
+                        a.checked_mul(b).ok_or_else(|| {
+                            RookError::Evaluation("Integer multiplication overflow".to_string())
+                        })
                     },
                     |a, b| {
-                        a.checked_mul(b)
-                            .ok_or_else(|| "BigInt multiplication overflow".to_string())
+                        a.checked_mul(b).ok_or_else(|| {
+                            RookError::Evaluation("BigInt multiplication overflow".to_string())
+                        })
                     },
                     |a, b| {
-                        a.checked_mul(b)
-                            .ok_or_else(|| "SmallInt multiplication overflow".to_string())
+                        a.checked_mul(b).ok_or_else(|| {
+                            RookError::Evaluation("SmallInt multiplication overflow".to_string())
+                        })
                     },
                     |a, b| Ok(a * b),
                     |a, b| Ok(a * b),
@@ -354,7 +363,7 @@ impl Expr {
                     None => Ok(None), // CAST(NULL AS type) → NULL
                     Some(dv) => {
                         let result = crate::types::functions::cast(&dv, target_type)
-                            .map_err(|e| format!("CAST error: {}", e))?;
+                            .context("CAST error")?;
                         Ok(Some(result))
                     }
                 }
@@ -384,7 +393,7 @@ impl Expr {
                 match (lv, rv) {
                     (Some(l), Some(r)) => {
                         let ord = crate::types::Comparable::compare(&l, &r)
-                            .map_err(|e| format!("Comparison error: {}", e))?;
+                            .context("Comparison error")?;
                         Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Equal)))
                     }
                     _ => Ok(None),
@@ -396,7 +405,7 @@ impl Expr {
                 match (lv, rv) {
                     (Some(l), Some(r)) => {
                         let ord = crate::types::Comparable::compare(&l, &r)
-                            .map_err(|e| format!("Comparison error: {}", e))?;
+                            .context("Comparison error")?;
                         Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Equal)))
                     }
                     _ => Ok(None),
@@ -408,7 +417,7 @@ impl Expr {
                 match (lv, rv) {
                     (Some(l), Some(r)) => {
                         let ord = crate::types::Comparable::compare(&l, &r)
-                            .map_err(|e| format!("Comparison error: {}", e))?;
+                            .context("Comparison error")?;
                         Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Less)))
                     }
                     _ => Ok(None),
@@ -420,7 +429,7 @@ impl Expr {
                 match (lv, rv) {
                     (Some(l), Some(r)) => {
                         let ord = crate::types::Comparable::compare(&l, &r)
-                            .map_err(|e| format!("Comparison error: {}", e))?;
+                            .context("Comparison error")?;
                         Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Greater)))
                     }
                     _ => Ok(None),
@@ -432,7 +441,7 @@ impl Expr {
                 match (lv, rv) {
                     (Some(l), Some(r)) => {
                         let ord = crate::types::Comparable::compare(&l, &r)
-                            .map_err(|e| format!("Comparison error: {}", e))?;
+                            .context("Comparison error")?;
                         Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Greater)))
                     }
                     _ => Ok(None),
@@ -444,7 +453,7 @@ impl Expr {
                 match (lv, rv) {
                     (Some(l), Some(r)) => {
                         let ord = crate::types::Comparable::compare(&l, &r)
-                            .map_err(|e| format!("Comparison error: {}", e))?;
+                            .context("Comparison error")?;
                         Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Less)))
                     }
                     _ => Ok(None),
@@ -515,9 +524,9 @@ fn evaluate_scalar_function(
     args: &[Expr],
     tuple: &Tuple,
     schema: &[ColumnInfo],
-) -> Result<Option<DataValue>, String> {
+) -> RookResult<Option<DataValue>> {
     // Evaluate all argument expressions against the tuple
-    let evaluated: Result<Vec<Option<DataValue>>, String> =
+    let evaluated: RookResult<Vec<Option<DataValue>>> =
         args.iter().map(|arg| arg.evaluate(tuple, schema)).collect();
     let evaluated = evaluated?;
 
@@ -534,36 +543,35 @@ fn evaluate_scalar_function(
             let val = evaluated
                 .into_iter()
                 .next()
-                .ok_or_else(|| "UPPER requires 1 argument".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("UPPER requires 1 argument".to_string()))?;
             match val {
                 None => Ok(None),
                 Some(dv) => crate::types::functions::upper(&dv)
                     .map(Some)
-                    .map_err(|e| format!("UPPER error: {}", e)),
+                    .context("UPPER error"),
             }
         }
         "LOWER" | "LCASE" => {
             let val = evaluated
                 .into_iter()
                 .next()
-                .ok_or_else(|| "LOWER requires 1 argument".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("LOWER requires 1 argument".to_string()))?;
             match val {
                 None => Ok(None),
                 Some(dv) => crate::types::functions::lower(&dv)
                     .map(Some)
-                    .map_err(|e| format!("LOWER error: {}", e)),
+                    .context("LOWER error"),
             }
         }
         "LENGTH" | "LEN" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => {
             let val = evaluated
                 .into_iter()
                 .next()
-                .ok_or_else(|| "LENGTH requires 1 argument".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("LENGTH requires 1 argument".to_string()))?;
             match val {
                 None => Ok(None),
                 Some(dv) => {
-                    let len = crate::types::functions::length(&dv)
-                        .map_err(|e| format!("LENGTH error: {}", e))?;
+                    let len = crate::types::functions::length(&dv).context("LENGTH error")?;
                     Ok(Some(DataValue::Int(len as i32)))
                 }
             }
@@ -573,63 +581,71 @@ fn evaluate_scalar_function(
             let substring = match iter.next() {
                 Some(Some(dv)) => dv,
                 Some(None) => return Ok(None),
-                None => return Err("POSITION requires at least 1 argument".to_string()),
+                None => {
+                    return Err(RookError::Evaluation(
+                        "POSITION requires at least 1 argument".to_string(),
+                    ));
+                }
             };
             let value = match iter.next() {
                 Some(Some(dv)) => dv,
                 Some(None) => return Ok(None),
-                None => return Err("POSITION requires 2 arguments".to_string()),
+                None => {
+                    return Err(RookError::Evaluation(
+                        "POSITION requires 2 arguments".to_string(),
+                    ));
+                }
             };
-            let pos = crate::types::functions::position(&value, &substring)
-                .map_err(|e| format!("POSITION error: {}", e))?;
+            let pos =
+                crate::types::functions::position(&value, &substring).context("POSITION error")?;
             Ok(Some(DataValue::Int(pos)))
         }
         "TRIM" => {
             let val = evaluated
                 .into_iter()
                 .next()
-                .ok_or_else(|| "TRIM requires 1 argument".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("TRIM requires 1 argument".to_string()))?;
             match val {
                 None => Ok(None),
                 Some(dv) => crate::types::functions::trim(&dv)
                     .map(Some)
-                    .map_err(|e| format!("TRIM error: {}", e)),
+                    .context("TRIM error"),
             }
         }
         "LTRIM" => {
             let val = evaluated
                 .into_iter()
                 .next()
-                .ok_or_else(|| "LTRIM requires 1 argument".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("LTRIM requires 1 argument".to_string()))?;
             match val {
                 None => Ok(None),
                 Some(dv) => crate::types::functions::ltrim(&dv)
                     .map(Some)
-                    .map_err(|e| format!("LTRIM error: {}", e)),
+                    .context("LTRIM error"),
             }
         }
         "RTRIM" => {
             let val = evaluated
                 .into_iter()
                 .next()
-                .ok_or_else(|| "RTRIM requires 1 argument".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("RTRIM requires 1 argument".to_string()))?;
             match val {
                 None => Ok(None),
                 Some(dv) => crate::types::functions::rtrim(&dv)
                     .map(Some)
-                    .map_err(|e| format!("RTRIM error: {}", e)),
+                    .context("RTRIM error"),
             }
         }
         "ABS" => {
             let val = evaluated
                 .into_iter()
                 .next()
-                .ok_or_else(|| "ABS requires 1 argument".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("ABS requires 1 argument".to_string()))?;
             match val {
                 None => Ok(None),
                 Some(dv) => crate::types::functions::abs(&dv)
                     .map(Some)
-                    .map_err(|e| format!("ABS error: {}", e)),
+                    .context("ABS error"),
             }
         }
         "FLOOR" => {
@@ -641,14 +657,14 @@ fn evaluate_scalar_function(
                     // Numeric FLOOR: FLOOR(3.7) → 3
                     crate::types::functions::floor(&dv)
                         .map(Some)
-                        .map_err(|e| format!("FLOOR error: {}", e))
+                        .context("FLOOR error")
                 }
                 (Some(dv), Some(part_str)) => {
                     // Temporal FLOOR: FLOOR(date TO MONTH) → truncate date
                     let part = crate::types::functions::parse_date_part(&part_str)?;
                     crate::types::functions::date_trunc_floor(&dv, part)
                         .map(Some)
-                        .map_err(|e| format!("FLOOR temporal truncation error: {}", e))
+                        .context("FLOOR temporal truncation error")
                 }
                 (None, _) => Ok(None),
             }
@@ -662,14 +678,14 @@ fn evaluate_scalar_function(
                     // Numeric CEILING: CEILING(3.7) → 4
                     crate::types::functions::ceiling(&dv)
                         .map(Some)
-                        .map_err(|e| format!("CEILING error: {}", e))
+                        .context("CEILING error")
                 }
                 (Some(dv), Some(part_str)) => {
                     // Temporal CEILING: CEILING(date TO MONTH) → round up
                     let part = crate::types::functions::parse_date_part(&part_str)?;
                     crate::types::functions::date_trunc_ceil(&dv, part)
                         .map(Some)
-                        .map_err(|e| format!("CEILING temporal truncation error: {}", e))
+                        .context("CEILING temporal truncation error")
                 }
                 (None, _) => Ok(None),
             }
@@ -707,38 +723,41 @@ fn evaluate_scalar_function(
                     Some(rv),
                     |a, b| {
                         if b == 0 {
-                            Err("Division by zero".to_string())
+                            Err(RookError::Evaluation("Division by zero".to_string()))
                         } else {
-                            a.checked_rem(b)
-                                .ok_or_else(|| "Integer modulo overflow".to_string())
+                            a.checked_rem(b).ok_or_else(|| {
+                                RookError::Evaluation("Integer modulo overflow".to_string())
+                            })
                         }
                     },
                     |a, b| {
                         if b == 0 {
-                            Err("Division by zero".to_string())
+                            Err(RookError::Evaluation("Division by zero".to_string()))
                         } else {
-                            a.checked_rem(b)
-                                .ok_or_else(|| "BigInt modulo overflow".to_string())
+                            a.checked_rem(b).ok_or_else(|| {
+                                RookError::Evaluation("BigInt modulo overflow".to_string())
+                            })
                         }
                     },
                     |a, b| {
                         if b == 0 {
-                            Err("Division by zero".to_string())
+                            Err(RookError::Evaluation("Division by zero".to_string()))
                         } else {
-                            a.checked_rem(b)
-                                .ok_or_else(|| "SmallInt modulo overflow".to_string())
+                            a.checked_rem(b).ok_or_else(|| {
+                                RookError::Evaluation("SmallInt modulo overflow".to_string())
+                            })
                         }
                     },
                     |a, b| {
                         if b == 0.0 {
-                            Err("Division by zero".to_string())
+                            Err(RookError::Evaluation("Division by zero".to_string()))
                         } else {
                             Ok(a % b)
                         }
                     },
                     |a, b| {
                         if b == 0.0 {
-                            Err("Division by zero".to_string())
+                            Err(RookError::Evaluation("Division by zero".to_string()))
                         } else {
                             Ok(a % b)
                         }
@@ -762,7 +781,11 @@ fn evaluate_scalar_function(
                         DataValue::Real(v) => v.0 as f64,
                         DataValue::DoublePrecision(v) => v.0,
                         DataValue::Numeric(v) => v.unscaled as f64 / 10_f64.powi(v.scale as i32),
-                        _ => return Err("POWER requires numeric arguments".to_string()),
+                        _ => {
+                            return Err(RookError::Evaluation(
+                                "POWER requires numeric arguments".to_string(),
+                            ));
+                        }
                     };
                     let e_f64 = match e {
                         DataValue::SmallInt(v) => v as f64,
@@ -771,16 +794,20 @@ fn evaluate_scalar_function(
                         DataValue::Real(v) => v.0 as f64,
                         DataValue::DoublePrecision(v) => v.0,
                         DataValue::Numeric(v) => v.unscaled as f64 / 10_f64.powi(v.scale as i32),
-                        _ => return Err("POWER requires numeric arguments".to_string()),
+                        _ => {
+                            return Err(RookError::Evaluation(
+                                "POWER requires numeric arguments".to_string(),
+                            ));
+                        }
                     };
                     let res = b_f64.powf(e_f64);
                     if !res.is_finite() {
                         // Negative base with a fractional exponent, zero to
                         // a negative power, or overflow.
-                        return Err(format!(
+                        return Err(RookError::Evaluation(format!(
                             "POWER({}, {}) is out of range or undefined",
                             b_f64, e_f64
-                        ));
+                        )));
                     }
                     Ok(Some(DataValue::DoublePrecision(
                         crate::types::value::OrderedF64(res),
@@ -793,7 +820,7 @@ fn evaluate_scalar_function(
             let val = evaluated
                 .into_iter()
                 .next()
-                .ok_or_else(|| "SQRT requires 1 argument".to_string())?;
+                .ok_or_else(|| RookError::Evaluation("SQRT requires 1 argument".to_string()))?;
             match val {
                 None => Ok(None),
                 Some(dv) => {
@@ -804,10 +831,16 @@ fn evaluate_scalar_function(
                         DataValue::Real(v) => v.0 as f64,
                         DataValue::DoublePrecision(v) => v.0,
                         DataValue::Numeric(v) => v.unscaled as f64 / 10_f64.powi(v.scale as i32),
-                        _ => return Err("SQRT requires a numeric argument".to_string()),
+                        _ => {
+                            return Err(RookError::Evaluation(
+                                "SQRT requires a numeric argument".to_string(),
+                            ));
+                        }
                     };
                     if num < 0.0 {
-                        return Err("cannot take square root of a negative number".to_string());
+                        return Err(RookError::Evaluation(
+                            "cannot take square root of a negative number".to_string(),
+                        ));
                     }
                     let res = num.sqrt();
                     Ok(Some(DataValue::DoublePrecision(
@@ -823,23 +856,35 @@ fn evaluate_scalar_function(
             let val = match iter.next() {
                 Some(Some(dv)) => dv,
                 Some(None) => return Ok(None),
-                None => return Err("SUBSTRING requires a string argument".to_string()),
+                None => {
+                    return Err(RookError::Evaluation(
+                        "SUBSTRING requires a string argument".to_string(),
+                    ));
+                }
             };
             let start = match iter.next() {
                 Some(Some(DataValue::Int(s))) => {
                     if s <= 0 {
-                        return Err("SUBSTRING start position must be >= 1".to_string());
+                        return Err(RookError::Evaluation(
+                            "SUBSTRING start position must be >= 1".to_string(),
+                        ));
                     }
                     s as usize
                 }
                 Some(Some(DataValue::BigInt(s))) => {
                     if s <= 0 {
-                        return Err("SUBSTRING start position must be >= 1".to_string());
+                        return Err(RookError::Evaluation(
+                            "SUBSTRING start position must be >= 1".to_string(),
+                        ));
                     }
                     s as usize
                 }
                 Some(None) => return Ok(None),
-                _ => return Err("SUBSTRING requires integer start position".to_string()),
+                _ => {
+                    return Err(RookError::Evaluation(
+                        "SUBSTRING requires integer start position".to_string(),
+                    ));
+                }
             };
             let len = match iter.next() {
                 Some(Some(DataValue::Int(l))) => {
@@ -858,31 +903,47 @@ fn evaluate_scalar_function(
                 // Default: rest of string (use string length via evaluating the value first)
                 None => match &val {
                     DataValue::Varchar(s) | DataValue::Char(s) => s.chars().count(),
-                    _ => return Err("SUBSTRING requires a string value".to_string()),
+                    _ => {
+                        return Err(RookError::Evaluation(
+                            "SUBSTRING requires a string value".to_string(),
+                        ));
+                    }
                 },
-                _ => return Err("SUBSTRING requires integer length".to_string()),
+                _ => {
+                    return Err(RookError::Evaluation(
+                        "SUBSTRING requires integer length".to_string(),
+                    ));
+                }
             };
             crate::types::functions::substring(&val, start, len)
                 .map(Some)
-                .map_err(|e| format!("SUBSTRING error: {}", e))
+                .context("SUBSTRING error")
         }
         "ROUND" => {
             let mut iter = evaluated.into_iter();
             let val = match iter.next() {
                 Some(Some(dv)) => dv,
                 Some(None) => return Ok(None),
-                None => return Err("ROUND requires a numeric argument".to_string()),
+                None => {
+                    return Err(RookError::Evaluation(
+                        "ROUND requires a numeric argument".to_string(),
+                    ));
+                }
             };
             let places = match iter.next() {
                 Some(Some(DataValue::Int(p))) => p,
                 Some(Some(DataValue::BigInt(p))) => p as i32,
                 Some(None) => return Ok(None),
                 None => 0,
-                _ => return Err("ROUND requires integer places".to_string()),
+                _ => {
+                    return Err(RookError::Evaluation(
+                        "ROUND requires integer places".to_string(),
+                    ));
+                }
             };
             crate::types::functions::round(&val, places)
                 .map(Some)
-                .map_err(|e| format!("ROUND error: {}", e))
+                .context("ROUND error")
         }
         "COALESCE" => {
             let vals: Vec<Option<DataValue>> = evaluated;
@@ -892,7 +953,9 @@ fn evaluate_scalar_function(
         // ── DATE/TIME extract ───────────────────────────────────────────
         "EXTRACT" | "DATE_PART" => {
             if args.len() != 2 {
-                return Err("EXTRACT requires 2 arguments: (part, value)".to_string());
+                return Err(RookError::Evaluation(
+                    "EXTRACT requires 2 arguments: (part, value)".to_string(),
+                ));
             }
             let mut iter = evaluated.into_iter();
             let part_str = match iter.next() {
@@ -901,15 +964,19 @@ fn evaluate_scalar_function(
                 }
                 Some(None) => return Ok(None),
                 _ => {
-                    return Err(
+                    return Err(RookError::Evaluation(
                         "EXTRACT first argument must be a string (YEAR/MONTH/DAY/etc.)".to_string(),
-                    );
+                    ));
                 }
             };
             let val = match iter.next() {
                 Some(Some(dv)) => dv,
                 Some(None) => return Ok(None),
-                None => return Err("EXTRACT requires 2 arguments".to_string()),
+                None => {
+                    return Err(RookError::Evaluation(
+                        "EXTRACT requires 2 arguments".to_string(),
+                    ));
+                }
             };
 
             let part = match part_str.as_str() {
@@ -919,10 +986,14 @@ fn evaluate_scalar_function(
                 "HOUR" => crate::types::functions::DatePart::Hour,
                 "MINUTE" => crate::types::functions::DatePart::Minute,
                 "SECOND" => crate::types::functions::DatePart::Second,
-                _ => return Err(format!("Unknown EXTRACT part: {}", part_str)),
+                _ => {
+                    return Err(RookError::Evaluation(format!(
+                        "Unknown EXTRACT part: {}",
+                        part_str
+                    )));
+                }
             };
-            let result = crate::types::functions::extract(part, &val)
-                .map_err(|e| format!("EXTRACT error: {}", e))?;
+            let result = crate::types::functions::extract(part, &val).context("EXTRACT error")?;
             Ok(Some(DataValue::Int(result)))
         }
 
@@ -938,37 +1009,35 @@ fn evaluate_scalar_function(
             match (left, right) {
                 (None, _) => Ok(None),          // NULLIF(NULL, anything) → NULL
                 (Some(l), None) => Ok(Some(l)), // NULLIF(val, NULL) → val (val = NULL is UNKNOWN → ELSE val)
-                (Some(l), Some(r)) => crate::types::functions::nullif(l, r)
-                    .map_err(|e| format!("NULLIF error: {}", e)),
+                (Some(l), Some(r)) => crate::types::functions::nullif(l, r).context("NULLIF error"),
             }
         }
 
-        _ => Err(format!("Unknown scalar function: '{}'", name)),
+        _ => Err(RookError::Evaluation(format!(
+            "Unknown scalar function: '{}'",
+            name
+        ))),
     }
 }
 
 /// Helper: apply a binary arithmetic operation to two nullable values.
 /// Supports INT, BIGINT, SMALLINT, DOUBLE PRECISION, and cross-type promotion.
-fn scale_numeric_unscaled(
-    unscaled: i128,
-    current_scale: u8,
-    target_scale: u8,
-) -> Result<i128, String> {
+fn scale_numeric_unscaled(unscaled: i128, current_scale: u8, target_scale: u8) -> RookResult<i128> {
     if current_scale == target_scale {
         Ok(unscaled)
     } else if target_scale > current_scale {
         let diff = (target_scale - current_scale) as u32;
         let factor = 10_i128
             .checked_pow(diff)
-            .ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+            .ok_or_else(|| RookError::Evaluation("Numeric scale factor overflow".to_string()))?;
         unscaled
             .checked_mul(factor)
-            .ok_or_else(|| "Numeric scaling overflow".to_string())
+            .ok_or_else(|| RookError::Evaluation("Numeric scaling overflow".to_string()))
     } else {
         let diff = (current_scale - target_scale) as u32;
         let factor = 10_i128
             .checked_pow(diff)
-            .ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+            .ok_or_else(|| RookError::Evaluation("Numeric scale factor overflow".to_string()))?;
         Ok(unscaled / factor)
     }
 }
@@ -976,13 +1045,13 @@ fn scale_numeric_unscaled(
 fn numeric_add(
     a: crate::types::value::NumericValue,
     b: crate::types::value::NumericValue,
-) -> Result<crate::types::value::NumericValue, String> {
+) -> RookResult<crate::types::value::NumericValue> {
     let target_scale = a.scale.max(b.scale);
     let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
     let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
     let unscaled = a_unscaled
         .checked_add(b_unscaled)
-        .ok_or_else(|| "Numeric addition overflow".to_string())?;
+        .ok_or_else(|| RookError::Evaluation("Numeric addition overflow".to_string()))?;
     Ok(crate::types::value::NumericValue {
         unscaled,
         scale: target_scale,
@@ -992,13 +1061,13 @@ fn numeric_add(
 fn numeric_sub(
     a: crate::types::value::NumericValue,
     b: crate::types::value::NumericValue,
-) -> Result<crate::types::value::NumericValue, String> {
+) -> RookResult<crate::types::value::NumericValue> {
     let target_scale = a.scale.max(b.scale);
     let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
     let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
     let unscaled = a_unscaled
         .checked_sub(b_unscaled)
-        .ok_or_else(|| "Numeric subtraction overflow".to_string())?;
+        .ok_or_else(|| RookError::Evaluation("Numeric subtraction overflow".to_string()))?;
     Ok(crate::types::value::NumericValue {
         unscaled,
         scale: target_scale,
@@ -1008,15 +1077,15 @@ fn numeric_sub(
 fn numeric_mul(
     a: crate::types::value::NumericValue,
     b: crate::types::value::NumericValue,
-) -> Result<crate::types::value::NumericValue, String> {
+) -> RookResult<crate::types::value::NumericValue> {
     let target_scale = a
         .scale
         .checked_add(b.scale)
-        .ok_or_else(|| "Numeric scale overflow".to_string())?;
+        .ok_or_else(|| RookError::Evaluation("Numeric scale overflow".to_string()))?;
     let unscaled = a
         .unscaled
         .checked_mul(b.unscaled)
-        .ok_or_else(|| "Numeric multiplication overflow".to_string())?;
+        .ok_or_else(|| RookError::Evaluation("Numeric multiplication overflow".to_string()))?;
     Ok(crate::types::value::NumericValue {
         unscaled,
         scale: target_scale,
@@ -1026,28 +1095,28 @@ fn numeric_mul(
 fn numeric_div(
     a: crate::types::value::NumericValue,
     b: crate::types::value::NumericValue,
-) -> Result<crate::types::value::NumericValue, String> {
+) -> RookResult<crate::types::value::NumericValue> {
     if b.unscaled == 0 {
-        return Err("Division by zero".to_string());
+        return Err(RookError::Evaluation("Division by zero".to_string()));
     }
     let target_scale = a.scale.max(b.scale);
     let shift = target_scale as i32 + b.scale as i32 - a.scale as i32;
     let a_shifted = if shift >= 0 {
         let factor = 10_i128
             .checked_pow(shift as u32)
-            .ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+            .ok_or_else(|| RookError::Evaluation("Numeric scale factor overflow".to_string()))?;
         a.unscaled
             .checked_mul(factor)
-            .ok_or_else(|| "Numeric division overflow".to_string())?
+            .ok_or_else(|| RookError::Evaluation("Numeric division overflow".to_string()))?
     } else {
         let factor = 10_i128
             .checked_pow((-shift) as u32)
-            .ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+            .ok_or_else(|| RookError::Evaluation("Numeric scale factor overflow".to_string()))?;
         a.unscaled / factor
     };
     let unscaled = a_shifted
         .checked_div(b.unscaled)
-        .ok_or_else(|| "Numeric division overflow".to_string())?;
+        .ok_or_else(|| RookError::Evaluation("Numeric division overflow".to_string()))?;
     Ok(crate::types::value::NumericValue {
         unscaled,
         scale: target_scale,
@@ -1057,16 +1126,16 @@ fn numeric_div(
 fn numeric_rem(
     a: crate::types::value::NumericValue,
     b: crate::types::value::NumericValue,
-) -> Result<crate::types::value::NumericValue, String> {
+) -> RookResult<crate::types::value::NumericValue> {
     if b.unscaled == 0 {
-        return Err("Division by zero".to_string());
+        return Err(RookError::Evaluation("Division by zero".to_string()));
     }
     let target_scale = a.scale.max(b.scale);
     let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
     let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
     let unscaled = a_unscaled
         .checked_rem(b_unscaled)
-        .ok_or_else(|| "Numeric modulo overflow".to_string())?;
+        .ok_or_else(|| RookError::Evaluation("Numeric modulo overflow".to_string()))?;
     Ok(crate::types::value::NumericValue {
         unscaled,
         scale: target_scale,
@@ -1085,17 +1154,17 @@ fn arithmetic_op<FI, FB, FD, FF, FDbl, FN>(
     float_op: FF,
     double_op: FDbl,
     numeric_op: FN,
-) -> Result<Option<DataValue>, String>
+) -> RookResult<Option<DataValue>>
 where
-    FI: FnOnce(i32, i32) -> Result<i32, String>,
-    FB: FnOnce(i64, i64) -> Result<i64, String>,
-    FD: FnOnce(i16, i16) -> Result<i16, String>,
-    FF: FnOnce(f64, f64) -> Result<f64, String>,
-    FDbl: FnOnce(f64, f64) -> Result<f64, String>,
+    FI: FnOnce(i32, i32) -> RookResult<i32>,
+    FB: FnOnce(i64, i64) -> RookResult<i64>,
+    FD: FnOnce(i16, i16) -> RookResult<i16>,
+    FF: FnOnce(f64, f64) -> RookResult<f64>,
+    FDbl: FnOnce(f64, f64) -> RookResult<f64>,
     FN: FnOnce(
         crate::types::value::NumericValue,
         crate::types::value::NumericValue,
-    ) -> Result<crate::types::value::NumericValue, String>,
+    ) -> RookResult<crate::types::value::NumericValue>,
 {
     match (left, right) {
         (None, _) | (_, None) => Ok(None),
@@ -1311,10 +1380,10 @@ where
                 )))
             })
         }
-        (Some(l), Some(r)) => Err(format!(
+        (Some(l), Some(r)) => Err(RookError::Evaluation(format!(
             "Arithmetic not supported between {:?} and {:?}",
             l, r
-        )),
+        ))),
     }
 }
 

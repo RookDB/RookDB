@@ -61,7 +61,7 @@ fn apply_assignments(
     schema: &[ColumnInfo],
     compiled: &[(usize, Expr)],
     old: &[Option<DataValue>],
-) -> Result<Vec<Option<DataValue>>, String> {
+) -> RookResult<Vec<Option<DataValue>>> {
     let row = Tuple::new(old.to_vec());
     let mut new_values = old.to_vec();
     for (idx, expr) in compiled {
@@ -69,8 +69,9 @@ fn apply_assignments(
         new_values[*idx] = match expr.evaluate(&row, schema)? {
             None => None,
             Some(v) => Some(
-                crate::types::functions::assign_cast(&v, &column.data_type)
-                    .map_err(|e| format!("column '{}': {}", column.name, e))?,
+                crate::types::functions::assign_cast(&v, &column.data_type).map_err(|e| {
+                    RookError::TypeMismatch(format!("column '{}': {}", column.name, e))
+                })?,
             ),
         };
     }
@@ -211,7 +212,7 @@ fn update_rows(
         let updated_values = match apply_assignments(columns, &row_schema, &compiled, &decoded) {
             Ok(v) => v,
             Err(e) => {
-                return Err(RookError::TypeMismatch(e).with_context("assignment error"));
+                return Err(e.with_context("assignment error"));
             }
         };
         let new_bytes = match serialize_nullable_typed_row(&schema, &updated_values) {
