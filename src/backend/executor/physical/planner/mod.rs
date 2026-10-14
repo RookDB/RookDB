@@ -9,10 +9,10 @@ use rook_ast::logical::*;
 use super::explain::{PlanNode, PlanTrace};
 use super::expr::{Expr, Predicate, binding_names, expr_from_ast, resolve_column};
 use super::operators::{
-    CteScanOperator, DistinctOperator, Estimated, FilterOperator, IndexScanMode, IndexScanOperator,
-    InsertOperator, LimitOperator, PhysicalOperator, ProjectionOperator, SeqScanOperator,
-    SetOpOperator, SetOpType as PhysicalSetOpType, SingleRowOperator, SortOperator,
-    SubqueryExecOperator, SubqueryType as PhysicalSubqueryType, ValuesOperator,
+    CteScanOperator, DistinctOperator, Estimated, FilterOperator, InsertOperator, LimitOperator,
+    PhysicalOperator, ProjectionOperator, SeqScanOperator, SetOpOperator,
+    SetOpType as PhysicalSetOpType, SingleRowOperator, SortOperator, SubqueryExecOperator,
+    SubqueryType as PhysicalSubqueryType, ValuesOperator,
 };
 use super::tuple::ColumnInfo;
 use crate::types::datatype::DataType;
@@ -829,66 +829,13 @@ impl PhysicalPlanner {
             });
         }
 
-        // Try loading named indexes from sys_indexes
-        let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
-            self.catalog.engine(),
-            &self.db_name,
-            &ts.table,
-        )
-        .unwrap_or_default();
-
+        // A plain table scan reads the heap in file order. (Reading it in
+        // index order instead costs random page reads, decodes every column
+        // and still gives ORDER BY no order to rely on.)
         let heap_manager =
             crate::backend::cache::lease_heap_owned(self.catalog.engine(), &heap_path).map_err(
                 |e| e.with_context(format!("Failed to open heap for table '{}'", ts.table)),
             )?;
-
-        if let Some((first_idx_name, idx_cols, _)) = named_indexes.first() {
-            // Use the first named index for the full scan
-            let index_path =
-                self.catalog
-                    .engine()
-                    .paths()
-                    .index(&self.db_name, &ts.table, first_idx_name);
-
-            // The key types are those of the indexed columns, in index order.
-            let key_types: Option<Vec<DataType>> = idx_cols
-                .iter()
-                .map(|name| {
-                    table_schema
-                        .iter()
-                        .find(|c| c.name.eq_ignore_ascii_case(name))
-                        .map(|c| c.data_type.clone())
-                })
-                .collect();
-
-            if index_path.exists()
-                && let Some(key_types) = key_types
-            {
-                let indexed_cols: Vec<usize> = idx_cols
-                    .iter()
-                    .filter_map(|name| {
-                        column_info
-                            .iter()
-                            .position(|c| c.name.eq_ignore_ascii_case(name))
-                    })
-                    .collect();
-
-                return Ok(Box::new(
-                    IndexScanOperator::new(
-                        crate::backend::cache::CachedIndex::new(
-                            std::sync::Arc::clone(self.catalog.engine()),
-                            index_path,
-                            key_types,
-                        ),
-                        heap_manager,
-                        IndexScanMode::FullScan,
-                        column_info,
-                        indexed_cols,
-                    )
-                    .described(&ts.table, first_idx_name),
-                ));
-            }
-        }
 
         // Decode only the columns the query reads.
         let wanted: Option<Vec<usize>> = self.read_columns.borrow().as_ref().map(|names| {
@@ -1103,6 +1050,7 @@ impl PhysicalPlanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::executor::physical::operators::IndexScanMode;
     use rook_ast::{BinaryOp, ComparisonOp, ConstantValue, ExprNode, PredicateNode};
 
     fn col(name: &str) -> ExprNode {

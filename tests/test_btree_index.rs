@@ -160,7 +160,7 @@ fn index_survives_a_catalog_save_and_stays_maintained() {
 }
 
 #[test]
-fn planner_prefers_existing_index_for_scans() {
+fn plain_scan_stays_sequential_with_an_index() {
     let _ws = common::TestWorkspace::new("btree", "planpref");
     let catalog = setup_table("idx_db");
 
@@ -179,7 +179,8 @@ fn planner_prefers_existing_index_for_scans() {
     // Without an index the scan is sequential.
     assert_eq!(planner.plan(&scan_plan()).unwrap().name(), "SeqScan");
 
-    // With an index present it drives the scan.
+    // An index does not change that: walking it would read the heap in
+    // key order, page by page at random, for no benefit to the query.
     create_index(
         &catalog,
         "idx_db",
@@ -188,10 +189,7 @@ fn planner_prefers_existing_index_for_scans() {
         &[String::from("salary")],
     )
     .unwrap();
-    assert_eq!(
-        planner.plan(&scan_plan()).unwrap().name(),
-        "IndexScan(Full)"
-    );
+    assert_eq!(planner.plan(&scan_plan()).unwrap().name(), "SeqScan");
 }
 
 #[test]
@@ -199,7 +197,13 @@ fn index_scan_returns_identical_rows_to_seq_scan() {
     let _ws = common::TestWorkspace::new("btree", "equiv");
     let catalog = setup_table("eq_db");
 
-    let before = run_select(&catalog, "eq_db", "SELECT name FROM staff ORDER BY id");
+    // The same query, by a filtered sequential scan and then by an index
+    // range scan.
+    let before = run_select(
+        &catalog,
+        "eq_db",
+        "SELECT name FROM staff WHERE salary >= 0 ORDER BY id",
+    );
 
     create_index(
         &catalog,
@@ -209,7 +213,11 @@ fn index_scan_returns_identical_rows_to_seq_scan() {
         &[String::from("salary")],
     )
     .unwrap();
-    let after = run_select(&catalog, "eq_db", "SELECT name FROM staff ORDER BY id");
+    let after = run_select(
+        &catalog,
+        "eq_db",
+        "SELECT name FROM staff WHERE salary >= 0 ORDER BY id",
+    );
 
     assert_eq!(before, after, "index-driven scan must not change results");
     assert_eq!(before.len(), 6);
@@ -290,7 +298,12 @@ fn index_scan_walks_keys_in_ascending_order() {
     )
     .unwrap();
 
-    let out = run_select(&catalog, "ko_db", "SELECT salary FROM staff");
+    // A range predicate on the indexed column drives an index scan.
+    let out = run_select(
+        &catalog,
+        "ko_db",
+        "SELECT salary FROM staff WHERE salary >= 0",
+    );
     let salaries: Vec<String> = out.iter().map(|r| r[0].clone()).collect();
 
     let mut sorted = salaries.clone();

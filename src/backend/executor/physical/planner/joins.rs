@@ -285,8 +285,16 @@ impl PhysicalPlanner {
                 extract_equi_join_keys(pred, &left_schema, &right_schema)
                 && !build_keys.is_empty()
             {
-                return Ok(wrap(Box::new(HashJoinOperator::new(
-                    left, right, build_keys, probe_keys, residual,
+                // Hash the smaller input; ties keep the left one.
+                let build_left = left.estimate_cardinality() <= right.estimate_cardinality();
+                return Ok(wrap(Box::new(HashJoinOperator::with_build_side(
+                    left,
+                    right,
+                    build_keys,
+                    probe_keys,
+                    residual,
+                    PhysicalJoinType::Inner,
+                    build_left,
                 ))));
             }
         }
@@ -309,8 +317,9 @@ impl PhysicalPlanner {
                     .zip(right_keys.iter())
                     .all(|(l, r)| keys_hash_alike(l, &left_schema, r, &right_schema))
             {
-                return Ok(wrap(Box::new(HashJoinOperator::with_join_type(
-                    left, right, left_keys, right_keys, residual, join_type,
+                let build_left = left.estimate_cardinality() <= right.estimate_cardinality();
+                return Ok(wrap(Box::new(HashJoinOperator::with_build_side(
+                    left, right, left_keys, right_keys, residual, join_type, build_left,
                 ))));
             }
         }

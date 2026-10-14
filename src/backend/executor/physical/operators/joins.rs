@@ -1096,10 +1096,40 @@ impl HashJoinOperator {
         remaining_predicate: Option<Predicate>,
         join_type: JoinType,
     ) -> Self {
+        let build_is_left = join_type != JoinType::Left;
+        Self::with_build_side(
+            left,
+            right,
+            left_keys,
+            right_keys,
+            remaining_predicate,
+            join_type,
+            build_is_left,
+        )
+    }
+
+    /// [`with_join_type`](Self::with_join_type) with the build side chosen
+    /// by the caller, normally the smaller input. The output is still the
+    /// left columns followed by the right columns. A LEFT join must build
+    /// on the right input and a RIGHT join on the left one, since the
+    /// preserved side is the probe side; for those the choice is ignored.
+    pub fn with_build_side(
+        left: Box<dyn PhysicalOperator>,
+        right: Box<dyn PhysicalOperator>,
+        left_keys: Vec<Expr>,
+        right_keys: Vec<Expr>,
+        remaining_predicate: Option<Predicate>,
+        join_type: JoinType,
+        build_left: bool,
+    ) -> Self {
         let mut output_schema = left.schema().to_vec();
         output_schema.extend(right.schema().iter().cloned());
 
-        let build_is_left = join_type != JoinType::Left;
+        let build_is_left = match join_type {
+            JoinType::Left => false,
+            JoinType::Right => true,
+            JoinType::Inner | JoinType::Cross | JoinType::Full => build_left,
+        };
         let (build, probe, build_keys, probe_keys) = if build_is_left {
             (left, right, left_keys, right_keys)
         } else {
