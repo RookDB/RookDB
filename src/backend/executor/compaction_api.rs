@@ -25,7 +25,10 @@ pub fn rebuild_table_fsm(
     }
 
     // 2. Opening the HeapManager triggers `FSM::build_from_heap`
-    // automatically when the .fsm file is missing.
+    // automatically when the .fsm file is missing. A cached handle holds the
+    // deleted fork, so it is dropped first, and this open stays private so it
+    // is guaranteed to be the one that rebuilds.
+    crate::backend::cache::evict_heap(engine, &table_path)?;
     let _hm = HeapManager::open(table_path)?;
     log::info!("Successfully rebuilt FSM tree for table '{}'", table_name);
 
@@ -45,7 +48,7 @@ pub fn update_page_free_space(
     let table_path = engine.paths().heap(db_name, table_name);
 
     // Open the HeapManager (loads the FSM)
-    let mut hm = HeapManager::open(table_path)?;
+    let mut hm = crate::backend::cache::lease_heap(engine, &table_path)?;
 
     // Call the FSM vacuum update logic to make the reclaimed space searchable
     hm.vacuum_page(page_id, reclaimed_bytes)?; // Assumes vacuum_page or fsm.fsm_vacuum_update is accessible

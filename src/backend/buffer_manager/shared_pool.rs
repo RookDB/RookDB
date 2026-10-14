@@ -1,18 +1,18 @@
-//! Process-wide shared buffer pools.
+//! Per-file buffer pool views, one per heap file.
 //!
-//! Every `HeapManager::open()` used to allocate a private 128/64-frame
-//! [`BufferPool`]. Two managers opened on the same `.dat` file therefore held
-//! independent caches over the same inode — stale-cache and lost-write
-//! hazards between them (e.g. a seq-scan operator and an insert operator in
-//! one query each open their own manager).
+//! All pages are cached in one global frame store with a single memory budget
+//! (see [`shared_pool_capacity`] and `buffer_pool`); a [`BufferPool`] is only
+//! the per-file view onto it. Two `HeapManager`s opened on the same `.dat`
+//! file must still see each other's dirty pages, so this module keeps a
+//! process-wide registry mapping canonical file paths to `Weak` references
+//! to a single view. The first manager registers it; later managers on the
+//! same file receive clones of the same `Arc`. When the last manager drops
+//! its handle, the view drops, writing its dirty pages back and releasing its
+//! frames to the store, and the expired registry entry is swept on the next
+//! lookup.
 //!
-//! This module keeps a global registry mapping canonical file paths to
-//! `Weak` references to a single shared pool. The first manager registers
-//! the pool; later managers on the same file receive clones of the same
-//! `Arc`, so cached pages (including dirty state) stay coherent. When the
-//! last manager drops its handle, the pool itself drops — flushing dirty
-//! pages via its own `Drop` impl — and the expired registry entry is swept
-//! on the next lookup.
+//! The registry is keyed by file identity, not by engine, so it stays
+//! process-wide: engines on different data directories never share a path.
 
 use std::collections::HashMap;
 use std::io;

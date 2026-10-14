@@ -200,12 +200,14 @@ pub(super) fn alter_table(
             // without decoding the row.
             let dat_path = catalog.engine().paths().heap(db, &alter.table);
             if Path::new(&dat_path).exists() {
-                let heap = HeapManager::open(PathBuf::from(&dat_path)).map_err(|e| {
-                    io::Error::other(format!(
-                        "Failed to open heap for SET NOT NULL validation: {}",
-                        e
-                    ))
-                })?;
+                let heap =
+                    crate::backend::cache::lease_heap(catalog.engine(), Path::new(&dat_path))
+                        .map_err(|e| {
+                            io::Error::other(format!(
+                                "Failed to open heap for SET NOT NULL validation: {}",
+                                e
+                            ))
+                        })?;
                 for result in heap.scan() {
                     let (_, _, row_bytes) = result?;
                     if crate::types::null_bitmap::is_column_null_in_row(&row_bytes, col_idx)
@@ -389,6 +391,9 @@ fn rename_table(
             .collect();
     let old_dat = catalog.engine().paths().heap(db, old_name);
     let new_dat = catalog.engine().paths().heap(db, new_name);
+    // The open-table handle is keyed by path: drop it before the file moves.
+    let _ = crate::backend::cache::evict_heap(catalog.engine(), &old_dat);
+    crate::backend::buffer_manager::shared_pool::invalidate(&old_dat);
     let _ = std::fs::rename(&old_dat, &new_dat);
     let _ = std::fs::rename(
         catalog.engine().paths().heap_fsm(db, old_name),
@@ -493,7 +498,7 @@ fn rewrite_rows(
         return Ok(());
     }
 
-    let old_heap = HeapManager::open(PathBuf::from(&dat_path))
+    let old_heap = crate::backend::cache::lease_heap(engine, Path::new(&dat_path))
         .map_err(|e| io::Error::other(format!("Failed to open heap for backfill: {}", e)))?;
     let mut rows: Vec<Vec<u8>> = Vec::new();
     for result in old_heap.scan() {

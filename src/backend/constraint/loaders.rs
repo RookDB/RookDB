@@ -4,7 +4,6 @@
 //! and table schemas from the system tables (`sys_indexes`, `sys_constraints`,
 //! `sys_columns`, `sys_tables`).
 
-use crate::backend::heap::HeapManager;
 use crate::backend::system_table::split_column_list;
 use crate::types::{DataType, DataValue};
 
@@ -44,7 +43,7 @@ pub fn load_referencing_foreign_keys(
     let mut tbl_id_to_name: std::collections::HashMap<i32, String> =
         std::collections::HashMap::new();
     if tbl_path.exists()
-        && let Ok(heap) = HeapManager::open(tbl_path)
+        && let Ok(heap) = crate::backend::cache::lease_heap(engine, &tbl_path)
     {
         for result in heap.scan() {
             if let Ok((_, _, raw_bytes)) = result
@@ -65,7 +64,7 @@ pub fn load_referencing_foreign_keys(
         }
     }
 
-    let heap = HeapManager::open(constr_path)
+    let heap = crate::backend::cache::lease_heap(engine, &constr_path)
         .map_err(|e| format!("Failed to open sys_constraints: {}", e))?;
 
     let mut referencing_fks = Vec::new();
@@ -155,8 +154,8 @@ pub(crate) fn load_table_schema(
         return Ok(None);
     }
 
-    let heap =
-        HeapManager::open(col_path).map_err(|e| format!("Failed to open sys_columns: {}", e))?;
+    let heap = crate::backend::cache::lease_heap(engine, &col_path)
+        .map_err(|e| format!("Failed to open sys_columns: {}", e))?;
 
     let mut schema: Vec<(i32, String, DataType)> = Vec::new();
 

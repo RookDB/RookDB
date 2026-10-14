@@ -360,7 +360,7 @@ pub fn delete_index_metadata(
         return Ok(0);
     }
 
-    let mut heap = crate::backend::heap::HeapManager::open(idx_path)?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &idx_path)?;
     let mut to_delete: Vec<(u32, u32)> = Vec::new();
 
     for result in heap.scan() {
@@ -425,7 +425,7 @@ pub fn delete_column_constraints(
         return Ok(0);
     }
 
-    let mut heap = crate::backend::heap::HeapManager::open(constr_path)?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &constr_path)?;
     let mut to_delete: Vec<(u32, u32)> = Vec::new();
 
     for result in heap.scan() {
@@ -559,7 +559,7 @@ pub fn rename_column_in_constraints(
         return Ok(0);
     }
 
-    let mut heap = crate::backend::heap::HeapManager::open(constr_path.clone())?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &constr_path)?;
     let mut updates: Vec<(u32, u32, Vec<Option<String>>)> = Vec::new();
 
     for result in heap.scan() {
@@ -678,7 +678,7 @@ pub fn rename_referenced_table_in_constraints(
         .filter_map(|t| resolve_table_id(engine, db_name, t).ok().map(|(id, _)| id))
         .collect();
 
-    let mut heap = crate::backend::heap::HeapManager::open(constr_path.clone())?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &constr_path)?;
     let mut updates: Vec<(u32, u32, Vec<Option<String>>)> = Vec::new();
 
     for result in heap.scan() {
@@ -751,7 +751,7 @@ pub fn rename_referenced_column_in_constraints(
             })
             .collect();
 
-    let mut heap = crate::backend::heap::HeapManager::open(constr_path)?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &constr_path)?;
     let mut updates: Vec<(u32, u32, Vec<Option<String>>)> = Vec::new();
 
     for result in heap.scan() {
@@ -915,7 +915,7 @@ fn delete_rows_by_column(
         return Ok(0);
     }
 
-    let mut heap = crate::backend::heap::HeapManager::open(path)?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &path)?;
     let mut to_delete: Vec<(u32, u32)> = Vec::new();
 
     for result in heap.scan() {
@@ -1008,7 +1008,7 @@ pub fn delete_referencing_foreign_keys(
         return Ok(0);
     }
 
-    let mut heap = crate::backend::heap::HeapManager::open(constr_path)?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &constr_path)?;
     let mut to_delete: Vec<(u32, u32)> = Vec::new();
 
     for result in heap.scan() {
@@ -1067,7 +1067,7 @@ pub fn rename_table_in_system(
 ) -> std::io::Result<()> {
     let (table_id, _db_id) = resolve_table_id(engine, db_name, old_name)?;
     let path = sys_path(engine, "tables");
-    let mut heap = crate::backend::heap::HeapManager::open(path)?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &path)?;
     let mut found = None;
     for result in heap.scan() {
         let (page_id, slot_id, raw_bytes) = result?;

@@ -81,6 +81,8 @@ pub(super) fn drop_database(
     let mut lines = Vec::new();
     catalog.databases.remove(db_name);
     let engine = std::sync::Arc::clone(catalog.engine());
+    // Every cached table handle of the database must not outlive its files.
+    let _ = crate::backend::cache::flush_and_clear_heaps(&engine);
     let _ = std::fs::remove_dir_all(engine.paths().database_dir(db_name));
     if let Err(e) = crate::backend::system_table::delete_database_metadata(&engine, db_name) {
         lines.push(format!(
@@ -593,6 +595,9 @@ pub(super) fn drop_table(
         db_obj.tables.remove(table);
     }
     let dat_path = catalog.engine().paths().heap(db, table);
+    // The engine's open-table handle must not outlive the file.
+    let _ = crate::backend::cache::evict_heap(catalog.engine(), &dat_path);
+    crate::backend::buffer_manager::shared_pool::invalidate(&dat_path);
     let _ = std::fs::remove_file(&dat_path);
     let _ = std::fs::remove_file(catalog.engine().paths().heap_fsm(db, table));
     crate::backend::cache::drop_statistics(catalog.engine(), db, table);

@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use crate::backend::executor::create_index::{index_file_path, load_table_indexes_multi};
 use crate::backend::index::btree::BTree;
 use crate::catalog::Catalog;
-use crate::heap::HeapManager;
 use crate::types::{DataType, deserialize_nullable_row};
 
 /// Summary of one VACUUM run, for reporting and tests.
@@ -77,7 +76,7 @@ pub fn vacuum_table(
     }
 
     // 5. Stamp last_vacuum through a FRESH manager (post-invalidation).
-    stamp_last_vacuum(&heap_path)?;
+    stamp_last_vacuum(catalog.engine(), &heap_path)?;
 
     log::info!(
         "[Vacuum] {}.{} done: {} page(s) compacted, {} dead tuple(s) reclaimed, {} index(es) rebuilt",
@@ -123,8 +122,8 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
         .ok_or_else(|| format!("Table '{}.{}' not found in catalog", db_name, table_name))?;
 
     let heap_path = engine.paths().heap(db_name, table_name);
-    let heap_manager =
-        HeapManager::open(heap_path).map_err(|e| format!("Failed to open heap: {}", e))?;
+    let heap_manager = crate::backend::cache::lease_heap(engine, &heap_path)
+        .map_err(|e| format!("Failed to open heap: {}", e))?;
 
     let mut rebuilt = 0usize;
     for (idx_name, col_names, _is_unique) in &indexes {
@@ -222,10 +221,14 @@ fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> Result
 
 /// Record the current time in the header's `last_vacuum` field.
 ///
-/// Opens a fresh HeapManager AFTER cache invalidation so the write lands on
-/// the post-compaction file state; dropping it flushes via the shared pool.
-fn stamp_last_vacuum(heap_path: &std::path::Path) -> Result<(), String> {
-    let mut manager = HeapManager::open(heap_path.to_path_buf()).map_err(|e| e.to_string())?;
+/// Takes the engine's handle AFTER cache invalidation (compaction evicts it),
+/// so the write lands on the post-compaction file state.
+fn stamp_last_vacuum(
+    engine: &crate::backend::engine::Engine,
+    heap_path: &std::path::Path,
+) -> Result<(), String> {
+    let mut manager =
+        crate::backend::cache::lease_heap(engine, heap_path).map_err(|e| e.to_string())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)

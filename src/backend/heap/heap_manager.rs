@@ -191,9 +191,10 @@ impl Iterator for HeapScanIterator {
 
 /// High-level heap file manager with FSM-guided insertion.
 ///
-/// All page I/O is routed through a CLOCK BufferPool for efficient caching.
+/// All page I/O is routed through a [`BufferPool`] view onto the global CLOCK
+/// frame store, which holds the single memory budget for every open file.
 ///
-/// The pool is **shared process-wide per file** (see `buffer_manager::shared_pool`):
+/// The view is **shared per file** (see `buffer_manager::shared_pool`):
 /// two `HeapManager`s opened on the same `.dat` file — e.g. a scan operator and
 /// an insert operator in one query — see each other's dirty pages immediately
 /// instead of holding independent caches over the same inode. The lock is held
@@ -202,7 +203,7 @@ impl Iterator for HeapScanIterator {
 /// The file header lives only in the pool's page 0 frame. A manager keeps no
 /// copy of it, so every handle on the file reads the same counts.
 pub struct HeapManager {
-    /// Shared buffer pool (one per underlying file, process-wide).
+    /// Buffer pool view of this file (one per underlying file, shared by every manager on it).
     pub pool: SharedPool,
     fsm: FSM,
 }
@@ -335,7 +336,7 @@ impl HeapManager {
             ));
         }
 
-        // Get the process-wide shared pool for this file (opens it if this
+        // Get the shared pool view for this file (opens it if this
         // is the first manager on the file).
         let pool = shared_pool::get_or_create(&file_path)?;
 

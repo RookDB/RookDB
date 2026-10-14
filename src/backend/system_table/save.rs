@@ -25,7 +25,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
         let db_id_to_name = load_database_names(catalog.engine());
         let tbl_path = sys_path(catalog.engine(), "tables");
         if tbl_path.exists()
-            && let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path)
+            && let Ok(heap) = crate::backend::cache::lease_heap(catalog.engine(), &tbl_path)
         {
             for result in heap.scan() {
                 if let Ok((_, _, raw_bytes)) = result
@@ -50,7 +50,7 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
             }
         }
 
-        if let Ok(heap) = crate::backend::heap::HeapManager::open(constr_path.clone()) {
+        if let Ok(heap) = crate::backend::cache::lease_heap(catalog.engine(), &constr_path) {
             for result in heap.scan() {
                 if let Ok((_, _, raw_bytes)) = result
                     && let Ok(decoded) =
@@ -147,7 +147,7 @@ fn load_database_names(
     let mut names = std::collections::HashMap::new();
     let path = sys_path(engine, "databases");
     if path.exists()
-        && let Ok(heap) = crate::backend::heap::HeapManager::open(path)
+        && let Ok(heap) = crate::backend::cache::lease_heap(engine, &path)
     {
         for result in heap.scan() {
             if let Ok((_, _, raw)) = result

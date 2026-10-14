@@ -589,7 +589,7 @@ fn scan_system_table(
         return Ok(Vec::new());
     }
 
-    let heap = crate::backend::heap::HeapManager::open(path)
+    let heap = crate::backend::cache::lease_heap(engine, &path)
         .map_err(|e| format!("Failed to open {}: {}", name, e))?;
 
     let mut rows = Vec::new();
@@ -617,7 +617,7 @@ fn insert_system_rows(
     rows: &[Vec<Option<String>>],
 ) -> std::io::Result<()> {
     let path = sys_path(engine, name);
-    let mut heap = crate::backend::heap::HeapManager::open(path)?;
+    let mut heap = crate::backend::cache::lease_heap(engine, &path)?;
 
     for row in rows {
         // Convert Vec<Option<String>> into Vec<Option<&str>> for serialisation

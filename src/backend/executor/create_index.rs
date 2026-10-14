@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
 use crate::catalog::Catalog;
 use crate::catalog::types::Column;
@@ -196,8 +195,8 @@ pub fn load_table_indexes_multi(
         return Ok(Vec::new());
     }
 
-    let heap =
-        HeapManager::open(idx_path).map_err(|e| format!("Failed to open sys_indexes: {}", e))?;
+    let heap = crate::backend::cache::lease_heap(engine, &idx_path)
+        .map_err(|e| format!("Failed to open sys_indexes: {}", e))?;
 
     let mut indexes = Vec::new();
     for result in heap.scan() {
@@ -376,7 +375,7 @@ pub fn create_index_with_flags(
     }
 
     // 5. Open the heap file for scanning
-    let heap_manager = HeapManager::open(heap_path)
+    let heap_manager = crate::backend::cache::lease_heap(catalog.engine(), &heap_path)
         .map_err(|e| format!("Failed to open heap for table '{}': {}", table_name, e))?;
 
     // 6. Create the B+ Tree index file (composite-aware)

@@ -1,4 +1,4 @@
-//! Process-wide hot-path caches for the executor tier.
+//! Per-engine hot-path caches for the executor tier.
 //!
 //! The per-row DML paths used to re-pay heavy fixed costs on every tuple:
 //!
@@ -8,10 +8,11 @@
 //!   CHECK loaders, index discovery), deserialising every catalog row each time.
 //! * `BTree::open` plus `sync_all()` (fsync) once per row per index.
 //!
-//! This module keeps small process-wide registries so those costs are paid
-//! once per table/index instead of once per row:
+//! This module operates on the caches an [`Engine`] owns so those costs are
+//! paid once per table/index instead of once per row:
 //!
-//! * [`with_heap`] — one cached `HeapManager` per canonical `.dat` path.
+//! * [`with_heap`] / [`lease_heap`] — one cached `HeapManager` per canonical
+//!   `.dat` path: the engine's open-table cache.
 //! * [`metadata`] — constraint/index metadata per `(db, table)`.
 //! * `indexes` — discovered index files per `(db, table)` (create_index.rs).
 //! * [`with_btree`] — one cached `BTree` handle per `.idx` path, with fsync
@@ -164,6 +165,70 @@ pub fn with_heap<T>(
         },
     );
     Ok(result)
+}
+
+/// A cached `HeapManager` checked out of the engine's open-table cache.
+///
+/// Dereferences to the manager. It goes back into the cache when dropped, so
+/// a caller that holds it across other catalog calls never holds the cache
+/// lock (a nested lookup of the same file just opens a second manager over
+/// the same shared pool, as before the cache existed).
+pub struct HeapLease<'a> {
+    engine: &'a Engine,
+    key: PathBuf,
+    entry: Option<CachedHeap>,
+}
+
+impl std::ops::Deref for HeapLease<'_> {
+    type Target = HeapManager;
+    fn deref(&self) -> &HeapManager {
+        &self.entry.as_ref().expect("lease holds a manager").manager
+    }
+}
+
+impl std::ops::DerefMut for HeapLease<'_> {
+    fn deref_mut(&mut self) -> &mut HeapManager {
+        &mut self.entry.as_mut().expect("lease holds a manager").manager
+    }
+}
+
+impl Drop for HeapLease<'_> {
+    fn drop(&mut self) {
+        if let Some(mut entry) = self.entry.take() {
+            entry.ops_since_flush += 1;
+            lock(&self.engine.heaps)
+                .entry(self.key.clone())
+                .or_insert(entry);
+        }
+    }
+}
+
+/// Check the engine's cached `HeapManager` for `path` out of the cache,
+/// opening it on a miss. A handle whose file was replaced is discarded.
+pub fn lease_heap<'a>(engine: &'a Engine, path: &Path) -> io::Result<HeapLease<'a>> {
+    let key = canonical(path);
+    let cached = {
+        let mut cache = lock(&engine.heaps);
+        if let Some(entry) = cache.get(&key)
+            && entry.manager.is_file_stale(path)
+        {
+            cache.remove(&key);
+            crate::backend::buffer_manager::shared_pool::invalidate(path);
+        }
+        cache.remove(&key)
+    };
+    let entry = match cached {
+        Some(entry) => entry,
+        None => CachedHeap {
+            manager: HeapManager::open(path.to_path_buf())?,
+            ops_since_flush: 0,
+        },
+    };
+    Ok(HeapLease {
+        engine,
+        key,
+        entry: Some(entry),
+    })
 }
 
 /// Drop the cached manager for `path` (after flushing it).
@@ -516,7 +581,7 @@ fn scan_sys(
     if !path.exists() {
         return None;
     }
-    let heap = HeapManager::open(path).ok()?;
+    let heap = crate::backend::cache::lease_heap(engine, &path).ok()?;
     let mut rows = Vec::new();
     for result in heap.scan() {
         let (_, _, raw) = result.ok()?;
