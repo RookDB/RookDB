@@ -230,7 +230,7 @@ fn update_rows(
         // Constraint validation against disk, excluding all pointers in this batch
         checks.check(catalog, columns, &updated_values, pointers)?;
 
-        crate::backend::constraint::validate_update_restrict(
+        crate::backend::constraint::validate_update_references(
             catalog,
             db_name,
             table_name,
@@ -481,20 +481,24 @@ fn update_rows(
         )?;
     }
 
-    // FK cascade propagation
-    if !pending_updates.is_empty() {
-        for update in &pending_updates {
-            if let Err(e) = crate::backend::constraint::propagate_update_to_children(
-                catalog,
-                db_name,
-                table_name,
-                columns,
-                &update.old_values,
-                &update.updated_values,
-                &referencing_fks,
-            ) {
-                log::warn!("[UpdateByPointers] Failed to propagate FK cascade: {}", e);
-            }
+    // FK cascade propagation. The checks before Phase 2 cleared every
+    // action, so what fails here is storage, part-way through: the statement
+    // reports it rather than claim success.
+    let mut cascade_error: Option<RookError> = None;
+    for update in &pending_updates {
+        if let Err(e) = crate::backend::constraint::propagate_update_to_children(
+            catalog,
+            db_name,
+            table_name,
+            columns,
+            &update.old_values,
+            &update.updated_values,
+            &referencing_fks,
+        ) {
+            cascade_error = Some(e.with_context(
+                "the rows were updated, but changing the rows that reference them failed",
+            ));
+            break;
         }
     }
 
@@ -505,6 +509,10 @@ fn update_rows(
             table_name,
             updated_count as u64,
         );
+    }
+
+    if let Some(e) = cascade_error {
+        return Err(e);
     }
 
     let result = UpdateResult {

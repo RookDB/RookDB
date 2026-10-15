@@ -12,6 +12,11 @@ use super::{ConstraintKind, RookError};
 use crate::backend::cache::TableMeta;
 use std::cell::OnceCell;
 
+/// Whether `a` and `b` name the same columns in the same order.
+fn same_columns(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
+}
+
 /// The value in `cell`, made by `make` the first time it is asked for.
 pub(crate) fn once<T>(cell: &OnceCell<T>, make: impl FnOnce() -> RookResult<T>) -> RookResult<&T> {
     if let Some(value) = cell.get() {
@@ -220,6 +225,8 @@ fn unique_lookup_error(table_name: &str, what: &str, cause: RookError) -> RookEr
 ///
 /// FK definitions come from the process-cached [`TableMeta`] instead of
 /// re-resolving table ids and rescanning `sys_constraints` on every row.
+/// The foreign key on the columns `skip` (if any) is not checked.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_foreign_key_insert_meta(
     catalog: &crate::catalog::types::Catalog,
     db_name: &str,
@@ -228,12 +235,16 @@ pub(crate) fn check_foreign_key_insert_meta(
     values: &[Option<DataValue>],
     meta: Option<&TableMeta>,
     probes: &[OnceCell<value_lookup::KeyProbe>],
+    skip: &[String],
 ) -> Result<(), RookError> {
     let Some(meta) = meta else {
         return Ok(());
     };
 
     for (i, (child_cols, parent_table, parent_cols)) in meta.foreign_keys.iter().enumerate() {
+        if !skip.is_empty() && same_columns(child_cols, skip) {
+            continue;
+        }
         // The child's values for the FK columns.
         let mut values_of_key = Vec::with_capacity(child_cols.len());
         for child_col in child_cols {

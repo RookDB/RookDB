@@ -314,15 +314,28 @@ fn delete_rows(
         };
         let decoded = decode_row(&tuple_data, columns)?;
 
-        // FOREIGN KEY constraint check
+        // FOREIGN KEY actions. Every target row passed the checks above, so
+        // a failure here is part-way through: the statement fails rather
+        // than skip the row and report success.
         if let Err(e) =
             crate::backend::constraint::validate_row_delete(catalog, db_name, table_name, &decoded)
         {
-            log::warn!(
-                "[DeleteByPointers] Skipping row due to FOREIGN KEY constraint: {}",
-                e
-            );
-            continue;
+            flush_held_page(catalog.engine(), &file, &mut held, db_name, table_name)?;
+            if let Some(cause) = index_error {
+                crate::backend::executor::create_index::repair_indexes(
+                    catalog,
+                    db_name,
+                    table_name,
+                    &format!("Index maintenance failed for a deleted row: {}", cause),
+                )?;
+            }
+            if deleted_count > 0 {
+                file.record_dead_tuples(deleted_count as u32)?;
+            }
+            return Err(e.with_context(format!(
+                "{} row(s) were deleted before acting on the rows that reference the next one failed",
+                deleted_count
+            )));
         }
 
         // Re-read the page in case validate_row_delete triggered CASCADE

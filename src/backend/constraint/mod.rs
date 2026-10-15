@@ -277,8 +277,15 @@ fn check_delete_restrictions_from(
                     )?;
                 }
             }
-            // SET NULL keeps the child row, so nothing below it is affected.
-            DeleteAction::SetNull => {}
+            // SET NULL keeps the child row, so nothing below it is
+            // affected; the row must still keep its own constraints.
+            DeleteAction::SetNull => fk_actions::check_set_null(
+                catalog,
+                db_name,
+                &fk.child_table,
+                &fk.child_cols,
+                &parent_key,
+            )?,
         }
     }
 
@@ -351,12 +358,14 @@ pub fn propagate_update_to_children(
     Ok(())
 }
 
-/// Validate referencing FOREIGN KEY constraints with RESTRICT action before updating a row.
+/// Check, before a row is updated, what its changed keys do to the rows
+/// that reference them: a RESTRICT foreign key fails when any child row
+/// references the old key, and ON UPDATE CASCADE or SET NULL fails when the
+/// child rows it would rewrite would break a constraint of their own.
 ///
-/// Returns Err if any child table references the old value of a changed key.
 /// `foreign_keys` are the ones referencing the table, as for
 /// [`propagate_update_to_children`].
-pub fn validate_update_restrict(
+pub fn validate_update_references(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
@@ -366,20 +375,35 @@ pub fn validate_update_restrict(
     foreign_keys: &[loaders::ReferencingFk],
 ) -> Result<(), RookError> {
     for fk in foreign_keys {
-        let action_upper = fk.action.to_uppercase();
-        if action_upper.contains("ON UPDATE CASCADE") || action_upper.contains("ON UPDATE SET NULL")
-        {
-            continue;
-        }
-
         let Some(old_key) = row_key(columns, old_row, &fk.parent_cols) else {
             continue;
         };
+        let new_values = row_values(columns, new_row, &fk.parent_cols);
         let old_values: Vec<Option<DataValue>> = old_key.iter().cloned().map(Some).collect();
-        if same_key(&old_values, &row_values(columns, new_row, &fk.parent_cols)) {
+        if same_key(&old_values, &new_values) {
             continue;
         }
-        restrict_update(catalog, table_name, fk, db_name, &old_key)?;
+        let action_upper = fk.action.to_uppercase();
+        if action_upper.contains("ON UPDATE CASCADE") {
+            fk_actions::check_update_cascade(
+                catalog,
+                db_name,
+                &fk.child_table,
+                &fk.child_cols,
+                &old_key,
+                &new_values,
+            )?;
+        } else if action_upper.contains("ON UPDATE SET NULL") {
+            fk_actions::check_set_null(
+                catalog,
+                db_name,
+                &fk.child_table,
+                &fk.child_cols,
+                &old_key,
+            )?;
+        } else {
+            restrict_update(catalog, table_name, fk, db_name, &old_key)?;
+        }
     }
 
     Ok(())
@@ -513,6 +537,20 @@ impl RowChecks {
         values: &[Option<DataValue>],
         exclude_ptrs: &[(u32, u32)],
     ) -> Result<(), RookError> {
+        self.check_except_fk(catalog, columns, values, exclude_ptrs, &[])
+    }
+
+    /// [`RowChecks::check`] without the foreign key on the columns
+    /// `skip_fk`: the one a parent's change is cascading through, whose new
+    /// parent key may not be written yet.
+    pub(crate) fn check_except_fk(
+        &self,
+        catalog: &Catalog,
+        columns: &[Column],
+        values: &[Option<DataValue>],
+        exclude_ptrs: &[(u32, u32)],
+        skip_fk: &[String],
+    ) -> Result<(), RookError> {
         let (db_name, table_name) = (self.db_name.as_str(), self.table_name.as_str());
         let meta = self.meta();
 
@@ -540,6 +578,7 @@ impl RowChecks {
             values,
             meta,
             &self.parent_probes,
+            skip_fk,
         )?;
 
         // 4. CHECK constraints

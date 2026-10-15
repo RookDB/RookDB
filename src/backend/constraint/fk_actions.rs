@@ -89,29 +89,7 @@ fn apply_to_child_rows(
         return Ok(Vec::new());
     };
 
-    let new_values: Option<Vec<Option<DataValue>>> = match action {
-        ChildAction::Delete => None,
-        ChildAction::SetNull => Some(vec![None; col_positions.len()]),
-        ChildAction::SetTo(values) => {
-            let mut converted = Vec::with_capacity(values.len());
-            for (value, &pos) in values.iter().zip(&col_positions) {
-                converted.push(match value {
-                    None => None,
-                    Some(v) => Some(assign_cast(v, &columns[pos].data_type).map_err(|e| {
-                        RookError::TypeMismatch(format!(
-                            "{}: new key '{}' does not fit column '{}.{}': {}",
-                            label,
-                            key_text(v),
-                            child_table,
-                            columns[pos].name,
-                            e
-                        ))
-                    })?),
-                });
-            }
-            Some(converted)
-        }
-    };
+    let new_values = new_fk_values(columns, &col_positions, &action, child_table, label)?;
 
     let heap_path = catalog.engine().paths().heap(db_name, child_table);
     if !heap_path.exists() {
@@ -130,6 +108,21 @@ fn apply_to_child_rows(
     )?;
     if pointers.is_empty() {
         return Ok(Vec::new());
+    }
+    // Every changed row must keep the child's constraints; nothing is
+    // written unless all of them do.
+    if let Some(values) = &new_values {
+        let _ = check_new_child_rows(
+            catalog,
+            db_name,
+            child_table,
+            child_cols,
+            &file,
+            &pointers,
+            &col_positions,
+            values,
+            label,
+        )?;
     }
 
     let mut matched = Vec::new();
@@ -282,6 +275,344 @@ fn apply_to_child_rows(
     }
 
     Ok(matched)
+}
+
+/// The values `action` gives the FK columns at `col_positions` of
+/// `columns`, converted to their types; `None` for a delete.
+fn new_fk_values(
+    columns: &[crate::catalog::types::Column],
+    col_positions: &[usize],
+    action: &ChildAction,
+    child_table: &str,
+    label: &str,
+) -> RookResult<Option<Vec<Option<DataValue>>>> {
+    Ok(match action {
+        ChildAction::Delete => None,
+        ChildAction::SetNull => Some(vec![None; col_positions.len()]),
+        ChildAction::SetTo(values) => {
+            let mut converted = Vec::with_capacity(values.len());
+            for (value, &pos) in values.iter().zip(col_positions) {
+                converted.push(match value {
+                    None => None,
+                    Some(v) => Some(assign_cast(v, &columns[pos].data_type).map_err(|e| {
+                        RookError::TypeMismatch(format!(
+                            "{}: new key '{}' does not fit column '{}.{}': {}",
+                            label,
+                            key_text(v),
+                            child_table,
+                            columns[pos].name,
+                            e
+                        ))
+                    })?),
+                });
+            }
+            Some(converted)
+        }
+    })
+}
+
+/// Fail unless every row of `child_table` at `pointers`, with `values` in
+/// its FK columns (`col_positions`), keeps the child's constraints: NOT
+/// NULL, UNIQUE, CHECK and its other foreign keys. The foreign key being
+/// acted on is not checked, as its new parent key may not be written yet.
+/// Returns the rows as they are now.
+#[allow(clippy::too_many_arguments)]
+fn check_new_child_rows(
+    catalog: &Catalog,
+    db_name: &str,
+    child_table: &str,
+    child_cols: &[String],
+    file: &crate::backend::heap::HeapFile,
+    pointers: &[(u32, u32)],
+    col_positions: &[usize],
+    values: &[Option<DataValue>],
+    label: &str,
+) -> RookResult<Vec<Vec<Option<DataValue>>>> {
+    let Some(columns) = child_columns(catalog, db_name, child_table) else {
+        return Ok(Vec::new());
+    };
+    let schema: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
+    let checks = super::RowChecks::new(catalog, db_name, child_table);
+    let mut old_rows = Vec::with_capacity(pointers.len());
+    let mut page = crate::page::Page::new();
+    for page_pointers in pointers.chunk_by(|a, b| a.0 == b.0) {
+        file.read_page(&mut page, page_pointers[0].0)
+            .map_err(RookError::storage_bare)?;
+        for &(_, slot) in page_pointers {
+            let Some(bytes) = page.tuple(slot) else {
+                continue;
+            };
+            let Ok(old_row) = crate::types::deserialize_nullable_row(&schema, bytes) else {
+                continue;
+            };
+            let mut row = old_row.clone();
+            for (&pos, value) in col_positions.iter().zip(values) {
+                row[pos] = value.clone();
+            }
+            // The rows being changed are excluded: two of them never share
+            // a key afterwards unless they already did before.
+            checks
+                .check_except_fk(catalog, columns, &row, pointers, child_cols)
+                .map_err(|e| {
+                    e.with_context(format!(
+                        "{} would break a constraint of '{}'",
+                        label, child_table
+                    ))
+                })?;
+            old_rows.push(old_row);
+        }
+    }
+    Ok(old_rows)
+}
+
+/// Check, without writing anything, that `action` on the rows of
+/// `child_table` whose `child_cols` equal `parent_key` keeps every one of
+/// them within the child's constraints, and that what the change does in
+/// turn to the rows referencing them is allowed too, at every depth. For a
+/// parent's UPDATE or DELETE to call before it changes its own rows.
+#[allow(clippy::too_many_arguments)]
+fn check_child_action(
+    catalog: &Catalog,
+    db_name: &str,
+    child_table: &str,
+    child_cols: &[String],
+    parent_key: &[DataValue],
+    action: ChildAction,
+    label: &str,
+    visited: &mut HashSet<Visit>,
+) -> RookResult<()> {
+    let Some(columns) = child_columns(catalog, db_name, child_table) else {
+        return Ok(());
+    };
+    let Some(col_positions) = child_cols
+        .iter()
+        .map(|name| {
+            columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(name))
+        })
+        .collect::<Option<Vec<usize>>>()
+    else {
+        return Ok(());
+    };
+    let Some(values) = new_fk_values(columns, &col_positions, &action, child_table, label)? else {
+        return Ok(());
+    };
+    let heap_path = catalog.engine().paths().heap(db_name, child_table);
+    if !heap_path.exists() {
+        return Ok(());
+    }
+    let pointers = super::value_lookup::child_row_pointers(
+        catalog,
+        db_name,
+        child_table,
+        child_cols,
+        parent_key,
+    )?;
+    if pointers.is_empty() {
+        return Ok(());
+    }
+    let file = crate::backend::heap::HeapFile::open(catalog.engine(), &heap_path)
+        .map_err(|e| RookError::storage(format!("Failed to open child heap for {}", label), e))?;
+    let old_rows = check_new_child_rows(
+        catalog,
+        db_name,
+        child_table,
+        child_cols,
+        &file,
+        &pointers,
+        &col_positions,
+        &values,
+        label,
+    )?;
+
+    for (fk, old_key, new_key) in key_changes(
+        catalog,
+        db_name,
+        child_table,
+        child_cols,
+        &values,
+        &old_rows,
+    ) {
+        if !visited.insert(visit_key(&fk.child_table, &fk.child_cols, &old_key)) {
+            continue;
+        }
+        match on_update(&fk.action) {
+            OnUpdate::Cascade => check_child_action(
+                catalog,
+                db_name,
+                &fk.child_table,
+                &fk.child_cols,
+                &old_key,
+                ChildAction::SetTo(&new_key),
+                "UPDATE CASCADE",
+                visited,
+            )?,
+            OnUpdate::SetNull => check_child_action(
+                catalog,
+                db_name,
+                &fk.child_table,
+                &fk.child_cols,
+                &old_key,
+                ChildAction::SetNull,
+                "SET NULL",
+                visited,
+            )?,
+            OnUpdate::Restrict => {
+                super::restrict_update(catalog, child_table, &fk, db_name, &old_key)?
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`check_child_action`] for ON DELETE / ON UPDATE SET NULL.
+pub(crate) fn check_set_null(
+    catalog: &Catalog,
+    db_name: &str,
+    child_table: &str,
+    child_cols: &[String],
+    parent_key: &[DataValue],
+) -> RookResult<()> {
+    check_child_action(
+        catalog,
+        db_name,
+        child_table,
+        child_cols,
+        parent_key,
+        ChildAction::SetNull,
+        "SET NULL",
+        &mut HashSet::new(),
+    )
+}
+
+/// [`check_child_action`] for ON UPDATE CASCADE to `new_key`.
+pub(crate) fn check_update_cascade(
+    catalog: &Catalog,
+    db_name: &str,
+    child_table: &str,
+    child_cols: &[String],
+    old_key: &[DataValue],
+    new_key: &[Option<DataValue>],
+) -> RookResult<()> {
+    check_child_action(
+        catalog,
+        db_name,
+        child_table,
+        child_cols,
+        old_key,
+        ChildAction::SetTo(new_key),
+        "UPDATE CASCADE",
+        &mut HashSet::new(),
+    )
+}
+
+/// What a foreign key does when the key it references is updated.
+enum OnUpdate {
+    Cascade,
+    SetNull,
+    Restrict,
+}
+
+fn on_update(action: &str) -> OnUpdate {
+    let upper = action.to_uppercase();
+    if upper.contains("ON UPDATE CASCADE") {
+        OnUpdate::Cascade
+    } else if upper.contains("ON UPDATE SET NULL") {
+        OnUpdate::SetNull
+    } else {
+        OnUpdate::Restrict
+    }
+}
+
+/// The rows `old_rows` of `table` get `values` in their columns `changed`.
+/// For every foreign key referencing a changed column: each distinct old
+/// key those rows held, and the key they hold after. Keys that stay the
+/// same, or that held a NULL, are left out.
+fn key_changes(
+    catalog: &Catalog,
+    db_name: &str,
+    table: &str,
+    changed: &[String],
+    values: &[Option<DataValue>],
+    old_rows: &[Vec<Option<DataValue>>],
+) -> Vec<(ReferencingFk, Vec<DataValue>, Vec<Option<DataValue>>)> {
+    let Some(columns) = child_columns(catalog, db_name, table) else {
+        return Vec::new();
+    };
+    let positions: Vec<usize> = changed
+        .iter()
+        .filter_map(|n| columns.iter().position(|c| c.name.eq_ignore_ascii_case(n)))
+        .collect();
+    let fks = crate::backend::cache::referencing_fks(catalog.engine(), db_name, table);
+    let mut seen: HashSet<Visit> = HashSet::new();
+    let mut out = Vec::new();
+    for fk in fks.iter().filter(|fk| references_any(fk, changed)) {
+        for old_row in old_rows {
+            let Some(old_key) = row_key(columns, old_row, &fk.parent_cols) else {
+                continue;
+            };
+            let mut new_row = old_row.clone();
+            for (&pos, value) in positions.iter().zip(values) {
+                new_row[pos] = value.clone();
+            }
+            let new_key = super::row_values(columns, &new_row, &fk.parent_cols);
+            let old_values: Vec<Option<DataValue>> = old_key.iter().cloned().map(Some).collect();
+            if super::same_key(&old_values, &new_key)
+                || !seen.insert(visit_key(&fk.child_table, &fk.child_cols, &old_key))
+            {
+                continue;
+            }
+            out.push((fk.clone(), old_key, new_key));
+        }
+    }
+    out
+}
+
+/// After the rows `old_rows` of `table` got `values` in their columns
+/// `changed`, apply the ON UPDATE action of every foreign key referencing
+/// those columns, as an UPDATE of the rows would. RESTRICT was checked
+/// before anything was written, so a referencing row found now fails.
+fn propagate_row_changes(
+    catalog: &Catalog,
+    db_name: &str,
+    table: &str,
+    changed: &[String],
+    values: &[Option<DataValue>],
+    old_rows: &[Vec<Option<DataValue>>],
+    visited: &mut HashSet<Visit>,
+) -> RookResult<()> {
+    for (fk, old_key, new_key) in key_changes(catalog, db_name, table, changed, values, old_rows) {
+        if !visited.insert(visit_key(&fk.child_table, &fk.child_cols, &old_key)) {
+            log::trace!(
+                "[FK] Cycle detected: skipping '{}' with value '{}'",
+                fk.child_table,
+                tuple_text(&old_key)
+            );
+            continue;
+        }
+        match on_update(&fk.action) {
+            OnUpdate::Cascade => update_child_rows_fk(
+                catalog,
+                db_name,
+                &fk.child_table,
+                &fk.child_cols,
+                &old_key,
+                &new_key,
+                visited,
+            )?,
+            OnUpdate::SetNull => set_null_child_rows(
+                catalog,
+                db_name,
+                &fk.child_table,
+                &fk.child_cols,
+                &old_key,
+                visited,
+            )?,
+            OnUpdate::Restrict => super::restrict_update(catalog, table, &fk, db_name, &old_key)?,
+        }
+    }
+    Ok(())
 }
 
 /// Text form of a key value, for messages and cycle detection.
@@ -454,53 +785,17 @@ pub(crate) fn set_null_child_rows(
         return Ok(());
     }
 
-    // Recursive SET NULL into grandchild tables that reference a nulled column.
-    let set_null_to_grandchildren = referencing_with(catalog, db_name, child_table, |action| {
-        action.to_uppercase().contains("SET NULL")
-    });
-    let Some(columns) = child_columns(catalog, db_name, child_table) else {
-        return Ok(());
-    };
-
-    let mut seen: HashSet<Visit> = HashSet::new();
-    for fk in set_null_to_grandchildren
-        .iter()
-        .filter(|fk| references_any(fk, child_cols))
-    {
-        for row in &updated {
-            let Some(key) = row_key(columns, row, &fk.parent_cols) else {
-                continue;
-            };
-            let visit = visit_key(&fk.child_table, &fk.child_cols, &key);
-            if !seen.insert(visit.clone()) {
-                continue;
-            }
-            if !visited.insert(visit) {
-                log::trace!(
-                    "[SET NULL] Cycle detected: skipping '{}' with value '{}' (already set to NULL)",
-                    fk.child_table,
-                    tuple_text(&key)
-                );
-                continue;
-            }
-            log::trace!(
-                "[SET NULL] Recursively setting NULL in '{}' cols '{}' where value = '{}'",
-                fk.child_table,
-                fk.child_cols.join(", "),
-                tuple_text(&key)
-            );
-            set_null_child_rows(
-                catalog,
-                db_name,
-                &fk.child_table,
-                &fk.child_cols,
-                &key,
-                visited,
-            )?;
-        }
-    }
-
-    Ok(())
+    // The rows were updated: the rows referencing their nulled columns
+    // follow those foreign keys' ON UPDATE actions.
+    propagate_row_changes(
+        catalog,
+        db_name,
+        child_table,
+        child_cols,
+        &vec![None; child_cols.len()],
+        &updated,
+        visited,
+    )
 }
 
 /// Update the FK columns in all child rows that match an old parent key to
@@ -535,71 +830,15 @@ pub(crate) fn update_child_rows_fk(
         return Ok(());
     }
 
-    // Recursive UPDATE CASCADE into grandchild tables
-    let update_cascade_fks = referencing_with(catalog, db_name, child_table, |action| {
-        action.to_uppercase().contains("ON UPDATE CASCADE")
-    });
-    let Some(columns) = child_columns(catalog, db_name, child_table) else {
-        return Ok(());
-    };
-    let positions: Vec<usize> = child_cols
-        .iter()
-        .filter_map(|n| columns.iter().position(|c| c.name.eq_ignore_ascii_case(n)))
-        .collect();
-
-    let mut seen: HashSet<Visit> = HashSet::new();
-    for fk in update_cascade_fks
-        .iter()
-        .filter(|fk| references_any(fk, child_cols))
-    {
-        for old_row in &updated {
-            let Some(old_gc_key) = row_key(columns, old_row, &fk.parent_cols) else {
-                continue;
-            };
-            let mut new_row = old_row.clone();
-            for (&pos, value) in positions.iter().zip(new_key) {
-                new_row[pos] = value.clone();
-            }
-            let new_gc_key: Vec<Option<DataValue>> = fk
-                .parent_cols
-                .iter()
-                .map(|n| {
-                    columns
-                        .iter()
-                        .position(|c| c.name.eq_ignore_ascii_case(n))
-                        .and_then(|p| new_row[p].clone())
-                })
-                .collect();
-            if old_gc_key
-                .iter()
-                .zip(&new_gc_key)
-                .all(|(o, n)| n.as_ref() == Some(o))
-            {
-                continue;
-            }
-            let visit = visit_key(&fk.child_table, &fk.child_cols, &old_gc_key);
-            if !seen.insert(visit.clone()) {
-                continue;
-            }
-            if !visited.insert(visit) {
-                log::trace!(
-                    "[UPDATE CASCADE] Cycle detected: skipping '{}' with value '{}' (already cascaded)",
-                    fk.child_table,
-                    tuple_text(&old_gc_key)
-                );
-                continue;
-            }
-            update_child_rows_fk(
-                catalog,
-                db_name,
-                &fk.child_table,
-                &fk.child_cols,
-                &old_gc_key,
-                &new_gc_key,
-                visited,
-            )?;
-        }
-    }
-
-    Ok(())
+    // The rows were updated: the rows referencing their changed columns
+    // follow those foreign keys' ON UPDATE actions.
+    propagate_row_changes(
+        catalog,
+        db_name,
+        child_table,
+        child_cols,
+        new_key,
+        &updated,
+        visited,
+    )
 }
