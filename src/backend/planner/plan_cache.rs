@@ -438,7 +438,14 @@ pub fn get_cached_plan(
     db_name: &str,
     normalized_sql: &str,
 ) -> Option<PlanCacheEntry> {
-    crate::backend::engine::lock(&engine.plans).get(db_name, normalized_sql)
+    use crate::backend::cache::{CacheSite, CacheTier};
+    let hit = if engine.cache_enabled(CacheTier::Plans) {
+        crate::backend::engine::lock(&engine.plans).get(db_name, normalized_sql)
+    } else {
+        None
+    };
+    engine.cache_counters.record(CacheSite::Plan, hit.is_some());
+    hit
 }
 
 /// Store an entry in the plan cache.
@@ -448,6 +455,9 @@ pub fn store_cached_plan(
     normalized_sql: &str,
     entry: PlanCacheEntry,
 ) {
+    if !engine.cache_enabled(crate::backend::cache::CacheTier::Plans) {
+        return;
+    }
     crate::backend::engine::lock(&engine.plans).insert(db_name, normalized_sql, entry);
 }
 

@@ -66,6 +66,10 @@ pub struct Engine {
     /// UPDATE, DELETE and compaction append a JSON line per statement under
     /// `logs/` (off by default).
     log_operations: std::sync::atomic::AtomicBool,
+    /// The cache tiers switched off (see [`Engine::set_cache_enabled`]).
+    disabled_caches: crate::backend::cache::DisabledTiers,
+    /// Lookups per cache site (see [`Engine::cache_stats`]).
+    pub(crate) cache_counters: crate::backend::cache::CacheCounters,
 }
 
 impl Engine {
@@ -97,6 +101,10 @@ impl Engine {
                 crate::backend::executor::physical::external_sort::DEFAULT_MERGE_FAN_IN,
             ),
             log_operations: std::sync::atomic::AtomicBool::new(false),
+            disabled_caches: crate::backend::cache::DisabledTiers::new(
+                crate::backend::cache::tiers_disabled_by_env(),
+            ),
+            cache_counters: Default::default(),
             visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
@@ -168,6 +176,53 @@ impl Engine {
     pub fn logs_operations(&self) -> bool {
         self.log_operations
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Switch one tier of this engine's caches on or off. Results stay the
+    /// same; this exists to measure what each tier saves and to show work
+    /// a cache would otherwise hide. Switching a tier off writes out and
+    /// drops what it holds. `ROOK_NO_CACHE` sets the starting state.
+    ///
+    /// [`CacheTier::Paths`](crate::backend::cache::CacheTier::Paths) is
+    /// process-wide, like the path memo: it switches for every engine.
+    pub fn set_cache_enabled(&self, tier: crate::backend::cache::CacheTier, on: bool) {
+        use crate::backend::cache::{self, CacheTier};
+        cache::set_tier(&self.disabled_caches, tier, on);
+        if tier == CacheTier::Paths {
+            cache::set_path_memo(on);
+        }
+        if on {
+            return;
+        }
+        match tier {
+            CacheTier::Plans => lock(&self.plans).clear(),
+            CacheTier::Meta => {
+                lock(&self.table_meta).clear();
+                lock(&self.referencing_fks).clear();
+                lock(&self.statistics).clear();
+                lock(&self.index_discovery).clear();
+            }
+            CacheTier::Handles => {
+                if let Err(e) = cache::flush_and_clear_heaps(self) {
+                    log::warn!("[cache] flushing heaps on disable failed: {}", e);
+                }
+                cache::sync_and_clear_btrees(self);
+            }
+            CacheTier::Paths => {}
+        }
+    }
+
+    /// Whether `tier` of this engine's caches is on.
+    pub fn cache_enabled(&self, tier: crate::backend::cache::CacheTier) -> bool {
+        match tier {
+            crate::backend::cache::CacheTier::Paths => crate::backend::cache::path_memo_on(),
+            _ => crate::backend::cache::tier_on(&self.disabled_caches, tier),
+        }
+    }
+
+    /// The cache lookups this engine has made so far, by site.
+    pub fn cache_stats(&self) -> crate::backend::cache::CacheStats {
+        crate::backend::cache::CacheStats::of(self)
     }
 
     /// When and where this engine's sorts spill to disk.

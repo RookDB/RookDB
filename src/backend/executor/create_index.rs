@@ -756,15 +756,20 @@ fn discover_cached(
     db_name: &str,
     table_name: &str,
 ) -> IndexList {
+    use crate::backend::cache::{CacheSite, CacheTier};
+    let on = engine.cache_enabled(CacheTier::Meta);
     let key = (db_name.to_string(), table_name.to_string());
-    if let Ok(map) = engine.index_discovery.lock()
+    if on
+        && let Ok(map) = engine.index_discovery.lock()
         && let Some(hit) = map.get(&key)
     {
+        engine.cache_counters.record(CacheSite::IndexList, true);
         return std::sync::Arc::clone(hit);
     }
+    engine.cache_counters.record(CacheSite::IndexList, false);
 
     let discovered = std::sync::Arc::new(discover_indexes_for_table(engine, db_name, table_name));
-    if let Ok(mut map) = engine.index_discovery.lock() {
+    if on && let Ok(mut map) = engine.index_discovery.lock() {
         map.insert(key, std::sync::Arc::clone(&discovered));
     }
     discovered

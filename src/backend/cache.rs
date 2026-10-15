@@ -38,6 +38,268 @@ use crate::backend::engine::Engine;
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::heap_manager::HeapManager;
 
+// ── switches and counters ────────────────────────────────────────────────────
+
+/// A group of caches that can be switched off together, to measure what it
+/// saves or to run the engine without it ([`Engine::set_cache_enabled`]).
+/// Everything stays correct with any tier off; it only gets slower.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheTier {
+    /// The plan cache: SQL with its literals replaced by placeholders, to
+    /// the insert template or plan made for it.
+    Plans,
+    /// What the system tables say about a table: its constraints and id,
+    /// the foreign keys that reference it, its indexes and its statistics.
+    Meta,
+    /// Open `HeapManager`s and `BTree`s kept between rows and statements,
+    /// with their fsyncs batched. Off, every use opens the file and closes
+    /// it again, which writes and fsyncs it and releases its buffered pages.
+    Handles,
+    /// Resolved file paths. Process-wide, like the memo itself.
+    Paths,
+}
+
+impl CacheTier {
+    pub const ALL: [CacheTier; 4] = [
+        CacheTier::Plans,
+        CacheTier::Meta,
+        CacheTier::Handles,
+        CacheTier::Paths,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CacheTier::Plans => "plans",
+            CacheTier::Meta => "meta",
+            CacheTier::Handles => "handles",
+            CacheTier::Paths => "paths",
+        }
+    }
+
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+
+    /// The tiers named in `list`: comma-separated tier names, or `all`.
+    pub fn parse_list(list: &str) -> Result<Vec<CacheTier>, String> {
+        let mut tiers = Vec::new();
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            if name.eq_ignore_ascii_case("all") {
+                return Ok(CacheTier::ALL.to_vec());
+            }
+            match CacheTier::ALL
+                .iter()
+                .find(|t| t.name().eq_ignore_ascii_case(name))
+            {
+                Some(&tier) => tiers.push(tier),
+                None => {
+                    return Err(format!(
+                        "unknown cache tier '{}' (expected all, plans, meta, handles or paths)",
+                        name
+                    ));
+                }
+            }
+        }
+        Ok(tiers)
+    }
+}
+
+/// Bit set of the tiers switched off in an engine (`CacheTier::bit`).
+pub(crate) type DisabledTiers = std::sync::atomic::AtomicU8;
+
+/// The tiers `ROOK_NO_CACHE` switches off in every engine this process
+/// opens (`all`, or a list such as `meta,handles`). Lets benchmarks and the
+/// test suite run uncached without code changes.
+pub(crate) fn tiers_disabled_by_env() -> u8 {
+    static CACHED: OnceLock<u8> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let Ok(list) = std::env::var("ROOK_NO_CACHE") else {
+            return 0;
+        };
+        match CacheTier::parse_list(&list) {
+            Ok(tiers) => tiers.iter().fold(0, |bits, t| bits | t.bit()),
+            Err(e) => {
+                log::warn!("ROOK_NO_CACHE ignored: {}", e);
+                0
+            }
+        }
+    })
+}
+
+/// Whether `tier` is on in a set of disabled tiers.
+pub(crate) fn tier_on(disabled: &DisabledTiers, tier: CacheTier) -> bool {
+    disabled.load(std::sync::atomic::Ordering::Relaxed) & tier.bit() == 0
+}
+
+/// Switch `tier` on or off in a set of disabled tiers.
+pub(crate) fn set_tier(disabled: &DisabledTiers, tier: CacheTier, on: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if on {
+        disabled.fetch_and(!tier.bit(), Relaxed);
+    } else {
+        disabled.fetch_or(tier.bit(), Relaxed);
+    }
+}
+
+/// A place the engine looks something up in a cache. Counted separately so
+/// a lookup made once per row instead of once per statement shows up even
+/// while the cache makes it cheap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheSite {
+    Plan,
+    TableMeta,
+    ReferencingFks,
+    IndexList,
+    Statistics,
+    Heap,
+    BTree,
+    Path,
+}
+
+impl CacheSite {
+    pub const ALL: [CacheSite; 8] = [
+        CacheSite::Plan,
+        CacheSite::TableMeta,
+        CacheSite::ReferencingFks,
+        CacheSite::IndexList,
+        CacheSite::Statistics,
+        CacheSite::Heap,
+        CacheSite::BTree,
+        CacheSite::Path,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CacheSite::Plan => "plan",
+            CacheSite::TableMeta => "table_meta",
+            CacheSite::ReferencingFks => "referencing_fks",
+            CacheSite::IndexList => "index_list",
+            CacheSite::Statistics => "statistics",
+            CacheSite::Heap => "heap",
+            CacheSite::BTree => "btree",
+            CacheSite::Path => "path",
+        }
+    }
+
+    pub fn tier(self) -> CacheTier {
+        match self {
+            CacheSite::Plan => CacheTier::Plans,
+            CacheSite::TableMeta
+            | CacheSite::ReferencingFks
+            | CacheSite::IndexList
+            | CacheSite::Statistics => CacheTier::Meta,
+            CacheSite::Heap | CacheSite::BTree => CacheTier::Handles,
+            CacheSite::Path => CacheTier::Paths,
+        }
+    }
+}
+
+/// Hits and misses per [`CacheSite`]. A lookup in a switched-off tier
+/// counts as a miss.
+#[derive(Default)]
+pub(crate) struct CacheCounters([[std::sync::atomic::AtomicU64; 2]; CacheSite::ALL.len()]);
+
+impl CacheCounters {
+    pub(crate) fn record(&self, site: CacheSite, hit: bool) {
+        self.0[site as usize][usize::from(!hit)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> [[u64; 2]; CacheSite::ALL.len()] {
+        std::array::from_fn(|i| {
+            std::array::from_fn(|j| self.0[i][j].load(std::sync::atomic::Ordering::Relaxed))
+        })
+    }
+}
+
+/// Counters of the path memo, which is process-wide.
+fn path_counters() -> &'static CacheCounters {
+    static COUNTERS: OnceLock<CacheCounters> = OnceLock::new();
+    COUNTERS.get_or_init(CacheCounters::default)
+}
+
+/// Whether the path memo is on: 0 until switched, then 1 (on) or 2 (off).
+/// Process-wide, like the memo; unswitched, `ROOK_NO_CACHE` decides.
+static PATH_MEMO: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn set_path_memo(on: bool) {
+    PATH_MEMO.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+    if !on {
+        lock(canonical_memo()).clear();
+    }
+}
+
+pub(crate) fn path_memo_on() -> bool {
+    match PATH_MEMO.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => tiers_disabled_by_env() & CacheTier::Paths.bit() == 0,
+        state => state == 1,
+    }
+}
+
+/// Cache lookups counted so far, from [`Engine::cache_stats`]. Subtract an
+/// earlier snapshot ([`CacheStats::since`]) for the lookups of one
+/// statement or benchmark phase.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    counts: [[u64; 2]; CacheSite::ALL.len()],
+}
+
+impl CacheStats {
+    pub(crate) fn of(engine: &Engine) -> CacheStats {
+        let mut counts = engine.cache_counters.snapshot();
+        counts[CacheSite::Path as usize] = path_counters().snapshot()[CacheSite::Path as usize];
+        CacheStats { counts }
+    }
+
+    pub fn hits(&self, site: CacheSite) -> u64 {
+        self.counts[site as usize][0]
+    }
+
+    pub fn misses(&self, site: CacheSite) -> u64 {
+        self.counts[site as usize][1]
+    }
+
+    pub fn lookups(&self, site: CacheSite) -> u64 {
+        self.hits(site) + self.misses(site)
+    }
+
+    /// The lookups made since `earlier`.
+    pub fn since(&self, earlier: &CacheStats) -> CacheStats {
+        CacheStats {
+            counts: std::array::from_fn(|i| {
+                std::array::from_fn(|j| self.counts[i][j].saturating_sub(earlier.counts[i][j]))
+            }),
+        }
+    }
+}
+
+/// `site hits/lookups` for every site that was looked up, e.g.
+/// `table_meta 999/1000  heap 1000/1000`.
+impl std::fmt::Display for CacheStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        for site in CacheSite::ALL {
+            if self.lookups(site) == 0 {
+                continue;
+            }
+            if !first {
+                f.write_str("  ")?;
+            }
+            first = false;
+            write!(
+                f,
+                "{} {}/{}",
+                site.name(),
+                self.hits(site),
+                self.lookups(site)
+            )?;
+        }
+        if first {
+            f.write_str("no lookups")?;
+        }
+        Ok(())
+    }
+}
+
 // ── tuning knobs ─────────────────────────────────────────────────────────────
 
 /// Flush a cached heap after this many inserts routed through the cache.
@@ -74,12 +336,16 @@ pub(crate) fn canonical(path: &Path) -> PathBuf {
     } else {
         std::env::current_dir().unwrap_or_default()
     };
+    let memo_on = path_memo_on();
     let memo_key = (cwd, path.to_path_buf());
-    if let Some(hit) = lock(canonical_memo()).get(&memo_key) {
+    if memo_on && let Some(hit) = lock(canonical_memo()).get(&memo_key) {
+        path_counters().record(CacheSite::Path, true);
         return hit.clone();
     }
+    path_counters().record(CacheSite::Path, false);
 
     match path.canonicalize() {
+        Ok(resolved) if !memo_on => resolved,
         Ok(resolved) => {
             let mut memo = lock(canonical_memo());
             if memo.len() >= CANONICAL_MEMO_LIMIT {
@@ -120,12 +386,21 @@ pub fn with_heap<T>(
     path: &Path,
     f: impl FnOnce(&mut HeapManager) -> RookResult<T>,
 ) -> RookResult<T> {
+    if !engine.cache_enabled(CacheTier::Handles) {
+        engine.cache_counters.record(CacheSite::Heap, false);
+        let mut manager = HeapManager::open(path.to_path_buf())?;
+        let result = f(&mut manager)?;
+        manager.flush()?;
+        return Ok(result);
+    }
+
     let key = canonical(path);
 
     // Fast path: existing entry.
     {
         let mut cache = lock(&engine.heaps);
         if let Some(entry) = cache.get_mut(&key) {
+            engine.cache_counters.record(CacheSite::Heap, true);
             let result = f(&mut entry.manager)?;
             entry.ops_since_flush += 1;
             if entry.ops_since_flush >= HEAP_FLUSH_INTERVAL {
@@ -137,6 +412,7 @@ pub fn with_heap<T>(
     }
 
     // Miss: open outside the map lock, then insert (double-check).
+    engine.cache_counters.record(CacheSite::Heap, false);
     let mut manager = HeapManager::open(path.to_path_buf())?;
     let mut cache = lock(&engine.heaps);
     if let Some(entry) = cache.get_mut(&key) {
@@ -237,7 +513,14 @@ impl From<HeapManager> for HeapHandle {
 /// on a miss.
 fn check_out(engine: &Engine, path: &Path) -> RookResult<(PathBuf, CachedHeap)> {
     let key = canonical(path);
-    let cached = { lock(&engine.heaps).remove(&key) };
+    let cached = if engine.cache_enabled(CacheTier::Handles) {
+        lock(&engine.heaps).remove(&key)
+    } else {
+        None
+    };
+    engine
+        .cache_counters
+        .record(CacheSite::Heap, cached.is_some());
     let entry = match cached {
         Some(entry) => entry,
         None => CachedHeap {
@@ -249,9 +532,16 @@ fn check_out(engine: &Engine, path: &Path) -> RookResult<(PathBuf, CachedHeap)> 
 }
 
 /// Put a checked-out manager back, unless another one was cached meanwhile
-/// or its file was released while it was out.
+/// or its file was released while it was out. With the handle cache off it
+/// is flushed and closed instead.
 fn check_in(engine: &Engine, key: PathBuf, mut entry: CachedHeap) {
     if !crate::backend::buffer_manager::shared_pool::is_current(&key, &entry.manager.pool) {
+        return;
+    }
+    if !engine.cache_enabled(CacheTier::Handles) {
+        if let Err(e) = entry.manager.flush() {
+            log::warn!("[cache] heap flush on close failed: {}", e);
+        }
         return;
     }
     entry.ops_since_flush += 1;
@@ -330,10 +620,18 @@ fn btree_call<T, E>(
     f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> Result<T, E>,
     mutation: bool,
 ) -> Result<T, E> {
+    if !engine.cache_enabled(CacheTier::Handles) {
+        // The tree syncs when it drops.
+        engine.cache_counters.record(CacheSite::BTree, false);
+        return f(&mut open()?);
+    }
+
     let key = canonical(path);
     let mut cache = lock(&engine.btrees);
 
-    if !cache.contains_key(&key) {
+    let hit = cache.contains_key(&key);
+    engine.cache_counters.record(CacheSite::BTree, hit);
+    if !hit {
         let tree = open()?;
         cache.insert(key.clone(), (tree, 0));
     }
@@ -705,12 +1003,17 @@ fn scan_sys(
 /// Fetch (and memoise) metadata for `(db, table)`. Returns `None` when the
 /// table is not present in the system tables yet.
 pub fn metadata(engine: &Engine, db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
+    let on = engine.cache_enabled(CacheTier::Meta);
     let key = (db_name.to_string(), table_name.to_string());
-    if let Some(hit) = lock(&engine.table_meta).get(&key) {
+    if on && let Some(hit) = lock(&engine.table_meta).get(&key) {
+        engine.cache_counters.record(CacheSite::TableMeta, true);
         return Some(Arc::clone(hit));
     }
+    engine.cache_counters.record(CacheSite::TableMeta, false);
     let loaded = load_meta(engine, db_name, table_name)?;
-    lock(&engine.table_meta).insert(key, Arc::clone(&loaded));
+    if on {
+        lock(&engine.table_meta).insert(key, Arc::clone(&loaded));
+    }
     Some(loaded)
 }
 
@@ -790,15 +1093,25 @@ pub fn known_statistics(
         .tables
         .get(table_name)?
         .columns;
+    let on = engine.cache_enabled(CacheTier::Meta);
     let key = (db_name.to_string(), table_name.to_string());
-    let cached = lock(&engine.statistics).get(&key).cloned();
+    let cached = if on {
+        lock(&engine.statistics).get(&key).cloned()
+    } else {
+        None
+    };
+    engine
+        .cache_counters
+        .record(CacheSite::Statistics, cached.is_some());
     let stats = match cached {
         Some(stats) => stats,
         None => {
             let stored = Arc::new(load_stored_statistics(
                 engine, db_name, table_name, columns,
             )?);
-            lock(&engine.statistics).insert(key, Arc::clone(&stored));
+            if on {
+                lock(&engine.statistics).insert(key, Arc::clone(&stored));
+            }
             stored
         }
     };
@@ -848,10 +1161,12 @@ pub fn analyze_table(
         );
     }
     let arc = Arc::new(stats);
-    lock(&engine.statistics).insert(
-        (db_name.to_string(), table_name.to_string()),
-        Arc::clone(&arc),
-    );
+    if engine.cache_enabled(CacheTier::Meta) {
+        lock(&engine.statistics).insert(
+            (db_name.to_string(), table_name.to_string()),
+            Arc::clone(&arc),
+        );
+    }
     reset_modified(engine, db_name, table_name);
     Ok(arc)
 }
@@ -907,16 +1222,25 @@ pub type RefFks = Vec<crate::backend::constraint::loaders::ReferencingFk>;
 /// Called once per updated/deleted row by FK propagation — a full system-table
 /// sweep per row made bulk UPDATE/DELETE quadratic.
 pub fn referencing_fks(engine: &Engine, db_name: &str, table_name: &str) -> std::sync::Arc<RefFks> {
+    let on = engine.cache_enabled(CacheTier::Meta);
     let key = (db_name.to_string(), table_name.to_string());
-    if let Some(hit) = lock(&engine.referencing_fks).get(&key) {
+    if on && let Some(hit) = lock(&engine.referencing_fks).get(&key) {
+        engine
+            .cache_counters
+            .record(CacheSite::ReferencingFks, true);
         return std::sync::Arc::clone(hit);
     }
+    engine
+        .cache_counters
+        .record(CacheSite::ReferencingFks, false);
     let loaded = crate::backend::constraint::loaders::load_referencing_foreign_keys(
         engine, db_name, table_name,
     )
     .unwrap_or_default();
     let arc = std::sync::Arc::new(loaded);
-    lock(&engine.referencing_fks).insert(key, std::sync::Arc::clone(&arc));
+    if on {
+        lock(&engine.referencing_fks).insert(key, std::sync::Arc::clone(&arc));
+    }
     arc
 }
 
