@@ -712,10 +712,10 @@ fn discover_indexes_for_table(
     for (idx_name, columns, _) in
         load_table_indexes_multi(engine, db_name, table_name).unwrap_or_default()
     {
+        // Listed even when its file is gone: maintaining it then fails, and
+        // the failure rebuilds the table's indexes (`repair_indexes`).
+        // Leaving it out let the index silently miss every later change.
         let idx_path = index_file_path(engine, db_name, table_name, &idx_name);
-        if !idx_path.exists() {
-            continue;
-        }
         let positions: Option<Vec<usize>> = columns
             .iter()
             .map(|c| {

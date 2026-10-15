@@ -81,3 +81,23 @@ fn a_failed_index_update_rebuilds_the_indexes() {
         [1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51]
     );
 }
+
+/// The same loss with nothing cached about the table, as after a restart:
+/// the index list comes from `sys_indexes` alone, which must still name the
+/// index whose file is gone, or the index silently stops being maintained.
+#[test]
+fn a_lost_index_file_is_rebuilt_with_a_cold_cache() {
+    let _ws = common::TestWorkspace::new("index_repair", "cold");
+    let mut s = session();
+    ok(&mut s, "CREATE DATABASE app");
+    ok(&mut s, "USE app");
+    ok(&mut s, "CREATE TABLE t (id INT PRIMARY KEY, k INT)");
+    ok(&mut s, "CREATE INDEX t_k ON t (k)");
+    ok(&mut s, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3), (4, 3)");
+
+    let path = lose_index_file();
+    common::engine().invalidate_metadata();
+    ok(&mut s, "DELETE FROM t WHERE id = 3");
+    assert!(path.exists(), "the index was not rebuilt after DELETE");
+    assert_eq!(ids(&mut s, "SELECT id FROM t WHERE k = 3"), [4]);
+}
