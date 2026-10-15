@@ -366,7 +366,7 @@ impl CachedInsert {
                 row
             };
 
-            target.insert_row(&row)?;
+            target.insert_row(catalog, &row)?;
             inserted_count += 1;
         }
 

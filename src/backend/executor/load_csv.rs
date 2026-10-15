@@ -55,57 +55,91 @@ pub fn insert_row(
     table_name: &str,
     values: &[Option<DataValue>],
 ) -> RookResult<(u32, u32)> {
-    InsertTarget::new(catalog, db_name, table_name)?.insert_row(values)
+    InsertTarget::new(catalog, db_name, table_name)?.insert_row(catalog, values)
 }
 
 /// What an INSERT statement resolves once about its table, so a multi-row
-/// statement does not repeat the catalog lookups, the schema copy and the
-/// path building for every row.
-pub struct InsertTarget<'a> {
-    catalog: &'a Catalog,
-    db_name: &'a str,
-    table_name: &'a str,
-    columns: &'a [Column],
+/// statement does not repeat the catalog and metadata lookups, the schema
+/// copy and the path building for every row. It borrows nothing, so an
+/// operator can keep it from row to row.
+pub struct InsertTarget {
+    db_name: String,
+    table_name: String,
+    columns: Vec<Column>,
     schema: Vec<crate::types::DataType>,
     table_path: std::path::PathBuf,
+    resolved: std::cell::RefCell<ResolvedIndexes>,
 }
 
-impl<'a> InsertTarget<'a> {
-    pub fn new(catalog: &'a Catalog, db_name: &'a str, table_name: &'a str) -> RookResult<Self> {
-        let columns = table_columns(catalog, db_name, table_name)?;
+/// The table's constraints and indexes as of one metadata generation.
+struct ResolvedIndexes {
+    generation: u64,
+    checks: crate::backend::constraint::RowChecks,
+    indexes: crate::backend::executor::create_index::IndexList,
+}
+
+impl ResolvedIndexes {
+    fn new(catalog: &Catalog, db_name: &str, table_name: &str) -> Self {
+        let engine = catalog.engine();
+        // Read first: an invalidation while resolving shows up on the next row.
+        let generation = engine.metadata_generation();
+        ResolvedIndexes {
+            generation,
+            checks: crate::backend::constraint::RowChecks::new(catalog, db_name, table_name),
+            indexes: crate::backend::executor::create_index::table_index_list(
+                engine, db_name, table_name,
+            ),
+        }
+    }
+}
+
+impl InsertTarget {
+    pub fn new(catalog: &Catalog, db_name: &str, table_name: &str) -> RookResult<Self> {
+        let columns = table_columns(catalog, db_name, table_name)?.to_vec();
         Ok(Self {
-            catalog,
-            db_name,
-            table_name,
-            columns,
+            db_name: db_name.to_string(),
+            table_name: table_name.to_string(),
             schema: columns.iter().map(|c| c.data_type.clone()).collect(),
+            columns,
             table_path: catalog.engine().paths().heap(db_name, table_name),
+            resolved: std::cell::RefCell::new(ResolvedIndexes::new(catalog, db_name, table_name)),
         })
     }
 
-    pub fn columns(&self) -> &'a [Column] {
-        self.columns
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
     }
 
     /// [`insert_row`] against the resolved table.
-    pub fn insert_row(&self, values: &[Option<DataValue>]) -> RookResult<(u32, u32)> {
-        insert_row_resolved(self, values)
+    pub fn insert_row(
+        &self,
+        catalog: &Catalog,
+        values: &[Option<DataValue>],
+    ) -> RookResult<(u32, u32)> {
+        insert_row_resolved(self, catalog, values)
+    }
+
+    /// Resolve the table's constraints and indexes again when table metadata
+    /// was invalidated since: a row's checks can build an index a constraint
+    /// lacks, and the row must then go into that index too.
+    fn refresh(&self, catalog: &Catalog) {
+        if catalog.engine().metadata_generation() != self.resolved.borrow().generation {
+            *self.resolved.borrow_mut() =
+                ResolvedIndexes::new(catalog, &self.db_name, &self.table_name);
+        }
     }
 }
 
 fn insert_row_resolved(
-    target: &InsertTarget<'_>,
+    target: &InsertTarget,
+    catalog: &Catalog,
     values: &[Option<DataValue>],
 ) -> RookResult<(u32, u32)> {
-    let InsertTarget {
-        catalog,
-        db_name,
-        table_name,
-        columns,
-        schema,
-        table_path,
-    } = target;
-    let (catalog, db_name, table_name, columns) = (*catalog, *db_name, *table_name, *columns);
+    let (db_name, table_name, columns) = (
+        target.db_name.as_str(),
+        target.table_name.as_str(),
+        target.columns.as_slice(),
+    );
     if values.len() != columns.len() {
         return Err(RookError::TypeMismatch(format!(
             "table '{}' has {} columns but {} values were supplied",
@@ -125,38 +159,53 @@ fn insert_row_resolved(
         })
         .collect::<RookResult<_>>()?;
 
-    crate::backend::constraint::validate_row_insert(catalog, db_name, table_name, &row)?;
+    target.refresh(catalog);
+    target
+        .resolved
+        .borrow()
+        .checks
+        .check(catalog, columns, &row, &[])?;
+    target.refresh(catalog);
+    let indexes = std::sync::Arc::clone(&target.resolved.borrow().indexes);
 
-    let bytes = serialize_nullable_typed_row(schema, &row)?;
+    let bytes = serialize_nullable_typed_row(&target.schema, &row)?;
 
-    let (page_id, slot_id) = crate::backend::cache::with_heap(catalog.engine(), table_path, |hm| {
-        hm.insert_tuple(&bytes)
-    })
-    // A row the heap refuses (empty or larger than a page) is a TypeMismatch.
-    ?;
+    let (page_id, slot_id) = crate::backend::cache::with_heap(catalog.engine(), &target.table_path, |hm| {
+            hm.insert_tuple(&bytes)
+        })
+        // A row the heap refuses (empty or larger than a page) is a TypeMismatch.
+        ?;
 
-    if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
+    if let Err(e) = crate::backend::executor::create_index::insert_into_indexes(
+        &indexes,
         catalog.engine(),
-        db_name,
-        table_name,
         &row,
         page_id,
         slot_id,
     ) {
-        // A row the index cannot see would vanish from every index scan:
-        // take the row back out and fail the insert.
-        if let Err(undo) = crate::backend::executor::delete::delete_by_pointers(
-            catalog,
-            db_name,
-            table_name,
-            &[(page_id, slot_id)],
-        ) {
-            log::error!("Failed to undo insert after index error: {}", undo);
+        let cause = format!("Index update failed: {}", e);
+        // An index whose file is gone is built again from the table, which
+        // now holds the row, so the row stands. Any other failure leaves
+        // the indexes as they were: the row is taken back out instead.
+        let lost = indexes.iter().any(|(path, _)| !path.exists());
+        let repaired = lost
+            && crate::backend::executor::create_index::repair_indexes(
+                catalog, db_name, table_name, &cause,
+            )
+            .is_ok();
+        if !repaired {
+            // A row the index cannot see would vanish from every index
+            // scan: take the row back out and fail the insert.
+            if let Err(undo) = crate::backend::executor::delete::delete_by_pointers(
+                catalog,
+                db_name,
+                table_name,
+                &[(page_id, slot_id)],
+            ) {
+                log::error!("Failed to undo insert after index error: {}", undo);
+            }
+            return Err(RookError::IndexMaintenance(cause));
         }
-        return Err(RookError::IndexMaintenance(format!(
-            "Index update failed: {}",
-            e
-        )));
     }
 
     crate::backend::cache::note_modified(catalog.engine(), db_name, table_name, 1);
@@ -313,7 +362,8 @@ pub fn load_csv(
         }
         let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
 
-        let result = parse_text_row(columns, &refs).and_then(|row| target.insert_row(&row));
+        let result =
+            parse_text_row(columns, &refs).and_then(|row| target.insert_row(catalog, &row));
         match result {
             Ok(_) => inserted += 1,
             Err(e) => {

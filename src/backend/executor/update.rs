@@ -184,6 +184,11 @@ fn update_rows(
         .map_err(|e| e.with_context("Failed to open table file"))?;
     let file_identity = file.identity();
 
+    // Resolved once for the statement rather than per row.
+    let checks = crate::backend::constraint::RowChecks::new(catalog, db_name, table_name);
+    let referencing_fks =
+        crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
+
     let mut updated_count = 0usize;
     let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
     let mut pending_updates: Vec<PendingUpdate> = Vec::new();
@@ -223,13 +228,7 @@ fn update_rows(
         };
 
         // Constraint validation against disk, excluding all pointers in this batch
-        crate::backend::constraint::validate_row_update_with_excludes(
-            catalog,
-            db_name,
-            table_name,
-            &updated_values,
-            pointers,
-        )?;
+        checks.check(catalog, columns, &updated_values, pointers)?;
 
         crate::backend::constraint::validate_update_restrict(
             catalog,
@@ -238,6 +237,7 @@ fn update_rows(
             columns,
             &decoded,
             &updated_values,
+            &referencing_fks,
         )?;
 
         pending_updates.push(PendingUpdate {
@@ -256,7 +256,7 @@ fn update_rows(
 
     // Intra-batch uniqueness validation: ensure no two updated rows in the same
     // statement produce duplicate keys for any UNIQUE constraint or index.
-    let meta = crate::backend::cache::metadata(catalog.engine(), db_name, table_name);
+    let meta = checks.meta();
     let mut has_intra_batch_conflict = false;
 
     // Check column-level UNIQUE constraints
@@ -285,7 +285,7 @@ fn update_rows(
     }
 
     // Check unique indexes (including composite)
-    if !has_intra_batch_conflict && let Some(ref m) = meta {
+    if !has_intra_batch_conflict && let Some(m) = meta {
         for (idx_name, idx_cols) in &m.unique_indexes {
             let col_indices: Vec<usize> = idx_cols
                 .iter()
@@ -343,7 +343,7 @@ fn update_rows(
     // An index rejects keys above its size limit. Check before Phase 2: once
     // rows are rewritten, a failed index update would leave them invisible
     // to index scans.
-    if let Some(ref m) = meta {
+    if let Some(m) = meta {
         for (idx_name, idx_cols, _) in &m.named_indexes {
             let col_indices: Vec<usize> = idx_cols
                 .iter()
@@ -436,6 +436,11 @@ fn update_rows(
     // written, rather than maintained row by row after that.
     let mut index_error: Option<String> = None;
     if !pending_updates.is_empty() {
+        let indexes = crate::backend::executor::create_index::table_index_list(
+            catalog.engine(),
+            db_name,
+            table_name,
+        );
         for (i, update) in pending_updates.iter().enumerate() {
             let (new_page_id, new_slot_id) = if in_place[i] {
                 (update.pointer.page_id, update.pointer.slot_index as u32)
@@ -449,17 +454,14 @@ fn update_rows(
             };
 
             if index_error.is_none()
-                && let Err(e) = crate::backend::executor::create_index::update_index_on_update(
+                && let Err(e) = crate::backend::executor::create_index::update_indexes_for_row(
+                    &indexes,
                     catalog.engine(),
-                    db_name,
-                    table_name,
                     columns,
                     &update.old_tuple_data,
                     &update.new_bytes,
-                    update.pointer.page_id,
-                    update.pointer.slot_index as u32,
-                    new_page_id,
-                    new_slot_id,
+                    (update.pointer.page_id, update.pointer.slot_index as u32),
+                    (new_page_id, new_slot_id),
                 )
             {
                 index_error = Some(e.to_string());
@@ -489,6 +491,7 @@ fn update_rows(
                 columns,
                 &update.old_values,
                 &update.updated_values,
+                &referencing_fks,
             ) {
                 log::warn!("[UpdateByPointers] Failed to propagate FK cascade: {}", e);
             }

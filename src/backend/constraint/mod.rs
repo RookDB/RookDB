@@ -294,6 +294,9 @@ fn check_delete_restrictions_from(
 /// - **CASCADE**: updates child rows' FK column from the old value to the new value.
 /// - **SET NULL**: sets child rows' FK column to NULL.
 /// - **RESTRICT** (default): returns `Err` if any child row references the old value.
+///
+/// `foreign_keys` are the ones referencing the table
+/// (`cache::referencing_fks`), looked up once for the statement.
 pub fn propagate_update_to_children(
     catalog: &Catalog,
     db_name: &str,
@@ -301,11 +304,9 @@ pub fn propagate_update_to_children(
     columns: &[Column],
     old_row: &[Option<DataValue>],
     new_row: &[Option<DataValue>],
+    foreign_keys: &[loaders::ReferencingFk],
 ) -> Result<(), RookError> {
-    let foreign_keys =
-        crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
-
-    for fk in foreign_keys.iter() {
+    for fk in foreign_keys {
         let action_upper = fk.action.to_uppercase();
 
         let Some(old_key) = row_key(columns, old_row, &fk.parent_cols) else {
@@ -353,6 +354,8 @@ pub fn propagate_update_to_children(
 /// Validate referencing FOREIGN KEY constraints with RESTRICT action before updating a row.
 ///
 /// Returns Err if any child table references the old value of a changed key.
+/// `foreign_keys` are the ones referencing the table, as for
+/// [`propagate_update_to_children`].
 pub fn validate_update_restrict(
     catalog: &Catalog,
     db_name: &str,
@@ -360,11 +363,9 @@ pub fn validate_update_restrict(
     columns: &[Column],
     old_row: &[Option<DataValue>],
     new_row: &[Option<DataValue>],
+    foreign_keys: &[loaders::ReferencingFk],
 ) -> Result<(), RookError> {
-    let foreign_keys =
-        crate::backend::cache::referencing_fks(catalog.engine(), db_name, table_name);
-
-    for fk in foreign_keys.iter() {
+    for fk in foreign_keys {
         let action_upper = fk.action.to_uppercase();
         if action_upper.contains("ON UPDATE CASCADE") || action_upper.contains("ON UPDATE SET NULL")
         {
@@ -461,39 +462,89 @@ pub fn validate_row_update_with_excludes(
             entity: "Table",
             name: format!("{}.{}", db_name, table_name),
         })?;
-
-    let columns = &table.columns;
-
-    // Load constraint/index metadata once (process-cached; a miss does one
-    // pass over sys_tables/sys_indexes/sys_constraints instead of five).
-    let meta = crate::backend::cache::metadata(catalog.engine(), db_name, table_name);
-
-    // 1. NOT NULL
-    validation::check_not_null(table_name, columns, new_values)?;
-
-    // 2. UNIQUE — self/batch matches excluded via `exclude_ptrs`
-    validation::check_unique_insert_meta(
+    RowChecks::new(catalog, db_name, table_name).check(
         catalog,
-        db_name,
-        table_name,
-        columns,
+        &table.columns,
         new_values,
         exclude_ptrs,
-        meta.as_deref(),
-    )?;
+    )
+}
 
-    // 3. FOREIGN KEY (parent key must exist)
-    validation::check_foreign_key_insert_meta(
-        catalog,
-        db_name,
-        table_name,
-        columns,
-        new_values,
-        meta.as_deref(),
-    )?;
+/// The constraints of one table, resolved once for a statement that checks
+/// many rows: the table's constraint metadata, and what each UNIQUE and
+/// FOREIGN KEY check finds out about its index the first time a row needs it.
+pub struct RowChecks {
+    db_name: String,
+    table_name: String,
+    meta: Option<std::sync::Arc<crate::backend::cache::TableMeta>>,
+    /// Per `meta.unique_indexes`: set once the index file is known to exist.
+    unique_ready: Vec<std::cell::OnceCell<()>>,
+    /// Per `meta.foreign_keys`: the lookup into the parent table's index.
+    parent_probes: Vec<std::cell::OnceCell<value_lookup::KeyProbe>>,
+}
 
-    // 4. CHECK constraints
-    validation::check_constraints_meta(table_name, columns, new_values, meta.as_deref())?;
+impl RowChecks {
+    pub fn new(catalog: &Catalog, db_name: &str, table_name: &str) -> Self {
+        // Process-cached; a miss does one pass over sys_tables, sys_indexes
+        // and sys_constraints.
+        let meta = crate::backend::cache::metadata(catalog.engine(), db_name, table_name);
+        let (uniques, fks) = meta
+            .as_ref()
+            .map_or((0, 0), |m| (m.unique_indexes.len(), m.foreign_keys.len()));
+        RowChecks {
+            db_name: db_name.to_string(),
+            table_name: table_name.to_string(),
+            meta,
+            unique_ready: (0..uniques).map(|_| Default::default()).collect(),
+            parent_probes: (0..fks).map(|_| Default::default()).collect(),
+        }
+    }
 
-    Ok(())
+    pub(crate) fn meta(&self) -> Option<&crate::backend::cache::TableMeta> {
+        self.meta.as_deref()
+    }
+
+    /// Check `values`, a row of the table with `columns`, against every
+    /// constraint; UNIQUE ignores the rows at `exclude_ptrs`.
+    pub fn check(
+        &self,
+        catalog: &Catalog,
+        columns: &[Column],
+        values: &[Option<DataValue>],
+        exclude_ptrs: &[(u32, u32)],
+    ) -> Result<(), RookError> {
+        let (db_name, table_name) = (self.db_name.as_str(), self.table_name.as_str());
+        let meta = self.meta();
+
+        // 1. NOT NULL
+        validation::check_not_null(table_name, columns, values)?;
+
+        // 2. UNIQUE — self/batch matches excluded via `exclude_ptrs`
+        validation::check_unique_insert_meta(
+            catalog,
+            db_name,
+            table_name,
+            columns,
+            values,
+            exclude_ptrs,
+            meta,
+            &self.unique_ready,
+        )?;
+
+        // 3. FOREIGN KEY (parent key must exist)
+        validation::check_foreign_key_insert_meta(
+            catalog,
+            db_name,
+            table_name,
+            columns,
+            values,
+            meta,
+            &self.parent_probes,
+        )?;
+
+        // 4. CHECK constraints
+        validation::check_constraints_meta(table_name, columns, values, meta)?;
+
+        Ok(())
+    }
 }

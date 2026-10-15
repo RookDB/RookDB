@@ -10,6 +10,16 @@ use crate::types::{DataType, DataValue};
 use super::value_lookup;
 use super::{ConstraintKind, RookError};
 use crate::backend::cache::TableMeta;
+use std::cell::OnceCell;
+
+/// The value in `cell`, made by `make` the first time it is asked for.
+pub(crate) fn once<T>(cell: &OnceCell<T>, make: impl FnOnce() -> RookResult<T>) -> RookResult<&T> {
+    if let Some(value) = cell.get() {
+        return Ok(value);
+    }
+    let _ = cell.set(make()?);
+    Ok(cell.get().expect("the cell was just set"))
+}
 
 /// Check that no NOT NULL column receives a NULL value.
 pub(crate) fn check_not_null(
@@ -39,6 +49,7 @@ pub(crate) fn check_not_null(
 /// B+ Tree handles are reused across rows (fsync batched in the cache layer).
 /// Every UNIQUE key is checked through an index: a listed index whose file is
 /// missing, or a UNIQUE column with no index at all, is built on first use.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_unique_insert_meta(
     catalog: &crate::catalog::types::Catalog,
     db_name: &str,
@@ -47,6 +58,7 @@ pub(crate) fn check_unique_insert_meta(
     values: &[Option<DataValue>],
     exclude_ptrs: &[(u32, u32)],
     meta: Option<&TableMeta>,
+    ready: &[OnceCell<()>],
 ) -> Result<(), RookError> {
     let engine = catalog.engine();
     let unique_indexes: &[(String, Vec<String>)] = match meta {
@@ -55,7 +67,7 @@ pub(crate) fn check_unique_insert_meta(
     };
 
     // 1. Check all UNIQUE indexes (composite or single-column)
-    for (idx_name, idx_cols) in unique_indexes {
+    for (i, (idx_name, idx_cols)) in unique_indexes.iter().enumerate() {
         if idx_cols.is_empty() {
             continue;
         }
@@ -88,12 +100,16 @@ pub(crate) fn check_unique_insert_meta(
         }
 
         let idx_path = engine.paths().index(db_name, table_name, idx_name);
-        if !idx_path.exists() {
-            crate::backend::executor::create_index::restore_index_file(
-                catalog, db_name, table_name, idx_name,
-            )
-            .map_err(|e| unique_lookup_error(table_name, idx_name, e))?;
-        }
+        // The file is looked for once per statement, not once per row.
+        once(&ready[i], || {
+            if !idx_path.exists() {
+                crate::backend::executor::create_index::restore_index_file(
+                    catalog, db_name, table_name, idx_name,
+                )
+                .map_err(|e| unique_lookup_error(table_name, idx_name, e))?;
+            }
+            Ok(())
+        })?;
         let kt1 = key_types.clone();
         let open_path = idx_path.clone();
         let tids = crate::backend::cache::with_btree(
@@ -211,12 +227,13 @@ pub(crate) fn check_foreign_key_insert_meta(
     columns: &[Column],
     values: &[Option<DataValue>],
     meta: Option<&TableMeta>,
+    probes: &[OnceCell<value_lookup::KeyProbe>],
 ) -> Result<(), RookError> {
     let Some(meta) = meta else {
         return Ok(());
     };
 
-    for (child_cols, parent_table, parent_cols) in &meta.foreign_keys {
+    for (i, (child_cols, parent_table, parent_cols)) in meta.foreign_keys.iter().enumerate() {
         // The child's values for the FK columns.
         let mut values_of_key = Vec::with_capacity(child_cols.len());
         for child_col in child_cols {
@@ -251,14 +268,14 @@ pub(crate) fn check_foreign_key_insert_meta(
                 Err(_) => break,
             }
         }
-        let found = key.len() == child_values.len()
-            && value_lookup::key_exists_in_table(
-                catalog,
-                db_name,
-                parent_table,
-                parent_cols,
-                &key,
-            )?;
+        let found = key.len() == child_values.len() && {
+            let probe = once(&probes[i], || {
+                value_lookup::parent_key_probe(catalog, db_name, parent_table, parent_cols)
+            })?;
+            !probe
+                .search(catalog.engine(), db_name, parent_table, &key)?
+                .is_empty()
+        };
         if !found {
             let shown = |names: &[String]| names.join(", ");
             return Err(RookError::constraint(

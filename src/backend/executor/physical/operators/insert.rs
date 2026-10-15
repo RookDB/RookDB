@@ -2,8 +2,8 @@
 //!
 //! Used for `INSERT INTO ... SELECT` and the `VALUES` form (via the
 //! `ValuesOperator` child). The child operator produces rows, and this
-//! operator inserts each row with `insert_row`, which returns the heap
-//! pointer needed for rollback.
+//! operator inserts each row through one `InsertTarget`, which returns the
+//! heap pointer needed for rollback.
 //!
 //! The operator returns each inserted tuple so the engine can report the count.
 //! Statement atomicity: the pointers of all rows inserted so far are tracked;
@@ -45,7 +45,8 @@ pub struct InsertOperator {
     catalog: Option<std::sync::Arc<crate::catalog::types::Catalog>>,
     inserted_pointers: Rc<RefCell<Vec<(u32, u32)>>>,
     completed: bool,
-    /// Injectable insert function. Defaults to wrapping `insert_row`.
+    /// Injectable insert function. Defaults to inserting through an
+    /// `InsertTarget` resolved once for the statement.
     /// In tests, can be replaced with a mock for isolated unit testing.
     inserter: InsertInserter,
     /// Source rows, read in full before the first insert so a statement that
@@ -65,14 +66,21 @@ impl InsertOperator {
     ) -> Self {
         let child_schema = child.schema().to_vec();
 
-        // Build the default inserter that wraps insert_row.
         let cat = catalog.clone();
         let tbl = table.clone();
         let db = db_name.clone();
         let inserted_pointers = Rc::new(RefCell::new(Vec::new()));
         let ptrs_clone = inserted_pointers.clone();
+        // The table is resolved at the first row and kept for the rest.
+        let mut target: Option<crate::backend::executor::load_csv::InsertTarget> = None;
         let inserter: InsertInserter = Box::new(move |vals| {
-            let ptr = crate::backend::executor::load_csv::insert_row(&cat, &db, &tbl, vals)?;
+            let target = match &mut target {
+                Some(target) => target,
+                None => target.insert(crate::backend::executor::load_csv::InsertTarget::new(
+                    &cat, &db, &tbl,
+                )?),
+            };
+            let ptr = target.insert_row(&cat, vals)?;
             ptrs_clone.borrow_mut().push(ptr);
             Ok(())
         });

@@ -70,6 +70,9 @@ pub struct Engine {
     disabled_caches: crate::backend::cache::DisabledTiers,
     /// Lookups per cache site (see [`Engine::cache_stats`]).
     pub(crate) cache_counters: crate::backend::cache::CacheCounters,
+    /// Counts the times table metadata was invalidated, so what a statement
+    /// resolved once can tell it is out of date.
+    metadata_generation: std::sync::atomic::AtomicU64,
 }
 
 impl Engine {
@@ -105,6 +108,7 @@ impl Engine {
                 crate::backend::cache::tiers_disabled_by_env(),
             ),
             cache_counters: Default::default(),
+            metadata_generation: Default::default(),
             visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
@@ -254,11 +258,25 @@ impl Engine {
     /// referencing foreign keys, index discovery and cached plans. Call after
     /// DDL changes the system tables.
     pub fn invalidate_metadata(&self) {
+        self.bump_metadata_generation();
         lock(&self.table_meta).clear();
         lock(&self.referencing_fks).clear();
         lock(&self.statistics).clear();
         lock(&self.index_discovery).clear();
         lock(&self.plans).clear();
+    }
+}
+
+impl Engine {
+    /// Changes whenever table metadata or index lists are invalidated.
+    pub(crate) fn metadata_generation(&self) -> u64 {
+        self.metadata_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn bump_metadata_generation(&self) {
+        self.metadata_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 

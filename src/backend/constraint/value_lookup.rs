@@ -85,6 +85,83 @@ fn index_search(
     })
 }
 
+/// How to look up rows of a table by the values of some of its columns: the
+/// index on exactly those columns, with its key types, and where each index
+/// column's value sits in a key given in the columns' order. Resolved once
+/// per statement, then [`KeyProbe::search`] runs per row.
+pub(crate) struct KeyProbe {
+    index: String,
+    types: Vec<DataType>,
+    order: Vec<usize>,
+}
+
+impl KeyProbe {
+    /// The probe for `names` of `table_name`, through an index on exactly
+    /// those columns, built under `new_name` when the table has none.
+    pub(crate) fn resolve(
+        catalog: &Catalog,
+        db_name: &str,
+        table_name: &str,
+        names: &[String],
+        new_name: &str,
+        unique: bool,
+    ) -> RookResult<KeyProbe> {
+        let (index, index_cols) =
+            ensure_columns_index(catalog, db_name, table_name, names, new_name, unique)?;
+        // The index may list the same columns in another order than the key.
+        let mut types = Vec::with_capacity(index_cols.len());
+        let mut order = Vec::with_capacity(index_cols.len());
+        for index_col in &index_cols {
+            let at = names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(index_col))
+                .ok_or_else(|| {
+                    RookError::Internal(format!("index '{}' does not match its columns", index))
+                })?;
+            let col = find_columns(
+                catalog,
+                db_name,
+                table_name,
+                std::slice::from_ref(index_col),
+            )
+            .and_then(|c| c.first().map(|c| c.data_type.clone()))
+            .ok_or_else(|| {
+                RookError::Internal(format!(
+                    "column '{}' of '{}' not found",
+                    index_col, table_name
+                ))
+            })?;
+            types.push(col);
+            order.push(at);
+        }
+        Ok(KeyProbe {
+            index,
+            types,
+            order,
+        })
+    }
+
+    /// Heap locations of the rows whose columns equal `key`, given one
+    /// typed value per column in the order the probe was resolved with.
+    pub(crate) fn search(
+        &self,
+        engine: &Engine,
+        db_name: &str,
+        table_name: &str,
+        key: &[DataValue],
+    ) -> RookResult<Vec<(u32, u32)>> {
+        let ordered: Vec<DataValue> = self.order.iter().map(|&at| key[at].clone()).collect();
+        index_search(
+            engine,
+            db_name,
+            table_name,
+            &self.index,
+            &self.types,
+            &ordered,
+        )
+    }
+}
+
 /// Heap locations of the rows of `table_name` whose `names` columns equal
 /// `key` (one typed value per name), found through an index on exactly those
 /// columns, built under `new_name` when the table has none.
@@ -97,68 +174,34 @@ fn rows_with_key(
     new_name: &str,
     unique: bool,
 ) -> RookResult<Vec<(u32, u32)>> {
-    let (index, index_cols) =
-        ensure_columns_index(catalog, db_name, table_name, names, new_name, unique)?;
-    // The index may list the same columns in another order than the key.
-    let mut types = Vec::with_capacity(index_cols.len());
-    let mut ordered = Vec::with_capacity(index_cols.len());
-    for index_col in &index_cols {
-        let at = names
-            .iter()
-            .position(|n| n.eq_ignore_ascii_case(index_col))
-            .ok_or_else(|| {
-                RookError::Internal(format!("index '{}' does not match its columns", index))
-            })?;
-        let col = find_columns(
-            catalog,
-            db_name,
-            table_name,
-            std::slice::from_ref(index_col),
-        )
-        .and_then(|c| c.first().map(|c| c.data_type.clone()))
-        .ok_or_else(|| {
-            RookError::Internal(format!(
-                "column '{}' of '{}' not found",
-                index_col, table_name
-            ))
-        })?;
-        types.push(col);
-        ordered.push(key[at].clone());
-    }
-    index_search(
+    KeyProbe::resolve(catalog, db_name, table_name, names, new_name, unique)?.search(
         catalog.engine(),
         db_name,
         table_name,
-        &index,
-        &types,
-        &ordered,
+        key,
     )
 }
 
-/// Check whether a row of `table_name` has `key` in its `columns`.
-///
-/// `key` must already have the columns' types, one value per column.
-pub(crate) fn key_exists_in_table(
+/// The probe that finds the rows of a FOREIGN KEY's parent table
+/// `table_name` whose `columns` hold a given key.
+pub(crate) fn parent_key_probe(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
     columns: &[String],
-    key: &[DataValue],
-) -> RookResult<bool> {
+) -> RookResult<KeyProbe> {
     let unique = matches!(
         find_columns(catalog, db_name, table_name, columns).as_deref(),
         Some([c]) if c.constraints.unique
     );
-    rows_with_key(
+    KeyProbe::resolve(
         catalog,
         db_name,
         table_name,
         columns,
-        key,
         &parent_index_name(table_name, columns),
         unique,
     )
-    .map(|found| !found.is_empty())
 }
 
 /// Heap locations of the rows of `child_table` whose `child_cols` equal

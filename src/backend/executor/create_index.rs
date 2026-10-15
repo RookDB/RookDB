@@ -783,6 +783,7 @@ pub fn invalidate_discovery(
     db_name: &str,
     table_name: Option<&str>,
 ) {
+    engine.bump_metadata_generation();
     let mut map = crate::backend::engine::lock(&engine.index_discovery);
     match table_name {
         Some(t) => {
@@ -808,11 +809,33 @@ pub fn update_index_on_insert(
     page_id: u32,
     slot_id: u32,
 ) -> RookResult<()> {
-    let indexes = discover_cached(engine, db_name, table_name);
-    if indexes.is_empty() {
-        return Ok(()); // No indexes to update
-    }
+    insert_into_indexes(
+        &discover_cached(engine, db_name, table_name),
+        engine,
+        values,
+        page_id,
+        slot_id,
+    )
+}
 
+/// The indexes of a table, for a statement that maintains them row by row
+/// with [`insert_into_indexes`].
+pub(crate) fn table_index_list(
+    engine: &crate::backend::engine::Engine,
+    db_name: &str,
+    table_name: &str,
+) -> IndexList {
+    discover_cached(engine, db_name, table_name)
+}
+
+/// [`update_index_on_insert`] with the table's indexes already listed.
+pub(crate) fn insert_into_indexes(
+    indexes: &IndexList,
+    engine: &crate::backend::engine::Engine,
+    values: &[Option<DataValue>],
+    page_id: u32,
+    slot_id: u32,
+) -> RookResult<()> {
     for (idx_path, meta) in indexes.iter() {
         // Build the (possibly composite) key; rows where ANY key component
         // is NULL are not indexed.
@@ -968,7 +991,28 @@ pub fn update_index_on_update(
     new_page_id: u32,
     new_slot_id: u32,
 ) -> RookResult<()> {
-    let indexes = discover_cached(engine, db_name, table_name);
+    update_indexes_for_row(
+        &discover_cached(engine, db_name, table_name),
+        engine,
+        columns,
+        old_tuple_data,
+        new_tuple_data,
+        (old_page_id, old_slot_id),
+        (new_page_id, new_slot_id),
+    )
+}
+
+/// [`update_index_on_update`] with the table's indexes already listed
+/// ([`table_index_list`]), for a statement that updates many rows.
+pub(crate) fn update_indexes_for_row(
+    indexes: &IndexList,
+    engine: &crate::backend::engine::Engine,
+    columns: &[crate::catalog::types::Column],
+    old_tuple_data: &[u8],
+    new_tuple_data: &[u8],
+    (old_page_id, old_slot_id): (u32, u32),
+    (new_page_id, new_slot_id): (u32, u32),
+) -> RookResult<()> {
     if indexes.is_empty() {
         return Ok(()); // No indexes to update
     }

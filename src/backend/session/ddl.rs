@@ -855,8 +855,9 @@ pub(super) fn create_table_as_select(
 
     let mut lines = Vec::new();
     let mut inserted = 0usize;
+    let target = crate::backend::executor::load_csv::InsertTarget::new(catalog, db, &ctas.table)?;
     for tuple in &tuples {
-        match crate::backend::executor::insert_row(catalog, db, &ctas.table, &tuple.values) {
+        match target.insert_row(catalog, &tuple.values) {
             Ok(_) => inserted += 1,
             Err(RookError::Io(e)) => lines.push(format!("Insert error: {}", e)),
             Err(_) => lines.push("Insert failed for one row.".to_string()),
