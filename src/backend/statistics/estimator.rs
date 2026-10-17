@@ -234,7 +234,7 @@ impl<'a> Estimator<'a> {
         let (col_expr, other, op) = if self.column_of(left, scope).is_some() {
             (left, right, op)
         } else {
-            (right, left, flip(op))
+            (right, left, op.flipped())
         };
         let col = self.column_of(col_expr, scope)?;
         let non_null = 1.0 - col.null_fraction();
@@ -483,16 +483,6 @@ fn collect_conjuncts<'p>(pred: &'p PredicateNode, out: &mut Vec<&'p PredicateNod
             collect_conjuncts(right, out);
         }
         other => out.push(other),
-    }
-}
-
-fn flip(op: ComparisonOp) -> ComparisonOp {
-    match op {
-        ComparisonOp::Lt => ComparisonOp::Gt,
-        ComparisonOp::Le => ComparisonOp::Ge,
-        ComparisonOp::Gt => ComparisonOp::Lt,
-        ComparisonOp::Ge => ComparisonOp::Le,
-        other => other,
     }
 }
 

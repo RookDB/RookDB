@@ -843,18 +843,6 @@ fn flatten_and<'a>(node: &'a rook_ast::PredicateNode, out: &mut Vec<&'a rook_ast
     }
 }
 
-/// `outer <op> inner` read as `inner <flipped op> outer`.
-fn flip(op: rook_ast::ComparisonOp) -> rook_ast::ComparisonOp {
-    use rook_ast::ComparisonOp as C;
-    match op {
-        C::Lt => C::Gt,
-        C::Le => C::Ge,
-        C::Gt => C::Lt,
-        C::Ge => C::Le,
-        other => other,
-    }
-}
-
 fn physical_op(op: rook_ast::ComparisonOp) -> ComparisonOp {
     match op {
         rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
@@ -940,7 +928,7 @@ impl PhysicalPlanner {
                     correlations.push((inner, outer, *op))
                 }
                 (Some((true, outer)), Some((false, (_, inner)))) => {
-                    correlations.push((inner, outer, flip(*op)))
+                    correlations.push((inner, outer, op.flipped()))
                 }
                 _ => return Ok(None),
             }

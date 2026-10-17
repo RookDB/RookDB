@@ -340,18 +340,16 @@ impl PhysicalPlanner {
     ) -> Option<IndexScanMode> {
         match pred {
             rook_ast::PredicateNode::Compare { left, op, right } => {
-                // Extract column name and constant value from the comparison
-                let (col_name, const_val) = match (left.as_ref(), right.as_ref()) {
-                    // column op constant or constant op column
-                    (col @ rook_ast::ExprNode::Column(_), rook_ast::ExprNode::Constant(cv))
-                    | (rook_ast::ExprNode::Constant(cv), col @ rook_ast::ExprNode::Column(_)) => {
-                        (col, cv)
-                    }
-                    // compound.column op constant or constant op compound.column
-                    (col @ rook_ast::ExprNode::Compound(_), rook_ast::ExprNode::Constant(cv))
-                    | (rook_ast::ExprNode::Constant(cv), col @ rook_ast::ExprNode::Compound(_)) => {
-                        (col, cv)
-                    }
+                // Read the comparison as `column op constant`; `5 > c` is `c < 5`.
+                let (col_name, const_val, op) = match (left.as_ref(), right.as_ref()) {
+                    (
+                        col @ (rook_ast::ExprNode::Column(_) | rook_ast::ExprNode::Compound(_)),
+                        rook_ast::ExprNode::Constant(cv),
+                    ) => (col, cv, *op),
+                    (
+                        rook_ast::ExprNode::Constant(cv),
+                        col @ (rook_ast::ExprNode::Column(_) | rook_ast::ExprNode::Compound(_)),
+                    ) => (col, cv, op.flipped()),
                     _ => return None,
                 };
 

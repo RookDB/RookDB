@@ -1,0 +1,69 @@
+//! Queries the planner rewrites before running them, checked against the
+//! result the unrewritten query defines. Each of these returned wrong rows
+//! or failed to plan; they were found by comparing random queries with
+//! SQLite.
+
+mod common;
+
+use storage_manager::backend::session::Session;
+use storage_manager::types::DataValue;
+
+fn run(s: &mut Session, sql: &str) -> Vec<Vec<Option<i64>>> {
+    let result = s
+        .execute(rook_parser::parse_sql(sql).unwrap())
+        .unwrap_or_else(|e| panic!("{}: {}", sql, e));
+    let (_, rows) = result.rows.unwrap_or_default();
+    rows.into_iter()
+        .map(|t| {
+            t.values
+                .into_iter()
+                .map(|v| match v {
+                    None => None,
+                    Some(DataValue::Int(i)) => Some(i as i64),
+                    Some(DataValue::BigInt(i)) => Some(i),
+                    Some(other) => panic!("{}: unexpected value {:?}", sql, other),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn sorted(mut rows: Vec<Vec<Option<i64>>>) -> Vec<Vec<Option<i64>>> {
+    rows.sort();
+    rows
+}
+
+fn session(tag: &str) -> (common::TestWorkspace, Session) {
+    let ws = common::TestWorkspace::new("rewrites", tag);
+    let mut s = Session::new(common::load_catalog());
+    for sql in [
+        "CREATE DATABASE rw",
+        "USE rw",
+        "CREATE TABLE p (id INT, b INT)",
+        "CREATE TABLE q (id INT, b INT)",
+        "INSERT INTO p VALUES (1, 30), (2, 10), (3, 20), (4, NULL)",
+        "INSERT INTO q VALUES (1, 7), (2, 7), (3, 8), (5, 9)",
+    ] {
+        run(&mut s, sql);
+    }
+    (ws, s)
+}
+
+/// `5 > c` is `c < 5`: an index range built from a comparison with the
+/// constant on the left must flip the operator.
+#[test]
+fn constant_on_the_left_of_an_indexed_comparison() {
+    let (_ws, mut s) = session("flip");
+    run(&mut s, "CREATE INDEX p_b ON p (b)");
+    for (sql, expected) in [
+        ("SELECT id FROM p WHERE 20 > b", vec![2]),
+        ("SELECT id FROM p WHERE 20 >= b", vec![2, 3]),
+        ("SELECT id FROM p WHERE 20 < b", vec![1]),
+        ("SELECT id FROM p WHERE 20 <= b", vec![1, 3]),
+        ("SELECT id FROM p WHERE 20 = b", vec![3]),
+        ("SELECT id FROM p WHERE (5 + 5) < b", vec![1, 3]),
+    ] {
+        let expected: Vec<_> = expected.into_iter().map(|i| vec![Some(i)]).collect();
+        assert_eq!(sorted(run(&mut s, sql)), expected, "{}", sql);
+    }
+}
