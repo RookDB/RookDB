@@ -115,7 +115,13 @@ impl PerGroupState {
             None => return Ok(()),
         };
 
-        if distinct && !self.distinct_seen.insert(val.clone()) {
+        // Keyed by `canonical_key`, so values `=` calls equal (0.0 and
+        // -0.0, INT 1 and BIGINT 1) count once.
+        if distinct
+            && !self
+                .distinct_seen
+                .insert(super::utils::canonical_key(val.clone()))
+        {
             return Ok(());
         }
 
@@ -528,28 +534,32 @@ impl AggregateOperator {
                 agg_states: vec![state],
             });
         } else {
+            // Reused per row: the key's values, and the same values as
+            // `canonical_key`, by which groups are found so values `=` calls
+            // equal (0.0 and -0.0, INT 1 and BIGINT 1) are one group.
+            let mut key_values: Vec<Option<DataValue>> = Vec::new();
+            let mut lookup: Vec<Option<DataValue>> = Vec::new();
             while self.child.next_batch(&mut batch)? > 0 {
                 for tuple in batch.drain(..) {
-                    let key_values: Vec<Option<DataValue>> = if self.group_by_exprs.is_empty() {
-                        Vec::new()
-                    } else {
-                        self.group_by_exprs
-                            .iter()
-                            .map(|expr| expr.evaluate(&tuple, &child_schema))
-                            .collect::<RookResult<Vec<_>>>()?
-                    };
-
-                    // The key is cloned only when it starts a new group.
-                    let group_idx = match self.group_map.get(&key_values) {
+                    key_values.clear();
+                    for expr in &self.group_by_exprs {
+                        key_values.push(expr.evaluate(&tuple, &child_schema)?);
+                    }
+                    lookup.clear();
+                    lookup.extend(key_values.iter().map(|v| {
+                        v.as_ref()
+                            .map(|v| super::utils::canonical_key_ref(v).into_owned())
+                    }));
+                    let group_idx = match self.group_map.get(&lookup) {
                         Some(&idx) => idx,
                         None => {
                             let idx = self.groups.len();
-                            self.group_map.insert(key_values.clone(), idx);
+                            self.group_map.insert(lookup.clone(), idx);
                             let agg_states = (0..self.aggregates.len())
                                 .map(|_| PerGroupState::new())
                                 .collect();
                             self.groups.push(GroupEntry {
-                                key_values,
+                                key_values: key_values.clone(),
                                 agg_states,
                             });
                             idx

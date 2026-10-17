@@ -625,7 +625,8 @@ impl PhysicalOperator for LimitOperator {
 // ── Distinct Operator ─────────────────────────────────────────────────────────
 
 /// Removes duplicate tuples (SQL `DISTINCT`). Streams: each row is passed
-/// on the first time its values are seen.
+/// on the first time its values are seen, compared by `canonical_key` so
+/// values `=` calls equal are duplicates.
 pub struct DistinctOperator {
     child: Box<dyn PhysicalOperator>,
     seen: HashSet<Vec<Option<DataValue>>>,
@@ -643,7 +644,10 @@ impl DistinctOperator {
 impl PhysicalOperator for DistinctOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
         while let Some(tuple) = self.child.next()? {
-            if self.seen.insert(tuple.values.clone()) {
+            if self
+                .seen
+                .insert(super::utils::canonical_row_key(&tuple.values))
+            {
                 return Ok(Some(tuple));
             }
         }
@@ -652,7 +656,10 @@ impl PhysicalOperator for DistinctOperator {
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
         while self.child.next_batch(batch)? > 0 {
-            batch.retain(|tuple| self.seen.insert(tuple.values.clone()));
+            batch.retain(|tuple| {
+                self.seen
+                    .insert(super::utils::canonical_row_key(&tuple.values))
+            });
             if !batch.is_empty() {
                 break;
             }

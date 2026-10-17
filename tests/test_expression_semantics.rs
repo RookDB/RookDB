@@ -453,3 +453,40 @@ fn numeric_division_keeps_a_fraction() {
         rows(&[&["0.333333", "0.666667", "-0.666667", "2.500000"]])
     );
 }
+
+/// DISTINCT, GROUP BY and COUNT(DISTINCT) treat values that are equal as
+/// one value: 0.0 and -0.0, INT 1 and BIGINT 1.
+#[test]
+fn duplicates_are_found_by_equality() {
+    let (_ws, mut s) = session("dupeq");
+    run(
+        &mut s,
+        "CREATE TABLE z (d DOUBLE PRECISION, i INT, b BIGINT)",
+    );
+    run(&mut s, "INSERT INTO z VALUES ('-0', 1, 1), ('0', 1, 1)");
+    let one = rows(&[&["1"]]);
+    assert_eq!(
+        run(&mut s, "SELECT COUNT(*) FROM (SELECT DISTINCT d FROM z) t"),
+        one
+    );
+    assert_eq!(run(&mut s, "SELECT COUNT(DISTINCT d) FROM z"), one);
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT COUNT(*) FROM (SELECT d FROM z GROUP BY d) t"
+        ),
+        one
+    );
+    let mixed = "CASE WHEN d < 0 OR CAST(d AS VARCHAR(5)) = '-0' THEN i ELSE b END";
+    assert_eq!(
+        run(
+            &mut s,
+            &format!("SELECT COUNT(*) FROM (SELECT DISTINCT {} FROM z) t", mixed)
+        ),
+        one
+    );
+    assert_eq!(
+        run(&mut s, &format!("SELECT COUNT(DISTINCT {}) FROM z", mixed)),
+        one
+    );
+}
