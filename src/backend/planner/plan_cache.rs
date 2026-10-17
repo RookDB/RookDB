@@ -740,13 +740,18 @@ pub struct PreparedStatement {
     pub db_name: String,
     pub param_count: usize,
     pub entry: PlanCacheEntry,
+    /// `sql_template` tokenized once, for binding parameters on each
+    /// execution; the tokenizer's error when it could not be.
+    template_tokens: Result<Vec<Token>, String>,
 }
 
 impl PreparedStatement {
     /// Prepare a statement from a SQL string.
     pub fn prepare(catalog: &Catalog, db_name: &str, sql: &str) -> RookResult<Self> {
         let (normalized, literals) = normalize_sql_literals(sql);
+        let template_tokens = tokenize_for_normalization(&normalized).map_err(|e| e.to_string());
         let prepared = |entry: PlanCacheEntry| Self {
+            template_tokens: template_tokens.clone(),
             sql_template: normalized.clone(),
             db_name: db_name.to_string(),
             param_count: literals.len(),
@@ -812,7 +817,10 @@ impl PreparedStatement {
             PlanCacheEntry::Plan { .. } => {
                 // The plan holds the prepared literals: plan the statement
                 // again with the new ones.
-                let sql = bind_template(&self.sql_template, params)?;
+                let tokens = self.template_tokens.as_ref().map_err(|e| {
+                    RookError::Internal(format!("prepared statement template: {}", e))
+                })?;
+                let sql = bind_template(tokens, params)?;
                 let plan = rook_parser::parse_sql(&sql)?;
                 let logical = crate::backend::planner::plan_query(&plan, catalog, &self.db_name)
                     .map_err(|e| RookError::Internal(e.to_string()))?;
@@ -847,14 +855,12 @@ fn is_number(text: &str) -> bool {
     mantissa_ok && exponent.is_none_or(digits)
 }
 
-/// `template` with each `$n` placeholder replaced by `params[n - 1]` as SQL.
-/// A number or hex string is checked to be one, so a parameter can never add
-/// SQL of its own.
-fn bind_template(template: &str, params: &[Literal]) -> RookResult<String> {
-    let tokens = tokenize_for_normalization(template)
-        .map_err(|e| RookError::Internal(format!("prepared statement template: {}", e)))?;
-    let mut sql = String::with_capacity(template.len());
-    for token in &tokens {
+/// A template's `tokens` with each `$n` placeholder replaced by
+/// `params[n - 1]` as SQL. A number or hex string is checked to be one, so a
+/// parameter can never add SQL of its own.
+fn bind_template(tokens: &[Token], params: &[Literal]) -> RookResult<String> {
+    let mut sql = String::with_capacity(tokens.len() * 4);
+    for token in tokens {
         let Token::Placeholder(p) = token else {
             sql.push_str(&token.to_string());
             continue;
@@ -1000,7 +1006,8 @@ mod tests {
     #[test]
     fn bound_parameters_cannot_add_sql() {
         let template = "SELECT id FROM t WHERE b = $1";
-        let bound = |p: Literal| bind_template(template, &[p]);
+        let tokens = tokenize_for_normalization(template).unwrap();
+        let bound = |p: Literal| bind_template(&tokens, &[p]);
         assert_eq!(
             bound(Literal::Hex("0aFF".into())).unwrap(),
             "SELECT id FROM t WHERE b = X'0aFF'"
