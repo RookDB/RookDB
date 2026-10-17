@@ -3,9 +3,81 @@ use std::collections::{HashMap, HashSet};
 use super::super::explain::PlanNode;
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
-use super::utils::canonical_row_key;
-use crate::backend::error::RookResult;
+use super::utils::{KeyClass, canonical_row_key};
+use crate::backend::error::{ResultContext, RookResult};
+use crate::types::datatype::DataType;
 use crate::types::value::DataValue;
+
+/// How one side's values of a column are converted to the column's type.
+#[derive(Clone, Debug, PartialEq)]
+enum Convert {
+    Keep,
+    /// CHAR to VARCHAR: the padding is dropped.
+    Unpad,
+    Cast(DataType),
+}
+
+/// The output type of a column whose sides have types `left` and `right`,
+/// and how to convert each side's values to it. Afterwards every value of
+/// the column has one [`KeyClass`], so hashing agrees with comparison:
+/// numbers of different classes meet as DOUBLE PRECISION, CHAR and VARCHAR
+/// as VARCHAR, and any other mismatch takes the left side's type.
+fn resolve_column(left: &DataType, right: &DataType) -> (DataType, Convert, Convert) {
+    use KeyClass::*;
+    let (lc, rc) = (KeyClass::of_type(left), KeyClass::of_type(right));
+    let cast = |class: KeyClass, to: &DataType| {
+        if class == KeyClass::of_type(to) {
+            Convert::Keep
+        } else {
+            Convert::Cast(to.clone())
+        }
+    };
+    match (lc, rc) {
+        _ if lc == rc => (left.clone(), Convert::Keep, Convert::Keep),
+        (Exact | Real | Double, Exact | Real | Double) => {
+            let to = DataType::DoublePrecision;
+            (to.clone(), cast(lc, &to), cast(rc, &to))
+        }
+        (Char, Varchar) | (Varchar, Char) => {
+            let width = |t: &DataType| match t {
+                DataType::Char(n) | DataType::Character(n) | DataType::Varchar(n) => *n,
+                _ => 0,
+            };
+            let unpad = |c: KeyClass| {
+                if c == Char {
+                    Convert::Unpad
+                } else {
+                    Convert::Keep
+                }
+            };
+            (
+                DataType::Varchar(width(left).max(width(right))),
+                unpad(lc),
+                unpad(rc),
+            )
+        }
+        _ => (left.clone(), Convert::Keep, Convert::Cast(left.clone())),
+    }
+}
+
+/// Convert each value of `tuple` as `converts` says.
+fn convert_row(tuple: &mut Tuple, converts: &[Convert]) -> RookResult<()> {
+    for (value, convert) in tuple.values.iter_mut().zip(converts) {
+        let Some(v) = value else { continue };
+        match convert {
+            Convert::Keep => {}
+            Convert::Unpad => {
+                if let DataValue::Char(s) = v {
+                    *v = DataValue::Varchar(s.trim_end().to_string());
+                }
+            }
+            Convert::Cast(to) => {
+                *v = crate::types::functions::cast(v, to).context("set operation column type")?;
+            }
+        }
+    }
+    Ok(())
+}
 
 // ── SetOp Type ────────────────────────────────────────────────────────────────
 
@@ -28,8 +100,12 @@ pub struct SetOpOperator {
     right: Box<dyn PhysicalOperator>,
     op_type: SetOpType,
     all: bool,
-    /// Output schema (from left child; must match right child).
+    /// Output schema: the left child's names, with each column's type
+    /// resolved from both children (see [`resolve_column`]).
     output_schema: Vec<ColumnInfo>,
+    /// Per column, how each child's values are converted to its type.
+    left_converts: Vec<Convert>,
+    right_converts: Vec<Convert>,
 
     // ── Runtime state ──
     left_tuples: Vec<Tuple>,
@@ -47,13 +123,23 @@ impl SetOpOperator {
         op_type: SetOpType,
         all: bool,
     ) -> Self {
-        let output_schema = left.schema().to_vec();
+        let mut output_schema = left.schema().to_vec();
+        let mut left_converts = Vec::with_capacity(output_schema.len());
+        let mut right_converts = Vec::with_capacity(output_schema.len());
+        for (col, right_col) in output_schema.iter_mut().zip(right.schema()) {
+            let (ty, l, r) = resolve_column(&col.data_type, &right_col.data_type);
+            col.data_type = ty;
+            left_converts.push(l);
+            right_converts.push(r);
+        }
         Self {
             left,
             right,
             op_type,
             all,
             output_schema,
+            left_converts,
+            right_converts,
             left_tuples: Vec::new(),
             right_tuples: Vec::new(),
             output_buffer: Vec::new(),
@@ -67,10 +153,22 @@ impl SetOpOperator {
         self.left_tuples.clear();
         self.right_tuples.clear();
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+        let keep = |c: &[Convert]| c.iter().all(|c| *c == Convert::Keep);
+        let (keep_left, keep_right) = (keep(&self.left_converts), keep(&self.right_converts));
         while self.left.next_batch(&mut child_batch)? > 0 {
+            if !keep_left {
+                for tuple in &mut child_batch {
+                    convert_row(tuple, &self.left_converts)?;
+                }
+            }
             self.left_tuples.append(&mut child_batch);
         }
         while self.right.next_batch(&mut child_batch)? > 0 {
+            if !keep_right {
+                for tuple in &mut child_batch {
+                    convert_row(tuple, &self.right_converts)?;
+                }
+            }
             self.right_tuples.append(&mut child_batch);
         }
 

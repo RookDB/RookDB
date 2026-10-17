@@ -339,3 +339,49 @@ fn hashed_equality_agrees_with_comparison_across_types() {
         assert_eq!(&run(&mut s, sql), want, "{}", sql);
     }
 }
+
+/// UNION / INTERSECT / EXCEPT resolve each column to one type, so values
+/// that compare equal across the two sides' types are one value.
+#[test]
+fn set_operations_resolve_column_types() {
+    let (_ws, mut s) = session("setoptypes");
+    for sql in [
+        "CREATE TABLE ev (day DATE, big BIGINT, r REAL, c CHAR(4))",
+        "INSERT INTO ev VALUES ('2024-01-01', 9007199254740993, 0.5, 'ab')",
+        "CREATE TABLE tx (t VARCHAR(12), d DOUBLE PRECISION, vc VARCHAR(6))",
+        "INSERT INTO tx VALUES ('2024-01-01', 9007199254740992.0, 'ab')",
+    ] {
+        run(&mut s, sql);
+    }
+    let count = |s: &mut Session, sql: &str| run(s, sql).len();
+    assert_eq!(
+        count(&mut s, "SELECT day FROM ev UNION SELECT t FROM tx"),
+        1
+    );
+    assert_eq!(
+        count(&mut s, "SELECT big FROM ev UNION SELECT d FROM tx"),
+        1
+    );
+    assert_eq!(
+        count(&mut s, "SELECT big FROM ev INTERSECT SELECT d FROM tx"),
+        1
+    );
+    assert_eq!(
+        count(&mut s, "SELECT r FROM ev EXCEPT SELECT 0.5 FROM tx"),
+        0
+    );
+    assert_eq!(count(&mut s, "SELECT c FROM ev UNION SELECT vc FROM tx"), 1);
+    assert_eq!(
+        run(&mut s, "SELECT day FROM ev UNION ALL SELECT t FROM tx"),
+        rows(&[&["2024-01-01"], &["2024-01-01"]])
+    );
+    assert_eq!(
+        types(&mut s, "SELECT big FROM ev UNION SELECT d FROM tx"),
+        [DataType::DoublePrecision]
+    );
+    assert_eq!(
+        types(&mut s, "SELECT NULL FROM ev UNION SELECT d FROM tx"),
+        [DataType::DoublePrecision]
+    );
+    assert!(try_run(&mut s, "SELECT day FROM ev UNION SELECT vc FROM tx").is_err());
+}
