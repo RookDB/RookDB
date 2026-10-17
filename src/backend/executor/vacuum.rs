@@ -6,20 +6,16 @@
 //!
 //! 1. **Counter snapshot** — `dead_tuple_count` is read for the report.
 //! 2. **Compaction** — `compaction_table()` rewrites every page holding
-//!    dead slots or bytes of replaced rows (renumbering surviving slots),
-//!    then rebuilds the FSM and resets `dead_tuple_count`.
-//! 3. **Index rebuild** — slot renumbering invalidates the `(page_id,
-//!    slot_id)` row pointers stored in B+Tree leaves. Every index on the
-//!    table is therefore bulk-rebuilt from the post-compaction heap.
-//! 4. **Header stamping** — `last_vacuum` is recorded in the table header.
+//!    dead slots or bytes of replaced rows, then rebuilds the FSM and resets
+//!    `dead_tuple_count`. Every row keeps its slot, so the `(page_id,
+//!    slot_id)` pointers in the indexes stay valid and need no rebuild, and
+//!    a VACUUM that stops partway leaves the indexes correct.
+//! 3. **Header stamping** — `last_vacuum` is recorded in the table header.
 
 use std::path::PathBuf;
 
-use crate::backend::error::{ResultContext, RookError, RookResult};
-use crate::backend::executor::create_index::{index_file_path, load_table_indexes_multi};
-use crate::backend::index::btree::BTree;
+use crate::backend::error::{RookError, RookResult};
 use crate::catalog::Catalog;
-use crate::types::{DataType, deserialize_nullable_row};
 
 /// Summary of one VACUUM run, for reporting and tests.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,15 +24,12 @@ pub struct VacuumStats {
     pub pages_compacted: usize,
     /// Dead-tuple counter value observed before the reset.
     pub dead_tuples_before: u32,
-    /// Number of indexes bulk-rebuilt after compaction.
-    pub indexes_rebuilt: usize,
 }
 
 /// Reclaim space occupied by soft-deleted rows in `db.table`.
 ///
 /// Safe to call at any time: tables with zero dead rows compact zero pages
-/// (the visibility map short-circuits clean pages) and index rebuilds are
-/// skipped entirely when no compaction happened.
+/// (the visibility map short-circuits clean pages).
 pub fn vacuum_table(catalog: &Catalog, db_name: &str, table_name: &str) -> RookResult<VacuumStats> {
     // Path-safety before touching the filesystem.
     crate::backend::name_validation::validate_database_name(db_name)?;
@@ -73,29 +66,20 @@ pub fn vacuum_table(catalog: &Catalog, db_name: &str, table_name: &str) -> RookR
     let pages_compacted = super::delete::compaction_table(catalog.engine(), db_name, table_name)
         .map_err(RookError::storage_bare)?;
 
-    let mut indexes_rebuilt = 0usize;
-    if pages_compacted > 0 {
-        // 4. Slot renumbering invalidated every stored row pointer → rebuild
-        //    all indexes from the fresh heap.
-        indexes_rebuilt = rebuild_indexes(catalog, db_name, table_name)?;
-    }
-
-    // 5. Stamp last_vacuum through a FRESH manager (post-invalidation).
+    // 3. Stamp last_vacuum through a FRESH manager (post-invalidation).
     stamp_last_vacuum(catalog.engine(), &heap_path)?;
 
     log::info!(
-        "[Vacuum] {}.{} done: {} page(s) compacted, {} dead tuple(s) reclaimed, {} index(es) rebuilt",
+        "[Vacuum] {}.{} done: {} page(s) compacted, {} dead tuple(s) reclaimed",
         db_name,
         table_name,
         pages_compacted,
-        dead_before,
-        indexes_rebuilt
+        dead_before
     );
 
     Ok(VacuumStats {
         pages_compacted,
         dead_tuples_before: dead_before,
-        indexes_rebuilt,
     })
 }
 
@@ -106,132 +90,6 @@ fn read_dead_tuple_count(
 ) -> RookResult<u32> {
     let file = crate::backend::heap::HeapFile::open(engine, heap_path)?;
     Ok(file.header()?.dead_tuple_count)
-}
-
-/// Bulk-rebuild every named index on a table from current heap contents.
-///
-/// Only the `.idx` B+Tree files are regenerated; `sys_indexes` is untouched.
-fn rebuild_indexes(catalog: &Catalog, db_name: &str, table_name: &str) -> RookResult<usize> {
-    let engine = catalog.engine();
-    let indexes = load_table_indexes_multi(engine, db_name, table_name)?;
-    if indexes.is_empty() {
-        return Ok(0);
-    }
-
-    let schema_types: Vec<DataType> = catalog
-        .databases
-        .get(db_name)
-        .and_then(|db| db.tables.get(table_name))
-        .map(|t| t.columns.iter().map(|c| c.data_type.clone()).collect())
-        .ok_or_else(|| {
-            RookError::Internal(format!(
-                "Table '{}.{}' not found in catalog",
-                db_name, table_name
-            ))
-        })?;
-
-    let heap_path = engine.paths().heap(db_name, table_name);
-    let heap_manager =
-        crate::backend::cache::lease_heap(engine, &heap_path).context("Failed to open heap")?;
-
-    let mut rebuilt = 0usize;
-    for (idx_name, col_names, _is_unique) in &indexes {
-        // Resolve every key column's position + type from the schema.
-        let mut col_positions = Vec::with_capacity(col_names.len());
-        let mut key_types = Vec::with_capacity(col_names.len());
-        let catalog_table = catalog
-            .databases
-            .get(db_name)
-            .and_then(|db| db.tables.get(table_name));
-        let Some(t) = catalog_table else {
-            return Err(RookError::Internal(format!(
-                "Table '{}.{}' not found in catalog",
-                db_name, table_name
-            )));
-        };
-        for cname in col_names {
-            match t
-                .columns
-                .iter()
-                .position(|c| c.name.eq_ignore_ascii_case(cname))
-            {
-                Some(pos) => {
-                    key_types.push(t.columns[pos].data_type.clone());
-                    col_positions.push(pos);
-                }
-                None => {
-                    log::warn!(
-                        "[Vacuum] Index '{}' references unknown column '{}'; skipping rebuild",
-                        idx_name,
-                        cname
-                    );
-                    col_positions.clear();
-                    break;
-                }
-            }
-        }
-        if col_positions.is_empty() {
-            continue;
-        }
-
-        let idx_path = index_file_path(engine, db_name, table_name, idx_name);
-        if !idx_path.exists() {
-            continue;
-        }
-
-        // Drop any stale cached handle before truncating/recreating the index file.
-        crate::backend::cache::evict_btree(catalog.engine(), &idx_path);
-
-        // Fresh tree over the post-compaction heap.
-        let mut btree = BTree::create_composite(idx_path.clone(), key_types).map_err(|e| {
-            RookError::storage(format!("Failed to recreate index '{}'", idx_name), e)
-        })?;
-
-        let mut entries = 0usize;
-        for result in heap_manager.scan() {
-            let (page_id, slot_id, raw_bytes) = match result {
-                Ok(t) => t,
-                Err(e) => {
-                    return Err(RookError::storage(
-                        "Heap scan failed during index rebuild",
-                        e,
-                    ));
-                }
-            };
-            let values = deserialize_nullable_row(&schema_types, &raw_bytes)
-                .context("Tuple decode failed during index rebuild")?;
-            // Composite key: gather every component; skip rows with any NULL.
-            let mut key: Vec<crate::types::DataValue> = Vec::with_capacity(col_positions.len());
-            let mut has_null = false;
-            for &pos in &col_positions {
-                match values.get(pos) {
-                    Some(Some(dv)) => key.push(dv.clone()),
-                    _ => {
-                        has_null = true;
-                        break;
-                    }
-                }
-            }
-            if !has_null {
-                btree
-                    .insert_keys(&key, page_id, slot_id)
-                    .context("Failed to insert into rebuilt index")?;
-                entries += 1;
-            }
-        }
-        btree.sync().map_err(|e| {
-            RookError::storage(format!("Failed to sync rebuilt index '{}'", idx_name), e)
-        })?;
-        crate::backend::cache::evict_btree(catalog.engine(), &idx_path);
-        log::info!(
-            "[Vacuum] Rebuilt index '{}' with {} entries",
-            idx_name,
-            entries
-        );
-        rebuilt += 1;
-    }
-
-    Ok(rebuilt)
 }
 
 /// Record the current time in the header's `last_vacuum` field.

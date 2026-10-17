@@ -311,14 +311,14 @@ fn composite_index_survives_vacuum_rebuild() {
     )
     .unwrap();
 
-    // Delete a slice to force compaction + rebuild.
+    // Delete a slice to force compaction.
     exec_delete(&catalog, "vdb", "orders", "amount < 60");
 
     let stats = storage_manager::backend::executor::vacuum::vacuum_table(&catalog, "vdb", "orders")
         .expect("vacuum");
-    assert_eq!(stats.indexes_rebuilt, 1);
+    assert!(stats.pages_compacted > 0);
 
-    // Post-rebuild: queries over the composite index stay exact.
+    // After compaction: queries over the composite index stay exact.
     // Surviving rows are i=6..11; only i=6 has cust_id=0 AND region='r0'.
     let catalog = load_catalog();
     assert_eq!(

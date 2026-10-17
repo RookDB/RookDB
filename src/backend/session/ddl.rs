@@ -903,13 +903,13 @@ pub(super) fn create_index(
     )))
 }
 
-/// VACUUM: reclaim space from soft-deleted rows and rebuild indexes.
+/// VACUUM: reclaim space from soft-deleted rows.
 pub(super) fn vacuum(catalog: &Catalog, db: &str, table: &str) -> RookResult<StatementResult> {
     let stats = crate::backend::executor::vacuum::vacuum_table(catalog, db, table)
         .map_err(|e| e.with_context("VACUUM failed"))?;
     let mut lines = vec![format!(
-        "VACUUM '{}.{}' complete: {} page(s) compacted, {} dead tuple(s) reclaimed, {} index(es) rebuilt.",
-        db, table, stats.pages_compacted, stats.dead_tuples_before, stats.indexes_rebuilt
+        "VACUUM '{}.{}' complete: {} page(s) compacted, {} dead tuple(s) reclaimed.",
+        db, table, stats.pages_compacted, stats.dead_tuples_before
     )];
     if stats.pages_compacted == 0 {
         lines.push("Table is already clean — nothing to do.".to_string());

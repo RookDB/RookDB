@@ -201,29 +201,49 @@ impl Page {
         Ok(slot_id)
     }
 
-    /// Whether compaction would free space: the page has a dead slot, or
-    /// its data area holds bytes no live row uses (left behind when a
-    /// reused slot or a shrunken row gave up its old space).
+    /// Whether compaction would free space: a dead slot still holds a
+    /// deleted row's bytes or ends the slot directory, or the data area holds
+    /// bytes no live row uses (left behind when a reused slot or a shrunken
+    /// row gave up its old space).
     pub fn has_garbage(&self) -> bool {
-        let mut live_rows = 0u32;
         let mut live_bytes = 0u32;
-        for (_, t) in self.tuples() {
-            live_rows += 1;
-            live_bytes += t.len() as u32;
+        let mut last_live = None;
+        for i in 0..self.slot_count() {
+            match self.slot(i) {
+                Some(slot) if !slot.is_dead() => {
+                    live_bytes += slot.length as u32;
+                    last_live = Some(i);
+                }
+                Some(slot) if slot.offset != 0 || slot.length != 0 => return true,
+                _ => {}
+            }
         }
-        live_rows < self.slot_count()
+        last_live.map_or(0, |i| i + 1) < self.slot_count()
             || (PAGE_SIZE as u32).saturating_sub(self.upper()) > live_bytes
     }
 
-    /// Rewrite the page with only its live rows, packed and renumbered from
-    /// slot 0 in their current order.
+    /// Rewrite the page with only its live rows, packed at the end of the
+    /// page. Every row keeps its slot, since index entries point at
+    /// `(page, slot)`; a dead slot before the last live one stays as a free
+    /// slot for a later insert, and dead slots after it are dropped.
     pub fn compact(&mut self) {
-        let live: Vec<Vec<u8>> = self.tuples().map(|(_, t)| t.to_vec()).collect();
+        let live: Vec<(u32, Vec<u8>)> = self.tuples().map(|(i, t)| (i, t.to_vec())).collect();
+        let slots = live.last().map_or(0, |&(i, _)| i + 1);
         self.data.fill(0);
         init_page(self);
-        for row in &live {
-            self.insert(row)
-                .expect("rows that fit before compaction fit after it");
+        self.set_lower(PAGE_HEADER_SIZE + slots * ITEM_ID_SIZE);
+        for (slot_id, row) in &live {
+            let start = self.upper() - row.len() as u32;
+            self.data[start as usize..start as usize + row.len()].copy_from_slice(row);
+            self.set_upper(start);
+            self.set_slot(
+                *slot_id,
+                Slot {
+                    offset: start,
+                    length: row.len() as u16,
+                    flags: 0,
+                },
+            );
         }
     }
 }
@@ -407,16 +427,24 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_keeps_live_rows_in_order() {
-        let mut page = page_with(&[b"one", b"two", b"three"]);
+    fn test_compact_keeps_slot_numbers() {
+        // Index entries hold (page, slot), so compaction must not move a
+        // row to another slot.
+        let mut page = page_with(&[b"one", b"two", b"three", b"four"]);
         page.mark_deleted(1);
+        page.mark_deleted(3);
         page.compact();
         let rows: Vec<(u32, Vec<u8>)> = page.tuples().map(|(i, t)| (i, t.to_vec())).collect();
-        assert_eq!(rows, vec![(0, b"one".to_vec()), (1, b"three".to_vec())]);
+        assert_eq!(rows, vec![(0, b"one".to_vec()), (2, b"three".to_vec())]);
+        assert!(!page.has_garbage());
+        // The trailing dead slot is dropped; the inner one stays, free.
+        assert_eq!(page.slot_count(), 3);
         assert_eq!(
             page_free_space(&page).unwrap(),
-            PAGE_SIZE as u32 - PAGE_HEADER_SIZE - 2 * ITEM_ID_SIZE - 8
+            PAGE_SIZE as u32 - PAGE_HEADER_SIZE - 3 * ITEM_ID_SIZE - 8
         );
+        assert_eq!(page.insert(b"new").unwrap(), 1);
+        assert_eq!(page.tuple(2), Some(&b"three"[..]));
     }
 
     #[test]

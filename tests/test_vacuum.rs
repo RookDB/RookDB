@@ -147,7 +147,7 @@ fn vacuum_reclaims_dead_tuples_and_preserves_live_rows() {
 }
 
 #[test]
-fn vacuum_rebuilds_indexes_for_renumbered_slots() {
+fn vacuum_keeps_index_pointers_valid() {
     let _ws = common::TestWorkspace::new("vacuum", "indexrb");
     let catalog = setup("idb");
 
@@ -172,16 +172,18 @@ fn vacuum_rebuilds_indexes_for_renumbered_slots() {
     .expect("create_index failed");
     assert_eq!(n, 30);
 
-    // Delete a contiguous middle chunk so surviving slots renumber.
+    // Delete a contiguous middle chunk, leaving dead slots between live ones.
     let result = exec_delete(&catalog, "idb", "events", "id >= 10 AND id < 20");
     assert_eq!(result.deleted_count, 10);
 
     let stats = vacuum_table(&catalog, "idb", "events").unwrap();
-    assert_eq!(stats.indexes_rebuilt, 1, "the index must be rebuilt");
+    assert!(stats.pages_compacted > 0);
 
-    // The rebuilt index must resolve every surviving id to a LIVE row with
-    // matching contents.
+    // Compaction keeps every row in its slot, so the index must still
+    // resolve every surviving id to a LIVE row with matching contents. The
+    // file is read directly, so the engine's cached handle writes it first.
     let idx_path = common::path("database/base/idb/events.idx_events_id.idx");
+    storage_manager::backend::cache::flush_and_evict_btree(catalog.engine(), &idx_path);
     let mut btree = storage_manager::backend::index::btree::BTree::open(idx_path).unwrap();
     btree.set_key_type(DataType::Int);
 
@@ -207,7 +209,7 @@ fn vacuum_rebuilds_indexes_for_renumbered_slots() {
         }
     }
 
-    // Deleted ids must NOT resolve through the rebuilt index.
+    // Deleted ids must NOT resolve through the index.
     for id in [10i32, 15, 19] {
         assert!(
             btree
