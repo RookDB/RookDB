@@ -35,13 +35,18 @@ pub(crate) const KEY_LEN_SIZE: usize = 2; // u16
 /// `BTree::open` assumed page 0 — the ORIGINAL leftmost leaf — and all
 /// searches degenerated to next_leaf chain walks.
 pub(crate) fn root_sidecar_path(idx_path: &Path) -> PathBuf {
-    let mut s = idx_path.as_os_str().to_owned();
-    s.push(".root");
-    PathBuf::from(s)
+    crate::backend::paths::with_suffix(idx_path, ".root")
 }
 
+/// Replace the sidecar atomically: a crash leaves the old pointer or the
+/// new one, never a short file.
 pub(crate) fn write_root_sidecar(idx_path: &Path, root_page_id: u32) -> RookResult<()> {
-    std::fs::write(root_sidecar_path(idx_path), root_page_id.to_le_bytes()).map_err(RookError::from)
+    let path = root_sidecar_path(idx_path);
+    let tmp = crate::backend::paths::with_suffix(&path, ".tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    std::io::Write::write_all(&mut file, &root_page_id.to_le_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, &path).map_err(RookError::from)
 }
 
 pub(crate) fn read_root_sidecar(idx_path: &Path) -> RookResult<u32> {

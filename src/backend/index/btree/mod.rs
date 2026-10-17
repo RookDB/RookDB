@@ -216,10 +216,29 @@ impl BTree {
         // For now, use a placeholder (will be set explicitly).
         let key_types = vec![DataType::Int];
 
-        // Restore the persisted root pointer. Without it, every reopened
-        // index descended into the original leftmost leaf and searched via
-        // the next_leaf chain — O(n) lookups on any real tree.
-        let root_page_id = read_root_sidecar(&file_path).unwrap_or(0);
+        // Restore the persisted root pointer. Page 0 is the root only of a
+        // one-page tree; in a larger one it is the leftmost leaf, and
+        // inserting through it as the root would break the tree's order, so
+        // a lost or bad pointer is an error (the index must be rebuilt).
+        let root_page_id = match read_root_sidecar(&file_path) {
+            Ok(root) if root < total_pages.max(1) => root,
+            Err(_) if total_pages <= 1 => 0,
+            Ok(root) => {
+                return Err(RookError::io(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "index {:?}: root page {} is past its {} pages; rebuild the index",
+                        file_path, root, total_pages
+                    ),
+                ));
+            }
+            Err(e) => {
+                return Err(e.with_context(format!(
+                    "index {:?}: root pointer unreadable; rebuild the index",
+                    file_path
+                )));
+            }
+        };
 
         log::info!(
             "[BTree::open] Opened with {} pages, root={}",
@@ -671,8 +690,9 @@ impl BTree {
             }
 
             let new_root_id = self.allocate_page(&new_root_node)?;
-            self.root_page_id = new_root_id;
+            // Only a recorded root becomes this handle's root.
             write_root_sidecar(&self.file_path, new_root_id)?;
+            self.root_page_id = new_root_id;
         }
 
         Ok(())
@@ -1034,21 +1054,22 @@ impl BTree {
         let right_keys = all_keys[split_point + 1..].to_vec();
         let right_children = all_children[split_point + 1..].to_vec();
 
-        // Update the old node
-        let left_node = BTreeNode::Internal {
-            num_keys: left_keys.len() as u32,
-            keys: left_keys,
-            children: left_children,
-        };
-        self.write_node(page_id, &left_node)?;
-
-        // Create the new sibling
+        // Create the new sibling first: if that fails, the old node still
+        // holds every key and child.
         let right_node = BTreeNode::Internal {
             num_keys: right_keys.len() as u32,
             keys: right_keys,
             children: right_children,
         };
         let new_sibling_id = self.allocate_page(&right_node)?;
+
+        // Then shrink the old node to the left half.
+        let left_node = BTreeNode::Internal {
+            num_keys: left_keys.len() as u32,
+            keys: left_keys,
+            children: left_children,
+        };
+        self.write_node(page_id, &left_node)?;
 
         Ok((promoted_to_parent, new_sibling_id))
     }

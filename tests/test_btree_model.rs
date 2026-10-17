@@ -260,3 +260,23 @@ fn oversized_key_is_rejected_and_changes_nothing() {
     drop(tree);
     remove_index(&path);
 }
+
+/// A multi-page index whose root pointer is lost cannot be opened as if
+/// page 0 (its first leaf) were the root: inserts through it would break
+/// the tree's order.
+#[test]
+fn an_index_without_its_root_pointer_does_not_open() {
+    let path = index_path("lost_root");
+    remove_index(&path);
+    {
+        let mut tree = BTree::create(path.clone(), DataType::Int).unwrap();
+        for i in 0..5000 {
+            tree.insert_keys(&[DataValue::Int(i)], 1, i as u32).unwrap();
+        }
+    }
+    std::fs::remove_file(format!("{}.root", path.display())).unwrap();
+    assert!(BTree::open(path.clone()).is_err());
+    std::fs::write(format!("{}.root", path.display()), [1u8, 0]).unwrap();
+    assert!(BTree::open(path.clone()).is_err());
+    remove_index(&path);
+}
