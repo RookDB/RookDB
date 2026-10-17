@@ -553,11 +553,17 @@ fn plan_select_with_ctes(
                 }
             }
         }
-        current_plan = LogicalPlan::Sort(LogicalSort {
-            order_by,
-            child: Box::new(current_plan),
-            limit: limit_hint,
-        });
+        // Positions are resolved by now, so a constant left as a key (an
+        // output `10` that shares its name with another) orders nothing; a
+        // later pass would read it as a position.
+        order_by.retain(|ob| !matches!(ob.expr, rook_ast::ExprNode::Constant(_)));
+        if !order_by.is_empty() {
+            current_plan = LogicalPlan::Sort(LogicalSort {
+                order_by,
+                child: Box::new(current_plan),
+                limit: limit_hint,
+            });
+        }
     }
 
     // 8. Apply LIMIT / OFFSET

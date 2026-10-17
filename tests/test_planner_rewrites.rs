@@ -211,3 +211,23 @@ fn hidden_sort_column_keeps_outputs_of_one_name_apart() {
         ]
     );
 }
+
+/// A key naming a constant output that shares its name with another
+/// (`SELECT 10, b, 10 ... ORDER BY 1, 2, 3`) orders nothing and is not read
+/// as position 10.
+#[test]
+fn sort_key_on_a_repeated_constant_output() {
+    let (_ws, mut s) = session("const_dup");
+    assert_eq!(
+        run(&mut s, "SELECT DISTINCT 10, b, 10 FROM q ORDER BY 1, 2, 3"),
+        vec![
+            vec![Some(10), Some(7), Some(10)],
+            vec![Some(10), Some(8), Some(10)],
+            vec![Some(10), Some(9), Some(10)]
+        ]
+    );
+    assert_eq!(
+        run(&mut s, "SELECT 10, 10 FROM q ORDER BY 1, 2 LIMIT 2"),
+        vec![vec![Some(10), Some(10)], vec![Some(10), Some(10)]]
+    );
+}
