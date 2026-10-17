@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::types::comparison::compare_nullable;
 use crate::types::value::DataValue;
 
-use super::super::operators::{PhysicalOperator, canonical_key};
+use super::super::operators::{KeyClass, PhysicalOperator, canonical_key};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::Expr;
 
@@ -55,54 +55,54 @@ pub enum SubqueryKind {
 /// lookup costs O(1) rather than a pass over every value.
 #[derive(Debug)]
 pub struct InList {
-    /// Each non-NULL value as [`canonical_key`], so values that compare
-    /// equal across types (INT 1, BIGINT 1, 1.0) are one key.
-    keys: HashSet<DataValue>,
-    /// One value of each type in the list. A value no key matches is still
-    /// compared with these, so an incomparable left-hand side is an error
-    /// whether or not it is in the list.
-    samples: Vec<DataValue>,
+    /// Every value, NULLs included, for a left-hand side the hash cannot
+    /// answer.
+    values: Vec<Option<DataValue>>,
+    /// When the non-NULL values share one [`KeyClass`]: that class and each
+    /// value as [`canonical_key`]. Only a left-hand side of the same class
+    /// is looked up here; any other is compared with every value.
+    keys: Option<(KeyClass, HashSet<DataValue>)>,
     has_null: bool,
 }
 
 impl InList {
     pub fn new(values: Vec<Option<DataValue>>) -> Self {
-        let mut keys = HashSet::with_capacity(values.len());
-        let mut samples: Vec<DataValue> = Vec::new();
-        let mut has_null = false;
-        for value in values {
-            let Some(value) = value else {
-                has_null = true;
-                continue;
-            };
-            if !samples
-                .iter()
-                .any(|s| std::mem::discriminant(s) == std::mem::discriminant(&value))
-            {
-                samples.push(value.clone());
-            }
-            keys.insert(canonical_key(value));
-        }
+        let mut present = values.iter().flatten();
+        let keys = present.next().map(KeyClass::of_value).and_then(|class| {
+            present.all(|v| KeyClass::of_value(v) == class).then(|| {
+                (
+                    class,
+                    values
+                        .iter()
+                        .flatten()
+                        .cloned()
+                        .map(canonical_key)
+                        .collect(),
+                )
+            })
+        });
+        let has_null = values.iter().any(Option::is_none);
         Self {
+            values,
             keys,
-            samples,
             has_null,
         }
     }
 
     /// `lhs [NOT] IN (list)` under three-valued logic.
     fn contains(&self, lhs: Option<&DataValue>, negated: bool) -> RookResult<Option<bool>> {
-        let Some(lhs) = lhs else {
-            let empty = self.keys.is_empty() && !self.has_null;
-            return Ok(empty.then_some(negated));
-        };
-        if self.keys.contains(&canonical_key(lhs.clone())) {
-            return Ok(Some(!negated));
+        if let (Some(lhs), Some((class, keys))) = (lhs, &self.keys)
+            && KeyClass::of_value(lhs) == *class
+        {
+            return Ok(if keys.contains(&canonical_key(lhs.clone())) {
+                Some(!negated)
+            } else if self.has_null {
+                None
+            } else {
+                Some(negated)
+            });
         }
-        for sample in &self.samples {
-            compare_nullable(Some(sample), Some(lhs))?;
-        }
-        Ok(if self.has_null { None } else { Some(negated) })
+        in_result(lhs, self.values.iter().map(|v| Ok(v.as_ref())), negated)
     }
 }
 

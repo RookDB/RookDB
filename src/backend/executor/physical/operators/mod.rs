@@ -60,4 +60,4 @@ pub use set_op::{SetOpOperator, SetOpType};
 pub use sort::SortOperator;
 pub(crate) use sort::compare_rows;
 pub use subquery::{SubqueryExecOperator, SubqueryType};
-pub(crate) use utils::canonical_key;
+pub(crate) use utils::{KeyClass, canonical_key};

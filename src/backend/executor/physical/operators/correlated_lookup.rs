@@ -21,6 +21,11 @@
 //! probes as the table has rows, or an outer value cannot be looked up
 //! exactly (it does not convert to the key type without loss), it builds
 //! the hash table and uses that from then on.
+//!
+//! Hashing finds every matching row only when the outer value shares a
+//! [`KeyClass`] with the column's values (see there). A run whose outer
+//! value does not, such as text against a DATE column, returns every row
+//! and leaves the comparison to the filter.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -31,10 +36,10 @@ use super::super::planner::PhysicalPlanner;
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::scans::IndexScanOperator;
 use super::trait_::PhysicalOperator;
-use super::utils::canonical_key;
+use super::utils::{KeyClass, canonical_key};
 use crate::backend::error::RookResult;
 use crate::types::datatype::DataType;
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, NumericValue};
 
 /// Multiple of the hash-join budget the grouped input may occupy.
 const BUDGET_FACTOR: usize = 4;
@@ -45,13 +50,16 @@ const PROBE_COST: usize = 2;
 /// End of a group's row chain.
 const END: u32 = u32::MAX;
 
-/// Memory held by one stored row: the tuple, its values and string payloads.
+/// Memory held by one stored row: the tuple, its values and their heap
+/// payloads.
 fn row_bytes(tuple: &Tuple) -> usize {
     let mut bytes = std::mem::size_of::<Tuple>()
         + tuple.values.len() * std::mem::size_of::<Option<DataValue>>();
     for value in tuple.values.iter().flatten() {
-        if let DataValue::Char(s) | DataValue::Varchar(s) | DataValue::Bit(s) = value {
-            bytes += s.len();
+        match value {
+            DataValue::Char(s) | DataValue::Varchar(s) | DataValue::Bit(s) => bytes += s.len(),
+            DataValue::Numeric(_) => bytes += std::mem::size_of::<NumericValue>(),
+            _ => {}
         }
     }
     bytes + std::mem::size_of::<u32>()
@@ -79,20 +87,55 @@ fn probe_key(value: &DataValue, key_type: &DataType) -> Option<DataValue> {
     (key == *value || (integer(value) && integer(&key))).then_some(key)
 }
 
+/// The key classes a key column's stored values have.
+#[derive(Clone, Copy, PartialEq)]
+enum Classes {
+    Nothing,
+    One(KeyClass),
+    Mixed,
+}
+
+impl Classes {
+    fn add(&mut self, class: KeyClass) {
+        *self = match *self {
+            Classes::Nothing => Classes::One(class),
+            Classes::One(c) if c == class => Classes::One(c),
+            _ => Classes::Mixed,
+        };
+    }
+
+    /// Whether hashing a value of `class` finds every stored row that
+    /// compares equal to it.
+    fn hashes_alike(self, class: KeyClass) -> bool {
+        self == Classes::Nothing || self == Classes::One(class)
+    }
+}
+
+/// Where a run of the built table is.
+#[derive(Clone, Copy)]
+enum Cursor {
+    /// The next row of the run's group, or [`END`].
+    Chain(u32),
+    /// The next row of all of them, for a key that cannot be hashed.
+    All(u32),
+}
+
 enum State {
     /// The input has not been read yet.
     Unbuilt,
     /// Looking each run's key up in the index; `None` until the run's first
     /// `next`, then whether the run has rows to return.
     Probing(Option<bool>),
-    /// The input rows in arrival order. Each group is a chain through
-    /// `next`, from its first row to its last; `cursor` is the next row of
-    /// the current run's group, `None` until the run's first `next`.
+    /// The input rows in arrival order, less those with a NULL key. Each
+    /// group is a chain through `next`, from its first row to its last;
+    /// `classes` holds each key column's classes; `cursor` is `None` until
+    /// the run's first `next`.
     Built {
         rows: Vec<Tuple>,
         next: Vec<u32>,
         groups: HashMap<Vec<DataValue>, (u32, u32)>,
-        cursor: Option<u32>,
+        classes: Vec<Classes>,
+        cursor: Option<Cursor>,
     },
     /// Over budget: every run reads the input again.
     Streaming,
@@ -106,8 +149,9 @@ pub struct CorrelatedLookupOperator {
     params: Vec<Rc<RefCell<Option<DataValue>>>>,
     budget: usize,
     state: State,
-    /// Reused for each run's lookup key.
+    /// Reused for each run's lookup key and its values' classes.
     key_buf: Vec<DataValue>,
+    class_buf: Vec<KeyClass>,
     probe: Option<Probe>,
 }
 
@@ -125,6 +169,7 @@ impl CorrelatedLookupOperator {
             budget: super::joins::spill_budget().saturating_mul(BUDGET_FACTOR),
             state: State::Unbuilt,
             key_buf: Vec::new(),
+            class_buf: Vec::new(),
             probe: None,
         }
     }
@@ -160,16 +205,20 @@ impl CorrelatedLookupOperator {
         Some(true)
     }
 
-    /// `values` at the key columns as a hash key in `buf`; false when one
-    /// is NULL, since `col = NULL` holds for no row.
-    fn fill_key<'a>(
-        values: impl Iterator<Item = &'a Option<DataValue>>,
+    /// `values` at the key columns as a hash key in `buf`, with their
+    /// classes in `classes`; false when one is NULL, since `col = NULL`
+    /// holds for no row.
+    fn fill_key(
+        values: impl Iterator<Item = Option<DataValue>>,
         buf: &mut Vec<DataValue>,
+        classes: &mut Vec<KeyClass>,
     ) -> bool {
         buf.clear();
+        classes.clear();
         for value in values {
             let Some(value) = value else { return false };
-            buf.push(canonical_key(value.clone()));
+            classes.push(KeyClass::of_value(&value));
+            buf.push(canonical_key(value));
         }
         true
     }
@@ -180,13 +229,17 @@ impl CorrelatedLookupOperator {
         let mut rows: Vec<Tuple> = Vec::new();
         let mut next: Vec<u32> = Vec::new();
         let mut groups: HashMap<Vec<DataValue>, (u32, u32)> = HashMap::new();
+        let mut classes = vec![Classes::Nothing; self.key_columns.len()];
         let mut bytes = 0usize;
         let mut batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
         while self.child.next_batch(&mut batch)? > 0 {
             for tuple in batch.drain(..) {
-                let key_values = self.key_columns.iter().map(|&i| &tuple.values[i]);
-                if !Self::fill_key(key_values, &mut self.key_buf) {
+                let key_values = self.key_columns.iter().map(|&i| tuple.values[i].clone());
+                if !Self::fill_key(key_values, &mut self.key_buf, &mut self.class_buf) {
                     continue;
+                }
+                for (seen, &class) in classes.iter_mut().zip(&self.class_buf) {
+                    seen.add(class);
                 }
                 bytes += row_bytes(&tuple);
                 let idx = rows.len() as u32;
@@ -214,6 +267,7 @@ impl CorrelatedLookupOperator {
             rows,
             next,
             groups,
+            classes,
             cursor: None,
         };
         Ok(())
@@ -256,33 +310,38 @@ impl PhysicalOperator for CorrelatedLookupOperator {
                 rows,
                 next,
                 groups,
+                classes,
                 cursor,
             } => {
-                let idx = match *cursor {
-                    Some(idx) => idx,
+                let run = match *cursor {
+                    Some(run) => run,
                     None => {
-                        let mut keyed = true;
-                        self.key_buf.clear();
-                        for param in &self.params {
-                            match &*param.borrow() {
-                                Some(v) => self.key_buf.push(canonical_key(v.clone())),
-                                None => {
-                                    keyed = false;
-                                    break;
-                                }
+                        let params = self.params.iter().map(|p| p.borrow().clone());
+                        if !Self::fill_key(params, &mut self.key_buf, &mut self.class_buf) {
+                            Cursor::Chain(END)
+                        } else if classes
+                            .iter()
+                            .zip(&self.class_buf)
+                            .all(|(seen, &class)| seen.hashes_alike(class))
+                        {
+                            match groups.get(self.key_buf.as_slice()) {
+                                Some(&(first, _)) => Cursor::Chain(first),
+                                None => Cursor::Chain(END),
                             }
-                        }
-                        match groups.get(self.key_buf.as_slice()) {
-                            Some(&(first, _)) if keyed => first,
-                            _ => END,
+                        } else {
+                            Cursor::All(0)
                         }
                     }
                 };
-                if idx == END {
-                    *cursor = Some(END);
-                    return Ok(None);
-                }
-                *cursor = Some(next[idx as usize]);
+                let (idx, after) = match run {
+                    Cursor::Chain(idx) if idx != END => (idx, Cursor::Chain(next[idx as usize])),
+                    Cursor::All(idx) if (idx as usize) < rows.len() => (idx, Cursor::All(idx + 1)),
+                    done => {
+                        *cursor = Some(done);
+                        return Ok(None);
+                    }
+                };
+                *cursor = Some(after);
                 Ok(Some(rows[idx as usize].clone()))
             }
         }

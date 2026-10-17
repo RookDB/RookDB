@@ -1,4 +1,63 @@
+use crate::types::datatype::DataType;
 use crate::types::value::{DataValue, NumericValue, OrderedF64};
+
+/// The types within which [`canonical_key`] agrees with comparison: two
+/// values of one class compare equal exactly when their keys are equal.
+/// Across classes comparison can find values equal whose keys differ (an
+/// integer and a float, CHAR and blank-padded VARCHAR, a DATE and text) or
+/// tell apart values whose keys are equal (REAL and DOUBLE), so such values
+/// must be compared rather than hashed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyClass {
+    /// Integers and NUMERIC: compared exactly.
+    Exact,
+    Real,
+    Double,
+    Bool,
+    Char,
+    Varchar,
+    /// DATE and TIMESTAMP: a DATE is the TIMESTAMP at its midnight.
+    DateTime,
+    Time,
+    Bit,
+}
+
+impl KeyClass {
+    pub fn of_value(value: &DataValue) -> Self {
+        match value {
+            DataValue::SmallInt(_)
+            | DataValue::Int(_)
+            | DataValue::BigInt(_)
+            | DataValue::Numeric(_) => KeyClass::Exact,
+            DataValue::Real(_) => KeyClass::Real,
+            DataValue::DoublePrecision(_) => KeyClass::Double,
+            DataValue::Bool(_) => KeyClass::Bool,
+            DataValue::Char(_) => KeyClass::Char,
+            DataValue::Varchar(_) => KeyClass::Varchar,
+            DataValue::Date(_) | DataValue::Timestamp(_) => KeyClass::DateTime,
+            DataValue::Time(_) => KeyClass::Time,
+            DataValue::Bit(_) => KeyClass::Bit,
+        }
+    }
+
+    pub fn of_type(data_type: &DataType) -> Self {
+        match data_type {
+            DataType::SmallInt
+            | DataType::Int
+            | DataType::BigInt
+            | DataType::Numeric { .. }
+            | DataType::Decimal { .. } => KeyClass::Exact,
+            DataType::Real => KeyClass::Real,
+            DataType::DoublePrecision => KeyClass::Double,
+            DataType::Bool => KeyClass::Bool,
+            DataType::Char(_) | DataType::Character(_) => KeyClass::Char,
+            DataType::Varchar(_) => KeyClass::Varchar,
+            DataType::Date | DataType::Timestamp => KeyClass::DateTime,
+            DataType::Time => KeyClass::Time,
+            DataType::Bit(_) => KeyClass::Bit,
+        }
+    }
+}
 
 /// Map a value to the form used for hashing in joins and set operations, so
 /// that values which compare equal hash equal across types: every integer

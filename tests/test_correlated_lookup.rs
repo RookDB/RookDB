@@ -271,3 +271,38 @@ fn index_probe_sees_inner_changes() {
     run(&mut s, "DELETE FROM i WHERE k = 20");
     assert_eq!(ids(&mut s, q), ["1", "4", "5"]);
 }
+
+/// Pairs that compare equal although their hash keys differ (DATE and
+/// text, CHAR and blank-padded VARCHAR, BIGINT and DOUBLE) must still
+/// match, with or without an index on the inner column.
+#[test]
+fn keys_that_compare_equal_across_types_still_match() {
+    let (_ws, mut s) = session("crosstype");
+    for sql in [
+        "CREATE TABLE ev (id INT, day DATE, c CHAR(4), big BIGINT)",
+        "INSERT INTO ev VALUES (1, '2024-01-01', 'ab', 9007199254740993)",
+        "CREATE TABLE oo (id INT, day_txt VARCHAR(12), vc VARCHAR(6), d DOUBLE PRECISION)",
+        "INSERT INTO oo VALUES (7, '2024-01-01', 'ab ', 9007199254740992.0)",
+    ] {
+        run(&mut s, sql);
+    }
+    let queries = [
+        "SELECT id FROM oo WHERE EXISTS (SELECT 1 FROM ev WHERE ev.day = oo.day_txt)",
+        "SELECT id FROM oo WHERE EXISTS (SELECT 1 FROM ev WHERE ev.c = oo.vc)",
+        "SELECT id FROM oo WHERE EXISTS (SELECT 1 FROM ev WHERE ev.big = oo.d)",
+        "SELECT id FROM oo WHERE (SELECT COUNT(*) FROM ev WHERE ev.day = oo.day_txt) = 1",
+    ];
+    for q in queries {
+        assert_eq!(ids(&mut s, q), ["7"], "{}", q);
+    }
+    for sql in [
+        "CREATE INDEX ev_day ON ev (day)",
+        "CREATE INDEX ev_c ON ev (c)",
+        "CREATE INDEX ev_big ON ev (big)",
+    ] {
+        run(&mut s, sql);
+    }
+    for q in queries {
+        assert_eq!(ids(&mut s, q), ["7"], "indexed: {}", q);
+    }
+}

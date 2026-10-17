@@ -7,7 +7,7 @@ use super::super::expr::{
 };
 use super::super::operators::{
     AggregateFunction, AggregateInfo, AggregateOperator, HashJoinOperator,
-    IndexNestedLoopJoinOperator, JoinType as PhysicalJoinType, MergedColumnsOperator,
+    IndexNestedLoopJoinOperator, JoinType as PhysicalJoinType, KeyClass, MergedColumnsOperator,
     NestedLoopJoinOperator, PhysicalOperator, infer_aggregate_output_type, mark_merged,
 };
 use super::super::tuple::ColumnInfo;
@@ -300,6 +300,7 @@ impl PhysicalPlanner {
             let right_schema = right.schema().to_vec();
             if let Some((build_keys, probe_keys, residual)) =
                 extract_equi_join_keys(pred, &left_schema, &right_schema)
+                    .map(|keys| hashable_keys(keys, &left_schema, &right_schema))
                 && !build_keys.is_empty()
             {
                 // Hash the smaller input; ties keep the left one.
@@ -317,8 +318,8 @@ impl PhysicalPlanner {
         }
 
         // 3. Outer equi-joins use the hash join too. Limited to keys whose
-        // two sides hash alike (same type, or both numeric); other key pairs
-        // keep the plain nested loop.
+        // two sides hash alike (one key class); other key pairs keep the
+        // plain nested loop.
         if matches!(
             join_type,
             PhysicalJoinType::Left | PhysicalJoinType::Right | PhysicalJoinType::Full
@@ -647,40 +648,55 @@ fn qualify_using_keys(
     }
 }
 
+/// Equi-join keys with each pair of columns whose types hash differently
+/// (see [`KeyClass`]) moved into the residual predicate, where it is
+/// compared rather than hashed.
+fn hashable_keys(
+    (left_keys, right_keys, residual): (Vec<Expr>, Vec<Expr>, Option<Predicate>),
+    left_schema: &[ColumnInfo],
+    right_schema: &[ColumnInfo],
+) -> (Vec<Expr>, Vec<Expr>, Option<Predicate>) {
+    let mut keys = (Vec::new(), Vec::new());
+    let mut residual = residual;
+    for (l, r) in left_keys.into_iter().zip(right_keys) {
+        if key_classes(&l, left_schema, &r, right_schema).is_some_and(|(a, b)| a != b) {
+            let pair = Predicate::Compare(l, ComparisonOp::Equals, r);
+            residual = Some(match residual {
+                Some(rest) => Predicate::and(rest, pair),
+                None => pair,
+            });
+        } else {
+            keys.0.push(l);
+            keys.1.push(r);
+        }
+    }
+    (keys.0, keys.1, residual)
+}
+
 /// True when two join-key columns produce equal hash keys exactly when they
-/// compare equal: identical types, or two numeric types.
+/// compare equal: their types share a [`KeyClass`].
 fn keys_hash_alike(
     left: &Expr,
     left_schema: &[ColumnInfo],
     right: &Expr,
     right_schema: &[ColumnInfo],
 ) -> bool {
-    let column_type = |expr: &Expr, schema: &[ColumnInfo]| match expr {
-        Expr::Column { table, column } => {
-            resolve_outer_key(schema, table.as_deref(), column).map(|i| schema[i].data_type.clone())
-        }
+    key_classes(left, left_schema, right, right_schema).is_some_and(|(l, r)| l == r)
+}
+
+/// The key classes of two join keys, when both are columns of known type.
+fn key_classes(
+    left: &Expr,
+    left_schema: &[ColumnInfo],
+    right: &Expr,
+    right_schema: &[ColumnInfo],
+) -> Option<(KeyClass, KeyClass)> {
+    let class = |expr: &Expr, schema: &[ColumnInfo]| match expr {
+        Expr::Column { table, column } => resolve_outer_key(schema, table.as_deref(), column)
+            .map(|i| KeyClass::of_type(&schema[i].data_type)),
         _ => None,
     };
-    // Every numeric type shares one canonical hash key.
-    let is_numeric = |t: &DataType| {
-        matches!(
-            t,
-            DataType::SmallInt
-                | DataType::Int
-                | DataType::BigInt
-                | DataType::Real
-                | DataType::DoublePrecision
-                | DataType::Numeric { .. }
-                | DataType::Decimal { .. }
-        )
-    };
-    match (
-        column_type(left, left_schema),
-        column_type(right, right_schema),
-    ) {
-        (Some(l), Some(r)) => l == r || (is_numeric(&l) && is_numeric(&r)),
-        _ => false,
-    }
+    Some((class(left, left_schema)?, class(right, right_schema)?))
 }
 
 // ── HAVING aggregate rewriting ────────────────────────────────────────────────

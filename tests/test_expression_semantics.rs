@@ -306,3 +306,36 @@ fn in_subquery_matches_across_numeric_types_and_keeps_null_logic() {
     );
     assert!(try_run(&mut s, "SELECT id FROM a WHERE x IN (SELECT s FROM a)").is_err());
 }
+
+/// IN (subquery) and hash joins agree with `=` for values of different
+/// types: equal ones match even when their hash keys differ, and values
+/// with equal keys that `=` tells apart do not.
+#[test]
+fn hashed_equality_agrees_with_comparison_across_types() {
+    let (_ws, mut s) = session("crosstype");
+    for sql in [
+        "CREATE TABLE ev (id INT, day DATE, c CHAR(4), r REAL, big BIGINT)",
+        "INSERT INTO ev VALUES (1, '2024-01-01', 'ab', 0.1, 9007199254740993)",
+        "CREATE TABLE tx (t VARCHAR(12), vc VARCHAR(6), d DOUBLE PRECISION)",
+        "INSERT INTO tx VALUES ('2024-01-01', 'ab ', 0.1)",
+        "CREATE TABLE dd (d DOUBLE PRECISION)",
+        "INSERT INTO dd VALUES (9007199254740992.0)",
+    ] {
+        run(&mut s, sql);
+    }
+    let one = rows(&[&["1"]]);
+    let none = Vec::<Vec<String>>::new();
+    for (sql, want) in [
+        ("SELECT id FROM ev WHERE day IN (SELECT t FROM tx)", &one),
+        ("SELECT id FROM ev WHERE c IN (SELECT vc FROM tx)", &one),
+        ("SELECT id FROM ev WHERE big IN (SELECT d FROM dd)", &one),
+        // REAL 0.1 widened to DOUBLE is not DOUBLE 0.1.
+        ("SELECT id FROM ev WHERE r IN (SELECT d FROM tx)", &none),
+        ("SELECT id FROM ev WHERE r = (SELECT d FROM tx)", &none),
+        ("SELECT ev.id FROM ev JOIN tx ON ev.r = tx.d", &none),
+        ("SELECT ev.id FROM ev JOIN dd ON ev.big = dd.d", &one),
+        ("SELECT ev.id FROM ev JOIN tx ON ev.c = tx.vc", &one),
+    ] {
+        assert_eq!(&run(&mut s, sql), want, "{}", sql);
+    }
+}
