@@ -51,7 +51,9 @@ use common::load_catalog;
 
 use rook_parser::parse_set_clause;
 use storage_manager::backend::error::RookResult;
-use storage_manager::backend::executor::physical::expr::{Expr, Predicate, evaluate_predicate};
+use storage_manager::backend::executor::physical::expr::{
+    Expr, InList, Predicate, evaluate_predicate,
+};
 use storage_manager::backend::executor::physical::operators::{
     AggregateFunction, AggregateInfo, HashJoinOperator, PerGroupState, PhysicalOperator,
 };
@@ -225,7 +227,7 @@ fn b_in_positive_with_null_in_list_is_unknown() {
             table: None,
             column: "x".into(),
         },
-        vec![Some(DataValue::Int(1)), None],
+        std::rc::Rc::new(InList::new(vec![Some(DataValue::Int(1)), None])),
         false,
     );
     let r = evaluate_predicate(&pred, &tuple, &schema).unwrap();
@@ -246,7 +248,7 @@ fn control_b_not_in_with_null_in_list_is_unknown() {
             table: None,
             column: "x".into(),
         },
-        vec![Some(DataValue::Int(1)), None],
+        std::rc::Rc::new(InList::new(vec![Some(DataValue::Int(1)), None])),
         true,
     );
     let r = evaluate_predicate(&pred, &tuple, &schema).unwrap();

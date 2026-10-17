@@ -261,3 +261,48 @@ fn limit_offset_forms() {
     assert!(try_run(&mut s, "SELECT id FROM a LIMIT -1").is_err());
     assert!(try_run(&mut s, "SELECT id FROM a LIMIT 1 + 1").is_err());
 }
+
+#[test]
+fn in_subquery_matches_across_numeric_types_and_keeps_null_logic() {
+    let (_ws, mut s) = session("inlist");
+    run(&mut s, "CREATE TABLE n (big BIGINT, d DOUBLE PRECISION)");
+    run(&mut s, "INSERT INTO n VALUES (5, 0.0), (NULL, NULL)");
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT id FROM a WHERE x IN (SELECT big FROM n) ORDER BY id"
+        ),
+        rows(&[&["2"]])
+    );
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT id FROM a WHERE x IN (SELECT d FROM n) ORDER BY id"
+        ),
+        rows(&[&["3"]])
+    );
+    // The NULL in the list makes every non-member UNKNOWN.
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT id FROM a WHERE x NOT IN (SELECT big FROM n)"
+        ),
+        Vec::<Vec<String>>::new()
+    );
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT id FROM a WHERE x NOT IN (SELECT big FROM n WHERE big IS NOT NULL) \
+             ORDER BY id"
+        ),
+        rows(&[&["3"]])
+    );
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT id FROM a WHERE x NOT IN (SELECT big FROM n WHERE big > 100) ORDER BY id"
+        ),
+        rows(&[&["1"], &["2"], &["3"]])
+    );
+    assert!(try_run(&mut s, "SELECT id FROM a WHERE x IN (SELECT s FROM a)").is_err());
+}

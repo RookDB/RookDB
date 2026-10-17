@@ -13,7 +13,7 @@ pub mod tests;
 
 pub use convert::{expr_from_ast, predicate_from_ast};
 use functions::evaluate_scalar_function;
-pub use predicate::{BooleanTest, ComparisonOp, Predicate, evaluate_predicate};
+pub use predicate::{BooleanTest, ComparisonOp, InList, Predicate, evaluate_predicate};
 
 use std::cell::RefCell;
 use std::rc::Rc;

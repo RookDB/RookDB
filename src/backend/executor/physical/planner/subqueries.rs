@@ -11,7 +11,7 @@ use super::super::expr::correlated::{
     CorrelatedSubquery, OuterBinding, SubqueryUse, Visitor, outer_placeholder, ref_key,
     rewrite_pred, rewrite_select,
 };
-use super::super::expr::predicate::SubqueryKind;
+use super::super::expr::predicate::{InList, SubqueryKind};
 use super::super::expr::{
     ComparisonOp, Expr, Predicate, expr_from_ast, predicate_from_ast, resolve_column,
 };
@@ -92,7 +92,11 @@ impl PhysicalPlanner {
                 } else {
                     let lhs_expr = expr_from_ast(expr, column_names)?;
                     let values = self.materialize_in_subquery(subquery.select.as_ref())?;
-                    Ok(Predicate::InSubqueryResult(lhs_expr, values, *negated))
+                    Ok(Predicate::InSubqueryResult(
+                        lhs_expr,
+                        Rc::new(InList::new(values)),
+                        *negated,
+                    ))
                 }
             }
             // Compare nodes — handle correlated scalar subqueries if present

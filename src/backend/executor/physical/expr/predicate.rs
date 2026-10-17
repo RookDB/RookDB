@@ -6,12 +6,13 @@
 use crate::backend::error::{ResultContext, RookResult};
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::types::comparison::compare_nullable;
 use crate::types::value::DataValue;
 
-use super::super::operators::PhysicalOperator;
+use super::super::operators::{PhysicalOperator, canonical_key};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::Expr;
 
@@ -50,6 +51,61 @@ pub enum SubqueryKind {
     },
 }
 
+/// The materialized values of an uncorrelated `IN (subquery)`, hashed so a
+/// lookup costs O(1) rather than a pass over every value.
+#[derive(Debug)]
+pub struct InList {
+    /// Each non-NULL value as [`canonical_key`], so values that compare
+    /// equal across types (INT 1, BIGINT 1, 1.0) are one key.
+    keys: HashSet<DataValue>,
+    /// One value of each type in the list. A value no key matches is still
+    /// compared with these, so an incomparable left-hand side is an error
+    /// whether or not it is in the list.
+    samples: Vec<DataValue>,
+    has_null: bool,
+}
+
+impl InList {
+    pub fn new(values: Vec<Option<DataValue>>) -> Self {
+        let mut keys = HashSet::with_capacity(values.len());
+        let mut samples: Vec<DataValue> = Vec::new();
+        let mut has_null = false;
+        for value in values {
+            let Some(value) = value else {
+                has_null = true;
+                continue;
+            };
+            if !samples
+                .iter()
+                .any(|s| std::mem::discriminant(s) == std::mem::discriminant(&value))
+            {
+                samples.push(value.clone());
+            }
+            keys.insert(canonical_key(value));
+        }
+        Self {
+            keys,
+            samples,
+            has_null,
+        }
+    }
+
+    /// `lhs [NOT] IN (list)` under three-valued logic.
+    fn contains(&self, lhs: Option<&DataValue>, negated: bool) -> RookResult<Option<bool>> {
+        let Some(lhs) = lhs else {
+            let empty = self.keys.is_empty() && !self.has_null;
+            return Ok(empty.then_some(negated));
+        };
+        if self.keys.contains(&canonical_key(lhs.clone())) {
+            return Ok(Some(!negated));
+        }
+        for sample in &self.samples {
+            compare_nullable(Some(sample), Some(lhs))?;
+        }
+        Ok(if self.has_null { None } else { Some(negated) })
+    }
+}
+
 /// A predicate that can be evaluated against a deserialised tuple.
 #[derive(Clone, Debug)]
 pub enum Predicate {
@@ -69,7 +125,7 @@ pub enum Predicate {
     /// Pre-materialized IN (subquery) result.
     /// Contains the left-hand expression, the materialized set of values,
     /// and a negation flag (`NOT IN`).
-    InSubqueryResult(Expr, Vec<Option<DataValue>>, bool),
+    InSubqueryResult(Expr, Rc<InList>, bool),
     /// Per-row correlated EXISTS subquery execution.
     ///
     /// For each outer row, sets each `param` to the value at the corresponding
@@ -263,13 +319,9 @@ pub fn evaluate_predicate(
 
         Predicate::ExistsResult(exists) => Ok(Some(*exists)),
 
-        Predicate::InSubqueryResult(expr, values, negated) => {
+        Predicate::InSubqueryResult(expr, list, negated) => {
             let val = expr.evaluate_ref(tuple, schema)?;
-            in_result(
-                val.as_deref(),
-                values.iter().map(|v| Ok(v.as_ref())),
-                *negated,
-            )
+            list.contains(val.as_deref(), *negated)
         }
 
         Predicate::CorrelatedExists {
