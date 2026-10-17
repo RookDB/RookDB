@@ -36,10 +36,12 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+mod bulk;
 mod codec;
 mod node;
 mod order;
 
+pub use bulk::BulkLoad;
 pub(crate) use codec::root_sidecar_path;
 pub(crate) use codec::{
     BTREE_PAGE_SIZE, decode_key, encode_key, encode_key_multi, read_root_sidecar,
@@ -109,6 +111,24 @@ fn check_node_fits(node: &BTreeNode) -> RookResult<()> {
     }
     Ok(())
 }
+
+/// Encode lookup/insert keys in the format a tree of `arity` key columns
+/// stores: bare `[len][bytes]` for single-column trees (legacy on-disk
+/// compatibility), or the framed composite envelope otherwise.
+fn encode_key_for(arity: usize, keys: &[DataValue]) -> RookResult<Vec<u8>> {
+    if arity == 1 {
+        if keys.len() != 1 {
+            return Err(RookError::io(
+                io::ErrorKind::InvalidInput,
+                "single-column index takes exactly one key value",
+            ));
+        }
+        Ok(encode_key(&keys[0]))
+    } else {
+        encode_key_multi(keys)
+    }
+}
+
 // ─── BTree ───────────────────────────────────────────────────────────────────
 
 /// A page-based B+ Tree index stored in a `.idx` file.
@@ -292,21 +312,8 @@ impl BTree {
 
     // ─── Composite Key Comparison Helpers ──────────────────────────────────
 
-    /// Encode lookup/insert keys in the format this tree stores:
-    /// bare `[len][bytes]` for single-column trees (legacy on-disk
-    /// compatibility), or the framed composite envelope otherwise.
     fn encode_key_for(&self, keys: &[DataValue]) -> RookResult<Vec<u8>> {
-        if self.key_types.len() == 1 {
-            if keys.len() != 1 {
-                return Err(RookError::io(
-                    io::ErrorKind::InvalidInput,
-                    "single-column index takes exactly one key value",
-                ));
-            }
-            Ok(encode_key(&keys[0]))
-        } else {
-            encode_key_multi(keys)
-        }
+        encode_key_for(self.key_types.len(), keys)
     }
 
     /// Scan all entries in the B+ Tree by traversing the leaf linked list.

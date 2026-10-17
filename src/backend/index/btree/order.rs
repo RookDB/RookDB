@@ -209,7 +209,7 @@ impl<'a> KeyOrder<'a> {
     }
 
     /// Key width in bytes when this is a single-column integer index.
-    fn int_key_width(&self) -> Option<usize> {
+    pub(crate) fn int_key_width(&self) -> Option<usize> {
         match self.key_types {
             [DataType::SmallInt] => Some(2),
             [DataType::Int] => Some(4),

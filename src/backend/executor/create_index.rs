@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::backend::error::{RookError, RookResult};
-use crate::backend::index::btree::BTree;
+use crate::backend::index::btree::{BTree, BulkLoad};
 use crate::catalog::Catalog;
 use crate::catalog::types::Column;
 use crate::types::DataType;
@@ -323,8 +323,11 @@ pub fn create_index_with_flags(
     let mut btree = BTree::create_composite(idx_path.clone(), key_types.clone())
         .map_err(|e| RookError::storage("Failed to create index file", e))?;
 
-    // 7. Scan all tuples and insert into the B+ Tree
-    let mut inserted_count = 0usize;
+    // 7. Gather every row's key, then build the tree bottom-up from them
+    let mut load = BulkLoad::new(key_types.len());
+    let decoder = crate::types::RowDecoder::new(&schema_types).only(indexed_idxs.iter().copied());
+    let mut values = Vec::with_capacity(schema_types.len());
+    let mut key_values: Vec<DataValue> = Vec::with_capacity(indexed_idxs.len());
     let scan_iter = heap_manager.scan();
     for result in scan_iter {
         let (page_id, slot_id, raw_bytes) = match result {
@@ -333,17 +336,19 @@ pub fn create_index_with_flags(
         };
 
         // Deserialize the tuple
-        let values = crate::types::deserialize_nullable_row(&schema_types, &raw_bytes)
+        decoder
+            .decode_into(&raw_bytes, &mut values)
             .map_err(|e| e.with_context("Failed to deserialize tuple"))?;
 
         // Assemble the key from every indexed column; skip rows where ANY
         // component is NULL (NULLs are not indexed).
-        let mut key_values: Vec<DataValue> = Vec::with_capacity(indexed_idxs.len());
+        key_values.clear();
         let mut has_null = false;
         for &ci in &indexed_idxs {
-            match values.get(ci) {
-                Some(Some(dv)) => key_values.push(dv.clone()),
-                _ => {
+            // The row buffer is decoded afresh next row: move the value out.
+            match values.get_mut(ci).and_then(Option::take) {
+                Some(dv) => key_values.push(dv),
+                None => {
                     has_null = true;
                     break;
                 }
@@ -353,8 +358,8 @@ pub fn create_index_with_flags(
             continue;
         }
 
-        // Insert into the B+ Tree: key=column values, value=(page_id, slot_id)
-        if let Err(e) = btree.insert_keys(&key_values, page_id, slot_id) {
+        // key=column values, value=(page_id, slot_id)
+        if let Err(e) = load.push(&key_values, page_id, slot_id) {
             return Err(RookError::storage(
                 format!(
                     "Failed to insert into index at (page={}, slot={})",
@@ -363,9 +368,10 @@ pub fn create_index_with_flags(
                 e,
             ));
         }
-
-        inserted_count += 1;
     }
+    let inserted_count = btree
+        .bulk_load(load)
+        .map_err(|e| RookError::storage("Failed to build index", e))?;
 
     // 8. Sync the index to disk
     btree
