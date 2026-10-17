@@ -145,7 +145,10 @@ impl Optimizer {
             }
             LogicalPlan::Aggregate(a) => {
                 let child = self.constant_folding(*a.child);
-                let group_by = a.group_by.into_iter().map(|e| fold_expr(&e)).collect();
+                // GROUP BY keys stay as written: the projection above reads a
+                // computed key by a name derived from its expression
+                // (`group_key_name`), which folding would change.
+                let group_by = a.group_by;
                 let aggregates = a
                     .aggregates
                     .into_iter()

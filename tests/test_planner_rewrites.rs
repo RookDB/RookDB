@@ -93,3 +93,34 @@ fn scalar_subquery_in_where_stays_above_a_join() {
         vec![vec![Some(1)]]
     );
 }
+
+/// A computed GROUP BY key with a constant part (`-3` parses as `0 - 3`) is
+/// read by the projection above under the key's own name, which constant
+/// folding must not change.
+#[test]
+fn group_by_expression_with_a_constant_part() {
+    let (_ws, mut s) = session("group_const");
+    assert_eq!(
+        sorted(run(
+            &mut s,
+            "SELECT -3 - id, COUNT(*) FROM q GROUP BY -3 - id"
+        )),
+        vec![
+            vec![Some(-8), Some(1)],
+            vec![Some(-6), Some(1)],
+            vec![Some(-5), Some(1)],
+            vec![Some(-4), Some(1)]
+        ]
+    );
+    assert_eq!(
+        run(&mut s, "SELECT 3 + 12, COUNT(*) FROM q GROUP BY 3 + 12"),
+        vec![vec![Some(15), Some(4)]]
+    );
+    assert_eq!(
+        sorted(run(
+            &mut s,
+            "SELECT b * (1 + 1), COUNT(*) FROM q GROUP BY b * (1 + 1) HAVING COUNT(*) > 1",
+        )),
+        vec![vec![Some(14), Some(2)]]
+    );
+}
