@@ -21,6 +21,7 @@ pub struct FSMMetrics {
 /// Global counters for Heap operations
 pub struct HeapMetrics {
     pub insert_tuple_calls: AtomicUsize,
+    pub delete_tuple_calls: AtomicUsize,
     pub get_tuple_calls: AtomicUsize,
     pub allocate_page_calls: AtomicUsize,
     pub write_page_calls: AtomicUsize,
@@ -41,6 +42,7 @@ pub static FSM_METRICS: FSMMetrics = FSMMetrics {
 
 pub static HEAP_METRICS: HeapMetrics = HeapMetrics {
     insert_tuple_calls: AtomicUsize::new(0),
+    delete_tuple_calls: AtomicUsize::new(0),
     get_tuple_calls: AtomicUsize::new(0),
     allocate_page_calls: AtomicUsize::new(0),
     write_page_calls: AtomicUsize::new(0),
@@ -60,6 +62,7 @@ pub struct StatsSnapshot {
     pub fsm_set_avail: usize,
     pub fsm_vacuum_update: usize,
     pub heap_insert_tuple: usize,
+    pub heap_delete_tuple: usize,
     pub heap_get_tuple: usize,
     pub heap_allocate_page: usize,
     pub heap_write_page: usize,
@@ -82,6 +85,7 @@ impl StatsSnapshot {
             fsm_set_avail: FSM_METRICS.fsm_set_avail_calls.load(Ordering::Relaxed),
             fsm_vacuum_update: FSM_METRICS.fsm_vacuum_update_calls.load(Ordering::Relaxed),
             heap_insert_tuple: HEAP_METRICS.insert_tuple_calls.load(Ordering::Relaxed),
+            heap_delete_tuple: HEAP_METRICS.delete_tuple_calls.load(Ordering::Relaxed),
             heap_get_tuple: HEAP_METRICS.get_tuple_calls.load(Ordering::Relaxed),
             heap_allocate_page: HEAP_METRICS.allocate_page_calls.load(Ordering::Relaxed),
             heap_write_page: HEAP_METRICS.write_page_calls.load(Ordering::Relaxed),
@@ -111,6 +115,7 @@ impl StatsSnapshot {
             .fsm_vacuum_update_calls
             .store(0, Ordering::Relaxed);
         HEAP_METRICS.insert_tuple_calls.store(0, Ordering::Relaxed);
+        HEAP_METRICS.delete_tuple_calls.store(0, Ordering::Relaxed);
         HEAP_METRICS.get_tuple_calls.store(0, Ordering::Relaxed);
         HEAP_METRICS.allocate_page_calls.store(0, Ordering::Relaxed);
         HEAP_METRICS.write_page_calls.store(0, Ordering::Relaxed);
@@ -163,6 +168,10 @@ impl StatsSnapshot {
         println!(
             "║  - insert_tuple:         {:8} calls                      ║",
             self.heap_insert_tuple
+        );
+        println!(
+            "║  - delete_tuple:         {:8} calls                      ║",
+            self.heap_delete_tuple
         );
         println!(
             "║  - get_tuple:            {:8} calls                      ║",

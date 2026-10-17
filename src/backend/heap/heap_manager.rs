@@ -618,7 +618,7 @@ impl HeapManager {
     pub fn delete_tuple(&mut self, page_id: u32, slot_id: u32) -> RookResult<u32> {
         use crate::backend::instrumentation::HEAP_METRICS;
         HEAP_METRICS
-            .insert_tuple_calls
+            .delete_tuple_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Validate page_id
