@@ -429,7 +429,7 @@ fn e_sum_overflow_must_not_silently_saturate() {
     };
     assert_eq!(
         st.finalize(&sum_info(numeric)).unwrap(),
-        Some(DataValue::Numeric(NumericValue {
+        Some(DataValue::numeric(NumericValue {
             unscaled: i64::MAX as i128 + 10,
             scale: 0
         })),
@@ -448,7 +448,7 @@ fn e_sum_numeric_stays_exact() {
     let mut st = PerGroupState::new();
     st.update(
         AggregateFunction::Sum,
-        Some(&DataValue::Numeric(NumericValue {
+        Some(&DataValue::numeric(NumericValue {
             unscaled: 10,
             scale: 2,
         })),
@@ -457,7 +457,7 @@ fn e_sum_numeric_stays_exact() {
     .unwrap();
     st.update(
         AggregateFunction::Sum,
-        Some(&DataValue::Numeric(NumericValue {
+        Some(&DataValue::numeric(NumericValue {
             unscaled: 20,
             scale: 2,
         })),
@@ -472,7 +472,7 @@ fn e_sum_numeric_stays_exact() {
         .unwrap();
     assert_eq!(
         out,
-        Some(DataValue::Numeric(NumericValue {
+        Some(DataValue::numeric(NumericValue {
             unscaled: 30,
             scale: 2
         })),

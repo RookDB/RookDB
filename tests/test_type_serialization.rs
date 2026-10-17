@@ -30,7 +30,7 @@ fn roundtrip_serialization_for_all_datatypes() {
         (
             numeric_ty.clone(),
             "12345.67",
-            DataValue::Numeric(NumericValue {
+            DataValue::numeric(NumericValue {
                 unscaled: 1234567,
                 scale: 2,
             }),
@@ -38,7 +38,7 @@ fn roundtrip_serialization_for_all_datatypes() {
         (
             decimal_ty.clone(),
             "-12.340",
-            DataValue::Numeric(NumericValue {
+            DataValue::numeric(NumericValue {
                 unscaled: -12340,
                 scale: 3,
             }),

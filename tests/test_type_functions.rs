@@ -35,20 +35,20 @@ fn numeric_functions_work_for_real_double_and_numeric() {
         DataValue::DoublePrecision(OrderedF64(3.142))
     );
 
-    let numeric = DataValue::Numeric(NumericValue {
+    let numeric = DataValue::numeric(NumericValue {
         unscaled: -12345,
         scale: 2,
     });
     assert_eq!(
         floor(&numeric).unwrap(),
-        DataValue::Numeric(NumericValue {
+        DataValue::numeric(NumericValue {
             unscaled: -124,
             scale: 0,
         })
     );
     assert_eq!(
         ceiling(&numeric).unwrap(),
-        DataValue::Numeric(NumericValue {
+        DataValue::numeric(NumericValue {
             unscaled: -123,
             scale: 0,
         })
@@ -135,7 +135,7 @@ fn assignment_rounds_fractions_into_integer_columns() {
 fn integer_casts_truncate_and_check_each_width() {
     let double = |v: f64| DataValue::DoublePrecision(OrderedF64(v));
     let real = |v: f32| DataValue::Real(OrderedF32(v));
-    let numeric = |unscaled: i128, scale: u8| DataValue::Numeric(NumericValue { unscaled, scale });
+    let numeric = |unscaled: i128, scale: u8| DataValue::numeric(NumericValue { unscaled, scale });
     // (target, smallest, largest) for each integer width.
     let widths: [(DataType, i128, i128); 3] = [
         (DataType::SmallInt, i16::MIN as i128, i16::MAX as i128),

@@ -16,11 +16,11 @@ fn numeric_and_integer_comparisons_work() {
         Ordering::Equal
     );
     assert_eq!(
-        DataValue::Numeric(NumericValue {
+        DataValue::numeric(NumericValue {
             unscaled: 1234,
             scale: 2,
         })
-        .compare(&DataValue::Numeric(NumericValue {
+        .compare(&DataValue::numeric(NumericValue {
             unscaled: 12340,
             scale: 3,
         }))

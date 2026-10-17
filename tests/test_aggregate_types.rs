@@ -44,7 +44,7 @@ fn session(tag: &str) -> (common::TestWorkspace, Session) {
 }
 
 fn numeric(unscaled: i128, scale: u8) -> Option<DataValue> {
-    Some(DataValue::Numeric(NumericValue { unscaled, scale }))
+    Some(DataValue::numeric(NumericValue { unscaled, scale }))
 }
 
 /// Whether `value` is of the variant a column declared `declared` holds.

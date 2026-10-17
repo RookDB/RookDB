@@ -414,7 +414,7 @@ fn control_b_round_int_negative_places() {
 #[test]
 fn c_numeric_index_key_roundtrip_via_codec_primitives() {
     // What the index stores (encode_key → to_bytes):
-    let key = DataValue::Numeric(NumericValue {
+    let key = DataValue::numeric(NumericValue {
         unscaled: 550,
         scale: 2,
     });

@@ -68,14 +68,14 @@ fn mixed_typed_row_roundtrip_covers_all_datatypes() {
     );
     assert_eq!(
         values[5],
-        Some(DataValue::Numeric(NumericValue {
+        Some(DataValue::numeric(NumericValue {
             unscaled: 123456,
             scale: 2,
         }))
     );
     assert_eq!(
         values[6],
-        Some(DataValue::Numeric(NumericValue {
+        Some(DataValue::numeric(NumericValue {
             unscaled: 12340,
             scale: 3,
         }))

@@ -1026,7 +1026,7 @@ fn decode_value(tag: u8, r: &mut impl std::io::Read) -> RookResult<DataValue> {
         TAG_NUMERIC => {
             let unscaled = i128::from_le_bytes(read_array(r)?);
             let [scale] = read_array(r)?;
-            DataValue::Numeric(NumericValue { unscaled, scale })
+            DataValue::Numeric(Box::new(NumericValue { unscaled, scale }))
         }
         TAG_BOOL => {
             let [v] = read_array(r)?;
@@ -2482,10 +2482,10 @@ mod spill_tests {
         let payload = |i: i32| match i % 5 {
             0 => DataValue::BigInt(i64::MAX - i as i64),
             1 => DataValue::Varchar(format!("text-{}", i)),
-            2 => DataValue::Numeric(NumericValue {
+            2 => DataValue::Numeric(Box::new(NumericValue {
                 unscaled: 123_456_789_012_345_678_901_234_567 + i as i128,
                 scale: 9,
-            }),
+            })),
             3 => DataValue::Char("ab  ".to_string()),
             _ => DataValue::SmallInt(i as i16),
         };
@@ -2531,10 +2531,10 @@ mod spill_tests {
             Some(DataValue::BigInt(i64::MAX)),
             Some(DataValue::Real(OrderedF32(-0.5))),
             Some(DataValue::DoublePrecision(OrderedF64(f64::MAX))),
-            Some(DataValue::Numeric(NumericValue {
+            Some(DataValue::Numeric(Box::new(NumericValue {
                 unscaled: i128::MIN + 1,
                 scale: 30,
-            })),
+            }))),
             Some(DataValue::Bool(true)),
             Some(DataValue::Char("pad  ".to_string())),
             Some(DataValue::Varchar("naïve ✓".to_string())),

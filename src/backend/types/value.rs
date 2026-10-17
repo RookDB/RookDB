@@ -134,8 +134,9 @@ pub enum DataValue {
     Real(OrderedF32),
     /// Double-precision float wrapped in [`OrderedF64`] to satisfy `Eq`.
     DoublePrecision(OrderedF64),
-    /// Exact decimal; see [`NumericValue`] for the encoding contract.
-    Numeric(NumericValue),
+    /// Exact decimal; see [`NumericValue`] for the encoding contract. Boxed:
+    /// its `i128` would otherwise make every value 48 bytes instead of 32.
+    Numeric(Box<NumericValue>),
     Bool(bool),
     /// Fixed-length character string (may be shorter than declared width;
     /// space-padding is applied during encoding).
@@ -152,7 +153,16 @@ pub enum DataValue {
     Timestamp(NaiveDateTime),
 }
 
+// Values are copied through every operator; keep them at 32 bytes.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<DataValue>() == 32);
+
 impl DataValue {
+    /// A NUMERIC value.
+    pub fn numeric(value: NumericValue) -> Self {
+        DataValue::Numeric(Box::new(value))
+    }
+
     /// Return the corresponding `DataType` for this value.
     pub fn data_type(&self) -> crate::types::datatype::DataType {
         use crate::types::datatype::DataType;
@@ -474,25 +484,25 @@ impl DataValue {
                 if bytes.len() == 17 && bytes.len() != expected {
                     let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                     let scale_byte = bytes[16];
-                    Ok(DataValue::Numeric(NumericValue {
+                    Ok(DataValue::Numeric(Box::new(NumericValue {
                         unscaled,
                         scale: scale_byte,
-                    }))
+                    })))
                 } else if bytes.len() == 17 && expected == 17 {
                     match decode_numeric_bcd(bytes, *precision, *scale) {
-                        Ok(decoded) => Ok(DataValue::Numeric(decoded)),
+                        Ok(decoded) => Ok(DataValue::Numeric(Box::new(decoded))),
                         Err(_) => {
                             let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                             let scale_byte = bytes[16];
-                            Ok(DataValue::Numeric(NumericValue {
+                            Ok(DataValue::Numeric(Box::new(NumericValue {
                                 unscaled,
                                 scale: scale_byte,
-                            }))
+                            })))
                         }
                     }
                 } else {
                     let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
-                    Ok(DataValue::Numeric(decoded))
+                    Ok(DataValue::Numeric(Box::new(decoded)))
                 }
             }
             DataType::Decimal { precision, scale } => {
@@ -500,25 +510,25 @@ impl DataValue {
                 if bytes.len() == 17 && bytes.len() != expected {
                     let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                     let scale_byte = bytes[16];
-                    Ok(DataValue::Numeric(NumericValue {
+                    Ok(DataValue::Numeric(Box::new(NumericValue {
                         unscaled,
                         scale: scale_byte,
-                    }))
+                    })))
                 } else if bytes.len() == 17 && expected == 17 {
                     match decode_numeric_bcd(bytes, *precision, *scale) {
-                        Ok(decoded) => Ok(DataValue::Numeric(decoded)),
+                        Ok(decoded) => Ok(DataValue::Numeric(Box::new(decoded))),
                         Err(_) => {
                             let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                             let scale_byte = bytes[16];
-                            Ok(DataValue::Numeric(NumericValue {
+                            Ok(DataValue::Numeric(Box::new(NumericValue {
                                 unscaled,
                                 scale: scale_byte,
-                            }))
+                            })))
                         }
                     }
                 } else {
                     let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
-                    Ok(DataValue::Numeric(decoded))
+                    Ok(DataValue::Numeric(Box::new(decoded)))
                 }
             }
             DataType::Bool => {
@@ -828,10 +838,10 @@ impl DataValue {
             DataType::Char(_) | DataType::Character(_) => DataValue::Char(String::new()),
             DataType::Bool => DataValue::Bool(false),
             DataType::Numeric { .. } | DataType::Decimal { .. } => {
-                DataValue::Numeric(NumericValue {
+                DataValue::Numeric(Box::new(NumericValue {
                     unscaled: i128::MIN,
                     scale: 0,
-                })
+                }))
             }
             DataType::Bit(_) => DataValue::Bit("0".to_string()),
         }
@@ -862,10 +872,10 @@ impl DataValue {
             DataType::Char(_) | DataType::Character(_) => DataValue::Char("\u{10FFFF}".to_string()),
             DataType::Bool => DataValue::Bool(true),
             DataType::Numeric { .. } | DataType::Decimal { .. } => {
-                DataValue::Numeric(NumericValue {
+                DataValue::Numeric(Box::new(NumericValue {
                     unscaled: i128::MAX,
                     scale: 0,
-                })
+                }))
             }
             DataType::Bit(_) => DataValue::Bit("1".to_string()),
         }
@@ -884,10 +894,10 @@ impl DataValue {
                 Some(DataValue::DoublePrecision(OrderedF64(v.0.next_up())))
             }
             DataValue::Numeric(v) => v.unscaled.checked_add(1).map(|unscaled| {
-                DataValue::Numeric(NumericValue {
+                DataValue::Numeric(Box::new(NumericValue {
                     unscaled,
                     scale: v.scale,
-                })
+                }))
             }),
             DataValue::Date(v) => v.succ_opt().map(DataValue::Date),
             _ => None,
@@ -907,10 +917,10 @@ impl DataValue {
                 Some(DataValue::DoublePrecision(OrderedF64(v.0.next_down())))
             }
             DataValue::Numeric(v) => v.unscaled.checked_sub(1).map(|unscaled| {
-                DataValue::Numeric(NumericValue {
+                DataValue::Numeric(Box::new(NumericValue {
                     unscaled,
                     scale: v.scale,
-                })
+                }))
             }),
             DataValue::Date(v) => v.pred_opt().map(DataValue::Date),
             _ => None,

@@ -1143,7 +1143,7 @@ pub fn parse_string_to_value(ty: &DataType, input: &str) -> RookResult<DataValue
         }
         DataType::Numeric { precision, scale } | DataType::Decimal { precision, scale } => {
             crate::types::value::parse_numeric_literal(input, *precision, *scale)
-                .map(DataValue::Numeric)
+                .map(DataValue::numeric)
         }
     }
 }

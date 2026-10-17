@@ -27,7 +27,7 @@ pub fn normalise_value_for_key(val: &DataValue) -> String {
 /// equals the TIMESTAMP at its midnight; CHAR padding is ignored.
 pub fn canonical_key(dv: DataValue) -> DataValue {
     let integer = |v: i128| {
-        DataValue::Numeric(NumericValue {
+        DataValue::numeric(NumericValue {
             unscaled: v,
             scale: 0,
         })
@@ -36,7 +36,7 @@ pub fn canonical_key(dv: DataValue) -> DataValue {
         DataValue::SmallInt(v) => integer(v as i128),
         DataValue::Int(v) => integer(v as i128),
         DataValue::BigInt(v) => integer(v as i128),
-        DataValue::Numeric(num) => DataValue::Numeric(normalize_numeric(num)),
+        DataValue::Numeric(num) => DataValue::numeric(normalize_numeric(*num)),
         DataValue::Real(v) => float_key(v.0 as f64, &v.0.to_string()),
         DataValue::DoublePrecision(v) => float_key(v.0, &v.0.to_string()),
         DataValue::Date(d) => match d.and_hms_opt(0, 0, 0) {
@@ -78,7 +78,7 @@ fn float_key(value: f64, shortest: &str) -> DataValue {
         return fallback;
     }
     match format!("{whole}{frac}").parse::<i128>() {
-        Ok(unscaled) => DataValue::Numeric(normalize_numeric(NumericValue {
+        Ok(unscaled) => DataValue::numeric(normalize_numeric(NumericValue {
             unscaled: if negative { -unscaled } else { unscaled },
             scale: frac.len() as u8,
         })),

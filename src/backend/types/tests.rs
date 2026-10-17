@@ -323,10 +323,10 @@ fn roundtrip_numeric() {
     assert_eq!(encoded.len(), 6);
     assert_eq!(
         DataValue::from_bytes(&ty, &encoded).unwrap(),
-        DataValue::Numeric(NumericValue {
+        DataValue::Numeric(Box::new(NumericValue {
             unscaled: -1234567,
             scale: 2,
-        })
+        }))
     );
 }
 
@@ -340,10 +340,10 @@ fn roundtrip_decimal() {
     assert_eq!(encoded.len(), 6);
     assert_eq!(
         DataValue::from_bytes(&ty, &encoded).unwrap(),
-        DataValue::Numeric(NumericValue {
+        DataValue::Numeric(Box::new(NumericValue {
             unscaled: 12_340,
             scale: 2,
-        })
+        }))
     );
 }
 
@@ -357,14 +357,14 @@ fn validate_numeric_values() {
 
 #[test]
 fn compare_numeric_exact_values() {
-    let a = DataValue::Numeric(NumericValue {
+    let a = DataValue::Numeric(Box::new(NumericValue {
         unscaled: 12345,
         scale: 2,
-    });
-    let b = DataValue::Numeric(NumericValue {
+    }));
+    let b = DataValue::Numeric(Box::new(NumericValue {
         unscaled: 12346,
         scale: 2,
-    });
+    }));
     assert_eq!(a.compare(&b).unwrap(), std::cmp::Ordering::Less);
 }
 
@@ -814,23 +814,23 @@ fn fn_abs_round_floor_ceiling() {
     let r = round(&DataValue::DoublePrecision(OrderedF64(3.14159)), 2).unwrap();
     assert_eq!(r, DataValue::DoublePrecision(OrderedF64(3.14)));
 
-    let n = DataValue::Numeric(NumericValue {
+    let n = DataValue::Numeric(Box::new(NumericValue {
         unscaled: -12345,
         scale: 2,
-    });
+    }));
     assert_eq!(
         floor(&n).unwrap(),
-        DataValue::Numeric(NumericValue {
+        DataValue::Numeric(Box::new(NumericValue {
             unscaled: -124,
             scale: 0
-        })
+        }))
     );
     assert_eq!(
         ceiling(&n).unwrap(),
-        DataValue::Numeric(NumericValue {
+        DataValue::Numeric(Box::new(NumericValue {
             unscaled: -123,
             scale: 0
-        })
+        }))
     );
 }
 

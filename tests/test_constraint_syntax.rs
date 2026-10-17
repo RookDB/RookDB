@@ -142,7 +142,7 @@ fn big_defaults_keep_every_digit() {
     let expected =
         storage_manager::types::value::parse_numeric_literal("123456789012345.1234567891", 30, 10)
             .unwrap();
-    assert_eq!(row[2], Some(DataValue::Numeric(expected)));
+    assert_eq!(row[2], Some(DataValue::numeric(expected)));
 }
 
 #[test]

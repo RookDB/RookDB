@@ -139,15 +139,15 @@ fn try_select(
 fn t1_cross_scale_numeric_compare_must_not_panic() {
     // Minimal reproducer: the exact sentinel/value pair the index-scan
     // range path produces for NUMERIC(p, s>0).
-    let sentinel_max = DataValue::Numeric(NumericValue {
+    let sentinel_max = DataValue::numeric(NumericValue {
         unscaled: i128::MAX,
         scale: 0,
     });
-    let sentinel_min = DataValue::Numeric(NumericValue {
+    let sentinel_min = DataValue::numeric(NumericValue {
         unscaled: i128::MIN,
         scale: 0,
     });
-    let stored = DataValue::Numeric(NumericValue {
+    let stored = DataValue::numeric(NumericValue {
         unscaled: 10050,
         scale: 2,
     });

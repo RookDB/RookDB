@@ -246,10 +246,10 @@ fn decode_tuple(bytes: &[u8]) -> RookResult<Tuple> {
             5 => Some(DataValue::DoublePrecision(OrderedF64(f64::from_bits(
                 u64::from_le_bytes(row.array()?),
             )))),
-            6 => Some(DataValue::Numeric(NumericValue {
+            6 => Some(DataValue::Numeric(Box::new(NumericValue {
                 unscaled: i128::from_le_bytes(row.array()?),
                 scale: row.array::<1>()?[0],
-            })),
+            }))),
             7 => Some(DataValue::Bool(row.array::<1>()?[0] != 0)),
             8 => Some(DataValue::Char(row.string()?)),
             9 => Some(DataValue::Varchar(row.string()?)),
@@ -609,10 +609,10 @@ mod tests {
                 Some(DataValue::BigInt(i64::MAX)),
                 Some(DataValue::Real(OrderedF32(f32::NAN))),
                 Some(DataValue::DoublePrecision(OrderedF64(-0.0))),
-                Some(DataValue::Numeric(NumericValue {
+                Some(DataValue::Numeric(Box::new(NumericValue {
                     unscaled: -12_345_678_901_234_567_890_123,
                     scale: 4,
-                })),
+                }))),
                 Some(DataValue::Bool(true)),
                 Some(DataValue::Char("ab ".to_string())),
                 Some(DataValue::Varchar("héllo".to_string())),

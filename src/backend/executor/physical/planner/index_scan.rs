@@ -560,42 +560,52 @@ impl PhysicalPlanner {
                             let diff = (*scale - num.scale) as u32;
                             let factor = 10_i128.checked_pow(diff)?;
                             let unscaled = num.unscaled.checked_mul(factor)?;
-                            Some(DataValue::Numeric(crate::types::value::NumericValue {
-                                unscaled,
-                                scale: *scale,
-                            }))
+                            Some(DataValue::Numeric(Box::new(
+                                crate::types::value::NumericValue {
+                                    unscaled,
+                                    scale: *scale,
+                                },
+                            )))
                         } else {
                             let diff = (num.scale - *scale) as u32;
                             let factor = 10_i128.checked_pow(diff)?;
-                            Some(DataValue::Numeric(crate::types::value::NumericValue {
-                                unscaled: num.unscaled / factor,
-                                scale: *scale,
-                            }))
+                            Some(DataValue::Numeric(Box::new(
+                                crate::types::value::NumericValue {
+                                    unscaled: num.unscaled / factor,
+                                    scale: *scale,
+                                },
+                            )))
                         }
                     }
                     DataValue::SmallInt(i) => {
                         let factor = 10_i128.checked_pow(*scale as u32)?;
                         let unscaled = (i as i128).checked_mul(factor)?;
-                        Some(DataValue::Numeric(crate::types::value::NumericValue {
-                            unscaled,
-                            scale: *scale,
-                        }))
+                        Some(DataValue::Numeric(Box::new(
+                            crate::types::value::NumericValue {
+                                unscaled,
+                                scale: *scale,
+                            },
+                        )))
                     }
                     DataValue::Int(i) => {
                         let factor = 10_i128.checked_pow(*scale as u32)?;
                         let unscaled = (i as i128).checked_mul(factor)?;
-                        Some(DataValue::Numeric(crate::types::value::NumericValue {
-                            unscaled,
-                            scale: *scale,
-                        }))
+                        Some(DataValue::Numeric(Box::new(
+                            crate::types::value::NumericValue {
+                                unscaled,
+                                scale: *scale,
+                            },
+                        )))
                     }
                     DataValue::BigInt(i) => {
                         let factor = 10_i128.checked_pow(*scale as u32)?;
                         let unscaled = (i as i128).checked_mul(factor)?;
-                        Some(DataValue::Numeric(crate::types::value::NumericValue {
-                            unscaled,
-                            scale: *scale,
-                        }))
+                        Some(DataValue::Numeric(Box::new(
+                            crate::types::value::NumericValue {
+                                unscaled,
+                                scale: *scale,
+                            },
+                        )))
                     }
                     DataValue::DoublePrecision(d) => {
                         let s = format!("{}", d.0);
@@ -605,7 +615,7 @@ impl PhysicalPlanner {
                                 crate::types::value::parse_numeric_literal(&s2, *precision, *scale)
                             })
                             .ok()
-                            .map(DataValue::Numeric)
+                            .map(DataValue::numeric)
                     }
                     DataValue::Real(r) => {
                         let s = format!("{}", r.0);
@@ -615,12 +625,12 @@ impl PhysicalPlanner {
                                 crate::types::value::parse_numeric_literal(&s2, *precision, *scale)
                             })
                             .ok()
-                            .map(DataValue::Numeric)
+                            .map(DataValue::numeric)
                     }
                     DataValue::Char(s) | DataValue::Varchar(s) => {
                         crate::types::value::parse_numeric_literal(&s, *precision, *scale)
                             .ok()
-                            .map(DataValue::Numeric)
+                            .map(DataValue::numeric)
                     }
                     _ => None,
                 }

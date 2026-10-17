@@ -35,7 +35,7 @@
 //!
 //!   P. `apply_assignments_typed`'s text-literal branch for NUMERIC
 //!      (update.rs:160-164) maps parse failure to NULL
-//!      (`.ok().map(DataValue::Numeric)`), silently NULLing the column
+//!      (`.ok().map(DataValue::numeric)`), silently NULLing the column
 //!      instead of rejecting the update — same class as round-5 finding O.
 //!      Control: the physical expression evaluator rejects invalid numeric
 //!      casts outright.
@@ -350,7 +350,7 @@ fn p_update_numeric_text_literal_parse_failure_silently_nulls() {
         rows.len() == 1 && rows[0][0] != "NULL",
         "BUG P CONFIRMED: SET sal = 'not a number' on a NUMERIC column silently \
          stored NULL (rows = {:?}, updated_count = {}) — parse_numeric_literal(..)\
-         .ok().map(DataValue::Numeric) maps the parse failure to None instead of \
+         .ok().map(DataValue::numeric) maps the parse failure to None instead of \
          rejecting the update (same class as round-5 finding O)",
         rows,
         result.updated_count
