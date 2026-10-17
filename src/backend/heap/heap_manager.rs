@@ -441,18 +441,20 @@ impl HeapManager {
         let required_bytes = (tuple_data.len() as u32) + ITEM_ID_SIZE;
         let min_category = Self::bytes_to_category(required_bytes);
 
-        // One FSM search. A hit can be stale: a phantom page beyond the heap
-        // (seen on freshly created tables under stress) or a page that has
-        // less room than advertised (its entry is corrected). Either way the
-        // insert goes to a fresh page rather than searching again, so a stale
-        // FSM never makes it fail while the file can grow.
+        // One FSM search. A hit can be stale: a page beyond the heap (an FSM
+        // fork left from an earlier file at this path, which
+        // `HeapManager::create` now removes) or a page that has less room
+        // than advertised. Either entry is corrected so later searches skip
+        // it, and the insert goes to a fresh page rather than searching
+        // again, so a stale FSM never makes it fail while the file can grow.
         let candidate = match self.fsm.search_page(min_category)? {
             Some(pid) if pid >= self.page_count() => {
                 log::warn!(
-                    "[HeapManager::insert_tuple] FSM returned phantom page {} (page_count={}); treating as miss",
+                    "[HeapManager::insert_tuple] FSM named page {} past the end of the heap (page_count={}); clearing it",
                     pid,
                     self.page_count()
                 );
+                self.fsm.fsm_set_avail(pid, 0, None)?;
                 None
             }
             hit => hit,
@@ -850,6 +852,22 @@ mod tests {
 
         let manager = HeapManager::create(temp_file.clone()).unwrap();
         (temp_file, manager)
+    }
+
+    #[test]
+    fn test_fsm_entry_past_the_heap_is_cleared() {
+        let (path, mut manager) = setup_temp_heap("test_fsm_phantom");
+        // An entry for page 40 of a two-page heap, as a stale fork would
+        // have: the insert goes to a real page and the entry is gone after.
+        manager
+            .fsm
+            .fsm_set_avail(40, PAGE_SIZE as u32, None)
+            .unwrap();
+        manager.fsm.fsm_set_avail(1, 0, None).unwrap();
+        let (page, _) = manager.insert_tuple(&[7u8; 100]).unwrap();
+        assert!(page < manager.page_count());
+        assert_ne!(manager.fsm.search_page(1).unwrap(), Some(40));
+        cleanup_temp_heap(&path);
     }
 
     #[test]
