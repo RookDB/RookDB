@@ -1069,3 +1069,22 @@ fn abs_of_the_minimum_overflows() {
     assert!(abs(&DataValue::SmallInt(i16::MIN)).is_err());
     assert!(abs(&DataValue::BigInt(i64::MIN)).is_err());
 }
+
+#[test]
+fn compare_numeric_with_integer_at_a_large_scale() {
+    use crate::types::comparison::Comparable;
+    // 0.5 as NUMERIC(38, 38): scaling 2 up to 38 places overflows i128.
+    let half = DataValue::numeric(NumericValue {
+        unscaled: 5 * 10_i128.pow(37),
+        scale: 38,
+    });
+    assert_eq!(half.compare(&DataValue::Int(2)).unwrap(), Ordering::Less);
+    assert_eq!(
+        DataValue::BigInt(-2).compare(&half).unwrap(),
+        Ordering::Less
+    );
+    assert_eq!(
+        half.compare(&DataValue::SmallInt(0)).unwrap(),
+        Ordering::Greater
+    );
+}

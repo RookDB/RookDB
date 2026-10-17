@@ -274,39 +274,33 @@ fn compare_numeric_integer(
     left: &DataValue,
     right: &DataValue,
 ) -> Result<Ordering, ComparisonError> {
+    // The integer as a NUMERIC of scale 0, compared exactly; scaling it up
+    // to the other side's scale can overflow, which the exact comparison
+    // handles.
+    let as_numeric = |v: &DataValue| match v {
+        DataValue::SmallInt(i) => Some(NumericValue {
+            unscaled: *i as i128,
+            scale: 0,
+        }),
+        DataValue::Int(i) => Some(NumericValue {
+            unscaled: *i as i128,
+            scale: 0,
+        }),
+        DataValue::BigInt(i) => Some(NumericValue {
+            unscaled: *i as i128,
+            scale: 0,
+        }),
+        _ => None,
+    };
     match (left, right) {
-        // Cross-type NUMERIC ↔ INTEGER: widen integer to NumericValue at the same scale, then compare exactly
-        (DataValue::Numeric(a), DataValue::SmallInt(b)) => {
-            let factor = 10_i128.pow(a.scale as u32);
-            let b_scaled = (*b as i128) * factor;
-            Ok(a.unscaled.cmp(&b_scaled))
-        }
-        (DataValue::SmallInt(a), DataValue::Numeric(b)) => {
-            let factor = 10_i128.pow(b.scale as u32);
-            let a_scaled = (*a as i128) * factor;
-            Ok(a_scaled.cmp(&b.unscaled))
-        }
-        (DataValue::Numeric(a), DataValue::Int(b)) => {
-            let factor = 10_i128.pow(a.scale as u32);
-            let b_scaled = (*b as i128) * factor;
-            Ok(a.unscaled.cmp(&b_scaled))
-        }
-        (DataValue::Int(a), DataValue::Numeric(b)) => {
-            let factor = 10_i128.pow(b.scale as u32);
-            let a_scaled = (*a as i128) * factor;
-            Ok(a_scaled.cmp(&b.unscaled))
-        }
-        (DataValue::Numeric(a), DataValue::BigInt(b)) => {
-            let factor = 10_i128.pow(a.scale as u32);
-            let b_scaled = (*b as i128) * factor;
-            Ok(a.unscaled.cmp(&b_scaled))
-        }
-        (DataValue::BigInt(a), DataValue::Numeric(b)) => {
-            let factor = 10_i128.pow(b.scale as u32);
-            let a_scaled = (*a as i128) * factor;
-            Ok(a_scaled.cmp(&b.unscaled))
-        }
-
+        (DataValue::Numeric(a), b) => match as_numeric(b) {
+            Some(b) => compare_numeric_exact(a, &b),
+            None => Err(type_mismatch(left, right)),
+        },
+        (a, DataValue::Numeric(b)) => match as_numeric(a) {
+            Some(a) => compare_numeric_exact(&a, b),
+            None => Err(type_mismatch(left, right)),
+        },
         _ => Err(type_mismatch(left, right)),
     }
 }
