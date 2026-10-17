@@ -490,3 +490,24 @@ fn duplicates_are_found_by_equality() {
         one
     );
 }
+
+/// A hash join on arithmetic keys agrees with `=` like one on columns.
+#[test]
+fn expression_join_keys_agree_with_comparison() {
+    let (_ws, mut s) = session("exprjoin");
+    for sql in [
+        "CREATE TABLE ja (big BIGINT, n INT)",
+        "INSERT INTO ja VALUES (9007199254740993, 2)",
+        "CREATE TABLE jb (d DOUBLE PRECISION, m INT)",
+        "INSERT INTO jb VALUES (9007199254740992.0, 3)",
+    ] {
+        run(&mut s, sql);
+    }
+    let count = |s: &mut Session, on: &str| {
+        run(s, &format!("SELECT COUNT(*) FROM ja JOIN jb ON {}", on))[0][0].clone()
+    };
+    // = compares BIGINT with DOUBLE as doubles: 2^53 + 1 rounds to 2^53.
+    assert_eq!(count(&mut s, "ja.big + 0 = jb.d"), "1");
+    assert_eq!(count(&mut s, "ja.big = jb.d"), "1");
+    assert_eq!(count(&mut s, "ja.n + 1 = jb.m"), "1");
+}

@@ -648,9 +648,10 @@ fn qualify_using_keys(
     }
 }
 
-/// Equi-join keys with each pair of columns whose types hash differently
-/// (see [`KeyClass`]) moved into the residual predicate, where it is
-/// compared rather than hashed.
+/// Equi-join keys with each pair whose sides may hash differently (see
+/// [`KeyClass`]) moved into the residual predicate, where it is compared
+/// rather than hashed: sides of different classes, or an expression whose
+/// class is not known.
 fn hashable_keys(
     (left_keys, right_keys, residual): (Vec<Expr>, Vec<Expr>, Option<Predicate>),
     left_schema: &[ColumnInfo],
@@ -659,15 +660,21 @@ fn hashable_keys(
     let mut keys = (Vec::new(), Vec::new());
     let mut residual = residual;
     for (l, r) in left_keys.into_iter().zip(right_keys) {
-        if key_classes(&l, left_schema, &r, right_schema).is_some_and(|(a, b)| a != b) {
+        let column = |e: &Expr| matches!(e, Expr::Column { .. });
+        let hash = match key_classes(&l, left_schema, &r, right_schema) {
+            Some((a, b)) => a == b,
+            // A column that does not resolve is left as it was planned.
+            None => column(&l) && column(&r),
+        };
+        if hash {
+            keys.0.push(l);
+            keys.1.push(r);
+        } else {
             let pair = Predicate::Compare(l, ComparisonOp::Equals, r);
             residual = Some(match residual {
                 Some(rest) => Predicate::and(rest, pair),
                 None => pair,
             });
-        } else {
-            keys.0.push(l);
-            keys.1.push(r);
         }
     }
     (keys.0, keys.1, residual)
@@ -684,19 +691,33 @@ fn keys_hash_alike(
     key_classes(left, left_schema, right, right_schema).is_some_and(|(l, r)| l == r)
 }
 
-/// The key classes of two join keys, when both are columns of known type.
+/// The key classes of two join keys, when both are known.
 fn key_classes(
     left: &Expr,
     left_schema: &[ColumnInfo],
     right: &Expr,
     right_schema: &[ColumnInfo],
 ) -> Option<(KeyClass, KeyClass)> {
-    let class = |expr: &Expr, schema: &[ColumnInfo]| match expr {
+    Some((
+        key_class(left, left_schema)?,
+        key_class(right, right_schema)?,
+    ))
+}
+
+/// The [`KeyClass`] of a join key's values: a column's type, a constant's,
+/// or exact arithmetic on exact operands. `None` when not known.
+fn key_class(expr: &Expr, schema: &[ColumnInfo]) -> Option<KeyClass> {
+    match expr {
         Expr::Column { table, column } => resolve_outer_key(schema, table.as_deref(), column)
             .map(|i| KeyClass::of_type(&schema[i].data_type)),
+        Expr::Constant(value) => Some(KeyClass::of_value(value)),
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) => {
+            let exact = Some(KeyClass::Exact);
+            (key_class(a, schema) == exact && key_class(b, schema) == exact)
+                .then_some(KeyClass::Exact)
+        }
         _ => None,
-    };
-    Some((class(left, left_schema)?, class(right, right_schema)?))
+    }
 }
 
 // ── HAVING aggregate rewriting ────────────────────────────────────────────────
