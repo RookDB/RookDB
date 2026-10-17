@@ -28,6 +28,11 @@ use crate::backend::page::{
 use crate::heap::types::HeaderMetadata;
 use std::sync::atomic::Ordering;
 
+/// The free-space map fork of the heap file at `heap_path`.
+fn fsm_path(heap_path: &std::path::Path) -> PathBuf {
+    crate::backend::paths::with_suffix(heap_path, ".fsm")
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Helper: Header page operations via BufferPool
 // ─────────────────────────────────────────────────────────────────────────
@@ -249,7 +254,7 @@ impl HeapManager {
         if file_path.exists() {
             std::fs::remove_file(&file_path)?;
         }
-        let fsm_sidecar = PathBuf::from(format!("{}.fsm", file_path.to_string_lossy()));
+        let fsm_sidecar = fsm_path(&file_path);
         if fsm_sidecar.exists() {
             std::fs::remove_file(&fsm_sidecar)?;
         }
@@ -297,10 +302,10 @@ impl HeapManager {
         let pool = shared_pool::register_pool(&file_path, pool);
 
         // Derive FSM path
-        let fsm_path = PathBuf::from(format!("{}.fsm", file_path.to_string_lossy()));
+        let fsm_path = fsm_path(&file_path);
 
         // Create FSM fork
-        let fsm = FSM::open(fsm_path.clone(), 2)?; // 2 pages initially
+        let fsm = FSM::open(fsm_path.clone())?;
 
         let mut manager = Self {
             pool,
@@ -312,8 +317,8 @@ impl HeapManager {
         manager.update_header(|h| {
             *h = header;
             h.page_count = 2;
+            h.fsm_page_count = FSM::calculate_fsm_page_count(2);
         })?;
-        manager.fsm.set_heap_page_count(2);
 
         // Register first data page with FSM
         let initial_free = PAGE_SIZE as u32 - PAGE_HEADER_SIZE;
@@ -361,16 +366,15 @@ impl HeapManager {
             header.total_tuples
         );
 
-        let mut fsm_path = file_path.to_string_lossy().into_owned();
-        if !fsm_path.ends_with(".fsm") {
-            fsm_path.push_str(".fsm");
-        }
-        let fsm_path = PathBuf::from(fsm_path);
+        let fsm_path = fsm_path(&file_path);
 
-        // Open/rebuild FSM
+        // Open the FSM, or rebuild it from the heap when it is missing or its
+        // recorded size does not fit the heap: written in an older layout,
+        // or left behind by a crash before the header was updated.
+        let calculated_fsm_pages = FSM::calculate_fsm_page_count(header.page_count);
         let fsm_is_missing = std::fs::metadata(&fsm_path).map_or(true, |meta| meta.len() == 0);
-        let fsm = if fsm_is_missing {
-            log::trace!("[HeapManager::open] FSM missing or empty, rebuilding...");
+        let fsm = if fsm_is_missing || header.fsm_page_count != calculated_fsm_pages {
+            log::trace!("[HeapManager::open] FSM missing or out of date, rebuilding...");
             // For FSM rebuild, we need the file handle. Use the pool's file.
             // Temporarily take ownership of the file for FSM rebuild.
             let mut guard = pool.lock().unwrap_or_else(|p| p.into_inner());
@@ -380,11 +384,10 @@ impl HeapManager {
             file.seek(SeekFrom::Start(0))?;
             FSM::build_from_heap(&mut file, fsm_path.clone())?
         } else {
-            FSM::open(fsm_path.clone(), header.page_count)?
+            FSM::open(fsm_path.clone())?
         };
 
         // ===== SYNC FSM PAGE COUNT TO HEADER =====
-        let calculated_fsm_pages = FSM::calculate_fsm_page_count(header.page_count);
 
         let mut header = header;
         if header.fsm_page_count != calculated_fsm_pages {
@@ -799,7 +802,6 @@ impl HeapManager {
             pool.unpin(frame_id, false);
             (page_id, pool.total_pages())
         };
-        self.fsm.set_heap_page_count(page_count);
 
         // Calculate FSM pages needed
         let new_fsm_page_count = FSM::calculate_fsm_page_count(page_count);

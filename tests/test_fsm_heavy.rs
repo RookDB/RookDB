@@ -285,9 +285,8 @@ fn test_fsm_bubble_up_recalculation() {
     let file_path = get_test_path(&db_path, table_name);
 
     // Provide large enough count so FSM has 1 page
-    let mut fsm = FSM::open(file_path.with_extension("dat.fsm"), 10).unwrap();
+    let mut fsm = FSM::open(file_path.with_extension("dat.fsm")).unwrap();
     // Simulate setting initial size
-    fsm.set_heap_page_count(10);
 
     // Fill pages 0 and 1 partially
     fsm.fsm_set_avail(0, 500, None).unwrap(); // Page 0
@@ -321,8 +320,7 @@ fn test_fsm_initial_state_routing() {
     let table_name = "fsm_initial_state";
     let file_path = get_test_path(&db_path, table_name);
 
-    let mut fsm = FSM::open(file_path.with_extension("dat.fsm"), 4).unwrap();
-    fsm.set_heap_page_count(4);
+    let mut fsm = FSM::open(file_path.with_extension("dat.fsm")).unwrap();
 
     // Assume new pages 1, 2, 3 have full size
     for p in 1..4 {
@@ -348,8 +346,7 @@ fn test_fsm_needle_in_haystack() {
     let table_name = "needle_haystack";
     let file_path = get_test_path(&db_path, table_name);
 
-    let mut fsm = FSM::open(file_path.with_extension("dat.fsm"), 4001).unwrap();
-    fsm.set_heap_page_count(4001);
+    let mut fsm = FSM::open(file_path.with_extension("dat.fsm")).unwrap();
 
     // Simulate completely full database
     for i in 1..=4000 {
@@ -396,8 +393,7 @@ fn test_fsm_exact_fit_left_bias() {
     let table_name = "left_bias";
     let file_path = get_test_path(&db_path, table_name);
 
-    let mut fsm = FSM::open(file_path.with_extension("dat.fsm"), 5).unwrap();
-    fsm.set_heap_page_count(5);
+    let mut fsm = FSM::open(file_path.with_extension("dat.fsm")).unwrap();
 
     fsm.fsm_set_avail(1, 0, None).unwrap();
     fsm.fsm_set_avail(2, 2000, None).unwrap();

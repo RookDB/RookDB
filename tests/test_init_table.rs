@@ -46,9 +46,13 @@ fn test_init_table() {
     let page_count = u32::from_le_bytes(header[0..4].try_into().unwrap());
     assert_eq!(page_count, 2, "Table should start with exactly 1 data page");
 
+    // Then the FSM fork's size in blocks (root, level-1 page, leaf page).
+    let fsm_pages = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    assert_eq!(fsm_pages, 3, "FSM fork should need 3 blocks");
+
     // Remaining header bytes should be zero
     assert!(
-        header[4..].iter().all(|&b| b == 0),
+        header[8..].iter().all(|&b| b == 0),
         "Remaining header bytes should be zero"
     );
 

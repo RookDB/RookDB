@@ -190,7 +190,6 @@ fn shared_cache(file: &File) -> RookResult<SharedFsmCache> {
 /// Manages 3-level binary max-tree spanning potentially billions of heap pages.
 pub struct FSM {
     fsm_file: File,
-    heap_page_count: u32, // Tracks total heap pages for growth detection
     /// Set when in-memory changes were written to the OS but not yet
     /// `sync()`ed. Lets callers skip fsync cycles when the FSM is clean.
     dirty: bool,
@@ -200,12 +199,8 @@ pub struct FSM {
 
 impl FSM {
     /// Open existing FSM fork file or create if missing.
-    pub fn open(fsm_path: PathBuf, heap_page_count: u32) -> RookResult<Self> {
-        log::trace!(
-            "[FSM::open] Opening FSM fork at {:?} for heap_page_count={}",
-            fsm_path,
-            heap_page_count
-        );
+    pub fn open(fsm_path: PathBuf) -> RookResult<Self> {
+        log::trace!("[FSM::open] Opening FSM fork at {:?}", fsm_path);
 
         let fsm_file = OpenOptions::new()
             .read(true)
@@ -218,7 +213,6 @@ impl FSM {
 
         Ok(Self {
             fsm_file,
-            heap_page_count,
             dirty: false,
             cache,
         })
@@ -303,69 +297,33 @@ impl FSM {
             }
         }
 
-        // Bubble up Level 0 -> Level 1 (Only if needed)
-        let max_l0 = page_count / FSM_SLOTS_PER_PAGE;
-        for log_l0 in 0..=max_l0 {
-            if let Some(page_l0) = in_memory_pages.get_mut(&(0, log_l0)) {
-                // Bubble up internally
+        // Fill each upper level from the roots of the level below, then
+        // bubble each page's own tree up.
+        for level in 0..FSM_LEVELS {
+            let mut pages: Vec<u32> = in_memory_pages
+                .keys()
+                .filter(|&&(l, _)| l == level)
+                .map(|&(_, p)| p)
+                .collect();
+            pages.sort_unstable();
+            for log_page in pages {
+                let page = in_memory_pages.get_mut(&(level, log_page)).expect("listed");
                 for i in (0..FSM_NON_LEAF_NODES).rev() {
-                    page_l0.tree[i] =
-                        std::cmp::max(page_l0.tree[2 * i + 1], page_l0.tree[2 * i + 2]);
+                    page.tree[i] = std::cmp::max(page.tree[2 * i + 1], page.tree[2 * i + 2]);
                 }
-
-                // Only create Level 1 if we have exceeded Level 0
-                if page_count > FSM_SLOTS_PER_PAGE {
-                    let root_val = page_l0.tree[0];
-                    let log_l1 = log_l0 / FSM_SLOTS_PER_PAGE;
-                    let slot_l1 = (log_l0 % FSM_SLOTS_PER_PAGE) as usize;
-
-                    let page_l1 = in_memory_pages.entry((1, log_l1)).or_default();
-                    page_l1.tree[FSM_NON_LEAF_NODES + slot_l1] = root_val;
-                }
-            }
-        }
-
-        // Bubble up Level 1 -> Level 2 (Only if needed)
-        if page_count > FSM_SLOTS_PER_PAGE {
-            let max_l1 = max_l0 / FSM_SLOTS_PER_PAGE;
-            for log_l1 in 0..=max_l1 {
-                if let Some(page_l1) = in_memory_pages.get_mut(&(1, log_l1)) {
-                    // Bubble up internally
-                    for i in (0..FSM_NON_LEAF_NODES).rev() {
-                        page_l1.tree[i] =
-                            std::cmp::max(page_l1.tree[2 * i + 1], page_l1.tree[2 * i + 2]);
-                    }
-
-                    // Only create Level 2 if we have exceeded Level 1
-                    let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
-                    if page_count > threshold_l2 {
-                        let root_val = page_l1.tree[0];
-                        let log_l2 = log_l1 / FSM_SLOTS_PER_PAGE;
-                        let slot_l2 = (log_l1 % FSM_SLOTS_PER_PAGE) as usize;
-
-                        let page_l2 = in_memory_pages.entry((2, log_l2)).or_default();
-                        page_l2.tree[FSM_NON_LEAF_NODES + slot_l2] = root_val;
-                    }
-                }
-            }
-
-            // Bubble up Level 2 internally
-            let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
-            if page_count > threshold_l2 {
-                let max_l2 = max_l1 / FSM_SLOTS_PER_PAGE;
-                for log_l2 in 0..=max_l2 {
-                    if let Some(page_l2) = in_memory_pages.get_mut(&(2, log_l2)) {
-                        for i in (0..FSM_NON_LEAF_NODES).rev() {
-                            page_l2.tree[i] =
-                                std::cmp::max(page_l2.tree[2 * i + 1], page_l2.tree[2 * i + 2]);
-                        }
-                    }
+                let root = page.tree[0];
+                if level + 1 < FSM_LEVELS {
+                    let parent = in_memory_pages
+                        .entry((level + 1, log_page / FSM_SLOTS_PER_PAGE))
+                        .or_default();
+                    parent.tree[FSM_NON_LEAF_NODES + (log_page % FSM_SLOTS_PER_PAGE) as usize] =
+                        root;
                 }
             }
         }
 
         // Create FSM handle and reset file contents
-        let mut fsm = FSM::open(fsm_path.clone(), page_count)?;
+        let mut fsm = FSM::open(fsm_path.clone())?;
         fsm.fsm_file.set_len(0)?; // Truncate to ensure clean build
         {
             let mut cache = lock_cache(&fsm.cache);
@@ -392,75 +350,35 @@ impl FSM {
         Ok(fsm)
     }
 
-    /// Get heap page count currently tracked by this FSM.
-    pub fn heap_page_count(&self) -> u32 {
-        self.heap_page_count
-    }
-
-    /// Update heap page count (used during allocation).
-    pub fn set_heap_page_count(&mut self, count: u32) {
-        self.heap_page_count = count;
-    }
-
-    /// Compute required FSM fork page count for given heap page count.
-    /// For small counts, we calculate based on 3-level tree structure.
+    /// Blocks the FSM fork needs for a heap of `heap_pages` pages: through
+    /// the level-0 page of the last heap page (see
+    /// [`logical_to_physical`](Self::logical_to_physical)).
     pub fn calculate_fsm_page_count(heap_pages: u32) -> u32 {
         if heap_pages == 0 {
             return 0;
         }
-        if heap_pages <= FSM_SLOTS_PER_PAGE {
-            return 1;
-        }
-
-        let l0_count = heap_pages.div_ceil(FSM_SLOTS_PER_PAGE);
-
-        let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
-        if heap_pages <= threshold_l2 {
-            let l1_count = l0_count.div_ceil(FSM_SLOTS_PER_PAGE);
-            return l0_count + l1_count;
-        }
-
-        let l1_count = l0_count.div_ceil(FSM_SLOTS_PER_PAGE);
-        let l2_count = l1_count.div_ceil(FSM_SLOTS_PER_PAGE);
-
-        l0_count + l1_count + l2_count
+        Self::logical_to_physical(0, (heap_pages - 1) / FSM_SLOTS_PER_PAGE) as u32 + 1
     }
 
-    /// Read FSM page at logical position (level, page_no, slot) into FSMPage struct.
+    /// The fork block of the FSM page at `(level, page_no)`.
     ///
-    /// If the page doesn't exist in the file yet, returns an empty FSMPage.
-    fn logical_to_physical(&self, level: u32, page_no: u32) -> u64 {
-        // Store pages contiguously by active levels to avoid sparse 3-level padding
-        // when the heap only needs Level 0.
-        let heap_pages = self.heap_page_count as u64;
+    /// The tree always has [`FSM_LEVELS`] levels, laid out as PostgreSQL
+    /// lays out its FSM: each upper page comes just before the first page
+    /// below it (root, level-1 page 0, level-0 pages 0.., level-1 page 1,
+    /// ...). A page's block never depends on the heap's size, so it stays
+    /// put as the heap grows, and a small heap needs only three blocks.
+    fn logical_to_physical(level: u32, page_no: u32) -> u64 {
         let f = FSM_SLOTS_PER_PAGE as u64;
-
-        if heap_pages <= f {
-            match level {
-                0 => page_no as u64,
-                _ => panic!("Invalid FSM level for single-level tree"),
-            }
-        } else {
-            let l0_count = heap_pages.div_ceil(f);
-            let l1_count = l0_count.div_ceil(f);
-            let threshold_l2 = f.saturating_mul(f);
-
-            if heap_pages <= threshold_l2 {
-                match level {
-                    1 => page_no as u64,
-                    0 => l1_count + page_no as u64,
-                    _ => panic!("Invalid FSM level for two-level tree"),
-                }
-            } else {
-                let l2_count = l1_count.div_ceil(f);
-                match level {
-                    2 => page_no as u64,
-                    1 => l2_count + page_no as u64,
-                    0 => l2_count + l1_count + page_no as u64,
-                    _ => panic!("Invalid FSM level for three-level tree"),
-                }
-            }
+        // The first level-0 page under the page, and the pages at or above
+        // level 0 needed to address it.
+        let mut leaf = page_no as u64 * f.pow(level);
+        let mut pages = 0u64;
+        for _ in 0..FSM_LEVELS {
+            pages += leaf + 1;
+            leaf /= f;
         }
+        // Less the lower pages counted for an upper page; 0-based.
+        pages - level as u64 - 1
     }
 
     pub fn read_fsm_page(&mut self, level: u32, page_no: u32) -> RookResult<FSMPage> {
@@ -469,7 +387,7 @@ impl FSM {
             .fsm_read_page_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let block = self.logical_to_physical(level, page_no);
+        let block = Self::logical_to_physical(level, page_no);
         let block_offset = block * FSM_PAGE_SIZE as u64;
 
         let mut cache = lock_cache(&self.cache);
@@ -507,7 +425,7 @@ impl FSM {
 
         // Held in the cache until `sync` or drop; the fork grows logically
         // now and physically when the block is flushed.
-        let block = self.logical_to_physical(level, page_no);
+        let block = Self::logical_to_physical(level, page_no);
         let mut cache = lock_cache(&self.cache);
         cache.pages.insert(block, page.clone());
         cache.dirty.insert(block);
@@ -579,7 +497,7 @@ impl FSM {
             .fsm_read_page_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let block = self.logical_to_physical(level, page_no);
+        let block = Self::logical_to_physical(level, page_no);
         let block_offset = block * FSM_PAGE_SIZE as u64;
         let mut cache = lock_cache(&self.cache);
 
@@ -666,18 +584,6 @@ impl FSM {
         true
     }
 
-    /// Highest FSM level in use for the current heap size (0 = leaves only).
-    fn root_level(&self) -> u32 {
-        let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
-        if self.heap_page_count <= FSM_SLOTS_PER_PAGE {
-            0
-        } else if self.heap_page_count <= threshold_l2 {
-            1
-        } else {
-            2
-        }
-    }
-
     /// Find a heap page whose free-space category is at least `min_category`.
     ///
     /// Descends from the root FSM page to a leaf; returns `None` when the
@@ -689,7 +595,7 @@ impl FSM {
             .fsm_search_avail_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let mut level = self.root_level();
+        let mut level = FSM_LEVELS - 1;
         let mut page_no = 0u32;
         loop {
             FSM_METRICS
@@ -744,12 +650,11 @@ impl FSM {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let fsm_page_no = heap_page_id / FSM_SLOTS_PER_PAGE;
-        let max_level = self.root_level();
 
         let mut value = Self::bytes_to_category(new_free_bytes);
         let mut page_no = fsm_page_no;
         let mut slot = (heap_page_id % FSM_SLOTS_PER_PAGE) as usize;
-        for level in 0..=max_level {
+        for level in 0..FSM_LEVELS {
             let (changed, root) = self.with_cached_page(level, page_no, |page| {
                 let changed = Self::set_slot(page, slot, value);
                 (changed, (changed, page.root_value()))
@@ -830,41 +735,35 @@ mod tests {
 
     #[test]
     fn test_calculate_fsm_page_count() {
-        // Small counts
-        assert_eq!(FSM::calculate_fsm_page_count(1), 1); // 1 L0
-        assert_eq!(FSM::calculate_fsm_page_count(100), 1);
-
-        let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
-
-        // Large count (4000 heap pages → exactly 1 L0)
-        let count = FSM::calculate_fsm_page_count(FSM_SLOTS_PER_PAGE);
-        assert_eq!(count, 1);
-
-        // Exceed Level 0 (4001 heap pages) -> 2 L0 + 1 L1
-        let count_l1 = FSM::calculate_fsm_page_count(FSM_SLOTS_PER_PAGE + 1);
-        assert_eq!(count_l1, 3);
-
-        // Exceed Level 1 -> requires Level 2
-        let count_l2 = FSM::calculate_fsm_page_count(threshold_l2 + 1);
-        assert!(count_l2 > threshold_l2 / FSM_SLOTS_PER_PAGE);
+        let f = FSM_SLOTS_PER_PAGE;
+        // Root, level-1 page 0, level-0 page 0.
+        assert_eq!(FSM::calculate_fsm_page_count(1), 3);
+        assert_eq!(FSM::calculate_fsm_page_count(f), 3);
+        // A second level-0 page.
+        assert_eq!(FSM::calculate_fsm_page_count(f + 1), 4);
+        // Level-0 page f needs level-1 page 1 first.
+        assert_eq!(FSM::calculate_fsm_page_count(f * f + 1), 3 + f + 1);
     }
 
     #[test]
-    fn test_small_heap_uses_single_fsm_block_on_disk() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("rookdb_fsm_small_{nanos}.fsm"));
+    fn test_blocks_never_move_as_the_heap_grows() {
+        let f = FSM_SLOTS_PER_PAGE;
+        assert_eq!(FSM::logical_to_physical(2, 0), 0);
+        assert_eq!(FSM::logical_to_physical(1, 0), 1);
+        assert_eq!(FSM::logical_to_physical(0, 0), 2);
+        assert_eq!(FSM::logical_to_physical(0, f - 1), f as u64 + 1);
+        assert_eq!(FSM::logical_to_physical(1, 1), f as u64 + 2);
+        assert_eq!(FSM::logical_to_physical(0, f), f as u64 + 3);
+    }
 
-        let mut fsm = FSM::open(path.clone(), 15).unwrap();
-        let page = FSMPage::new();
-        fsm.write_fsm_page(0, 0, &page).unwrap();
+    #[test]
+    fn test_small_heap_uses_three_fsm_blocks_on_disk() {
+        let path = temp_fsm_path("small");
+        let mut fsm = FSM::open(path.clone()).unwrap();
+        fsm.fsm_set_avail(3, 4096, None).unwrap();
         fsm.sync().unwrap();
-
-        let file_size = fs::metadata(&path).unwrap().len();
-        assert_eq!(file_size, FSM_PAGE_SIZE as u64);
-
+        assert_eq!(fs::metadata(&path).unwrap().len(), 3 * FSM_PAGE_SIZE as u64);
+        drop(fsm);
         fs::remove_file(path).unwrap();
     }
 
@@ -883,17 +782,17 @@ mod tests {
     fn test_writes_are_buffered_until_sync_and_survive_reopen() {
         let path = temp_fsm_path("buffered");
         {
-            let mut fsm = FSM::open(path.clone(), 15).unwrap();
+            let mut fsm = FSM::open(path.clone()).unwrap();
             fsm.fsm_set_avail(3, 4096, None).unwrap();
             assert!(fsm.has_pending());
             assert_eq!(fs::metadata(&path).unwrap().len(), 0, "not written yet");
 
             fsm.sync().unwrap();
             assert!(!fsm.has_pending());
-            assert_eq!(fs::metadata(&path).unwrap().len(), FSM_PAGE_SIZE as u64);
+            assert_eq!(fs::metadata(&path).unwrap().len(), 3 * FSM_PAGE_SIZE as u64);
         }
 
-        let mut reopened = FSM::open(path.clone(), 15).unwrap();
+        let mut reopened = FSM::open(path.clone()).unwrap();
         let (page_id, _) = reopened.fsm_search_avail(100).unwrap().expect("page 3");
         assert_eq!(page_id, 3);
         drop(reopened);
@@ -904,10 +803,10 @@ mod tests {
     fn test_drop_flushes_unsynced_pages() {
         let path = temp_fsm_path("drop");
         {
-            let mut fsm = FSM::open(path.clone(), 15).unwrap();
+            let mut fsm = FSM::open(path.clone()).unwrap();
             fsm.fsm_set_avail(5, 8000, None).unwrap();
         }
-        let mut reopened = FSM::open(path.clone(), 15).unwrap();
+        let mut reopened = FSM::open(path.clone()).unwrap();
         let (page_id, _) = reopened.fsm_search_avail(200).unwrap().expect("page 5");
         assert_eq!(page_id, 5);
         drop(reopened);
@@ -918,8 +817,8 @@ mod tests {
     #[test]
     fn test_two_handles_on_one_file_share_unsynced_updates() {
         let path = temp_fsm_path("shared");
-        let mut a = FSM::open(path.clone(), 15).unwrap();
-        let mut b = FSM::open(path.clone(), 15).unwrap();
+        let mut a = FSM::open(path.clone()).unwrap();
+        let mut b = FSM::open(path.clone()).unwrap();
 
         a.fsm_set_avail(4, 6400, None).unwrap();
         let (page_id, _) = b.fsm_search_avail(150).unwrap().expect("seen through b");
@@ -937,16 +836,32 @@ mod tests {
     #[test]
     fn test_pages_past_the_first_are_written_at_their_block() {
         let path = temp_fsm_path("blocks");
-        let heap_pages = FSM_SLOTS_PER_PAGE * 2 + 10; // two-level tree
         {
-            let mut fsm = FSM::open(path.clone(), heap_pages).unwrap();
+            let mut fsm = FSM::open(path.clone()).unwrap();
             fsm.fsm_set_avail(FSM_SLOTS_PER_PAGE * 2 + 5, 3200, None)
                 .unwrap();
             fsm.sync().unwrap();
         }
-        let mut reopened = FSM::open(path.clone(), heap_pages).unwrap();
+        let mut reopened = FSM::open(path.clone()).unwrap();
         let (page_id, _) = reopened.fsm_search_avail(100).unwrap().expect("found");
         assert_eq!(page_id, FSM_SLOTS_PER_PAGE * 2 + 5);
+        drop(reopened);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_free_space_survives_the_heap_growing_a_level() {
+        // A page's free space recorded while the heap fits one FSM page
+        // must still be found after the heap grows past it.
+        let path = temp_fsm_path("grow");
+        let mut fsm = FSM::open(path.clone()).unwrap();
+        fsm.fsm_set_avail(10, 8000, None).unwrap();
+        fsm.fsm_set_avail(FSM_SLOTS_PER_PAGE, 0, None).unwrap();
+        assert_eq!(fsm.search_page(200).unwrap(), Some(10));
+        fsm.sync().unwrap();
+        drop(fsm);
+        let mut reopened = FSM::open(path.clone()).unwrap();
+        assert_eq!(reopened.search_page(200).unwrap(), Some(10));
         drop(reopened);
         fs::remove_file(path).unwrap();
     }
