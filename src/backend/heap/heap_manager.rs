@@ -40,10 +40,9 @@ fn fsm_path(heap_path: &std::path::Path) -> PathBuf {
 /// Read the header metadata from page 0 via the buffer pool.
 fn read_header_via_pool(pool: &mut BufferPool) -> RookResult<HeaderMetadata> {
     let frame_id = pool.fetch_page(0)?;
-    let page = pool.get_page(frame_id);
-    let header = HeaderMetadata::deserialize(&page.data[..24])?;
+    let header = HeaderMetadata::deserialize(&pool.get_page(frame_id).data[..24]);
     pool.unpin(frame_id, false);
-    Ok(header)
+    header
 }
 
 /// Write the header metadata to page 0 via the buffer pool.
@@ -53,15 +52,9 @@ fn read_header_via_pool(pool: &mut BufferPool) -> RookResult<HeaderMetadata> {
 /// 8 KiB header write on every tuple was the dominant write-amplification
 /// cost of bulk loads.
 fn write_header_via_pool(pool: &mut BufferPool, header: &HeaderMetadata) -> RookResult<()> {
+    let bytes = header.serialize()?;
     let frame_id = pool.fetch_page(0)?;
-    {
-        let page = pool.get_page_mut(frame_id);
-        let bytes = header.serialize()?;
-        // Write only the header bytes (keep page count in sync with page data)
-        page.data[..24].copy_from_slice(&bytes);
-        // Update page count in bytes 0-3
-        page.data[0..4].copy_from_slice(&header.page_count.to_le_bytes());
-    }
+    pool.get_page_mut(frame_id).data[..24].copy_from_slice(&bytes);
     pool.unpin(frame_id, true);
     Ok(())
 }
@@ -736,10 +729,17 @@ impl HeapManager {
 
     /// Change the file header in the pool's page 0.
     pub fn update_header(&self, f: impl FnOnce(&mut HeaderMetadata)) -> RookResult<()> {
+        // One pin of page 0: every insert counts its row here.
         let mut pool = Self::lock_pool(&self.pool);
-        let mut header = read_header_via_pool(&mut pool)?;
-        f(&mut header);
-        write_header_via_pool(&mut pool, &header)
+        let frame_id = pool.fetch_page(0)?;
+        let page = pool.get_page_mut(frame_id);
+        let result = HeaderMetadata::deserialize(&page.data[..24]).and_then(|mut header| {
+            f(&mut header);
+            page.data[..24].copy_from_slice(&header.serialize()?);
+            Ok(())
+        });
+        pool.unpin(frame_id, result.is_ok());
+        result
     }
 
     /// Search for a page with available space (for testing/debugging).
