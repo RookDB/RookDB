@@ -233,3 +233,31 @@ fn date_plus_integer_is_a_date() {
     );
     assert_eq!(types(&mut s, "SELECT v + 1 FROM d"), [DataType::Date]);
 }
+
+#[test]
+fn simple_case_matches_the_operand() {
+    let (_ws, mut s) = session("simplecase");
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT id, CASE x WHEN 5 THEN 'five' WHEN 0 THEN 'zero' ELSE 'other' END \
+             FROM a ORDER BY id"
+        ),
+        rows(&[&["1", "'other'"], &["2", "'five'"], &["3", "'zero'"]])
+    );
+}
+
+#[test]
+fn limit_offset_forms() {
+    let (_ws, mut s) = session("limit");
+    assert_eq!(
+        run(&mut s, "SELECT id FROM a ORDER BY id LIMIT 1, 2"),
+        rows(&[&["2"], &["3"]])
+    );
+    assert_eq!(
+        run(&mut s, "SELECT id FROM a ORDER BY id OFFSET 2"),
+        rows(&[&["3"]])
+    );
+    assert!(try_run(&mut s, "SELECT id FROM a LIMIT -1").is_err());
+    assert!(try_run(&mut s, "SELECT id FROM a LIMIT 1 + 1").is_err());
+}
