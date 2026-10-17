@@ -567,15 +567,16 @@ impl LimitOperator {
 
 impl PhysicalOperator for LimitOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
+        // Checked first, so `LIMIT 0 OFFSET n` reads nothing.
+        if self.emitted >= self.limit {
+            return Ok(None);
+        }
+
         while self.skipped < self.offset {
             match self.child.next()? {
                 Some(_) => self.skipped += 1,
                 None => return Ok(None),
             }
-        }
-
-        if self.emitted >= self.limit {
-            return Ok(None);
         }
 
         match self.child.next()? {

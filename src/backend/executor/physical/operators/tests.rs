@@ -142,6 +142,31 @@ fn test_limit_with_offset() {
     assert!(limit.next().unwrap().is_none());
 }
 
+/// A child that fails if it is read: an operator that needs none of its
+/// rows must not pull any.
+struct UnreadOperator(Vec<ColumnInfo>);
+
+impl PhysicalOperator for UnreadOperator {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
+        panic!("the child was read");
+    }
+    fn schema(&self) -> &[ColumnInfo] {
+        &self.0
+    }
+    fn reset(&mut self) -> RookResult<()> {
+        Ok(())
+    }
+    fn name(&self) -> &'static str {
+        "Unread"
+    }
+}
+
+#[test]
+fn test_limit_zero_with_offset_reads_nothing() {
+    let mut limit = LimitOperator::new(Box::new(UnreadOperator(int_schema())), 0, 1000);
+    assert!(limit.next().unwrap().is_none());
+}
+
 #[test]
 fn test_limit_zero() {
     let (tuples, schema) = int_tuples(vec![(Some(1), Some(10)), (Some(2), Some(20))]);
