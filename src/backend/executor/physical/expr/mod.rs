@@ -552,6 +552,17 @@ fn numeric_mul(
     })
 }
 
+/// Fractional digits a NUMERIC quotient has at least.
+pub(crate) const NUMERIC_DIVISION_SCALE: u8 = 6;
+
+/// The scale of `a / b` for NUMERICs of scales `sa` and `sb`.
+pub(crate) fn numeric_division_scale(sa: u8, sb: u8) -> u8 {
+    sa.max(sb).clamp(NUMERIC_DIVISION_SCALE, 38)
+}
+
+/// `a / b`, rounded half away from zero at
+/// [`numeric_division_scale`] places, or at fewer (down to the operands'
+/// own scale) when scaling the dividend that far would overflow.
 fn numeric_div(
     a: crate::types::value::NumericValue,
     b: crate::types::value::NumericValue,
@@ -559,28 +570,32 @@ fn numeric_div(
     if b.unscaled == 0 {
         return Err(RookError::Evaluation("Division by zero".to_string()));
     }
-    let target_scale = a.scale.max(b.scale);
-    let shift = target_scale as i32 + b.scale as i32 - a.scale as i32;
-    let a_shifted = if shift >= 0 {
-        let factor = 10_i128
-            .checked_pow(shift as u32)
-            .ok_or_else(|| RookError::Evaluation("Numeric scale factor overflow".to_string()))?;
-        a.unscaled
-            .checked_mul(factor)
-            .ok_or_else(|| RookError::Evaluation("Numeric division overflow".to_string()))?
-    } else {
-        let factor = 10_i128
-            .checked_pow((-shift) as u32)
-            .ok_or_else(|| RookError::Evaluation("Numeric scale factor overflow".to_string()))?;
-        a.unscaled / factor
+    let overflow = || RookError::Evaluation("Numeric division overflow".to_string());
+    // unscaled(a) * 10^(scale + sb - sa) / unscaled(b) has `scale` places.
+    let shifted = |scale: u8| {
+        let shift = scale as u32 + b.scale as u32 - a.scale as u32;
+        10_i128
+            .checked_pow(shift)
+            .and_then(|f| a.unscaled.checked_mul(f))
     };
-    let unscaled = a_shifted
-        .checked_div(b.unscaled)
-        .ok_or_else(|| RookError::Evaluation("Numeric division overflow".to_string()))?;
-    Ok(crate::types::value::NumericValue {
-        unscaled,
-        scale: target_scale,
-    })
+    let (scale, dividend) = (a.scale.max(b.scale)..=numeric_division_scale(a.scale, b.scale))
+        .rev()
+        .find_map(|scale| shifted(scale).map(|d| (scale, d)))
+        .ok_or_else(overflow)?;
+    let quotient = dividend.checked_div(b.unscaled).ok_or_else(overflow)?;
+    let remainder = (dividend % b.unscaled).unsigned_abs();
+    // Round half away from zero: |r| >= |b| - |r|, without doubling r.
+    let unscaled = if remainder >= b.unscaled.unsigned_abs() - remainder {
+        let away = if (dividend < 0) == (b.unscaled < 0) {
+            1
+        } else {
+            -1
+        };
+        quotient.checked_add(away).ok_or_else(overflow)?
+    } else {
+        quotient
+    };
+    Ok(crate::types::value::NumericValue { unscaled, scale })
 }
 
 fn numeric_rem(

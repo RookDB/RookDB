@@ -439,3 +439,17 @@ fn index_range_bounds_keep_every_matching_row() {
     assert_eq!(count(&mut s, "r > 5"), "2");
     assert_eq!(count(&mut s, "r < 0"), "1");
 }
+
+/// NUMERIC division keeps fractional digits and rounds the last one.
+#[test]
+fn numeric_division_keeps_a_fraction() {
+    let (_ws, mut s) = session("numdiv");
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT CAST(1 AS NUMERIC(10,0)) / 3, CAST(2 AS NUMERIC(10,1)) / 3, \
+             CAST(-2 AS NUMERIC(10,0)) / 3, CAST(10 AS NUMERIC(10,2)) / 4"
+        ),
+        rows(&[&["0.333333", "0.666667", "-0.666667", "2.500000"]])
+    );
+}

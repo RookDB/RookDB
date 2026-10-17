@@ -85,6 +85,9 @@ fn exact_numeric_result_type(
     // The scales the executor's numeric_add/sub/mul/div produce.
     let scale = match op {
         rook_ast::ArithOp::Mul => sa.saturating_add(sb).min(MAX_NUMERIC_PRECISION),
+        rook_ast::ArithOp::Div => {
+            crate::backend::executor::physical::expr::numeric_division_scale(sa, sb)
+        }
         _ => sa.max(sb),
     };
     Some(DT::Numeric {
