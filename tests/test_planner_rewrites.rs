@@ -124,3 +124,32 @@ fn group_by_expression_with_a_constant_part() {
         vec![vec![Some(14), Some(2)]]
     );
 }
+
+/// ORDER BY over two output columns of one name (`p.b`, `q.b`) sorts on the
+/// column each key names, also when another key is computed and the sort
+/// therefore runs above the projection.
+#[test]
+fn order_by_output_columns_that_share_a_name() {
+    let (_ws, mut s) = session("order_dup");
+    let expected = vec![
+        vec![Some(7), Some(2), Some(10)],
+        vec![Some(7), Some(1), Some(30)],
+        vec![Some(8), Some(3), Some(20)],
+    ];
+    for sql in [
+        "SELECT q.b, p.id * 1, p.b FROM p JOIN q ON q.id = p.id ORDER BY 1, 3",
+        "SELECT q.b, p.id * 1, p.b FROM p JOIN q ON q.id = p.id ORDER BY q.b, p.b",
+        "SELECT q.b, p.id * 1, p.b FROM p JOIN q ON q.id = p.id ORDER BY 1, 3 LIMIT 3",
+        "SELECT DISTINCT q.b, p.id * 1, p.b FROM p JOIN q ON q.id = p.id ORDER BY 1, 3",
+    ] {
+        assert_eq!(run(&mut s, sql), expected, "{}", sql);
+    }
+    // Two computed outputs, both displayed as `expr`, under DISTINCT.
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT DISTINCT q.b - 7, p.b * 0 FROM p JOIN q ON q.id = p.id ORDER BY 1, 2",
+        ),
+        vec![vec![Some(0), Some(0)], vec![Some(1), Some(0)]]
+    );
+}

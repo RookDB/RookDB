@@ -367,8 +367,23 @@ impl PhysicalPlanner {
         //   2. Project it as an additional hidden column
         //   3. Sort by the hidden column's index
         //   4. Strip the hidden column after sorting
-        let (sort_keys, extra_projections, has_complex) =
-            self.plan_sort_keys(&s.order_by, &child_schema, &column_names, &bind_names)?;
+        // Above a projection, a key that repeats a SELECT item reads that
+        // output column; the item's input columns no longer exist here.
+        let projected: &[NamedExpr] = match s.child.as_ref() {
+            LogicalPlan::Project(p) => &p.expressions,
+            LogicalPlan::Distinct(d) => match d.child.as_ref() {
+                LogicalPlan::Project(p) => &p.expressions,
+                _ => &[],
+            },
+            _ => &[],
+        };
+        let (sort_keys, extra_projections, has_complex) = self.plan_sort_keys(
+            &s.order_by,
+            projected,
+            &child_schema,
+            &column_names,
+            &bind_names,
+        )?;
 
         // ── Build the operator chain ──────────────────────────────────
 
@@ -391,6 +406,7 @@ impl PhysicalPlanner {
     fn plan_sort_keys(
         &self,
         order_by: &[rook_ast::OrderByExpr],
+        projected: &[NamedExpr],
         child_schema: &[ColumnInfo],
         column_names: &[String],
         bind_names: &[String],
@@ -400,6 +416,19 @@ impl PhysicalPlanner {
         let mut has_complex = false;
 
         for ob in order_by {
+            // A bare name is an output alias first, so only qualified and
+            // computed keys are matched against the SELECT items. Two items
+            // may share a name (`SELECT a.b, c.b`); their position tells
+            // them apart.
+            if !matches!(
+                ob.expr,
+                rook_ast::ExprNode::Column(_) | rook_ast::ExprNode::Constant(_)
+            ) && projected.len() == child_schema.len()
+                && let Some(idx) = projected.iter().position(|ne| ne.expr == ob.expr)
+            {
+                sort_keys.push((idx, !ob.ascending));
+                continue;
+            }
             match &ob.expr {
                 rook_ast::ExprNode::Column(name) => {
                     let idx = resolve_column(child_schema, None, name)?.ok_or_else(|| {
