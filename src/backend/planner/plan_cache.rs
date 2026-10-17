@@ -85,6 +85,30 @@ impl Literal {
     }
 }
 
+/// Whether the last significant token of `before` ends an operand, after
+/// which `+` or `-` is a binary operator rather than a sign.
+fn follows_operand(before: &[Token]) -> bool {
+    let last = before
+        .iter()
+        .rev()
+        .find(|t| !matches!(t, Token::Whitespace(_)));
+    matches!(
+        last,
+        Some(
+            Token::Word(_)
+                | Token::Number(..)
+                | Token::SingleQuotedString(_)
+                | Token::DoubleQuotedString(_)
+                | Token::NationalStringLiteral(_)
+                | Token::EscapedStringLiteral(_)
+                | Token::HexStringLiteral(_)
+                | Token::Placeholder(_)
+                | Token::RParen
+                | Token::RBracket
+        )
+    )
+}
+
 /// Tokenize `sql` with sqlparser's `Tokenizer` under the project's
 /// `GenericDialect`, keeping comments as whitespace tokens so the
 /// normalizer can skip them explicitly.
@@ -143,14 +167,14 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<Literal>) 
             // All other whitespace is irrelevant: spacing is positional.
             Token::Whitespace(_) | Token::EOF => i += 1,
 
-            // Unary sign immediately followed by an unsigned number folds
-            // into a single signed literal. `a - 1` (binary) has whitespace
-            // between `-` and `1` at the token level, so it never folds;
-            // `(-10)` after `(` / `,` / `=` / operators does.
+            // A unary sign immediately followed by an unsigned number folds
+            // into a single signed literal: `(-10)`, `= -1`, `3 * -2`. After
+            // an operand (a name, number, string or `)`) the sign is a
+            // binary operator and stays: `10+3`, `(a)-1`.
             Token::Minus | Token::Plus
                 if i + 1 < tokens.len()
                     && matches!(tokens[i + 1], Token::Number(_, false))
-                    && !prev_was_word =>
+                    && !follows_operand(&tokens[..i]) =>
             {
                 let sign = if matches!(token, Token::Minus) {
                     "-"
@@ -1048,5 +1072,19 @@ mod tests {
             bound(Literal::Text("x' OR 'y".into())).unwrap(),
             "SELECT id FROM t WHERE b = 'x'' OR ''y'"
         );
+    }
+
+    #[test]
+    fn binary_signs_are_not_folded_into_literals() {
+        let (norm, params) = normalize_sql("SELECT * FROM t WHERE x = 10+3");
+        assert_eq!(norm, "SELECT * FROM t WHERE x = $1 + $2");
+        assert_eq!(params, vec!["10", "3"]);
+        let (norm, params) = normalize_sql("INSERT INTO t VALUES (2-1, 'a'-1, (x)-1)");
+        assert_eq!(norm, "INSERT INTO t VALUES($1 - $2, $3 - $4, (x) - $5)");
+        assert_eq!(params, vec!["2", "1", "a", "1", "1"]);
+        // A sign that starts a value still folds.
+        let (norm, params) = normalize_sql("INSERT INTO t VALUES (-10, 3 * -2)");
+        assert_eq!(norm, "INSERT INTO t VALUES($1, $2 * $3)");
+        assert_eq!(params, vec!["-10", "3", "-2"]);
     }
 }
