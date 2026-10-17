@@ -412,3 +412,30 @@ fn boolean_tests_of_a_comparison_treat_unknown_as_neither() {
         rows(&[&["NULL"], &["3"]])
     );
 }
+
+/// An index range scan returns every row a strict bound admits, also when
+/// the constant does not convert exactly to the column type, and an
+/// open-ended range reaches infinities and NaN.
+#[test]
+fn index_range_bounds_keep_every_matching_row() {
+    let (_ws, mut s) = session("rangebounds");
+    for sql in [
+        "CREATE TABLE rn (n NUMERIC(5,1), r REAL)",
+        "INSERT INTO rn VALUES (1.2, 0.1), (1.3, 0.5), (1.4, 'Infinity'), (2.0, 'NaN'), (0.0, '-Infinity')",
+        "CREATE INDEX rn_n ON rn (n)",
+        "CREATE INDEX rn_r ON rn (r)",
+    ] {
+        run(&mut s, sql);
+    }
+    let count = |s: &mut Session, cond: &str| {
+        run(s, &format!("SELECT COUNT(*) FROM rn WHERE {}", cond))[0][0].clone()
+    };
+    assert_eq!(count(&mut s, "n > 1.26"), "3");
+    assert_eq!(count(&mut s, "n < 1.24"), "2");
+    assert_eq!(count(&mut s, "n >= 1.3"), "3");
+    // REAL 0.1 is 0.100000001490116... > DOUBLE 0.1.
+    assert_eq!(count(&mut s, "r > 0.1"), "4");
+    assert_eq!(count(&mut s, "r < 0.1"), "1");
+    assert_eq!(count(&mut s, "r > 5"), "2");
+    assert_eq!(count(&mut s, "r < 0"), "1");
+}

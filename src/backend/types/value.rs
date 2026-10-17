@@ -822,8 +822,8 @@ impl DataValue {
             DataType::SmallInt => DataValue::SmallInt(i16::MIN),
             DataType::Int => DataValue::Int(i32::MIN),
             DataType::BigInt => DataValue::BigInt(i64::MIN),
-            DataType::Real => DataValue::Real(OrderedF32(f32::MIN)),
-            DataType::DoublePrecision => DataValue::DoublePrecision(OrderedF64(f64::MIN)),
+            DataType::Real => DataValue::Real(OrderedF32(f32::NEG_INFINITY)),
+            DataType::DoublePrecision => DataValue::DoublePrecision(OrderedF64(f64::NEG_INFINITY)),
             DataType::Date => {
                 DataValue::Date(NaiveDate::from_ymd_opt(-9999, 1, 1).unwrap_or_default())
             }
@@ -854,8 +854,9 @@ impl DataValue {
             DataType::SmallInt => DataValue::SmallInt(i16::MAX),
             DataType::Int => DataValue::Int(i32::MAX),
             DataType::BigInt => DataValue::BigInt(i64::MAX),
-            DataType::Real => DataValue::Real(OrderedF32(f32::MAX)),
-            DataType::DoublePrecision => DataValue::DoublePrecision(OrderedF64(f64::MAX)),
+            // NaN sorts above every number, infinity included.
+            DataType::Real => DataValue::Real(OrderedF32(f32::NAN)),
+            DataType::DoublePrecision => DataValue::DoublePrecision(OrderedF64(f64::NAN)),
             DataType::Date => {
                 DataValue::Date(NaiveDate::from_ymd_opt(9999, 12, 31).unwrap_or_default())
             }

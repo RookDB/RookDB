@@ -367,15 +367,22 @@ impl PhysicalPlanner {
                     return None;
                 }
 
-                let dv = Self::ast_constant_to_data_value(const_val)?;
-                let dv = Self::coerce_to_key_type(dv, col_type)?;
+                let constant = Self::ast_constant_to_data_value(const_val)?;
+                let dv = Self::coerce_to_key_type(constant.clone(), col_type)?;
+                // Whether the key is the constant itself. A rounded key is
+                // only used as an inclusive bound: stepping past it could
+                // skip rows the constant admits (`n > 1.26` on NUMERIC(5,1)
+                // rounds to 1.3, which matches). The filter above the scan
+                // removes the extra rows an inclusive bound lets in.
+                let exact = crate::types::comparison::compare_nullable(Some(&constant), Some(&dv))
+                    .is_ok_and(|o| o == Some(std::cmp::Ordering::Equal));
 
                 match op {
                     rook_ast::ComparisonOp::Eq => Some(IndexScanMode::PointLookup(dv)),
                     // ── Single range operators → RangeLookup with sentinels ──
                     rook_ast::ComparisonOp::Gt => {
                         // col > val → RangeLookup(val+1, MAX)
-                        let low = dv.increment()?;
+                        let low = if exact { dv.increment()? } else { dv };
                         let high = DataValue::max_for_type(col_type);
                         Some(IndexScanMode::RangeLookup(low, high))
                     }
@@ -387,7 +394,7 @@ impl PhysicalPlanner {
                     rook_ast::ComparisonOp::Lt => {
                         // col < val → RangeLookup(MIN, val-1)
                         let low = DataValue::min_for_type(col_type);
-                        let high = dv.decrement()?;
+                        let high = if exact { dv.decrement()? } else { dv };
                         Some(IndexScanMode::RangeLookup(low, high))
                     }
                     rook_ast::ComparisonOp::Le => {

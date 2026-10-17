@@ -1351,8 +1351,9 @@ mod tests {
                     _ => panic!("Expected DoublePrecision"),
                 }
                 match high {
+                    // NaN sorts above every number, infinity included.
                     crate::types::value::DataValue::DoublePrecision(v) => {
-                        assert_eq!(v.0, f64::MAX);
+                        assert!(v.0.is_nan());
                     }
                     _ => panic!("Expected DoublePrecision"),
                 }
