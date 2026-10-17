@@ -6,8 +6,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::backend::error::{RookError, RookResult};
-use crate::backend::executor::{parse_text_row, parse_text_value};
 use crate::catalog::Catalog;
+use crate::types::value::DataValue;
 use rook_ast::QueryPlan;
 use rook_ast::logical::LogicalPlan;
 use sqlparser::dialect::GenericDialect;
@@ -26,9 +26,62 @@ pub(crate) const DEFAULT_CACHE_CAPACITY: usize = 512;
 /// unterminated string literal) cannot parse either, so it is its own key,
 /// unnormalized; the parser reports the syntax error downstream.
 pub fn normalize_sql(sql: &str) -> (String, Vec<String>) {
+    let (normalized, literals) = normalize_sql_literals(sql);
+    let texts = literals.into_iter().map(Literal::into_text).collect();
+    (normalized, texts)
+}
+
+/// [`normalize_sql`], keeping what kind of literal each parameter was, so
+/// `5`, `'5'`, `NULL` and `'NULL'` stay distinct.
+pub fn normalize_sql_literals(sql: &str) -> (String, Vec<Literal>) {
     match tokenize_for_normalization(sql) {
         Ok(tokens) => normalize_from_tokens(sql, &tokens),
         Err(_) => (sql.trim().to_string(), Vec::new()),
+    }
+}
+
+/// A literal lifted out of a statement by [`normalize_sql_literals`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Literal {
+    /// A number as written, sign included.
+    Number(String),
+    /// A string's content, quotes and escapes removed.
+    Text(String),
+    /// The digits of `X'...'`.
+    Hex(String),
+    Null,
+}
+
+impl Literal {
+    /// The literal's text: what `normalize_sql` reports.
+    pub fn into_text(self) -> String {
+        match self {
+            Literal::Number(s) | Literal::Text(s) | Literal::Hex(s) => s,
+            Literal::Null => "NULL".to_string(),
+        }
+    }
+
+    /// The literal as SQL source.
+    fn to_sql(&self) -> String {
+        match self {
+            Literal::Number(n) => n.clone(),
+            Literal::Text(t) => format!("'{}'", t.replace('\'', "''")),
+            Literal::Hex(h) => format!("X'{}'", h),
+            Literal::Null => "NULL".to_string(),
+        }
+    }
+
+    /// The literal as a value of `column`. Unlike CSV text, `''` and
+    /// `'NULL'` are strings; only the `NULL` keyword is NULL.
+    fn to_value(&self, column: &crate::catalog::types::Column) -> RookResult<Option<DataValue>> {
+        let text = match self {
+            Literal::Null => return Ok(None),
+            Literal::Number(s) | Literal::Text(s) | Literal::Hex(s) => s,
+        };
+        DataValue::parse_and_encode(&column.data_type, text)
+            .and_then(|bytes| DataValue::from_bytes(&column.data_type, &bytes))
+            .map(Some)
+            .map_err(|e| e.with_context(format!("column '{}'", column.name)))
     }
 }
 
@@ -53,10 +106,9 @@ fn tokenize_for_normalization(
 /// (function-call / `VALUES(...)` glue). A `-`/`+` in unary position and
 /// immediately followed by a number folds into a signed literal, so
 /// `VALUES (-10)` parameterizes as one `$1` with value `-10`.
-fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
-    let _ = sql; // kept for signature symmetry with the legacy fallback
+fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<Literal>) {
     let mut normalized = String::with_capacity(sql.len());
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Literal> = Vec::new();
 
     // Tokens are separator-irrelevant after comment stripping, so spacing is
     // decided per pair of adjacent emitted tokens.
@@ -107,7 +159,7 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
                 };
                 if let Token::Number(value, _) = &tokens[i + 1] {
                     space_if_needed!(token, prev_was_word);
-                    params.push(format!("{}{}", sign, value));
+                    params.push(Literal::Number(format!("{}{}", sign, value)));
                     normalized.push('$');
                     normalized.push_str(&params.len().to_string());
                 }
@@ -138,7 +190,7 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
                     && !is_predicate_or_constraint_null
                 {
                     space_if_needed!(token, prev_was_word);
-                    params.push("NULL".to_string());
+                    params.push(Literal::Null);
                     normalized.push('$');
                     normalized.push_str(&params.len().to_string());
                     prev_was_word = false;
@@ -175,7 +227,7 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
             // tokenizer reports the "long" (signed) form.
             Token::Number(value, _long) => {
                 space_if_needed!(token, prev_was_word);
-                params.push(value.clone());
+                params.push(Literal::Number(value.clone()));
                 normalized.push('$');
                 normalized.push_str(&params.len().to_string());
                 prev_was_word = false;
@@ -189,7 +241,11 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
             | Token::HexStringLiteral(v)
             | Token::EscapedStringLiteral(v) => {
                 space_if_needed!(token, prev_was_word);
-                params.push(v.clone());
+                params.push(if matches!(token, Token::HexStringLiteral(_)) {
+                    Literal::Hex(v.clone())
+                } else {
+                    Literal::Text(v.clone())
+                });
                 normalized.push('$');
                 normalized.push_str(&params.len().to_string());
                 prev_was_word = false;
@@ -220,7 +276,7 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
                     .and_then(|s| s.parse::<usize>().map_err(|_| ()))
                 {
                     while params.len() < n {
-                        params.push(String::new()); // reserved, never consumed
+                        params.push(Literal::Text(String::new())); // reserved, never consumed
                     }
                 }
                 prev_was_word = false;
@@ -266,7 +322,12 @@ pub struct CachedInsert {
 
 impl CachedInsert {
     /// Execute the insert using the cached template and extracted parameter values.
-    pub fn execute(&self, catalog: &Catalog, db_name: &str, values: &[&str]) -> RookResult<usize> {
+    pub fn execute(
+        &self,
+        catalog: &Catalog,
+        db_name: &str,
+        values: &[Literal],
+    ) -> RookResult<usize> {
         let db = catalog
             .databases
             .get(db_name)
@@ -352,8 +413,13 @@ impl CachedInsert {
             offset += row_len;
 
             // Columns the statement leaves out take their DEFAULT (or NULL).
-            let row: Vec<Option<crate::types::DataValue>> = if self.columns.is_empty() {
-                parse_text_row(&table.columns, row_values)?
+            let row: Vec<Option<DataValue>> = if self.columns.is_empty() {
+                table
+                    .columns
+                    .iter()
+                    .zip(row_values)
+                    .map(|(column, literal)| literal.to_value(column))
+                    .collect::<RookResult<_>>()?
             } else {
                 let mut row: Vec<_> = table
                     .columns
@@ -361,7 +427,7 @@ impl CachedInsert {
                     .map(|c| c.constraints.default.clone())
                     .collect();
                 for (i, &pos) in col_positions.iter().enumerate() {
-                    row[pos] = parse_text_value(&table.columns[pos], row_values[i])?;
+                    row[pos] = row_values[i].to_value(&table.columns[pos])?;
                 }
                 row
             };
@@ -377,8 +443,14 @@ impl CachedInsert {
 /// A cached entry in the plan cache.
 #[derive(Clone, Debug)]
 pub enum PlanCacheEntry {
+    /// An INSERT template; its values are supplied per execution.
     Insert(CachedInsert),
-    Plan(LogicalPlan),
+    /// A planned statement. The plan holds the statement's literals, so it
+    /// serves only a statement with these same `literals`.
+    Plan {
+        plan: LogicalPlan,
+        literals: Vec<Literal>,
+    },
 }
 
 /// Process-wide Plan Cache.
@@ -611,7 +683,7 @@ pub fn execute_cached_insert(
     db_name: &str,
     sql: &str,
 ) -> RookResult<Option<usize>> {
-    let (normalized, params) = normalize_sql(sql);
+    let (normalized, params) = normalize_sql_literals(sql);
     let key_matched =
         normalized.starts_with("INSERT INTO") || normalized.starts_with("insert into");
 
@@ -622,16 +694,12 @@ pub fn execute_cached_insert(
     if let Some(PlanCacheEntry::Insert(cached_insert)) =
         get_cached_plan(catalog.engine(), db_name, &normalized)
     {
-        let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-        return cached_insert
-            .execute(catalog, db_name, &param_refs)
-            .map(Some);
+        return cached_insert.execute(catalog, db_name, &params).map(Some);
     }
 
     // Cache miss: construct template
     if let Some(cached_insert) = parse_insert_template(&normalized, params.len()) {
-        let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-        let res = cached_insert.execute(catalog, db_name, &param_refs)?;
+        let res = cached_insert.execute(catalog, db_name, &params)?;
         store_cached_plan(
             catalog.engine(),
             db_name,
@@ -651,8 +719,7 @@ pub fn execute_cached_insert(
             arity: params.len(),
             row_arities: ip.values.iter().map(|r| r.len()).collect(),
         };
-        let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-        let res = cached_insert.execute(catalog, db_name, &param_refs)?;
+        let res = cached_insert.execute(catalog, db_name, &params)?;
         store_cached_plan(
             catalog.engine(),
             db_name,
@@ -668,6 +735,7 @@ pub fn execute_cached_insert(
 /// Prepared Statement.
 #[derive(Clone, Debug)]
 pub struct PreparedStatement {
+    /// The statement with its literals replaced by `$1`, `$2`, ...
     pub sql_template: String,
     pub db_name: String,
     pub param_count: usize,
@@ -677,67 +745,132 @@ pub struct PreparedStatement {
 impl PreparedStatement {
     /// Prepare a statement from a SQL string.
     pub fn prepare(catalog: &Catalog, db_name: &str, sql: &str) -> RookResult<Self> {
-        let (normalized, default_params) = normalize_sql(sql);
-        if let Some(entry) = get_cached_plan(catalog.engine(), db_name, &normalized) {
-            return Ok(Self {
-                sql_template: normalized,
-                db_name: db_name.to_string(),
-                param_count: default_params.len(),
-                entry,
-            });
-        }
-
-        if let Some(cached_insert) = parse_insert_template(&normalized, default_params.len()) {
-            let entry = PlanCacheEntry::Insert(cached_insert);
-            store_cached_plan(catalog.engine(), db_name, &normalized, entry.clone());
-            return Ok(Self {
-                sql_template: normalized,
-                db_name: db_name.to_string(),
-                param_count: default_params.len(),
-                entry,
-            });
-        }
-
-        let plan = rook_parser::parse_sql(sql)?;
-        let entry = match plan {
-            QueryPlan::Insert(ref ip) if ip.source_select.is_none() => {
-                PlanCacheEntry::Insert(CachedInsert {
-                    table: ip.table.clone(),
-                    columns: ip.columns.clone(),
-                    arity: default_params.len(),
-                    row_arities: ip.values.iter().map(|r| r.len()).collect(),
-                })
+        let (normalized, literals) = normalize_sql_literals(sql);
+        let prepared = |entry: PlanCacheEntry| Self {
+            sql_template: normalized.clone(),
+            db_name: db_name.to_string(),
+            param_count: literals.len(),
+            entry,
+        };
+        match get_cached_plan(catalog.engine(), db_name, &normalized) {
+            Some(entry @ PlanCacheEntry::Insert(_)) => return Ok(prepared(entry)),
+            Some(PlanCacheEntry::Plan {
+                plan,
+                literals: cached,
+            }) if cached == literals => {
+                return Ok(prepared(PlanCacheEntry::Plan {
+                    plan,
+                    literals: cached,
+                }));
             }
-            _ => {
-                let logical = crate::backend::planner::plan_query(&plan, catalog, db_name)
-                    .map_err(|e| RookError::Internal(e.to_string()))?;
-                PlanCacheEntry::Plan(logical)
+            _ => {}
+        }
+
+        let entry = if let Some(cached_insert) = parse_insert_template(&normalized, literals.len())
+        {
+            PlanCacheEntry::Insert(cached_insert)
+        } else {
+            match rook_parser::parse_sql(sql)? {
+                QueryPlan::Insert(ref ip) if ip.source_select.is_none() => {
+                    PlanCacheEntry::Insert(CachedInsert {
+                        table: ip.table.clone(),
+                        columns: ip.columns.clone(),
+                        arity: literals.len(),
+                        row_arities: ip.values.iter().map(|r| r.len()).collect(),
+                    })
+                }
+                plan => PlanCacheEntry::Plan {
+                    plan: crate::backend::planner::plan_query(&plan, catalog, db_name)
+                        .map_err(|e| RookError::Internal(e.to_string()))?,
+                    literals: literals.clone(),
+                },
             }
         };
-
         store_cached_plan(catalog.engine(), db_name, &normalized, entry.clone());
-        Ok(Self {
-            sql_template: normalized,
-            db_name: db_name.to_string(),
-            param_count: default_params.len(),
-            entry,
-        })
+        Ok(prepared(entry))
     }
 
-    /// Execute the prepared statement with given parameters.
-    pub fn execute(&self, catalog: &Catalog, params: &[&str]) -> RookResult<usize> {
-        match &self.entry {
-            PlanCacheEntry::Insert(ins) => ins.execute(catalog, &self.db_name, params),
-            PlanCacheEntry::Plan(plan) => {
-                let tuples = crate::backend::executor::physical::engine::execute_plan_collect(
+    /// Execute the prepared statement with `params` in place of its
+    /// literals. Returns the rows inserted or produced.
+    pub fn execute(&self, catalog: &Catalog, params: &[Literal]) -> RookResult<usize> {
+        if params.len() != self.param_count {
+            return Err(RookError::TypeMismatch(format!(
+                "prepared statement takes {} parameter(s), got {}",
+                self.param_count,
+                params.len()
+            )));
+        }
+        let rows = match &self.entry {
+            PlanCacheEntry::Insert(ins) => return ins.execute(catalog, &self.db_name, params),
+            PlanCacheEntry::Plan { plan, literals } if literals.as_slice() == params => {
+                crate::backend::executor::physical::engine::execute_plan_collect(
                     plan,
                     catalog,
                     &self.db_name,
-                )?;
-                Ok(tuples.len())
+                )?
             }
-        }
+            PlanCacheEntry::Plan { .. } => {
+                // The plan holds the prepared literals: plan the statement
+                // again with the new ones.
+                let sql = bind_template(&self.sql_template, params)?;
+                let plan = rook_parser::parse_sql(&sql)?;
+                let logical = crate::backend::planner::plan_query(&plan, catalog, &self.db_name)
+                    .map_err(|e| RookError::Internal(e.to_string()))?;
+                crate::backend::executor::physical::engine::execute_plan_collect(
+                    &logical,
+                    catalog,
+                    &self.db_name,
+                )?
+            }
+        };
+        Ok(rows.len())
     }
+}
+
+/// Whether `text` is a plain numeric literal: digits, at most one point, an
+/// optional sign and exponent.
+fn is_number(text: &str) -> bool {
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((m, e)) => (m, Some(e.strip_prefix(['+', '-']).unwrap_or(e))),
+        None => (unsigned, None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let mantissa_ok = match mantissa.split_once('.') {
+        Some((whole, frac)) => {
+            (whole.is_empty() || digits(whole))
+                && (frac.is_empty() || digits(frac))
+                && !(whole.is_empty() && frac.is_empty())
+        }
+        None => digits(mantissa),
+    };
+    mantissa_ok && exponent.is_none_or(digits)
+}
+
+/// `template` with each `$n` placeholder replaced by `params[n - 1]` as SQL.
+/// A number is checked to be one, so a parameter can never add SQL of its own.
+fn bind_template(template: &str, params: &[Literal]) -> RookResult<String> {
+    let tokens = tokenize_for_normalization(template)
+        .map_err(|e| RookError::Internal(format!("prepared statement template: {}", e)))?;
+    let mut sql = String::with_capacity(template.len());
+    for token in &tokens {
+        let Token::Placeholder(p) = token else {
+            sql.push_str(&token.to_string());
+            continue;
+        };
+        let param = p
+            .strip_prefix('$')
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| params.get(n.checked_sub(1)?))
+            .ok_or_else(|| RookError::Internal(format!("no value for parameter {}", p)))?;
+        if let Literal::Number(n) = param
+            && !is_number(n)
+        {
+            return Err(RookError::TypeMismatch(format!("'{}' is not a number", n)));
+        }
+        sql.push_str(&param.to_sql());
+    }
+    Ok(sql)
 }
 
 #[cfg(test)]
