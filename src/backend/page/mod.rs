@@ -238,82 +238,39 @@ pub fn init_page(page: &mut Page) {
 }
 
 // Return available free space in the page
-pub fn page_free_space(page: &Page) -> RookResult<u32> {
-    let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-    let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-
+/// The page's `(lower, upper)` pointers, checked: the slot array starts
+/// after the header, both stay inside the page, and they do not cross.
+fn checked_pointers(page: &Page) -> RookResult<(u32, u32)> {
+    let (lower, upper) = (page.lower(), page.upper());
+    let corrupt = |msg: String| Err(RookError::io(std::io::ErrorKind::InvalidData, msg));
     if lower < PAGE_HEADER_SIZE {
-        return Err(RookError::io(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Invalid page lower pointer: {} < {}",
-                lower, PAGE_HEADER_SIZE
-            ),
+        return corrupt(format!(
+            "Invalid page lower pointer: {} < {}",
+            lower, PAGE_HEADER_SIZE
         ));
     }
-
     if lower > PAGE_SIZE as u32 || upper > PAGE_SIZE as u32 {
-        return Err(RookError::io(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Page pointers out of bounds: lower={}, upper={}, page_size={}",
-                lower, upper, PAGE_SIZE
-            ),
+        return corrupt(format!(
+            "Page pointers out of bounds: lower={}, upper={}, page_size={}",
+            lower, upper, PAGE_SIZE
         ));
     }
-
     if upper < lower {
-        return Err(RookError::io(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Corrupted page pointers: upper ({}) < lower ({})",
-                upper, lower
-            ),
+        return corrupt(format!(
+            "Corrupted page pointers: upper ({}) < lower ({})",
+            upper, lower
         ));
     }
+    Ok((lower, upper))
+}
 
+pub fn page_free_space(page: &Page) -> RookResult<u32> {
+    let (lower, upper) = checked_pointers(page)?;
     Ok(upper - lower)
 }
 
-/// Get the number of tuples currently stored in a page.
-/// This is calculated as (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE.
-///
-/// # Errors
-/// Returns error if reading the page header fails.
 pub fn get_tuple_count(page: &Page) -> RookResult<u32> {
-    let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-    let upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
-
-    if lower < PAGE_HEADER_SIZE {
-        return Err(RookError::io(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Invalid page lower pointer: {} < {}",
-                lower, PAGE_HEADER_SIZE
-            ),
-        ));
-    }
-
-    if lower > PAGE_SIZE as u32 || upper > PAGE_SIZE as u32 {
-        return Err(RookError::io(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Page pointers out of bounds: lower={}, upper={}, page_size={}",
-                lower, upper, PAGE_SIZE
-            ),
-        ));
-    }
-
-    if upper < lower {
-        return Err(RookError::io(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Corrupted page pointers: upper ({}) < lower ({})",
-                upper, lower
-            ),
-        ));
-    }
-
+    let (lower, _) = checked_pointers(page)?;
     if !(lower - PAGE_HEADER_SIZE).is_multiple_of(ITEM_ID_SIZE) {
         return Err(RookError::io(
             std::io::ErrorKind::InvalidData,
@@ -323,27 +280,9 @@ pub fn get_tuple_count(page: &Page) -> RookResult<u32> {
             ),
         ));
     }
-
-    let tuple_count = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
-
-    Ok(tuple_count)
+    Ok((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE)
 }
 
-/// Get slot entry (offset, length) for a given slot ID.
-///
-/// Uses the canonical 3-field slot format `[offset: u32, length: u16, flags: u16]`.
-/// Returns `(0, 0)` for soft-deleted slots (those with `SLOT_FLAG_DELETED` set)
-/// so that callers can uniformly treat `(0, 0)` as "skip this slot".
-///
-/// # Arguments
-/// * `page`    - The page to read from
-/// * `slot_id` - Zero-based slot index
-///
-/// # Returns
-/// `(offset, length)` of the live tuple data, or `(0, 0)` for deleted slots.
-///
-/// # Errors
-/// Returns an error only if `slot_id` is out of bounds or the page is structurally invalid.
 pub fn get_slot_entry(page: &Page, slot_id: u32) -> RookResult<(u32, u32)> {
     let tuple_count = get_tuple_count(page)?;
     let slot = page.slot(slot_id).ok_or_else(|| {
