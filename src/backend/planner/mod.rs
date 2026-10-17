@@ -464,6 +464,17 @@ fn plan_select_with_ctes(
             }
         }
 
+        // A repeated key groups nothing further, but would give the aggregate
+        // two output columns of one name (`GROUP BY b, b`, `GROUP BY 1, ABS(b)`).
+        let mut seen = Vec::with_capacity(group_by.len());
+        group_by.retain(|e| {
+            let first = !seen.contains(e);
+            if first {
+                seen.push(e.clone());
+            }
+            first
+        });
+
         for item in &select.projections {
             if let SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } = item
                 && let Some(column) = ungrouped_column(e, &group_by)

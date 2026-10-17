@@ -231,3 +231,33 @@ fn sort_key_on_a_repeated_constant_output() {
         vec![vec![Some(10), Some(10)], vec![Some(10), Some(10)]]
     );
 }
+
+/// A GROUP BY key written twice, directly or as a position, groups like the
+/// key written once.
+#[test]
+fn repeated_group_by_key() {
+    let (_ws, mut s) = session("dup_group_key");
+    let by_abs = vec![
+        vec![None, Some(1)],
+        vec![Some(0), Some(1)],
+        vec![Some(10), Some(2)],
+    ];
+    for sql in [
+        "SELECT ABS(b - 20), COUNT(*) FROM p GROUP BY ABS(b - 20), ABS(b - 20)",
+        "SELECT ABS(b - 20), COUNT(*) FROM p GROUP BY 1, ABS(b - 20)",
+        "SELECT ABS(b - 20), COUNT(*) FROM p GROUP BY 1, 1",
+    ] {
+        assert_eq!(sorted(run(&mut s, sql)), by_abs, "{}", sql);
+    }
+    let by_b = vec![
+        vec![Some(7), Some(2)],
+        vec![Some(8), Some(1)],
+        vec![Some(9), Some(1)],
+    ];
+    for sql in [
+        "SELECT b, COUNT(*) FROM q GROUP BY b, b",
+        "SELECT q.b, COUNT(*) FROM q GROUP BY q.b, b",
+    ] {
+        assert_eq!(sorted(run(&mut s, sql)), by_b, "{}", sql);
+    }
+}
