@@ -11,7 +11,7 @@ use super::super::operators::{
     NestedLoopJoinOperator, PhysicalOperator, infer_aggregate_output_type, mark_merged,
 };
 use super::super::tuple::ColumnInfo;
-use super::helpers::infer_expr_type_from_ast;
+use super::helpers::infer_expr_type_in_schema;
 use super::{PhysicalPlanner, PlannerStats};
 use crate::backend::error::{RookError, RookResult};
 use crate::statistics::estimator::{Estimator, hash_join_cost, index_nested_loop_cost};
@@ -347,7 +347,6 @@ impl PhysicalPlanner {
     ) -> RookResult<Box<dyn PhysicalOperator>> {
         let child_schema = child.schema();
         let column_names = binding_names(child_schema);
-        let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
 
         // ─── Resolve GROUP BY expressions ────────────────────────────────
         let mut group_by_exprs = Vec::new();
@@ -358,74 +357,19 @@ impl PhysicalPlanner {
             let expr = expr_from_ast(expr_node, &column_names)?;
             let name = crate::planner::helpers::group_key_name(expr_node);
             let data_type = match expr_node {
-                rook_ast::ExprNode::Column(name) => {
-                    let idx = column_names
-                        .iter()
-                        .position(|c| c.eq_ignore_ascii_case(name))
-                        .ok_or_else(|| RookError::NotFound {
-                            entity: "Column",
-                            name: name.clone(),
-                        })?;
-                    child_types[idx].clone()
-                }
-                rook_ast::ExprNode::Compound(parts) => {
-                    let name = parts.last().ok_or_else(|| {
-                        RookError::Internal("Empty compound identifier".to_string())
-                    })?;
-                    let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
-                    let idx = super::super::expr::column_position(child_schema, table, name)
-                        .or_else(|| {
-                            column_names
-                                .iter()
-                                .position(|c| c.eq_ignore_ascii_case(name))
-                        })
-                        .ok_or_else(|| RookError::NotFound {
-                            entity: "Column",
-                            name: name.clone(),
-                        })?;
-                    child_types[idx].clone()
-                }
-                rook_ast::ExprNode::Constant(cv) => match cv {
-                    rook_ast::ConstantValue::Null => DataType::Int,
-                    rook_ast::ConstantValue::Int(_) => DataType::Int,
-                    rook_ast::ConstantValue::Float(_) => DataType::DoublePrecision,
-                    rook_ast::ConstantValue::Text(_) => DataType::Varchar(u16::MAX),
-                    rook_ast::ConstantValue::Boolean(_) => DataType::Bool,
-                },
-                rook_ast::ExprNode::Cast { data_type, .. } => {
-                    data_type.parse::<DataType>().map_err(|e| {
-                        RookError::TypeMismatch(format!(
-                            "Invalid CAST target type '{}': {}",
-                            data_type, e
-                        ))
-                    })?
-                }
-                rook_ast::ExprNode::Binary { .. } => {
-                    infer_expr_type_from_ast(expr_node, &child_types, &column_names)
-                        .unwrap_or(DataType::Int)
-                }
-                // Scalar subqueries are not expected in GROUP BY expressions
                 rook_ast::ExprNode::ScalarSubquery(_) => {
                     return Err(RookError::Internal(
                         "Scalar subqueries are not allowed in GROUP BY".to_string(),
                     ));
                 }
-                // Aggregate functions in GROUP BY are not valid SQL — return error
-                rook_ast::ExprNode::Function { .. } => {
+                rook_ast::ExprNode::Function { name, .. } if is_aggregate_name(name) => {
                     return Err(RookError::Internal(
                         "Aggregate function calls are not allowed in GROUP BY".to_string(),
                     ));
                 }
-                rook_ast::ExprNode::Case { .. } => {
-                    return Err(RookError::Internal(
-                        "CASE expressions are not allowed in GROUP BY".to_string(),
-                    ));
-                }
-                rook_ast::ExprNode::Compare { .. }
-                | rook_ast::ExprNode::Logical { .. }
-                | rook_ast::ExprNode::Not(_)
-                | rook_ast::ExprNode::IsNull(_)
-                | rook_ast::ExprNode::IsNotNull(_) => DataType::Bool,
+                // A NULL key has no type of its own; any type holds it.
+                rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Null) => DataType::Int,
+                _ => infer_expr_type_in_schema(expr_node, child_schema)?,
             };
             group_by_exprs.push(expr);
             group_by_names.push(name);
@@ -458,7 +402,7 @@ impl PhysicalPlanner {
             };
 
             let input_type = if let Some(arg) = agg_expr.args.first() {
-                infer_expr_type_from_ast(arg, &child_types, &column_names).ok()
+                infer_expr_type_in_schema(arg, child_schema).ok()
             } else {
                 None
             };

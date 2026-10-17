@@ -6,6 +6,8 @@ use crate::backend::error::{RookError, RookResult};
 use crate::types::DataValue;
 use crate::types::datatype::DataType;
 
+use super::super::operators::{AggregateFunction, infer_aggregate_output_type};
+
 /// Promote two types to a common type using SQL-99 implicit promotion rules.
 ///
 /// Rules:
@@ -137,139 +139,142 @@ pub fn ast_expr_to_output_name(expr: &rook_ast::ExprNode) -> String {
     }
 }
 
-/// Infer the DataType of an AST expression given child schema types and column names.
-pub fn infer_expr_type_from_ast(
+/// Infer the type of an AST expression evaluated against rows of `schema`.
+///
+/// Columns resolve as the executor resolves them, so a qualified `b.id`
+/// takes `b`'s type even when an earlier `a.id` has the same name. A NULL
+/// literal has no type of its own: it takes the type of the other operand,
+/// branch or argument it stands beside, and a value that is NULL throughout
+/// (`SELECT NULL`) is typed INT.
+pub fn infer_expr_type_in_schema(
     expr: &rook_ast::ExprNode,
-    child_types: &[crate::types::datatype::DataType],
-    column_names: &[String],
-) -> RookResult<crate::types::datatype::DataType> {
-    match expr {
-        rook_ast::ExprNode::Column(name) => {
-            let idx = column_names
-                .iter()
-                .position(|c| c.eq_ignore_ascii_case(name))
-                .ok_or_else(|| RookError::NotFound {
-                    entity: "Column",
-                    name: name.clone(),
-                })?;
-            Ok(child_types[idx].clone())
+    schema: &[super::super::tuple::ColumnInfo],
+) -> RookResult<DataType> {
+    Ok(infer_type(expr, schema)?.unwrap_or(DataType::Int))
+}
+
+/// [`infer_expr_type_in_schema`]; `None` is the unknown type of NULL.
+fn infer_type(
+    expr: &rook_ast::ExprNode,
+    schema: &[super::super::tuple::ColumnInfo],
+) -> RookResult<Option<DataType>> {
+    use rook_ast::{ConstantValue as CV, ExprNode as E, FunctionArg};
+    let column = |table: Option<&str>, name: &str| {
+        super::super::expr::column_position(schema, table, name)
+            .map(|i| Some(schema[i].data_type.clone()))
+            .ok_or_else(|| RookError::NotFound {
+                entity: "Column",
+                name: match table {
+                    Some(t) => format!("{}.{}", t, name),
+                    None => name.to_string(),
+                },
+            })
+    };
+    // The first argument or branch whose type is known.
+    let first_known = |exprs: &mut dyn Iterator<Item = &E>| -> RookResult<Option<DataType>> {
+        for e in exprs {
+            if let Some(t) = infer_type(e, schema)? {
+                return Ok(Some(t));
+            }
         }
-        rook_ast::ExprNode::Compound(parts) => {
+        Ok(None)
+    };
+    Ok(match expr {
+        E::Column(name) => column(None, name)?,
+        E::Compound(parts) => {
             let name = parts
                 .last()
                 .ok_or_else(|| RookError::Internal("Empty compound identifier".to_string()))?;
-            let idx = column_names
-                .iter()
-                .position(|c| c.eq_ignore_ascii_case(name))
-                .ok_or_else(|| RookError::NotFound {
-                    entity: "Column",
-                    name: name.clone(),
-                })?;
-            Ok(child_types[idx].clone())
+            let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
+            column(table, name)?
         }
-        rook_ast::ExprNode::Constant(cv) => match cv {
-            rook_ast::ConstantValue::Null => Err(RookError::Internal(
-                "Cannot infer type for NULL literal".to_string(),
-            )),
-            rook_ast::ConstantValue::Int(_) => Ok(crate::types::datatype::DataType::Int),
-            rook_ast::ConstantValue::Float(_) => {
-                Ok(crate::types::datatype::DataType::DoublePrecision)
-            }
-            rook_ast::ConstantValue::Text(_) => {
-                Ok(crate::types::datatype::DataType::Varchar(u16::MAX))
-            }
-            rook_ast::ConstantValue::Boolean(_) => Ok(crate::types::datatype::DataType::Bool),
+        E::Constant(cv) => match cv {
+            CV::Null => None,
+            CV::Int(i) if i32::try_from(*i).is_ok() => Some(DataType::Int),
+            CV::Int(_) => Some(DataType::BigInt),
+            CV::Float(_) => Some(DataType::DoublePrecision),
+            CV::Text(_) => Some(DataType::Varchar(u16::MAX)),
+            CV::Boolean(_) => Some(DataType::Bool),
         },
-        rook_ast::ExprNode::Binary { left, op, right } => {
-            // Infer the result type by looking at child expression types and
-            // applying SQL type promotion (e.g., INT + DOUBLE → DOUBLE).
-            let left_type = infer_expr_type_from_ast(left, child_types, column_names)?;
-            let right_type = infer_expr_type_from_ast(right, child_types, column_names)?;
-            Ok(exact_numeric_result_type(&left_type, *op, &right_type)
-                .unwrap_or_else(|| promote_numeric_type(&left_type, &right_type)))
-        }
-        rook_ast::ExprNode::Cast { data_type, .. } => data_type
-            .parse::<crate::types::datatype::DataType>()
-            .map_err(|e| {
-                RookError::TypeMismatch(format!("Invalid CAST target type '{}': {}", data_type, e))
-            }),
-        // Scalar subqueries are materialized before this function is called,
-        // so any remaining ScalarSubquery node would have been replaced with
-        // a Constant. This is a fallback for the unimplemented case.
-        rook_ast::ExprNode::ScalarSubquery(_) => Err(RookError::Internal(
-            "Scalar subqueries must be materialized before type inference".to_string(),
-        )),
-        // Scalar / aggregate function — infer result type from the function name
-        rook_ast::ExprNode::Function { name, args, .. } => {
-            let upper = name.to_ascii_uppercase();
-            match upper.as_str() {
-                // Aggregate functions
-                "COUNT" => Ok(crate::types::datatype::DataType::BigInt),
-                "SUM" | "AVG" => Ok(crate::types::datatype::DataType::DoublePrecision),
-                "MIN" | "MAX" => {
-                    // Infer from argument type if possible
-                    if let Some(rook_ast::FunctionArg::Expr(expr)) = args.first() {
-                        infer_expr_type_from_ast(expr, child_types, column_names)
-                    } else {
-                        Ok(crate::types::datatype::DataType::Int)
-                    }
+        E::Binary { left, op, right } => {
+            match (infer_type(left, schema)?, infer_type(right, schema)?) {
+                // DATE ± integer days is a DATE.
+                (Some(DataType::Date), Some(_)) | (Some(_), Some(DataType::Date))
+                    if matches!(op, rook_ast::ArithOp::Add | rook_ast::ArithOp::Sub) =>
+                {
+                    Some(DataType::Date)
                 }
-                // String functions return VARCHAR
-                "UPPER" | "UCASE" | "LOWER" | "LCASE" | "TRIM" | "LTRIM" | "RTRIM"
-                | "SUBSTRING" | "SUBSTR" => Ok(crate::types::datatype::DataType::Varchar(u16::MAX)),
-                // String length returns INT
-                "LENGTH" | "LEN" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "POSITION"
-                | "CHARINDEX" => Ok(crate::types::datatype::DataType::Int),
-                // Numeric functions
-                "ABS" | "FLOOR" | "CEIL" | "CEILING" | "ROUND" => {
-                    if let Some(rook_ast::FunctionArg::Expr(expr)) = args.first() {
-                        infer_expr_type_from_ast(expr, child_types, column_names)
-                    } else {
-                        Ok(crate::types::datatype::DataType::Int)
-                    }
-                }
-                // EXTRACT returns INT
-                "EXTRACT" | "DATE_PART" => Ok(crate::types::datatype::DataType::Int),
-                // COALESCE — use type of first non-NULL argument
-                "COALESCE" => {
-                    if let Some(rook_ast::FunctionArg::Expr(expr)) = args.first() {
-                        infer_expr_type_from_ast(expr, child_types, column_names)
-                    } else {
-                        Ok(crate::types::datatype::DataType::Int)
-                    }
-                }
-                // NULLIF — use type of first argument
-                "NULLIF" => {
-                    if let Some(rook_ast::FunctionArg::Expr(expr)) = args.first() {
-                        infer_expr_type_from_ast(expr, child_types, column_names)
-                    } else {
-                        Ok(crate::types::datatype::DataType::Int)
-                    }
-                }
-                // CURRENT_* return VARCHAR or TIMESTAMP
-                "CURRENT_DATE" | "CURRENT_TIME" | "CURRENT_TIMESTAMP" | "NOW" => {
-                    Ok(crate::types::datatype::DataType::Varchar(u16::MAX))
-                }
-                _ => Ok(crate::types::datatype::DataType::Int),
+                (Some(l), Some(r)) => Some(
+                    exact_numeric_result_type(&l, *op, &r)
+                        .unwrap_or_else(|| promote_numeric_type(&l, &r)),
+                ),
+                (known, None) | (None, known) => known,
             }
         }
-        rook_ast::ExprNode::Case {
+        E::Cast { data_type, .. } => Some(data_type.parse::<DataType>().map_err(|e| {
+            RookError::TypeMismatch(format!("Invalid CAST target type '{}': {}", data_type, e))
+        })?),
+        E::ScalarSubquery(_) => {
+            return Err(RookError::Internal(
+                "Scalar subqueries must be materialized before type inference".to_string(),
+            ));
+        }
+        E::Function { name, args, .. } => {
+            let mut arg_exprs = args.iter().filter_map(|a| match a {
+                FunctionArg::Expr(e) => Some(e.as_ref()),
+                FunctionArg::Star => None,
+            });
+            let upper = name.to_ascii_uppercase();
+            let aggregate = match upper.as_str() {
+                "COUNT" => Some(AggregateFunction::Count),
+                "SUM" => Some(AggregateFunction::Sum),
+                "AVG" => Some(AggregateFunction::Avg),
+                "MIN" => Some(AggregateFunction::Min),
+                "MAX" => Some(AggregateFunction::Max),
+                _ => None,
+            };
+            if let Some(function) = aggregate {
+                let input = match arg_exprs.next() {
+                    Some(e) => infer_type(e, schema)?,
+                    None => None,
+                };
+                return Ok(Some(infer_aggregate_output_type(function, input.as_ref())));
+            }
+            match upper.as_str() {
+                "UPPER" | "UCASE" | "LOWER" | "LCASE" | "TRIM" | "LTRIM" | "RTRIM"
+                | "SUBSTRING" | "SUBSTR" | "||" | "CONCAT" => Some(DataType::Varchar(u16::MAX)),
+                "LENGTH" | "LEN" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "POSITION"
+                | "CHARINDEX" | "EXTRACT" | "DATE_PART" => Some(DataType::Int),
+                "POWER" | "POW" | "SQRT" => Some(DataType::DoublePrecision),
+                "CURRENT_DATE" => Some(DataType::Date),
+                "CURRENT_TIME" => Some(DataType::Time),
+                "CURRENT_TIMESTAMP" | "NOW" => Some(DataType::Timestamp),
+                // The result has the type of the (first) argument.
+                "ABS" | "FLOOR" | "CEIL" | "CEILING" | "ROUND" | "NULLIF" => match arg_exprs.next()
+                {
+                    Some(e) => infer_type(e, schema)?,
+                    None => None,
+                },
+                "MOD" | "COALESCE" => first_known(&mut arg_exprs)?,
+                _ => {
+                    return Err(RookError::Evaluation(format!(
+                        "Unknown scalar function: '{}'",
+                        name
+                    )));
+                }
+            }
+        }
+        E::Case {
             when_then_pairs,
             else_result,
-        } => {
-            // For CASE expressions, infer from first THEN branch (or ELSE branch)
-            if let Some((_, then_expr)) = when_then_pairs.first() {
-                infer_expr_type_from_ast(then_expr, child_types, column_names)
-            } else if let Some(else_expr) = else_result {
-                infer_expr_type_from_ast(else_expr, child_types, column_names)
-            } else {
-                Ok(crate::types::datatype::DataType::Int)
-            }
+        } => first_known(
+            &mut when_then_pairs
+                .iter()
+                .map(|(_, then)| then.as_ref())
+                .chain(else_result.as_deref()),
+        )?,
+        E::Compare { .. } | E::Logical { .. } | E::Not(_) | E::IsNull(_) | E::IsNotNull(_) => {
+            Some(DataType::Bool)
         }
-        rook_ast::ExprNode::Compare { .. }
-        | rook_ast::ExprNode::Logical { .. }
-        | rook_ast::ExprNode::Not(_)
-        | rook_ast::ExprNode::IsNull(_)
-        | rook_ast::ExprNode::IsNotNull(_) => Ok(crate::types::datatype::DataType::Bool),
-    }
+    })
 }

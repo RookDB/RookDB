@@ -464,6 +464,19 @@ fn plan_select_with_ctes(
             }
         }
 
+        for item in &select.projections {
+            if let SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } = item
+                && let Some(column) = ungrouped_column(e, &group_by)
+            {
+                return Err(PlanError {
+                    message: format!(
+                        "column '{}' must appear in the GROUP BY clause or be used in an aggregate function",
+                        column
+                    ),
+                });
+            }
+        }
+
         current_plan = LogicalPlan::Aggregate(LogicalAggregate {
             group_by,
             aggregates,

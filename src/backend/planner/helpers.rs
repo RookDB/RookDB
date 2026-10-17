@@ -500,7 +500,10 @@ pub fn expr_to_name(expr: &ExprNode) -> String {
 
 /// A GROUP BY key that is computed rather than a plain column.
 fn is_computed_group_key(expr: &ExprNode) -> bool {
-    matches!(expr, ExprNode::Binary { .. } | ExprNode::Cast { .. })
+    !matches!(
+        expr,
+        ExprNode::Column(_) | ExprNode::Compound(_) | ExprNode::Constant(_)
+    )
 }
 
 /// Output-column name of a GROUP BY key. Computed keys get a name unique to
@@ -524,36 +527,46 @@ fn replace_group_exprs(expr: &ExprNode, group_by: &[ExprNode]) -> ExprNode {
         return ExprNode::Column(group_key_name(expr));
     }
     match expr {
-        ExprNode::Binary { left, op, right } => ExprNode::Binary {
-            left: Box::new(replace_group_exprs(left, group_by)),
-            op: *op,
-            right: Box::new(replace_group_exprs(right, group_by)),
-        },
-        ExprNode::Cast {
-            expr: inner,
-            data_type,
-        } => ExprNode::Cast {
-            expr: Box::new(replace_group_exprs(inner, group_by)),
-            data_type: data_type.clone(),
-        },
-        ExprNode::Function {
-            name,
-            args,
-            distinct,
-        } if !is_aggregate_function(&name.to_ascii_uppercase()) => ExprNode::Function {
-            name: name.clone(),
-            args: args
-                .iter()
-                .map(|a| match a {
-                    rook_ast::FunctionArg::Star => rook_ast::FunctionArg::Star,
-                    rook_ast::FunctionArg::Expr(e) => {
-                        rook_ast::FunctionArg::Expr(Box::new(replace_group_exprs(e, group_by)))
-                    }
-                })
-                .collect(),
-            distinct: *distinct,
-        },
-        other => other.clone(),
+        // An aggregate's argument is read from the rows of the group.
+        ExprNode::Function { name, .. } if is_aggregate_function(&name.to_ascii_uppercase()) => {
+            expr.clone()
+        }
+        other => other.map_children(&mut |e| replace_group_exprs(e, group_by)),
+    }
+}
+
+/// The first column `expr` reads outside an aggregate call that is not a
+/// GROUP BY key, as written; such a column has no single value per group.
+pub fn ungrouped_column(expr: &ExprNode, group_by: &[ExprNode]) -> Option<String> {
+    if group_by.contains(expr) {
+        return None;
+    }
+    let last = |parts: &[String]| parts.last().cloned().unwrap_or_default();
+    let grouped = |table: Option<&str>, name: &str| {
+        group_by.iter().any(|g| match g {
+            ExprNode::Column(c) => c.eq_ignore_ascii_case(name),
+            ExprNode::Compound(parts) => {
+                last(parts).eq_ignore_ascii_case(name)
+                    && table.is_none_or(|t| {
+                        parts.len() < 2 || parts[parts.len() - 2].eq_ignore_ascii_case(t)
+                    })
+            }
+            _ => false,
+        })
+    };
+    match expr {
+        ExprNode::Column(name) => (!grouped(None, name)).then(|| name.clone()),
+        ExprNode::Compound(parts) => {
+            let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
+            (!grouped(table, &last(parts))).then(|| parts.join("."))
+        }
+        ExprNode::Function { name, .. } if is_aggregate_function(&name.to_ascii_uppercase()) => {
+            None
+        }
+        other => other
+            .children()
+            .into_iter()
+            .find_map(|e| ungrouped_column(e, group_by)),
     }
 }
 
@@ -576,29 +589,10 @@ pub fn contains_aggregate(expr: &SelectExpr) -> bool {
 
 fn contains_aggregate_expr(expr: &ExprNode) -> bool {
     match expr {
-        ExprNode::Binary { left, right, .. } => {
-            contains_aggregate_expr(left) || contains_aggregate_expr(right)
+        ExprNode::Function { name, .. } if is_aggregate_function(&name.to_ascii_uppercase()) => {
+            true
         }
-        ExprNode::Cast { expr: inner, .. } => contains_aggregate_expr(inner),
-        ExprNode::ScalarSubquery(_) => false,
-        ExprNode::Function { name, .. } => is_aggregate_function(&name.to_ascii_uppercase()),
-        ExprNode::Case {
-            when_then_pairs,
-            else_result,
-            ..
-        } => {
-            for (cond, res) in when_then_pairs {
-                if contains_aggregate_expr(cond) || contains_aggregate_expr(res) {
-                    return true;
-                }
-            }
-            if let Some(else_res) = else_result {
-                contains_aggregate_expr(else_res)
-            } else {
-                false
-            }
-        }
-        _ => false,
+        other => other.children().into_iter().any(contains_aggregate_expr),
     }
 }
 
@@ -613,64 +607,11 @@ pub fn replace_aggregates_in_expr(expr: &ExprNode) -> ExprNode {
             name,
             args,
             distinct,
-        } => {
-            let upper = name.to_ascii_uppercase();
-            if is_aggregate_function(&upper) {
-                // Replace the aggregate function call with a column reference
-                // whose name matches the alias assigned by extract_aggregates.
-                ExprNode::Column(aggregate_ref_name(name, args, *distinct))
-            } else {
-                // Non-aggregate function: recurse into arguments
-                let new_args: Vec<rook_ast::FunctionArg> = args
-                    .iter()
-                    .map(|a| match a {
-                        rook_ast::FunctionArg::Star => rook_ast::FunctionArg::Star,
-                        rook_ast::FunctionArg::Expr(e) => {
-                            rook_ast::FunctionArg::Expr(Box::new(replace_aggregates_in_expr(e)))
-                        }
-                    })
-                    .collect();
-                ExprNode::Function {
-                    name: name.clone(),
-                    args: new_args,
-                    distinct: *distinct,
-                }
-            }
+        } if is_aggregate_function(&name.to_ascii_uppercase()) => {
+            // A reference to the column extract_aggregates names for it.
+            ExprNode::Column(aggregate_ref_name(name, args, *distinct))
         }
-        ExprNode::Binary { left, op, right } => ExprNode::Binary {
-            left: Box::new(replace_aggregates_in_expr(left)),
-            op: *op,
-            right: Box::new(replace_aggregates_in_expr(right)),
-        },
-        ExprNode::Cast {
-            expr: inner,
-            data_type,
-        } => ExprNode::Cast {
-            expr: Box::new(replace_aggregates_in_expr(inner)),
-            data_type: data_type.clone(),
-        },
-        ExprNode::Case {
-            when_then_pairs,
-            else_result,
-        } => {
-            let new_pairs: Vec<(Box<ExprNode>, Box<ExprNode>)> = when_then_pairs
-                .iter()
-                .map(|(cond, res)| {
-                    (
-                        Box::new(replace_aggregates_in_expr(cond)),
-                        Box::new(replace_aggregates_in_expr(res)),
-                    )
-                })
-                .collect();
-            ExprNode::Case {
-                when_then_pairs: new_pairs,
-                else_result: else_result
-                    .as_ref()
-                    .map(|e| Box::new(replace_aggregates_in_expr(e))),
-            }
-        }
-        // Column references, constants, compounds, scalar subqueries — no aggregates
-        _ => expr.clone(),
+        other => other.map_children(&mut replace_aggregates_in_expr),
     }
 }
 
@@ -681,71 +622,33 @@ pub fn replace_aggregates_in_expr(expr: &ExprNode) -> ExprNode {
 /// expressions like `SUM(price)+1` where the aggregate is nested inside
 /// a binary arithmetic expression.
 fn extract_aggregates_from_expr(expr: &ExprNode) -> Vec<AggregateExpr> {
-    match expr {
-        ExprNode::Function {
-            name,
-            args,
-            distinct,
-        } => {
-            let upper = name.to_ascii_uppercase();
-            let function = match upper.as_str() {
-                "COUNT" => Some(AggregateFunction::Count),
-                "SUM" => Some(AggregateFunction::Sum),
-                "AVG" => Some(AggregateFunction::Avg),
-                "MIN" => Some(AggregateFunction::Min),
-                "MAX" => Some(AggregateFunction::Max),
-                _ => None,
-            };
-            if let Some(function) = function {
-                let ast_args: Vec<ExprNode> = args
-                    .iter()
-                    .filter_map(|a| match a {
-                        rook_ast::FunctionArg::Star => None,
-                        rook_ast::FunctionArg::Expr(e) => Some(*e.clone()),
-                    })
-                    .collect();
-                return vec![AggregateExpr {
-                    function,
-                    args: ast_args,
-                    alias: Some(aggregate_ref_name(name, args, *distinct)),
-                    distinct: *distinct,
-                }];
-            }
-            // Not an aggregate function (e.g. UPPER, LENGTH) — still recurse into args
-            // in case arguments contain sub-expressions with aggregates (unusual but valid).
-            let mut result = Vec::new();
-            for arg in args {
-                if let rook_ast::FunctionArg::Expr(e) = arg {
-                    result.extend(extract_aggregates_from_expr(e));
-                }
-            }
-            result
+    if let ExprNode::Function {
+        name,
+        args,
+        distinct,
+    } = expr
+    {
+        let function = match name.to_ascii_uppercase().as_str() {
+            "COUNT" => Some(AggregateFunction::Count),
+            "SUM" => Some(AggregateFunction::Sum),
+            "AVG" => Some(AggregateFunction::Avg),
+            "MIN" => Some(AggregateFunction::Min),
+            "MAX" => Some(AggregateFunction::Max),
+            _ => None,
+        };
+        if let Some(function) = function {
+            return vec![AggregateExpr {
+                function,
+                args: expr.children().into_iter().cloned().collect(),
+                alias: Some(aggregate_ref_name(name, args, *distinct)),
+                distinct: *distinct,
+            }];
         }
-        ExprNode::Binary { left, right, .. } => {
-            let mut result = extract_aggregates_from_expr(left);
-            result.extend(extract_aggregates_from_expr(right));
-            result
-        }
-        ExprNode::Cast { expr: inner, .. } => extract_aggregates_from_expr(inner),
-        ExprNode::ScalarSubquery(_) => Vec::new(),
-        ExprNode::Case {
-            when_then_pairs,
-            else_result,
-            ..
-        } => {
-            let mut result = Vec::new();
-            for (cond, res) in when_then_pairs {
-                result.extend(extract_aggregates_from_expr(cond));
-                result.extend(extract_aggregates_from_expr(res));
-            }
-            if let Some(else_res) = else_result {
-                result.extend(extract_aggregates_from_expr(else_res));
-            }
-            result
-        }
-        // Column references, constants, compounds — no aggregates possible
-        _ => Vec::new(),
     }
+    expr.children()
+        .into_iter()
+        .flat_map(extract_aggregates_from_expr)
+        .collect()
 }
 
 /// Extract aggregate expressions from projection list.
@@ -774,7 +677,16 @@ pub fn extract_aggregates(projections: &[SelectExpr]) -> Vec<AggregateExpr> {
             found[0].alias = Some(alias.clone());
         }
 
-        aggregates.extend(found);
+        // A call repeated in the list (`COALESCE(MAX(x), 0), MAX(x) > 0`)
+        // is computed once: its output column has one name.
+        for agg in found {
+            if !aggregates
+                .iter()
+                .any(|a: &AggregateExpr| a.alias == agg.alias)
+            {
+                aggregates.push(agg);
+            }
+        }
     }
     aggregates
 }

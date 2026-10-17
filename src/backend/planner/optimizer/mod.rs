@@ -974,8 +974,11 @@ fn sort_key_reads_input(
 }
 
 /// Whether `expr` can be computed from the projection's input: every column
-/// it names is an input column, and it holds no aggregate call or subquery,
-/// whose values exist only above the projection.
+/// it names is an input column, and it holds no aggregate call, whose value
+/// exists only above the projection. A scalar subquery runs on its own; when
+/// correlated, its outer references bind to the input row, which is the row
+/// they name (`ORDER BY (SELECT v FROM b WHERE b.k = a.x)` with `x` not
+/// selected).
 fn expr_reads_input(
     expr: &ExprNode,
     input: &[(Option<String>, rook_ast::logical::ColumnInfo)],
@@ -990,8 +993,8 @@ fn expr_reads_input(
                     && t.as_ref().is_none_or(|t| t.eq_ignore_ascii_case(table))
             })
         }
-        ExprNode::Compound(_) | ExprNode::ScalarSubquery(_) => false,
-        ExprNode::Constant(_) => true,
+        ExprNode::Compound(_) => false,
+        ExprNode::ScalarSubquery(_) | ExprNode::Constant(_) => true,
         ExprNode::Function { name, args, .. } => {
             !crate::backend::planner::helpers::is_aggregate_function(&name.to_ascii_uppercase())
                 && args.iter().all(|a| match a {

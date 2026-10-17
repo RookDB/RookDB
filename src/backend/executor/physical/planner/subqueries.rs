@@ -1044,18 +1044,15 @@ impl PhysicalPlanner {
     ) -> RookResult<(Box<dyn PhysicalOperator>, DataType)> {
         let child_schema = child.schema();
         let col_names = super::super::expr::binding_names(child_schema);
-        let col_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
         let mut projections = Vec::new();
         for p in &select.projections {
             match p {
                 rook_ast::SelectExpr::UnnamedExpr(e) => {
-                    let (expr, dt) =
-                        self.plan_projection_expr(e, &col_names, &col_types, child_schema)?;
+                    let (expr, dt) = self.plan_projection_expr(e, &col_names, child_schema)?;
                     projections.push((expr, "".to_string(), dt));
                 }
                 rook_ast::SelectExpr::ExprWithAlias { expr: e, alias } => {
-                    let (expr, dt) =
-                        self.plan_projection_expr(e, &col_names, &col_types, child_schema)?;
+                    let (expr, dt) = self.plan_projection_expr(e, &col_names, child_schema)?;
                     projections.push((expr, alias.clone(), dt));
                 }
                 _ => {}

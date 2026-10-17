@@ -17,7 +17,7 @@ use super::operators::{
 use super::tuple::ColumnInfo;
 use crate::types::datatype::DataType;
 
-use self::helpers::infer_expr_type_from_ast;
+use self::helpers::infer_expr_type_in_schema;
 use crate::backend::catalog::types::Catalog;
 use crate::backend::error::{RookError, RookResult};
 use crate::statistics::estimator::{Estimator, StatsSource};
@@ -279,7 +279,6 @@ impl PhysicalPlanner {
         let child = self.plan_internal(&p.child, cte_registry)?;
         let child_schema = child.schema();
         let column_names = binding_names(child_schema);
-        let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
 
         // Convert project expressions to physical expressions
         if p.expressions.is_empty() {
@@ -290,7 +289,7 @@ impl PhysicalPlanner {
         let mut projections = Vec::new();
         for ne in &p.expressions {
             let (e, data_type) =
-                self.plan_projection_expr(&ne.expr, &column_names, &child_types, child_schema)?;
+                self.plan_projection_expr(&ne.expr, &column_names, child_schema)?;
             projections.push((e, ne.name.clone(), data_type));
         }
 
@@ -308,7 +307,6 @@ impl PhysicalPlanner {
         let child_schema: Vec<ColumnInfo> = child.schema().to_vec();
         let column_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
         let bind_names = binding_names(&child_schema);
-        let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
 
         // ── Build sort keys, handling complex expressions ──────────────
         //
@@ -318,13 +316,8 @@ impl PhysicalPlanner {
         //   2. Project it as an additional hidden column
         //   3. Sort by the hidden column's index
         //   4. Strip the hidden column after sorting
-        let (sort_keys, extra_projections, has_complex) = self.plan_sort_keys(
-            &s.order_by,
-            &child_schema,
-            &column_names,
-            &bind_names,
-            &child_types,
-        )?;
+        let (sort_keys, extra_projections, has_complex) =
+            self.plan_sort_keys(&s.order_by, &child_schema, &column_names, &bind_names)?;
 
         // ── Build the operator chain ──────────────────────────────────
 
@@ -350,7 +343,6 @@ impl PhysicalPlanner {
         child_schema: &[ColumnInfo],
         column_names: &[String],
         bind_names: &[String],
-        child_types: &[DataType],
     ) -> RookResult<SortKeys> {
         let mut sort_keys: Vec<(usize, bool)> = Vec::new();
         let mut extra_projections: Vec<(Expr, String, DataType)> = Vec::new();
@@ -397,12 +389,8 @@ impl PhysicalPlanner {
                 }
                 complex_expr => {
                     // Complex sort expression: project as a hidden column
-                    let (phys_expr, data_type) = self.plan_projection_expr(
-                        complex_expr,
-                        bind_names,
-                        child_types,
-                        child_schema,
-                    )?;
+                    let (phys_expr, data_type) =
+                        self.plan_projection_expr(complex_expr, bind_names, child_schema)?;
                     let col_name = format!("__sort_col_{}", extra_projections.len());
                     let sort_idx = column_names.len() + extra_projections.len();
                     sort_keys.push((sort_idx, !ob.ascending));
@@ -980,7 +968,6 @@ impl PhysicalPlanner {
         &self,
         expr: &rook_ast::ExprNode,
         column_names: &[String],
-        child_types: &[DataType],
         child_schema: &[ColumnInfo],
     ) -> RookResult<(Expr, DataType)> {
         match expr {
@@ -1013,7 +1000,7 @@ impl PhysicalPlanner {
                     rook_ast::ArithOp::Mul => Expr::Mul(Box::new(left_expr), Box::new(right_expr)),
                     rook_ast::ArithOp::Div => Expr::Div(Box::new(left_expr), Box::new(right_expr)),
                 };
-                let data_type = infer_expr_type_from_ast(expr, child_types, column_names)?;
+                let data_type = infer_expr_type_in_schema(expr, child_schema)?;
                 Ok((phys_op, data_type))
             }
             rook_ast::ExprNode::Cast {
@@ -1036,7 +1023,7 @@ impl PhysicalPlanner {
             // All other expression types: use the standard converter
             _ => {
                 let e = expr_from_ast(expr, column_names)?;
-                let data_type = infer_expr_type_from_ast(expr, child_types, column_names)?;
+                let data_type = infer_expr_type_in_schema(expr, child_schema)?;
                 Ok((e, data_type))
             }
         }
