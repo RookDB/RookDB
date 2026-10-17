@@ -539,7 +539,13 @@ pub struct HashJoinOperator {
     probe_keys: Vec<Expr>,
     /// Any remaining predicate (non-equality conditions that must also be satisfied).
     remaining_predicate: Option<Predicate>,
-    /// Output schema (left columns + right columns).
+    /// The joined row's schema (left columns + right columns), which the
+    /// remaining predicate reads.
+    joined_schema: Vec<ColumnInfo>,
+    /// The columns of the joined row this join outputs, when not all of
+    /// them: the query reads no others (see [`keep_columns`](Self::keep_columns)).
+    output_columns: Option<Vec<usize>>,
+    /// Schema of the output rows.
     output_schema: Vec<ColumnInfo>,
     /// Child schemas, copied once so no call clones them again.
     build_schema: Vec<ColumnInfo>,
@@ -1150,6 +1156,8 @@ impl HashJoinOperator {
             build_keys,
             probe_keys,
             remaining_predicate,
+            joined_schema: output_schema.clone(),
+            output_columns: None,
             output_schema,
             build_is_left,
             preserve_build,
@@ -1182,6 +1190,23 @@ impl HashJoinOperator {
             probe_ord: 0,
             null_reader: None,
         }
+    }
+
+    /// Output only the joined columns `keep` accepts, for a query that reads
+    /// no others: a joined row then costs only the values read above, and
+    /// none for `COUNT(*)`.
+    pub fn keep_columns(mut self, keep: impl Fn(&ColumnInfo) -> bool) -> Self {
+        let columns: Vec<usize> = (0..self.joined_schema.len())
+            .filter(|&i| keep(&self.joined_schema[i]))
+            .collect();
+        if columns.len() < self.joined_schema.len() {
+            self.output_schema = columns
+                .iter()
+                .map(|&i| self.joined_schema[i].clone())
+                .collect();
+            self.output_columns = Some(columns);
+        }
+        self
     }
 
     /// Hold at most `bytes` of build rows in memory for this join, instead
@@ -1372,16 +1397,46 @@ impl HashJoinOperator {
     }
 
     /// Joined row in output order (left columns, then right columns).
-    fn join_row(&self, build: &Tuple, probe: &Tuple) -> Tuple {
+    /// The joined row of `build` and `probe`: every column when `full`
+    /// (for the remaining predicate), else the output columns.
+    fn join_row(&self, build: &Tuple, probe: &Tuple, full: bool) -> Tuple {
         let (left, right) = if self.build_is_left {
             (build, probe)
         } else {
             (probe, build)
         };
-        let mut values = Vec::with_capacity(left.values.len() + right.values.len());
-        values.extend(left.values.iter().cloned());
-        values.extend(right.values.iter().cloned());
+        let values = match &self.output_columns {
+            Some(columns) if !full => {
+                // From the schema, so a row outputting no columns is never read.
+                let split = if self.build_is_left {
+                    self.build_schema.len()
+                } else {
+                    self.probe_schema.len()
+                };
+                columns
+                    .iter()
+                    .map(|&i| match i.checked_sub(split) {
+                        None => left.values[i].clone(),
+                        Some(r) => right.values[r].clone(),
+                    })
+                    .collect()
+            }
+            _ => {
+                let mut values = Vec::with_capacity(left.values.len() + right.values.len());
+                values.extend(left.values.iter().cloned());
+                values.extend(right.values.iter().cloned());
+                values
+            }
+        };
         Tuple::new(values)
+    }
+
+    /// A full joined row cut down to the output columns.
+    fn output_row(&self, mut joined: Tuple) -> Tuple {
+        if let Some(columns) = &self.output_columns {
+            joined.values = columns.iter().map(|&i| joined.values[i].take()).collect();
+        }
+        joined
     }
 
     /// One side's values with NULLs in place of the other side's columns.
@@ -1400,7 +1455,7 @@ impl HashJoinOperator {
             out.extend(nulls);
             out.extend(values);
         }
-        Tuple::new(out)
+        self.output_row(Tuple::new(out))
     }
 
     /// Join probe rows against `build_rows` until one output row is ready.
@@ -1411,12 +1466,15 @@ impl HashJoinOperator {
                 while self.match_pos < self.cur_matches.len() {
                     let idx = self.cur_matches[self.match_pos] as usize;
                     self.match_pos += 1;
-                    let joined = self.join_row(&self.build_rows[idx], probe);
-                    if let Some(remaining) = &self.remaining_predicate
-                        && evaluate_predicate(remaining, &joined, &self.output_schema)?
+                    let full = self.remaining_predicate.is_some();
+                    let mut joined = self.join_row(&self.build_rows[idx], probe, full);
+                    if let Some(remaining) = &self.remaining_predicate {
+                        if evaluate_predicate(remaining, &joined, &self.joined_schema)?
                             != Some(true)
-                    {
-                        continue;
+                        {
+                            continue;
+                        }
+                        joined = self.output_row(joined);
                     }
                     self.cur_matched = true;
                     if self.preserve_build {

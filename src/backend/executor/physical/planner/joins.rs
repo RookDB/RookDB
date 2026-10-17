@@ -70,6 +70,23 @@ impl PhysicalPlanner {
             }
         };
 
+        // A hash join outputs only the columns read above it, or failing
+        // that the columns the query reads. Not under a USING / NATURAL
+        // join, whose merged columns are found by position.
+        let narrow = |join: HashJoinOperator| -> HashJoinOperator {
+            let read = self.read_columns.borrow();
+            let above = self.join_outputs.borrow();
+            let names = above
+                .get(&(j as *const LogicalJoin as usize))
+                .or(read.as_ref());
+            match names {
+                Some(names) if read.is_some() && merged_names.is_empty() => {
+                    join.keep_columns(|c| names.contains(&c.name.to_ascii_lowercase()))
+                }
+                _ => join,
+            }
+        };
+
         let mut combined_schema: Vec<ColumnInfo> = left
             .schema()
             .iter()
@@ -287,7 +304,7 @@ impl PhysicalPlanner {
             {
                 // Hash the smaller input; ties keep the left one.
                 let build_left = left.estimate_cardinality() <= right.estimate_cardinality();
-                return Ok(wrap(Box::new(HashJoinOperator::with_build_side(
+                return Ok(wrap(Box::new(narrow(HashJoinOperator::with_build_side(
                     left,
                     right,
                     build_keys,
@@ -295,7 +312,7 @@ impl PhysicalPlanner {
                     residual,
                     PhysicalJoinType::Inner,
                     build_left,
-                ))));
+                )))));
             }
         }
 
@@ -318,9 +335,9 @@ impl PhysicalPlanner {
                     .all(|(l, r)| keys_hash_alike(l, &left_schema, r, &right_schema))
             {
                 let build_left = left.estimate_cardinality() <= right.estimate_cardinality();
-                return Ok(wrap(Box::new(HashJoinOperator::with_build_side(
+                return Ok(wrap(Box::new(narrow(HashJoinOperator::with_build_side(
                     left, right, left_keys, right_keys, residual, join_type, build_left,
-                ))));
+                )))));
             }
         }
 

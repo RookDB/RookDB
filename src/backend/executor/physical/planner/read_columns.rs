@@ -11,10 +11,13 @@
 //!   (whose condition is derived from the columns the tables share);
 //! * an expression names a wildcard (`t.*`).
 //!
+//! For a plan with an answer, [`join_outputs`] narrows it per join: the
+//! columns read above each join, which are all the join needs to output.
+//!
 //! The expression walkers match every node type with no catch-all arm, so
 //! a new kind of node must be handled here before the planner compiles.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rook_ast::logical::LogicalPlan;
 use rook_ast::{ExprNode, FunctionArg, PredicateNode};
@@ -26,6 +29,86 @@ pub(super) fn read_columns(plan: &LogicalPlan) -> Option<HashSet<String>> {
     let mut names = HashSet::new();
     walk_plan(plan, &mut names)?;
     Some(names)
+}
+
+/// For each join in `plan` (by address), the lower-case names of the
+/// columns the operators above it read. Its own condition is not among
+/// them: the join evaluates that on its full rows. Only meaningful when
+/// [`read_columns`] has an answer for `plan`; `None` when a name cannot be
+/// placed.
+pub(super) fn join_outputs(plan: &LogicalPlan) -> Option<HashMap<usize, HashSet<String>>> {
+    let mut out = HashMap::new();
+    walk_above(plan, &HashSet::new(), &mut out)?;
+    Some(out)
+}
+
+/// Record, for each join under `plan`, `above` plus the names read between
+/// it and `plan`.
+fn walk_above(
+    plan: &LogicalPlan,
+    above: &HashSet<String>,
+    out: &mut HashMap<usize, HashSet<String>>,
+) -> Option<()> {
+    let mut names = above.clone();
+    match plan {
+        LogicalPlan::TableScan(_) => Some(()),
+        LogicalPlan::Filter(f) => {
+            walk_predicate(&f.predicate, &mut names)?;
+            walk_above(&f.child, &names, out)
+        }
+        LogicalPlan::Project(p) => {
+            for e in &p.expressions {
+                walk_expr(&e.expr, &mut names)?;
+            }
+            walk_above(&p.child, &names, out)
+        }
+        LogicalPlan::Distinct(d) => walk_above(&d.child, &names, out),
+        LogicalPlan::Sort(s) => {
+            for o in &s.order_by {
+                walk_expr(&o.expr, &mut names)?;
+            }
+            walk_above(&s.child, &names, out)
+        }
+        LogicalPlan::Limit(l) => walk_above(&l.child, &names, out),
+        LogicalPlan::Aggregate(a) => {
+            for e in &a.group_by {
+                walk_expr(e, &mut names)?;
+            }
+            for agg in &a.aggregates {
+                for e in &agg.args {
+                    walk_expr(e, &mut names)?;
+                }
+            }
+            if let Some(h) = &a.having {
+                walk_predicate(h, &mut names)?;
+            }
+            walk_above(&a.child, &names, out)
+        }
+        LogicalPlan::Join(j) => {
+            // The node's own address, as the planner sees it (not a box's).
+            let node: &rook_ast::logical::LogicalJoin = j;
+            out.insert(node as *const _ as usize, above.clone());
+            if let Some(c) = &j.condition {
+                walk_predicate(c, &mut names)?;
+            }
+            walk_above(&j.left, &names, out)?;
+            walk_above(&j.right, &names, out)
+        }
+        LogicalPlan::SetOp(s) => {
+            walk_above(&s.left, &names, out)?;
+            walk_above(&s.right, &names, out)
+        }
+        LogicalPlan::Subquery(s) => walk_above(&s.subquery, &names, out),
+        LogicalPlan::Insert(i) => {
+            for row in &i.values_rows {
+                for e in row {
+                    walk_expr(e, &mut names)?;
+                }
+            }
+            walk_above(&i.child, &names, out)
+        }
+        LogicalPlan::Cte(_) | LogicalPlan::RecursiveCte(_) | LogicalPlan::CteScan(_) => None,
+    }
 }
 
 /// `Some` when every row `plan` outputs was built by a projection or an

@@ -76,6 +76,21 @@ const QUERIES: &[&str] = &[
     "SELECT name, dname FROM emp NATURAL JOIN dept ORDER BY name",
     "SELECT name FROM emp JOIN dept USING (id) ORDER BY name",
     "SELECT a.name, b.name FROM emp a JOIN emp b ON a.mgr = b.id ORDER BY a.id",
+    // Hash joins output only the columns read above them.
+    "SELECT COUNT(*) FROM emp e JOIN dept d ON e.dept = d.id",
+    "SELECT COUNT(*) FROM emp a JOIN emp b ON a.mgr = b.id JOIN dept d ON d.id = b.dept",
+    "SELECT d.id FROM emp e JOIN dept d ON e.dept = d.id ORDER BY d.id",
+    "SELECT e.id FROM emp e JOIN dept d ON e.dept = d.id AND e.salary > d.id * 50 ORDER BY e.id",
+    "SELECT e.name FROM emp e JOIN dept d ON e.dept = d.id WHERE d.dname = 'ops' ORDER BY e.name",
+    "SELECT e.name FROM emp e JOIN dept d ON e.dept = d.id ORDER BY d.dname DESC, e.salary, e.name",
+    "SELECT d.dname, COUNT(e.id), MAX(e.salary) FROM dept d LEFT JOIN emp e ON e.dept = d.id \
+     GROUP BY d.dname HAVING COUNT(*) > 0 ORDER BY d.dname",
+    "SELECT e.name, d.dname FROM emp e RIGHT JOIN dept d ON e.dept = d.id ORDER BY d.dname, e.name",
+    "SELECT e.name, d.dname FROM emp e FULL JOIN dept d ON e.dept = d.id ORDER BY e.name, d.dname",
+    "SELECT COUNT(*) FROM emp e FULL JOIN dept d ON e.dept = d.id AND e.salary > 50",
+    "SELECT x.n FROM (SELECT e.name AS n, d.dname FROM emp e JOIN dept d ON e.dept = d.id) x \
+     ORDER BY x.n",
+    "SELECT b.name, COUNT(*) FROM emp a JOIN emp b ON a.mgr = b.id GROUP BY b.name ORDER BY b.name",
     "SELECT name FROM emp WHERE salary > (SELECT AVG(salary) FROM emp) ORDER BY name",
     "SELECT name FROM emp WHERE dept IN (SELECT id FROM dept WHERE dname LIKE 'e%') ORDER BY name",
     "SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM dept d WHERE d.id = e.dept) ORDER BY name",

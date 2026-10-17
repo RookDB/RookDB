@@ -38,6 +38,10 @@ pub struct PhysicalPlanner {
     /// Lower-case names of the columns the query being planned reads, or
     /// `None` to decode every column (see `read_columns`).
     read_columns: std::cell::RefCell<Option<std::collections::HashSet<String>>>,
+    /// Per join (by the address of its logical node), the lower-case names
+    /// of the columns read above it, when known (see `read_columns`).
+    join_outputs:
+        std::cell::RefCell<std::collections::HashMap<usize, std::collections::HashSet<String>>>,
     /// Column types of the non-recursive CTEs in scope (derived tables
     /// included), by lower-case name, so a scan of one carries the types its
     /// body produced.
@@ -110,6 +114,7 @@ impl PhysicalPlanner {
             catalog: catalog.into(),
             db_name,
             read_columns: std::cell::RefCell::new(None),
+            join_outputs: std::cell::RefCell::new(std::collections::HashMap::new()),
             cte_types: std::cell::RefCell::new(std::collections::HashMap::new()),
             trace: std::cell::RefCell::new(None),
             table_info: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -161,6 +166,10 @@ impl PhysicalPlanner {
             None
         } else {
             read_columns::read_columns(logical_plan)
+        };
+        *self.join_outputs.borrow_mut() = match &*self.read_columns.borrow() {
+            Some(_) => read_columns::join_outputs(logical_plan).unwrap_or_default(),
+            None => Default::default(),
         };
         self.cte_types.borrow_mut().clear();
         self.table_info.borrow_mut().clear();
@@ -1089,6 +1098,7 @@ mod tests {
             )),
             db_name: "test".to_string(),
             read_columns: std::cell::RefCell::new(None),
+            join_outputs: std::cell::RefCell::new(std::collections::HashMap::new()),
             cte_types: std::cell::RefCell::new(std::collections::HashMap::new()),
             trace: std::cell::RefCell::new(None),
             table_info: std::cell::RefCell::new(std::collections::HashMap::new()),
