@@ -1044,3 +1044,28 @@ fn test_free_fn_row_byte_size() {
     let free_size = row_byte_size(&schema, &[Some(&v0), Some(&v1), Some(&v2)]);
     assert_eq!(free_size, row.serialize().len());
 }
+
+#[test]
+fn cast_float_to_numeric_rounds_the_printed_decimal() {
+    let numeric = DataType::Numeric {
+        precision: 6,
+        scale: 2,
+    };
+    for (input, expected) in [
+        (1.005, "1.01"),
+        (-1.005, "-1.01"),
+        (2.675, "2.68"),
+        (0.125, "0.13"),
+    ] {
+        let v = cast(&DataValue::DoublePrecision(OrderedF64(input)), &numeric).unwrap();
+        assert_eq!(v.to_string(), expected, "{}", input);
+    }
+    assert!(cast(&DataValue::DoublePrecision(OrderedF64(f64::NAN)), &numeric).is_err());
+}
+
+#[test]
+fn abs_of_the_minimum_overflows() {
+    assert!(abs(&DataValue::Int(i32::MIN)).is_err());
+    assert!(abs(&DataValue::SmallInt(i16::MIN)).is_err());
+    assert!(abs(&DataValue::BigInt(i64::MIN)).is_err());
+}

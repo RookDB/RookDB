@@ -306,22 +306,23 @@ fn pow10(exp: u32) -> i128 {
 /// Return the absolute value of a numeric value.
 /// Supported for all numeric types: SMALLINT, INT, BIGINT, REAL, DOUBLE, NUMERIC.
 pub fn abs(value: &DataValue) -> Result<DataValue, FunctionError> {
+    // The result keeps the argument's type, as the planner declares it, so
+    // the one value whose magnitude does not fit (the type's minimum) is an
+    // overflow, as for `-x`.
+    let overflow = |ty: &str| FunctionError::InvalidArgument(format!("{} out of range in ABS", ty));
     match value {
-        DataValue::SmallInt(v) => match v.checked_abs() {
-            Some(x) => Ok(DataValue::SmallInt(x)),
-            None => Ok(DataValue::Int(-(*v as i32))),
-        },
-        DataValue::Int(v) => match v.checked_abs() {
-            Some(x) => Ok(DataValue::Int(x)),
-            None => Ok(DataValue::BigInt(-(*v as i64))),
-        },
-        DataValue::BigInt(v) => match v.checked_abs() {
-            Some(x) => Ok(DataValue::BigInt(x)),
-            None => Ok(DataValue::Numeric(crate::types::value::NumericValue {
-                unscaled: -(*v as i128),
-                scale: 0,
-            })),
-        },
+        DataValue::SmallInt(v) => v
+            .checked_abs()
+            .map(DataValue::SmallInt)
+            .ok_or_else(|| overflow("SMALLINT")),
+        DataValue::Int(v) => v
+            .checked_abs()
+            .map(DataValue::Int)
+            .ok_or_else(|| overflow("INT")),
+        DataValue::BigInt(v) => v
+            .checked_abs()
+            .map(DataValue::BigInt)
+            .ok_or_else(|| overflow("BIGINT")),
         DataValue::Real(v) => Ok(DataValue::Real(crate::types::value::OrderedF32(v.0.abs()))),
         DataValue::DoublePrecision(v) => Ok(DataValue::DoublePrecision(
             crate::types::value::OrderedF64(v.0.abs()),
@@ -788,7 +789,15 @@ pub fn cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionE
             DataValue::Numeric(_) | DataValue::Real(_) | DataValue::DoublePrecision(_)
         )
     {
-        let rounded = round(value, *scale as i32)?;
+        // A float is rounded as the decimal it prints as, not as its binary
+        // value: `1.005` is stored as 1.0049999…, which rounds to 1.00 when
+        // the float itself is scaled, where the literal says 1.01.
+        let exact = match value {
+            DataValue::Real(v) => float_text_to_numeric(&v.0.to_string())?,
+            DataValue::DoublePrecision(v) => float_text_to_numeric(&v.0.to_string())?,
+            other => other.clone(),
+        };
+        let rounded = round(&exact, *scale as i32)?;
         let encoded = DataValue::parse_and_encode(target, &value_to_literal(&rounded))
             .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
         return DataValue::from_bytes(target, &encoded)
@@ -800,6 +809,23 @@ pub fn cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionE
         .map_err(|e| FunctionError::InvalidArgument(e.to_string()))?;
     DataValue::from_bytes(target, &encoded)
         .map_err(|e| FunctionError::InvalidArgument(e.to_string()))
+}
+
+/// The NUMERIC with exactly the digits of a float's shortest text form
+/// (Rust prints floats without an exponent).
+fn float_text_to_numeric(text: &str) -> Result<DataValue, FunctionError> {
+    let scale = text.split('.').nth(1).map_or(0, str::len);
+    let scale = u8::try_from(scale)
+        .ok()
+        .filter(|s| *s <= 38)
+        .ok_or_else(|| {
+            FunctionError::InvalidArgument(format!("{} is out of range for NUMERIC", text))
+        })?;
+    crate::types::value::parse_numeric_literal(text, 38, scale)
+        .map(DataValue::Numeric)
+        .map_err(|_| {
+            FunctionError::InvalidArgument(format!("{} is out of range for NUMERIC", text))
+        })
 }
 
 /// Convert `value` for storage in a column of type `target`, as INSERT and

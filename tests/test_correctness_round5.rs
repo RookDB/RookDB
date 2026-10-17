@@ -282,29 +282,16 @@ fn abs_min_int_returns_error_not_panic() {
     let catalog = load_catalog();
     assert!(insert_single_tuple(&catalog, "t5db", "t", &["1", "-2147483648"]).unwrap());
 
-    // Must either return an error or a correct value — never panic.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_select(&catalog, "t5db", "SELECT ABS(v) FROM t")
-    }));
-    match result {
-        Ok(tuples) => {
-            // If it executed, the value must be the SQL-correct 2147483648
-            // (widened), not a wrapped negative.
-            let shown = tuples[0].values[0]
-                .as_ref()
-                .map(|d| format!("{}", d))
-                .unwrap_or_default()
-                .to_string();
-            assert!(
-                shown == "2147483648",
-                "ABS(v) on i32::MIN produced {:?} — overflowed wrap-around",
-                shown
-            );
-        }
-        Err(_) => panic!(
-            "BUG Q CONFIRMED: ABS(-2147483648) panicked (debug overflow) instead of returning a query error"
-        ),
-    }
+    // ABS keeps its argument's type, as the planner declares it, so the
+    // magnitude of INT's minimum does not fit: an overflow error, as in
+    // PostgreSQL, not a panic or a wrapped negative.
+    let plan = match rook_parser::parse_sql("SELECT ABS(v) FROM t") {
+        Ok(q) => plan_query(&q, &catalog, "t5db").expect("plan failed"),
+        Err(e) => panic!("parse failed: {:?}", e),
+    };
+    let err = execute_plan_collect(&plan, &catalog, "t5db")
+        .expect_err("ABS(-2147483648) must be an overflow error");
+    assert!(err.to_string().contains("out of range"), "{}", err);
 }
 
 // ── Finding R: SUBSTRING with negative length panics ────────────────────────
