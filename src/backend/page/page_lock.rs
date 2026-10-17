@@ -52,8 +52,6 @@ fn registry() -> &'static Mutex<PageLockRegistry> {
 
 /// Holds an exclusive write lock on a page; automatically releases on drop.
 pub struct PageWriteLock {
-    #[allow(dead_code)]
-    key: PageKey,
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -71,7 +69,6 @@ impl PageWriteLock {
         let guard = lock_arc.lock().unwrap();
 
         PageWriteLock {
-            key,
             _guard: unsafe {
                 std::mem::transmute::<
                     std::sync::MutexGuard<'_, ()>,

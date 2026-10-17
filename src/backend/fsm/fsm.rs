@@ -189,8 +189,6 @@ fn shared_cache(file: &File) -> RookResult<SharedFsmCache> {
 /// In-memory handle for the entire FSM fork file.
 /// Manages 3-level binary max-tree spanning potentially billions of heap pages.
 pub struct FSM {
-    #[allow(dead_code)]
-    fsm_path: PathBuf,
     fsm_file: File,
     heap_page_count: u32, // Tracks total heap pages for growth detection
     /// Set when in-memory changes were written to the OS but not yet
@@ -219,7 +217,6 @@ impl FSM {
         let cache = shared_cache(&fsm_file)?;
 
         Ok(Self {
-            fsm_path,
             fsm_file,
             heap_page_count,
             dirty: false,

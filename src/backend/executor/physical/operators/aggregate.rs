@@ -390,12 +390,10 @@ struct GroupEntry {
 // ── AggregateOperator ─────────────────────────────────────────────────────────
 
 /// A hash-based aggregation operator implementing GROUP BY.
-#[allow(dead_code)]
 pub struct AggregateOperator {
     child: Box<dyn PhysicalOperator>,
     group_by_exprs: Vec<Expr>,
     group_by_names: Vec<String>,
-    group_by_types: Vec<DataType>,
     aggregates: Vec<AggregateInfo>,
     having: Option<Predicate>,
     output_schema: Vec<ColumnInfo>,
@@ -473,7 +471,6 @@ impl AggregateOperator {
             child,
             group_by_exprs,
             group_by_names,
-            group_by_types,
             aggregates,
             having,
             output_schema,

@@ -119,7 +119,6 @@ fn check_node_fits(node: &BTreeNode) -> RookResult<()> {
 /// Provides point lookups, range scans, and ordered insertion.
 pub struct BTree {
     /// Path to the `.idx` file.
-    #[allow(dead_code)]
     file_path: PathBuf,
     /// Buffer pool managing 8 KB index pages.
     pool: BufferPool,
@@ -736,13 +735,6 @@ impl BTree {
         }
     }
 
-    /// Convert the first key segment from on-disk encoded bytes to a DataValue.
-    #[allow(dead_code)]
-    fn key_from_encoded(&self, encoded: &[u8]) -> DataValue {
-        let (key, _) = decode_key(encoded, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
-        key
-    }
-
     /// Internal insert: returns `Ok(None)` if no split, or `Ok(Some((middle_key, new_child_id)))` if split.
     fn insert_internal(
         &mut self,
@@ -1059,64 +1051,6 @@ impl BTree {
         let new_sibling_id = self.allocate_page(&right_node)?;
 
         Ok((promoted_to_parent, new_sibling_id))
-    }
-
-    /// Print the tree structure for debugging.
-    #[allow(dead_code)]
-    pub fn print_tree(&mut self) -> RookResult<()> {
-        println!("=== B+ Tree ===");
-        println!("Root page: {}", self.root_page_id);
-        println!("Total pages: {}", self.total_pages);
-        self.print_node(self.root_page_id, 0)?;
-        println!("==============");
-        Ok(())
-    }
-
-    fn print_node(&mut self, page_id: u32, depth: usize) -> RookResult<()> {
-        let indent = "  ".repeat(depth);
-        let node = self.read_node(page_id)?;
-        match &node {
-            BTreeNode::Internal {
-                num_keys,
-                keys,
-                children,
-            } => {
-                println!(
-                    "{}[Internal] page={}, num_keys={}, children={:?}",
-                    indent, page_id, num_keys, children
-                );
-                for (i, key) in keys.iter().enumerate() {
-                    let (val, _) =
-                        decode_key(key, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
-                    println!("{}  key[{}] = {}", indent, i, val);
-                }
-                // Recursively print children
-                for &child in children {
-                    self.print_node(child, depth + 1)?;
-                }
-            }
-            BTreeNode::Leaf {
-                num_keys,
-                keys,
-                values,
-                next_leaf,
-                prev_leaf,
-            } => {
-                println!(
-                    "{}[Leaf] page={}, num_keys={}, next={}, prev={}",
-                    indent, page_id, num_keys, next_leaf, prev_leaf
-                );
-                for (i, (key, val)) in keys.iter().zip(values.iter()).enumerate() {
-                    let (dv, _) =
-                        decode_key(key, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
-                    println!(
-                        "{}  entry[{}]: key={}, tid=({},{})",
-                        indent, i, dv, val.0, val.1
-                    );
-                }
-            }
-        }
-        Ok(())
     }
 }
 

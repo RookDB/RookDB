@@ -1055,10 +1055,6 @@ mod tests {
     fn constant_text(s: &str) -> ExprNode {
         ExprNode::Constant(ConstantValue::Text(s.to_string()))
     }
-    #[allow(dead_code)]
-    fn constant_bool(b: bool) -> ExprNode {
-        ExprNode::Constant(ConstantValue::Boolean(b))
-    }
 
     fn eq_pred(l: ExprNode, r: ExprNode) -> PredicateNode {
         PredicateNode::Compare {

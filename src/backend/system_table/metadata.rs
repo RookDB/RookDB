@@ -1123,42 +1123,6 @@ mod tests {
             "my col"
         ));
     }
-    use crate::catalog::types::*;
-
-    #[allow(dead_code)]
-    fn make_test_catalog() -> Catalog {
-        let mut catalog = Catalog::new(crate::backend::engine::Engine::current_dir());
-
-        let users = Table {
-            columns: vec![
-                Column {
-                    name: "id".to_string(),
-                    data_type: DataType::Int,
-                    nullable: false,
-                    constraints: Constraints::default(),
-                },
-                Column {
-                    name: "name".to_string(),
-                    data_type: DataType::Varchar(100),
-                    nullable: true,
-                    constraints: Constraints::default(),
-                },
-            ],
-        };
-
-        let mut tables = HashMap::new();
-        tables.insert("users".to_string(), users);
-
-        catalog.databases.insert(
-            "test_db".to_string(),
-            Database {
-                tables,
-                views: HashMap::new(),
-            },
-        );
-
-        catalog
-    }
 
     #[test]
     fn test_schema_constants_are_valid() {

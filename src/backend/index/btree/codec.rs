@@ -12,11 +12,6 @@ use crate::types::value::DataValue;
 
 pub const BTREE_PAGE_SIZE: usize = 8192;
 
-/// Minimum number of keys in a node (half-full, for non-root splits).
-/// Allow at least a few entries even for large keys.
-#[allow(dead_code)]
-pub const BTREE_MIN_KEYS: usize = 2;
-
 /// Page type markers.
 pub(crate) const PAGE_TYPE_INTERNAL: u32 = 0;
 pub(crate) const PAGE_TYPE_LEAF: u32 = 1;
@@ -111,14 +106,4 @@ pub(crate) fn encode_key_multi(values: &[DataValue]) -> RookResult<Vec<u8>> {
     out.extend_from_slice(&(total as u16).to_le_bytes());
     out.extend_from_slice(&body);
     Ok(out)
-}
-
-/// Calculate the byte size of an encoded key.
-#[allow(dead_code)]
-pub(crate) fn encoded_key_size(encoded: &[u8]) -> usize {
-    if encoded.len() < KEY_LEN_SIZE {
-        return 0;
-    }
-    let len = u16::from_le_bytes([encoded[0], encoded[1]]) as usize;
-    KEY_LEN_SIZE + len
 }

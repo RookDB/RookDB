@@ -17,7 +17,7 @@
 //! - `set_op.rs`: `UNION [ALL] / INTERSECT [ALL] / EXCEPT [ALL]`
 //! - `subquery.rs`: scalar and EXISTS subquery execution
 //! - `insert.rs`: INSERT INTO ... SELECT pipeline operator
-//! - `utils.rs`: normalise_value_for_key
+//! - `utils.rs`: canonical hash keys
 //! - `tests.rs`: unit tests (mock operator + operator behaviour)
 
 mod aggregate;
@@ -58,4 +58,3 @@ pub use set_op::{SetOpOperator, SetOpType};
 pub use sort::SortOperator;
 pub(crate) use sort::compare_rows;
 pub use subquery::{SubqueryExecOperator, SubqueryType};
-pub use utils::normalise_value_for_key;
