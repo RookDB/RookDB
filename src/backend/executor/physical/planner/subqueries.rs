@@ -33,6 +33,7 @@ use super::super::operators::{
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
 use crate::backend::error::{RookError, RookResult};
+use crate::planner::optimizer::helpers::contains_subquery;
 use crate::types::DataValue;
 use crate::types::datatype::DataType;
 
@@ -813,22 +814,6 @@ struct SimpleCorrelation {
     outer_indices: Vec<usize>,
 }
 
-/// Whether `pred` contains a subquery.
-fn has_nested_subquery(pred: &rook_ast::PredicateNode) -> bool {
-    struct Finder(bool);
-    impl Visitor for Finder {
-        fn expr(&mut self, _: &rook_ast::ExprNode, _: bool) -> Option<rook_ast::ExprNode> {
-            None
-        }
-        fn subquery(&mut self, _: &mut rook_ast::SelectPlan) {
-            self.0 = true;
-        }
-    }
-    let mut finder = Finder(false);
-    rewrite_pred(&mut pred.clone(), false, &mut finder);
-    finder.0
-}
-
 fn flatten_and<'a>(node: &'a rook_ast::PredicateNode, out: &mut Vec<&'a rook_ast::PredicateNode>) {
     match node {
         rook_ast::PredicateNode::BinaryOp {
@@ -899,7 +884,7 @@ impl PhysicalPlanner {
             return Ok(None);
         };
         // A nested subquery may reach the outer query; the general path binds it.
-        if has_nested_subquery(selection) {
+        if contains_subquery(selection) {
             return Ok(None);
         }
 

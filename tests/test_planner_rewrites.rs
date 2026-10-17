@@ -67,3 +67,29 @@ fn constant_on_the_left_of_an_indexed_comparison() {
         assert_eq!(sorted(run(&mut s, sql)), expected, "{}", sql);
     }
 }
+
+/// A WHERE conjunct holding a scalar subquery is not pushed into one join
+/// input or into the join condition: the subquery may read the other input,
+/// and only a filter above the join evaluates it.
+#[test]
+fn scalar_subquery_in_where_stays_above_a_join() {
+    let (_ws, mut s) = session("scalar_join");
+    // Correlated with the right input of the join.
+    assert_eq!(
+        sorted(run(
+            &mut s,
+            "SELECT p.id, q.id FROM p JOIN q ON q.id = p.id \
+             WHERE p.b > 10 * (SELECT COUNT(*) FROM q q2 WHERE q2.b = q.b)",
+        )),
+        vec![vec![Some(1), Some(1)], vec![Some(3), Some(3)]]
+    );
+    // Uncorrelated, compared with an expression over both inputs.
+    assert_eq!(
+        sorted(run(
+            &mut s,
+            "SELECT p.id FROM p CROSS JOIN q \
+             WHERE p.b + q.b > (SELECT MAX(b) FROM p) AND q.id = 1",
+        )),
+        vec![vec![Some(1)]]
+    );
+}

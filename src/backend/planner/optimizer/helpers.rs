@@ -428,10 +428,11 @@ pub fn extract_column_names(pred: &PredicateNode) -> Vec<String> {
         .collect()
 }
 
-/// Whether a predicate holds an `EXISTS` or `IN (subquery)` anywhere. Its
-/// column references name only what the outer expression reads: a correlated
-/// subquery may also read outer columns that no such list shows, so the
-/// predicate must stay where every outer column is still in scope.
+/// Whether a predicate holds a subquery anywhere: `EXISTS`, `IN (subquery)`
+/// or a scalar subquery inside an expression. Its column references name
+/// only what the outer expression reads: a correlated subquery may also read
+/// outer columns that no such list shows, so the predicate must stay where
+/// every outer column is still in scope.
 pub fn contains_subquery(pred: &PredicateNode) -> bool {
     match pred {
         PredicateNode::Exists(_) | PredicateNode::InSubquery { .. } => true,
@@ -439,7 +440,51 @@ pub fn contains_subquery(pred: &PredicateNode) -> bool {
             contains_subquery(left) || contains_subquery(right)
         }
         PredicateNode::Not(inner) => contains_subquery(inner),
-        _ => false,
+        PredicateNode::Compare { left, right, .. }
+        | PredicateNode::IsDistinctFrom { left, right } => {
+            expr_contains_subquery(left) || expr_contains_subquery(right)
+        }
+        PredicateNode::IsNull(expr)
+        | PredicateNode::IsNotNull(expr)
+        | PredicateNode::Like { expr, .. }
+        | PredicateNode::IsBoolean { expr, .. } => expr_contains_subquery(expr),
+        PredicateNode::Between { expr, low, high } => {
+            expr_contains_subquery(expr)
+                || expr_contains_subquery(low)
+                || expr_contains_subquery(high)
+        }
+        PredicateNode::InList { expr, list } => {
+            expr_contains_subquery(expr) || list.iter().any(expr_contains_subquery)
+        }
+    }
+}
+
+/// [`contains_subquery`] for an expression.
+pub fn expr_contains_subquery(expr: &ExprNode) -> bool {
+    match expr {
+        ExprNode::ScalarSubquery(_) => true,
+        ExprNode::Column(_) | ExprNode::Compound(_) | ExprNode::Constant(_) => false,
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. } => {
+            expr_contains_subquery(left) || expr_contains_subquery(right)
+        }
+        ExprNode::Cast { expr: inner, .. }
+        | ExprNode::Not(inner)
+        | ExprNode::IsNull(inner)
+        | ExprNode::IsNotNull(inner) => expr_contains_subquery(inner),
+        ExprNode::Function { args, .. } => args.iter().any(|arg| {
+            matches!(arg, rook_ast::FunctionArg::Expr(inner) if expr_contains_subquery(inner))
+        }),
+        ExprNode::Case {
+            when_then_pairs,
+            else_result,
+        } => {
+            when_then_pairs
+                .iter()
+                .any(|(when, then)| expr_contains_subquery(when) || expr_contains_subquery(then))
+                || else_result.as_deref().is_some_and(expr_contains_subquery)
+        }
     }
 }
 
