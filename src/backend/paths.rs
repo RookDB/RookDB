@@ -72,29 +72,64 @@ impl Paths {
         self.base_dir().join(db)
     }
 
+    /// The file `<db dir>/<table><suffix>`, built in one allocation: a
+    /// table's paths are asked for on every row an INSERT writes.
+    fn table_file(&self, db: &str, table: &str, suffix: &str) -> PathBuf {
+        let len = self.root.as_os_str().len() + db.len() + table.len() + suffix.len();
+        let mut path = PathBuf::with_capacity(len + "/database/base//".len());
+        path.push(&self.root);
+        path.push("database");
+        path.push("base");
+        path.push(db);
+        path.push(table);
+        path.as_mut_os_string().push(suffix);
+        path
+    }
+
     /// A table's heap file.
     pub fn heap(&self, db: &str, table: &str) -> PathBuf {
-        self.database_dir(db).join(format!("{}.dat", table))
+        self.table_file(db, table, ".dat")
     }
 
     /// A table's stored column statistics.
     pub fn statistics(&self, db: &str, table: &str) -> PathBuf {
-        self.database_dir(db).join(format!("{}.stats", table))
+        self.table_file(db, table, ".stats")
     }
 
     /// The free-space map fork of a table's heap file.
     pub fn heap_fsm(&self, db: &str, table: &str) -> PathBuf {
-        self.database_dir(db).join(format!("{}.dat.fsm", table))
+        self.table_file(db, table, ".dat.fsm")
     }
 
     /// A table's visibility map.
     pub fn visibility_map(&self, db: &str, table: &str) -> PathBuf {
-        self.database_dir(db).join(format!("{}_vm", table))
+        self.table_file(db, table, "_vm")
     }
 
     /// A named index on a table.
     pub fn index(&self, db: &str, table: &str, index: &str) -> PathBuf {
-        self.database_dir(db)
-            .join(format!("{}.{}.idx", table, index))
+        let mut path = self.table_file(db, table, ".");
+        path.as_mut_os_string().push(index);
+        path.as_mut_os_string().push(".idx");
+        path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_files_match_the_joined_layout() {
+        for root in ["", "data", "/srv/rook"] {
+            let p = Paths::new(root);
+            let dir = Path::new(root).join("database").join("base").join("db");
+            assert_eq!(p.heap("db", "t"), dir.join("t.dat"));
+            assert_eq!(p.statistics("db", "t"), dir.join("t.stats"));
+            assert_eq!(p.heap_fsm("db", "t"), dir.join("t.dat.fsm"));
+            assert_eq!(p.visibility_map("db", "t"), dir.join("t_vm"));
+            assert_eq!(p.index("db", "t", "ix"), dir.join("t.ix.idx"));
+            assert_eq!(p.database_dir("db"), dir);
+        }
     }
 }
