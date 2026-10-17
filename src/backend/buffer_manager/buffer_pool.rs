@@ -445,6 +445,8 @@ impl Inner {
                 ),
             ));
         }
+        // The frame's bytes are what a short read left, or an evicted page.
+        page.data.fill(0);
         init_page(page);
         Ok(())
     }
@@ -719,7 +721,10 @@ impl BufferPool {
         let idx = g.acquire_frame()?;
         let res = (|| -> RookResult<()> {
             let file = g.files.get(&fid).ok_or_else(no_file)?.file.clone();
+            // The frame may hold an evicted page: start from zeros, as
+            // `allocate_raw_page` does, so none of it reaches the new page.
             let page = &mut g.frames[idx].page;
+            page.data.fill(0);
             init_page(page);
 
             // Append to file
@@ -1201,6 +1206,32 @@ mod tests {
         assert_eq!(lower, 8, "new page should be initialized with lower=8");
 
         pool.unpin(frame_id, false);
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_new_page_does_not_inherit_an_evicted_page() {
+        let path = unique_temp_path();
+        create_test_file(&path, 2).expect("create test file");
+        // One frame, so the new page reuses the frame of page 1.
+        let mut pool = BufferPool::new(1);
+        pool.open(&path).expect("open pool");
+        let f = pool.fetch_page(1).expect("fetch page 1");
+        pool.get_page_mut(f).data[100..108].copy_from_slice(b"leftover");
+        pool.unpin(f, true);
+
+        let (page_id, frame_id) = pool.new_page().expect("new page");
+        assert!(pool.get_page(frame_id).data[8..].iter().all(|&b| b == 0));
+        pool.unpin(frame_id, false);
+        pool.flush_all().expect("flush");
+        let on_disk = fs::read(&path).unwrap();
+        let start = page_id as usize * PAGE_SIZE;
+        assert!(
+            on_disk[start + 8..start + PAGE_SIZE]
+                .iter()
+                .all(|&b| b == 0)
+        );
 
         fs::remove_file(&path).ok();
     }
