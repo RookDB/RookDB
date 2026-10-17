@@ -231,8 +231,9 @@ impl PhysicalOperator for SortOperator {
             return Ok(tuple);
         }
 
+        // Each row is emitted once (`reset` sorts again), so it is moved out.
         if self.pos < self.buffer.len() {
-            let tuple = self.buffer[self.pos].clone();
+            let tuple = std::mem::replace(&mut self.buffer[self.pos], Tuple::empty());
             self.pos += 1;
             Ok(Some(tuple))
         } else {
@@ -259,10 +260,11 @@ impl PhysicalOperator for SortOperator {
             return Ok(0);
         }
         let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
-        batch.reserve(take);
-        for i in 0..take {
-            batch.push(self.buffer[self.pos + i].clone());
-        }
+        batch.extend(
+            self.buffer[self.pos..self.pos + take]
+                .iter_mut()
+                .map(|t| std::mem::replace(t, Tuple::empty())),
+        );
         self.pos += take;
         Ok(take)
     }

@@ -624,13 +624,11 @@ impl PhysicalOperator for LimitOperator {
 
 // ── Distinct Operator ─────────────────────────────────────────────────────────
 
-/// Removes duplicate tuples (SQL `DISTINCT`).
+/// Removes duplicate tuples (SQL `DISTINCT`). Streams: each row is passed
+/// on the first time its values are seen.
 pub struct DistinctOperator {
     child: Box<dyn PhysicalOperator>,
     seen: HashSet<Vec<Option<DataValue>>>,
-    loaded: bool,
-    buffer: Vec<Tuple>,
-    pos: usize,
 }
 
 impl DistinctOperator {
@@ -638,31 +636,28 @@ impl DistinctOperator {
         Self {
             child,
             seen: HashSet::new(),
-            loaded: false,
-            buffer: Vec::new(),
-            pos: 0,
         }
     }
 }
 
 impl PhysicalOperator for DistinctOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        if !self.loaded {
-            while let Some(tuple) = self.child.next()? {
-                if self.seen.insert(tuple.values.clone()) {
-                    self.buffer.push(tuple);
-                }
+        while let Some(tuple) = self.child.next()? {
+            if self.seen.insert(tuple.values.clone()) {
+                return Ok(Some(tuple));
             }
-            self.loaded = true;
         }
+        Ok(None)
+    }
 
-        if self.pos < self.buffer.len() {
-            let tuple = self.buffer[self.pos].clone();
-            self.pos += 1;
-            Ok(Some(tuple))
-        } else {
-            Ok(None)
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        while self.child.next_batch(batch)? > 0 {
+            batch.retain(|tuple| self.seen.insert(tuple.values.clone()));
+            if !batch.is_empty() {
+                break;
+            }
         }
+        Ok(batch.len())
     }
 
     fn schema(&self) -> &[ColumnInfo] {
@@ -672,9 +667,6 @@ impl PhysicalOperator for DistinctOperator {
     fn reset(&mut self) -> RookResult<()> {
         self.child.reset()?;
         self.seen.clear();
-        self.buffer.clear();
-        self.pos = 0;
-        self.loaded = false;
         Ok(())
     }
 
