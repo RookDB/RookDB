@@ -124,9 +124,19 @@ impl Optimizer {
                 let order_by = s
                     .order_by
                     .into_iter()
-                    .map(|ob| rook_ast::OrderByExpr {
-                        expr: fold_expr(&ob.expr),
-                        ascending: ob.ascending,
+                    .map(|ob| {
+                        // A constant key is a SELECT-list position; `-1`
+                        // (parsed `0 - 1`) must not fold into one.
+                        let folded = fold_expr(&ob.expr);
+                        let expr = match (&folded, &ob.expr) {
+                            (ExprNode::Constant(_), ExprNode::Constant(_)) => folded,
+                            (ExprNode::Constant(_), _) => ob.expr,
+                            _ => folded,
+                        };
+                        rook_ast::OrderByExpr {
+                            expr,
+                            ascending: ob.ascending,
+                        }
                     })
                     .collect();
                 LogicalPlan::Sort(LogicalSort {

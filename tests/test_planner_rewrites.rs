@@ -173,3 +173,41 @@ fn computed_sort_key_over_columns_that_share_a_name() {
         ]
     );
 }
+
+/// A sort key whose value is constant (`-1`, parsed `0 - 1`) is not folded
+/// into a constant, which ORDER BY would read as a SELECT-list position.
+#[test]
+fn constant_valued_sort_key_is_not_a_position() {
+    let (_ws, mut s) = session("const_key");
+    assert_eq!(
+        run(&mut s, "SELECT id * 2, -1 FROM q ORDER BY 1, 2"),
+        vec![
+            vec![Some(2), Some(-1)],
+            vec![Some(4), Some(-1)],
+            vec![Some(6), Some(-1)],
+            vec![Some(10), Some(-1)]
+        ]
+    );
+    assert_eq!(
+        run(&mut s, "SELECT id FROM q ORDER BY 2 - 3, id DESC"),
+        vec![vec![Some(5)], vec![Some(3)], vec![Some(2)], vec![Some(1)]]
+    );
+}
+
+/// Two computed outputs share the display name `expr`; a sort that needs a
+/// hidden key column passes both through by position, not by name.
+#[test]
+fn hidden_sort_column_keeps_outputs_of_one_name_apart() {
+    let (_ws, mut s) = session("hidden_dup");
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT DISTINCT id - 10, -2 FROM q ORDER BY 1, 2 LIMIT 3",
+        ),
+        vec![
+            vec![Some(-9), Some(-2)],
+            vec![Some(-8), Some(-2)],
+            vec![Some(-7), Some(-2)]
+        ]
+    );
+}
