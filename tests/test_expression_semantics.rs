@@ -385,3 +385,30 @@ fn set_operations_resolve_column_types() {
     );
     assert!(try_run(&mut s, "SELECT day FROM ev UNION SELECT vc FROM tx").is_err());
 }
+
+/// `IS [NOT] TRUE` / `IS [NOT] FALSE` over a comparison keep the UNKNOWN
+/// case apart: a NULL operand is neither TRUE nor FALSE.
+#[test]
+fn boolean_tests_of_a_comparison_treat_unknown_as_neither() {
+    let (_ws, mut s) = session("booltest");
+    run(&mut s, "CREATE TABLE bt (x INT)");
+    run(&mut s, "INSERT INTO bt VALUES (3), (10), (NULL)");
+    let xs = |s: &mut Session, cond: &str| {
+        run(s, &format!("SELECT x FROM bt WHERE {} ORDER BY x", cond))
+    };
+    assert_eq!(xs(&mut s, "(x > 5) IS TRUE"), rows(&[&["10"]]));
+    // NULLs sort first.
+    assert_eq!(
+        xs(&mut s, "(x > 5) IS NOT TRUE"),
+        rows(&[&["NULL"], &["3"]])
+    );
+    assert_eq!(xs(&mut s, "(x > 5) IS FALSE"), rows(&[&["3"]]));
+    assert_eq!(
+        xs(&mut s, "(x > 5) IS NOT FALSE"),
+        rows(&[&["NULL"], &["10"]])
+    );
+    assert_eq!(
+        xs(&mut s, "NOT ((x > 5) IS TRUE)"),
+        rows(&[&["NULL"], &["3"]])
+    );
+}
