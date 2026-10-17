@@ -108,6 +108,40 @@ impl StatsSource for PlannerStats<'_> {
     }
 }
 
+/// The tables `plan` scans directly (not those of subqueries inside its
+/// expressions, which are planned on their own).
+fn scanned_tables<'p>(plan: &'p LogicalPlan, out: &mut Vec<&'p str>) {
+    match plan {
+        LogicalPlan::TableScan(ts) => out.push(&ts.table),
+        LogicalPlan::Filter(f) => scanned_tables(&f.child, out),
+        LogicalPlan::Project(p) => scanned_tables(&p.child, out),
+        LogicalPlan::Distinct(d) => scanned_tables(&d.child, out),
+        LogicalPlan::Sort(s) => scanned_tables(&s.child, out),
+        LogicalPlan::Limit(l) => scanned_tables(&l.child, out),
+        LogicalPlan::Aggregate(a) => scanned_tables(&a.child, out),
+        LogicalPlan::Join(j) => {
+            scanned_tables(&j.left, out);
+            scanned_tables(&j.right, out);
+        }
+        LogicalPlan::SetOp(s) => {
+            scanned_tables(&s.left, out);
+            scanned_tables(&s.right, out);
+        }
+        LogicalPlan::Subquery(s) => scanned_tables(&s.subquery, out),
+        LogicalPlan::Insert(i) => scanned_tables(&i.child, out),
+        LogicalPlan::Cte(c) => {
+            scanned_tables(&c.inner, out);
+            scanned_tables(&c.outer, out);
+        }
+        LogicalPlan::RecursiveCte(r) => {
+            scanned_tables(&r.non_recursive, out);
+            scanned_tables(&r.recursive, out);
+            scanned_tables(&r.outer, out);
+        }
+        LogicalPlan::CteScan(_) => {}
+    }
+}
+
 impl PhysicalPlanner {
     pub fn new(catalog: impl Into<std::sync::Arc<Catalog>>, db_name: String) -> Self {
         Self {
@@ -173,6 +207,14 @@ impl PhysicalPlanner {
         };
         self.cte_types.borrow_mut().clear();
         self.table_info.borrow_mut().clear();
+        // Size up every scanned table now, while its heap is still in the
+        // engine's cache: once a scan has checked the heap out, reading its
+        // row count would open the file again.
+        let mut tables = Vec::new();
+        scanned_tables(logical_plan, &mut tables);
+        for table in tables {
+            PlannerStats(self).info(table);
+        }
         self.plan_internal(logical_plan, &mut cte_registry)
     }
 
@@ -819,7 +861,7 @@ impl PhysicalPlanner {
 
         let heap_path = self.catalog.engine().paths().heap(&self.db_name, &ts.table);
 
-        if !heap_path.exists() {
+        if !crate::backend::cache::file_exists(self.catalog.engine(), &heap_path) {
             return Err(RookError::NotFound {
                 entity: "Table",
                 name: ts.table.clone(),

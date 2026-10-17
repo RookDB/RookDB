@@ -239,8 +239,8 @@ impl PhysicalPlanner {
                         .engine()
                         .paths()
                         .heap(&self.db_name, &inner_ts.table);
-                    if idx_path.exists()
-                        && heap_path.exists()
+                    if crate::backend::cache::file_exists(self.catalog.engine(), &idx_path)
+                        && crate::backend::cache::file_exists(self.catalog.engine(), &heap_path)
                         && let Some(outer_key_idx) =
                             resolve_outer_key(&left_schema, outer_table.as_deref(), outer_col)
                     {

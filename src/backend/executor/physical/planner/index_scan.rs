@@ -49,7 +49,7 @@ impl PhysicalPlanner {
             .collect();
 
         let heap_path = self.catalog.engine().paths().heap(&self.db_name, &ts.table);
-        if !heap_path.exists() {
+        if !crate::backend::cache::file_exists(self.catalog.engine(), &heap_path) {
             return Ok(None);
         }
 
@@ -134,7 +134,7 @@ impl PhysicalPlanner {
                 .engine()
                 .paths()
                 .index(&self.db_name, &ts.table, &idx_name);
-            if !idx_path.exists() {
+            if !crate::backend::cache::file_exists(self.catalog.engine(), &idx_path) {
                 return Ok(None);
             }
 
@@ -217,7 +217,7 @@ impl PhysicalPlanner {
         let paths = self.catalog.engine().paths();
         let idx_path = paths.index(&self.db_name, table, idx_name);
         let heap_path = paths.heap(&self.db_name, table);
-        if !idx_path.exists() {
+        if !crate::backend::cache::file_exists(self.catalog.engine(), &idx_path) {
             return None;
         }
         let heap =

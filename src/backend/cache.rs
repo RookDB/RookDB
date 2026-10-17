@@ -657,6 +657,19 @@ fn btree_call<T, E>(
     run(entry)
 }
 
+/// Whether the heap or index file at `path` exists: true without a system
+/// call when the engine holds it open, which the planner relies on for the
+/// tables and indexes of every query.
+pub fn file_exists(engine: &Engine, path: &Path) -> bool {
+    if engine.cache_enabled(CacheTier::Handles) {
+        let key = canonical(path);
+        if lock(&engine.heaps).contains_key(&key) || lock(&engine.btrees).contains_key(&key) {
+            return true;
+        }
+    }
+    path.exists()
+}
+
 /// An index a query reads through the engine's cached handle, so it sees
 /// the pages DML has written without a checkpoint and keeps them cached
 /// across queries.
@@ -671,7 +684,7 @@ pub struct CachedIndex {
 
 impl CachedIndex {
     pub fn new(engine: Arc<Engine>, path: PathBuf, key_types: Vec<crate::types::DataType>) -> Self {
-        let resolved = path.exists().then(|| canonical(&path));
+        let resolved = file_exists(&engine, &path).then(|| canonical(&path));
         CachedIndex {
             engine,
             path,
@@ -1117,16 +1130,17 @@ pub fn known_statistics(
     engine
         .cache_counters
         .record(CacheSite::Statistics, cached.is_some());
+    // A table with no usable statistics stored is remembered as such, so
+    // planning it does not look for the file again (`analyze_table` and
+    // `drop_statistics` replace the entry).
     let stats = match cached {
-        Some(stats) => stats,
+        Some(stats) => stats?,
         None => {
-            let stored = Arc::new(load_stored_statistics(
-                engine, db_name, table_name, columns,
-            )?);
+            let stored = load_stored_statistics(engine, db_name, table_name, columns).map(Arc::new);
             if on {
-                lock(&engine.statistics).insert(key, Arc::clone(&stored));
+                lock(&engine.statistics).insert(key, stored.clone());
             }
-            stored
+            stored?
         }
     };
     (!statistics_are_stale(engine, db_name, table_name, &stats)).then_some(stats)
@@ -1178,7 +1192,7 @@ pub fn analyze_table(
     if engine.cache_enabled(CacheTier::Meta) {
         lock(&engine.statistics).insert(
             (db_name.to_string(), table_name.to_string()),
-            Arc::clone(&arc),
+            Some(Arc::clone(&arc)),
         );
     }
     reset_modified(engine, db_name, table_name);

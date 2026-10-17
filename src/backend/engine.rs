@@ -37,7 +37,10 @@ type TableKey = (String, String);
 pub struct Engine {
     paths: crate::backend::paths::Paths,
     pub(crate) table_meta: Mutex<HashMap<TableKey, Arc<TableMeta>>>,
-    pub(crate) statistics: Mutex<HashMap<TableKey, Arc<crate::statistics::TableStatistics>>>,
+    /// Each table's statistics as last read or gathered; `None` when none
+    /// are stored.
+    pub(crate) statistics:
+        Mutex<HashMap<TableKey, Option<Arc<crate::statistics::TableStatistics>>>>,
     /// Rows inserted, updated or deleted since each table's statistics were
     /// gathered, by database then table (see `cache::note_modified`).
     pub(crate) modifications: Mutex<HashMap<String, HashMap<String, u64>>>,
