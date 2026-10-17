@@ -12,7 +12,6 @@ pub const ITEM_ID_SIZE: u32 = 8;
 pub const SLOT_FLAG_DELETED: u16 = 0b0000_0000_0000_0001;
 
 // Page size in bytes (8 KB)
-pub mod page_lock;
 
 /// Bumped whenever any slot on any page becomes dead. An insert's "no dead
 /// slot before here" hint is valid only while this has not moved; a stale hint

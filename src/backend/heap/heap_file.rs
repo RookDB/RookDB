@@ -6,7 +6,6 @@
 //! reader and writer of a table sees one copy of each page.
 
 use crate::backend::error::RookResult;
-use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -16,7 +15,6 @@ use crate::page::Page;
 
 pub struct HeapFile {
     pool: SharedPool,
-    identity: u64,
 }
 
 impl HeapFile {
@@ -26,19 +24,7 @@ impl HeapFile {
     /// resident between statements and has it written out at checkpoints.
     pub fn open(engine: &crate::backend::engine::Engine, path: &Path) -> RookResult<Self> {
         let pool = crate::backend::cache::with_heap(engine, path, |hm| Ok(Arc::clone(&hm.pool)))?;
-        let identity = {
-            let guard = pool.lock().unwrap_or_else(|p| p.into_inner());
-            let file = guard.file_handle().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no file")
-            })?;
-            crate::backend::disk::file_identity_from_file(file)?
-        };
-        Ok(Self { pool, identity })
-    }
-
-    /// Identity of the underlying file, for `PageWriteLock`.
-    pub fn identity(&self) -> u64 {
-        self.identity
+        Ok(Self { pool })
     }
 
     /// Number of pages in the file, header page included.

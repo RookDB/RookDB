@@ -11,7 +11,6 @@ use crate::backend::executor::compaction_api::rebuild_table_fsm;
 use crate::backend::executor::create_index::update_index_on_delete;
 use crate::backend::heap::HeapFile;
 use crate::backend::log::operation_log::{current_timestamp_iso, log_compaction, log_delete};
-use crate::backend::page::page_lock::PageWriteLock;
 use crate::backend::visibility_map::{vm_clear_page, vm_is_visible, vm_set_page};
 use crate::catalog::types::Catalog;
 use crate::page::Page;
@@ -104,7 +103,6 @@ pub fn compaction_table(
     let result = (|| -> RookResult<usize> {
         let path = engine.paths().heap(db_name, table_name);
         let file = HeapFile::open(engine, std::path::Path::new(&path))?;
-        let file_identity = file.identity();
 
         let total_pages = file.page_count();
         let mut pages_compacted = 0usize;
@@ -119,9 +117,6 @@ pub fn compaction_table(
                 continue;
             }
 
-            // Acquire exclusive write lock on this page before reading and potentially compacting
-            let _page_lock = PageWriteLock::acquire(file_identity, page_num);
-
             let mut page = Page::new();
             file.read_page(&mut page, page_num)?;
 
@@ -135,7 +130,6 @@ pub fn compaction_table(
             // Page is now clean (either had no dead tuples, or just compacted).
             // Mark all-visible so the next compaction can skip it entirely.
             let _ = vm_set_page(engine, db_name, table_name, page_num);
-            // Lock is automatically released here when _page_lock is dropped
         }
 
         // Rebuild the FSM and reset dead-tuple counter after a successful compaction.
@@ -178,12 +172,11 @@ pub fn compaction_table(
 //   "(c1 = 1 AND c2 = 2) AND (c3 = 3 OR c4 = 4)"
 //
 // Grammar (AND binds tighter than OR, same as SQL):
-/// A heap page kept locked in memory while consecutive rows on it are deleted.
+/// A heap page kept in memory while consecutive rows on it are deleted.
 struct HeldPage {
     page_num: u32,
     page: Page,
     dirty: bool,
-    _lock: PageWriteLock,
 }
 
 /// Write the held page back if any slot on it was deleted, then release it.
@@ -255,7 +248,6 @@ fn delete_rows(
     let path = catalog.engine().paths().heap(db_name, table_name);
     let file = HeapFile::open(catalog.engine(), std::path::Path::new(&path))
         .map_err(|e| e.with_context("Failed to open table file"))?;
-    let file_identity = file.identity();
 
     let mut deleted_count = 0usize;
     let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
@@ -295,15 +287,12 @@ fn delete_rows(
         if !hold_pages || held.as_ref().map(|h| h.page_num) != Some(page_num) {
             flush_held_page(catalog.engine(), &file, &mut held, db_name, table_name)?;
 
-            // Acquire exclusive write lock on this page
-            let lock = PageWriteLock::acquire(file_identity, page_num);
             let mut page = Page::new();
             file.read_page(&mut page, page_num)?;
             held = Some(HeldPage {
                 page_num,
                 page,
                 dirty: false,
-                _lock: lock,
             });
         }
         let held_page = held.as_mut().expect("page loaded above");

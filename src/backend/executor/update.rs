@@ -14,7 +14,6 @@
 use crate::backend::error::{ConstraintKind, RookError, RookResult};
 
 use crate::backend::log::operation_log::current_timestamp_iso;
-use crate::backend::page::page_lock::PageWriteLock;
 use crate::catalog::types::Catalog;
 use crate::page::Page;
 use crate::types::datatype::DataType;
@@ -182,7 +181,6 @@ fn update_rows(
     let path = catalog.engine().paths().heap(db_name, table_name);
     let file = crate::backend::heap::HeapFile::open(catalog.engine(), std::path::Path::new(&path))
         .map_err(|e| e.with_context("Failed to open table file"))?;
-    let file_identity = file.identity();
 
     // Resolved once for the statement rather than per row.
     let checks = crate::backend::constraint::RowChecks::new(catalog, db_name, table_name);
@@ -395,7 +393,6 @@ fn update_rows(
                 end += 1;
             }
 
-            let _page_lock = PageWriteLock::acquire(file_identity, page_id);
             let mut page = Page::new();
             file.read_page(&mut page, page_id)?;
             let mut moved_on_page = false;

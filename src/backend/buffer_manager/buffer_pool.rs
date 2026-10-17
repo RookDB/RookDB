@@ -670,11 +670,6 @@ impl BufferPool {
         self.file.is_some()
     }
 
-    /// The underlying file handle, if a file is attached.
-    pub(crate) fn file_handle(&self) -> Option<&File> {
-        self.file.as_deref()
-    }
-
     /// A duplicate of the underlying file handle (shares the file offset).
     /// Used for external scans such as the FSM rebuild.
     pub(crate) fn try_clone_file(&self) -> RookResult<File> {

@@ -17,8 +17,8 @@
 //! A few things stay process-wide on purpose:
 //!
 //! * The registries that give each open file one buffer pool
-//!   (`shared_pool`), one free-space map (`fsm`) and one set of page locks
-//!   (`page_lock`), and the memo of canonical paths. They are keyed by the
+//!   (`shared_pool`) and one free-space map (`fsm`), and the memo of
+//!   canonical paths. They are keyed by the
 //!   file itself (its absolute path or inode), not by table name, so engines
 //!   on different directories never meet in them, and two routes to the
 //!   same file still get one copy of its pages. They play the part of a

@@ -7,7 +7,6 @@
 //! - Leaves are linked into a doubly-linked list for efficient range scans.
 //! - Keys are variable-length: `[key_len: u16][encoded_key_bytes]`.
 //! - Values are heap tuple identifiers `(page_id: u32, slot_id: u32)`.
-//! - Page-level write latching (via `PageWriteLock`) protects splits.
 //!
 //! # Page Format
 //!
@@ -52,8 +51,6 @@ use node::NodeView;
 use order::{KeyOrder, LeafInsertSlot};
 
 use crate::backend::buffer_manager::buffer_pool::BufferPool;
-use crate::backend::disk::file_identity_from_file;
-use crate::backend::page::page_lock::PageWriteLock;
 use crate::types::DataType;
 use crate::types::value::DataValue;
 
@@ -122,8 +119,6 @@ pub struct BTree {
     file_path: PathBuf,
     /// Buffer pool managing 8 KB index pages.
     pool: BufferPool,
-    /// Stable file identity used for PageWriteLock.
-    file_id: u64,
     /// The data type(s) of the indexed column(s). A single entry is a plain
     /// single-column index; multiple entries form a composite key where each
     /// value contributes one `[len][bytes]` segment in order.
@@ -167,8 +162,6 @@ impl BTree {
             .truncate(true)
             .open(&file_path)?;
 
-        let file_id = file_identity_from_file(&file)?;
-
         // Create the root node (empty leaf)
         let root = BTreeNode::new_leaf();
         let buf = root.serialize();
@@ -185,7 +178,6 @@ impl BTree {
         Ok(Self {
             file_path,
             pool,
-            file_id,
             key_types,
             root_page_id: 0,
             total_pages: 1,
@@ -205,7 +197,6 @@ impl BTree {
 
         let file = OpenOptions::new().read(true).write(true).open(&file_path)?;
 
-        let file_id = file_identity_from_file(&file)?;
         let file_size = file.metadata()?.len();
         let total_pages = (file_size as usize / BTREE_PAGE_SIZE) as u32;
 
@@ -248,7 +239,6 @@ impl BTree {
         Ok(Self {
             file_path,
             pool,
-            file_id,
             key_types,
             root_page_id,
             total_pages,
@@ -664,10 +654,6 @@ impl BTree {
             ));
         }
 
-        // Acquire page write lock for the root
-        let file_id = self.file_id;
-        let _lock = PageWriteLock::acquire(file_id, self.root_page_id);
-
         let result = self.insert_internal(self.root_page_id, &encoded, page_id, slot_id)?;
 
         // Check if the root was split
@@ -791,10 +777,6 @@ impl BTree {
                 Ok(Some((new_key, new_leaf_id)))
             }
         } else {
-            // Acquire write lock for the child before modifying
-            let file_id = self.file_id;
-            let _lock = PageWriteLock::acquire(file_id, child_id);
-
             // Recursively insert
             let result =
                 self.insert_internal(child_id, encoded_key, value_page_id, value_slot_id)?;
