@@ -63,22 +63,12 @@ pub fn fold_expr(expr: &ExprNode) -> ExprNode {
         ExprNode::Binary { left, op, right } => {
             let left = fold_expr(left);
             let right = fold_expr(right);
-            match (&left, op, &right) {
-                (ExprNode::Constant(a), _, ExprNode::Constant(b)) => fold_binary_op(a, *op, b),
-                (ExprNode::Constant(ConstantValue::Int(0)), ArithOp::Mul, _)
-                | (_, ArithOp::Mul, ExprNode::Constant(ConstantValue::Int(0))) => {
-                    ExprNode::Constant(ConstantValue::Int(0))
-                }
-                (ExprNode::Constant(ConstantValue::Float(f)), ArithOp::Mul, _) if *f == 0.0 => {
-                    ExprNode::Constant(ConstantValue::Float(*f))
-                }
-                (_, ArithOp::Mul, ExprNode::Constant(ConstantValue::Float(f))) if *f == 0.0 => {
-                    ExprNode::Constant(ConstantValue::Float(*f))
-                }
-                (e, ArithOp::Add, ExprNode::Constant(ConstantValue::Int(0)))
-                | (ExprNode::Constant(ConstantValue::Int(0)), ArithOp::Add, e) => e.clone(),
-                (e, ArithOp::Mul, ExprNode::Constant(ConstantValue::Int(1)))
-                | (ExprNode::Constant(ConstantValue::Int(1)), ArithOp::Mul, e) => e.clone(),
+            // Only constant-with-constant is folded. Identities such as
+            // `x * 0 = 0` or `x + 0 = x` do not hold in SQL: NULL * 0 is
+            // NULL, an error in `x` must still be raised, and `x + 0` must
+            // still be type-checked (it is an error for text).
+            match (&left, &right) {
+                (ExprNode::Constant(a), ExprNode::Constant(b)) => fold_binary_op(a, *op, b),
                 _ => ExprNode::Binary {
                     left: Box::new(left),
                     op: *op,
@@ -104,86 +94,51 @@ pub fn fold_expr(expr: &ExprNode) -> ExprNode {
 
 /// Fold a binary operation between two constants.
 ///
-/// A division by a constant zero is left unfolded: it is an error, not a
-/// value, and the executor is the one place that reports it. Folding it to
-/// NULL made `SELECT 10 / 0` fail typing with "Cannot infer type for NULL
-/// literal" and made `WHERE 10 / 0 = 1` quietly match nothing.
+/// Anything the executor would reject is left unfolded so the executor
+/// reports it: division by zero, integer overflow (an INT literal, one
+/// that fits in 32 bits, overflows at 32 bits, as it does at run time) and
+/// operands that are not numbers. Folding `SELECT 10 / 0` to NULL made it
+/// fail typing with "Cannot infer type for NULL literal"; saturating
+/// `9223372036854775807 + 1` returned a wrong number instead of an error.
 pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> ExprNode {
     let unfolded = || ExprNode::Binary {
         left: Box::new(ExprNode::Constant(a.clone())),
         op,
         right: Box::new(ExprNode::Constant(b.clone())),
     };
+    let as_float = |c: &ConstantValue| match c {
+        ConstantValue::Int(i) => Some(*i as f64),
+        ConstantValue::Float(f) => Some(*f),
+        _ => None,
+    };
     let result = match (a, b) {
         (ConstantValue::Null, _) | (_, ConstantValue::Null) => ConstantValue::Null,
         (ConstantValue::Int(ai), ConstantValue::Int(bi)) => {
             let v = match op {
-                ArithOp::Add => ai.saturating_add(*bi),
-                ArithOp::Sub => ai.saturating_sub(*bi),
-                ArithOp::Mul => ai.saturating_mul(*bi),
-                ArithOp::Div => {
-                    // `checked_div` also declines i64::MIN / -1.
-                    match ai.checked_div(*bi) {
-                        Some(v) => v,
-                        None => return unfolded(),
-                    }
-                }
+                ArithOp::Add => ai.checked_add(*bi),
+                ArithOp::Sub => ai.checked_sub(*bi),
+                ArithOp::Mul => ai.checked_mul(*bi),
+                // `checked_div` also declines i64::MIN / -1.
+                ArithOp::Div => ai.checked_div(*bi),
             };
-            ConstantValue::Int(v)
+            let fits_i32 = |i: i64| i32::try_from(i).is_ok();
+            match v {
+                Some(v) if !(fits_i32(*ai) && fits_i32(*bi)) || fits_i32(v) => {
+                    ConstantValue::Int(v)
+                }
+                _ => return unfolded(),
+            }
         }
-        (ConstantValue::Float(af), ConstantValue::Float(bf)) => {
-            let v = match op {
+        _ => match (as_float(a), as_float(b)) {
+            (Some(af), Some(bf)) => ConstantValue::Float(match op {
                 ArithOp::Add => af + bf,
                 ArithOp::Sub => af - bf,
                 ArithOp::Mul => af * bf,
-                ArithOp::Div => {
-                    if *bf == 0.0 {
-                        return unfolded();
-                    }
-                    af / bf
-                }
-            };
-            ConstantValue::Float(v)
-        }
-        (ConstantValue::Int(ai), ConstantValue::Float(bf)) => {
-            let af = *ai as f64;
-            let v = match op {
-                ArithOp::Add => af + bf,
-                ArithOp::Sub => af - bf,
-                ArithOp::Mul => af * bf,
-                ArithOp::Div => {
-                    if *bf == 0.0 {
-                        return unfolded();
-                    }
-                    af / bf
-                }
-            };
-            ConstantValue::Float(v)
-        }
-        (ConstantValue::Float(af), ConstantValue::Int(bi)) => {
-            let bf = *bi as f64;
-            let v = match op {
-                ArithOp::Add => af + bf,
-                ArithOp::Sub => af - bf,
-                ArithOp::Mul => af * bf,
-                ArithOp::Div => {
-                    if bf == 0.0 {
-                        return unfolded();
-                    }
-                    af / bf
-                }
-            };
-            ConstantValue::Float(v)
-        }
-        (ConstantValue::Boolean(a), ConstantValue::Boolean(b)) => {
-            let v = match op {
-                ArithOp::Add => *a || *b,
-                ArithOp::Mul => *a && *b,
-                _ => return ExprNode::Constant(ConstantValue::Null),
-            };
-            ConstantValue::Boolean(v)
-        }
-        _ => ConstantValue::Null,
+                ArithOp::Div if bf == 0.0 => return unfolded(),
+                ArithOp::Div => af / bf,
+            }),
+            _ => return unfolded(),
+        },
     };
     ExprNode::Constant(result)
 }
@@ -274,62 +229,36 @@ pub fn fold_predicate(pred: &PredicateNode) -> PredicateNode {
 
 /// Fold a comparison between two constants.
 pub fn fold_comparison(a: &ConstantValue, op: ComparisonOp, b: &ConstantValue) -> Option<bool> {
-    let result = match (a, b) {
-        (ConstantValue::Null, _) | (_, ConstantValue::Null) => return None,
-        (ConstantValue::Int(ai), ConstantValue::Int(bi)) => match op {
-            ComparisonOp::Eq => ai == bi,
-            ComparisonOp::Ne => ai != bi,
-            ComparisonOp::Lt => ai < bi,
-            ComparisonOp::Le => ai <= bi,
-            ComparisonOp::Gt => ai > bi,
-            ComparisonOp::Ge => ai >= bi,
-        },
-        (ConstantValue::Float(af), ConstantValue::Float(bf)) => match op {
-            ComparisonOp::Eq => af == bf,
-            ComparisonOp::Ne => af != bf,
-            ComparisonOp::Lt => af < bf,
-            ComparisonOp::Le => af <= bf,
-            ComparisonOp::Gt => af > bf,
-            ComparisonOp::Ge => af >= bf,
-        },
-        (ConstantValue::Int(ai), ConstantValue::Float(bf)) => {
-            let af = *ai as f64;
-            match op {
-                ComparisonOp::Eq => af == *bf,
-                ComparisonOp::Ne => af != *bf,
-                ComparisonOp::Lt => af < *bf,
-                ComparisonOp::Le => af <= *bf,
-                ComparisonOp::Gt => af > *bf,
-                ComparisonOp::Ge => af >= *bf,
-            }
+    use std::cmp::Ordering;
+    let ordering = match (a, b) {
+        (ConstantValue::Int(ai), ConstantValue::Int(bi)) => ai.cmp(bi),
+        (
+            ConstantValue::Int(_) | ConstantValue::Float(_),
+            ConstantValue::Int(_) | ConstantValue::Float(_),
+        ) => {
+            let f = |c: &ConstantValue| match c {
+                ConstantValue::Int(i) => *i as f64,
+                ConstantValue::Float(f) => *f,
+                _ => unreachable!(),
+            };
+            f(a).partial_cmp(&f(b))?
         }
-        (ConstantValue::Float(af), ConstantValue::Int(bi)) => {
-            let bf = *bi as f64;
-            match op {
-                ComparisonOp::Eq => *af == bf,
-                ComparisonOp::Ne => *af != bf,
-                ComparisonOp::Lt => *af < bf,
-                ComparisonOp::Le => *af <= bf,
-                ComparisonOp::Gt => *af > bf,
-                ComparisonOp::Ge => *af >= bf,
-            }
-        }
-        (ConstantValue::Text(a), ConstantValue::Text(b)) => match op {
-            ComparisonOp::Eq => a == b,
-            ComparisonOp::Ne => a != b,
-            ComparisonOp::Lt => a < b,
-            ComparisonOp::Le => a <= b,
-            ComparisonOp::Gt => a > b,
-            ComparisonOp::Ge => a >= b,
-        },
+        (ConstantValue::Text(a), ConstantValue::Text(b)) => a.cmp(b),
         (ConstantValue::Boolean(a), ConstantValue::Boolean(b)) => match op {
-            ComparisonOp::Eq => a == b,
-            ComparisonOp::Ne => a != b,
+            ComparisonOp::Eq => return Some(a == b),
+            ComparisonOp::Ne => return Some(a != b),
             _ => return None,
         },
         _ => return None,
     };
-    Some(result)
+    Some(match op {
+        ComparisonOp::Eq => ordering == Ordering::Equal,
+        ComparisonOp::Ne => ordering != Ordering::Equal,
+        ComparisonOp::Lt => ordering == Ordering::Less,
+        ComparisonOp::Le => ordering != Ordering::Greater,
+        ComparisonOp::Gt => ordering == Ordering::Greater,
+        ComparisonOp::Ge => ordering != Ordering::Less,
+    })
 }
 
 // ─── Column Extraction ────────────────────────────────────────────────────────

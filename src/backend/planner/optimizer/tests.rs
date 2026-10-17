@@ -210,21 +210,66 @@ fn test_fold_division_by_zero() {
     assert_eq!(fold_expr(&float_expr), float_expr);
 }
 
-#[test]
-fn test_fold_identity_ops() {
-    let expr = ExprNode::Binary {
-        left: Box::new(column("age")),
-        op: ArithOp::Add,
-        right: Box::new(constant_int(0)),
-    };
-    assert_eq!(fold_expr(&expr), column("age"));
+fn binary(left: ExprNode, op: ArithOp, right: ExprNode) -> ExprNode {
+    ExprNode::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }
+}
 
-    let expr2 = ExprNode::Binary {
-        left: Box::new(column("age")),
-        op: ArithOp::Mul,
-        right: Box::new(constant_int(1)),
-    };
-    assert_eq!(fold_expr(&expr2), column("age"));
+#[test]
+fn test_fold_keeps_identities_with_columns() {
+    // `x * 0` is NULL when x is NULL, and `x + 0` must still be type-checked:
+    // neither is rewritten.
+    for expr in [
+        binary(column("age"), ArithOp::Add, constant_int(0)),
+        binary(column("age"), ArithOp::Mul, constant_int(1)),
+        binary(column("age"), ArithOp::Mul, constant_int(0)),
+        binary(constant_int(0), ArithOp::Mul, column("age")),
+        binary(column("age"), ArithOp::Mul, constant_float(0.0)),
+    ] {
+        assert_eq!(fold_expr(&expr), expr);
+    }
+}
+
+#[test]
+fn test_fold_keeps_errors_in_a_product_with_zero() {
+    let div_zero = binary(constant_int(1), ArithOp::Div, constant_int(0));
+    let expr = binary(div_zero, ArithOp::Mul, constant_int(0));
+    assert_eq!(fold_expr(&expr), expr);
+}
+
+#[test]
+fn test_fold_leaves_integer_overflow_to_the_executor() {
+    // INT literals overflow at 32 bits, as they do at run time.
+    let int_overflow = binary(constant_int(i32::MAX as i64), ArithOp::Add, constant_int(1));
+    assert_eq!(fold_expr(&int_overflow), int_overflow);
+    let bigint_overflow = binary(constant_int(i64::MAX), ArithOp::Add, constant_int(1));
+    assert_eq!(fold_expr(&bigint_overflow), bigint_overflow);
+    // A BIGINT operand folds in 64 bits.
+    let bigint = binary(
+        constant_int(i32::MAX as i64 + 1),
+        ArithOp::Add,
+        constant_int(1),
+    );
+    assert_eq!(
+        fold_expr(&bigint),
+        ExprNode::Constant(ConstantValue::Int(i32::MAX as i64 + 2))
+    );
+}
+
+#[test]
+fn test_fold_leaves_non_numeric_operands_to_the_executor() {
+    let text = ExprNode::Constant(ConstantValue::Text("a".to_string()));
+    let expr = binary(text, ArithOp::Add, constant_int(1));
+    assert_eq!(fold_expr(&expr), expr);
+    let bools = binary(
+        ExprNode::Constant(ConstantValue::Boolean(true)),
+        ArithOp::Add,
+        ExprNode::Constant(ConstantValue::Boolean(true)),
+    );
+    assert_eq!(fold_expr(&bools), bools);
 }
 
 #[test]
