@@ -709,9 +709,11 @@ pub fn execute_cached_insert(
         return Ok(Some(res));
     }
 
-    // If fast template failed (e.g. complex expression), fall back to SQL parser if registered
+    // The fast template rejects some statements whose values are still
+    // plain literals (a quoted table name, say): the parser's plan says
+    // which. Any other statement takes the ordinary path.
     if let Ok(QueryPlan::Insert(ref ip)) = rook_parser::parse_sql(sql)
-        && ip.source_select.is_none()
+        && values_are_lifted_literals(ip, params.len())
     {
         let cached_insert = CachedInsert {
             table: ip.table.clone(),
@@ -730,6 +732,34 @@ pub fn execute_cached_insert(
     }
 
     Ok(None)
+}
+
+/// Whether `ip` inserts rows of plain literals only, the `count` literals
+/// normalization lifted out, so a [`CachedInsert`] can store them by
+/// position. An expression (`ABS(-5)`, `1 + 2`) or a literal it does not
+/// lift (`TRUE`) must be evaluated by the ordinary insert path.
+fn values_are_lifted_literals(ip: &rook_ast::InsertPlan, count: usize) -> bool {
+    use rook_ast::{ArithOp, ConstantValue, ExprNode};
+    let lifted = |e: &ExprNode| match e {
+        ExprNode::Constant(ConstantValue::Boolean(_)) => false,
+        ExprNode::Constant(_) => true,
+        // `-5` parses as `0 - 5`; the normalizer lifts it as one literal.
+        ExprNode::Binary {
+            left,
+            op: ArithOp::Sub,
+            right,
+        } => {
+            matches!(**left, ExprNode::Constant(ConstantValue::Int(0)))
+                && matches!(
+                    **right,
+                    ExprNode::Constant(ConstantValue::Int(_) | ConstantValue::Float(_))
+                )
+        }
+        _ => false,
+    };
+    ip.source_select.is_none()
+        && ip.values.iter().map(Vec::len).sum::<usize>() == count
+        && ip.values.iter().flatten().all(lifted)
 }
 
 /// Prepared Statement.
@@ -776,7 +806,7 @@ impl PreparedStatement {
             PlanCacheEntry::Insert(cached_insert)
         } else {
             match rook_parser::parse_sql(sql)? {
-                QueryPlan::Insert(ref ip) if ip.source_select.is_none() => {
+                QueryPlan::Insert(ref ip) if values_are_lifted_literals(ip, literals.len()) => {
                     PlanCacheEntry::Insert(CachedInsert {
                         table: ip.table.clone(),
                         columns: ip.columns.clone(),

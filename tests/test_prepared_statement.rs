@@ -133,3 +133,31 @@ fn empty_and_null_strings_are_not_null() {
     );
     assert_eq!(rows(&mut s, "SELECT s FROM t WHERE id = 11"), [["'NULL'"]]);
 }
+
+#[test]
+fn inserts_with_expressions_evaluate_them() {
+    let (_ws, mut s) = session("exprinsert");
+    for sql in [
+        "INSERT INTO t VALUES (ABS(-20), 'x')",
+        "INSERT INTO t VALUES (1 + 20, UPPER('y'))",
+        "INSERT INTO t VALUES (22, 'z' || 'z')",
+    ] {
+        match execute_cached_insert(&s.catalog, "ps", sql) {
+            Ok(Some(n)) => assert_eq!(n, 1, "{}", sql),
+            Ok(None) => {
+                rows(&mut s, sql);
+            }
+            Err(e) => panic!("{}: {}", sql, e),
+        }
+    }
+    let stmt = PreparedStatement::prepare(&s.catalog, "ps", "INSERT INTO t VALUES (ABS(-1), 'a')")
+        .unwrap();
+    assert_eq!(
+        stmt.execute(&s.catalog, &[num("-23"), text("w")]).unwrap(),
+        1
+    );
+    assert_eq!(
+        rows(&mut s, "SELECT id, s FROM t WHERE id >= 20 ORDER BY id"),
+        [["20", "'x'"], ["21", "'Y'"], ["22", "'zz'"], ["23", "'w'"]]
+    );
+}
