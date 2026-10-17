@@ -311,13 +311,30 @@ impl ProjectionOperator {
         projections: Vec<(Expr, String, DataType)>,
     ) -> Self {
         let child_schema = child.schema().to_vec();
+        // An output that passes an input column through under its own name
+        // keeps that column's table, so `t.a` still finds it above.
         let output_schema: Vec<ColumnInfo> = projections
             .iter()
-            .map(|(_, name, dt)| ColumnInfo {
-                merged: false,
-                name: name.clone(),
-                data_type: dt.clone(),
-                table: None,
+            .map(|(expr, name, dt)| {
+                let origin = match expr {
+                    Expr::Column { table, column } => {
+                        crate::backend::executor::physical::expr::column_position(
+                            &child_schema,
+                            table.as_deref(),
+                            column,
+                        )
+                        .map(|i| &child_schema[i])
+                        .filter(|c| c.name == *name)
+                    }
+                    Expr::Slot(i) => child_schema.get(*i).filter(|c| c.name == *name),
+                    _ => None,
+                };
+                ColumnInfo {
+                    merged: origin.is_some_and(|c| c.merged),
+                    name: name.clone(),
+                    data_type: dt.clone(),
+                    table: origin.and_then(|c| c.table.clone()),
+                }
             })
             .collect();
         // Plain column references are resolved once, here, not per row.
@@ -386,6 +403,12 @@ impl ProjectionOperator {
         // of the same name (after a join).
         let mut op = Self::new(child, projections);
         op.columns = Some(bind_columns(indices));
+        for (out, &idx) in op.output_schema.iter_mut().zip(indices) {
+            let origin = &op.child_schema[idx];
+            let kept = origin.name == out.name;
+            out.table = origin.table.clone().filter(|_| kept);
+            out.merged = kept && origin.merged;
+        }
         Ok(op)
     }
 

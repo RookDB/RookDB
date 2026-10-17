@@ -153,3 +153,23 @@ fn order_by_output_columns_that_share_a_name() {
         vec![vec![Some(0), Some(0)], vec![Some(1), Some(0)]]
     );
 }
+
+/// A sort on a computed key under a join adds a hidden column next to the
+/// join's columns. Two join columns share the name `b` there; each keeps its
+/// table, so the key and the SELECT list above read the right one.
+#[test]
+fn computed_sort_key_over_columns_that_share_a_name() {
+    let (_ws, mut s) = session("hidden_sort");
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT q.b - p.b, q.b * 1 FROM p LEFT JOIN q ON q.id = p.id ORDER BY 1, 2",
+        ),
+        vec![
+            vec![None, None],
+            vec![Some(-23), Some(7)],
+            vec![Some(-12), Some(8)],
+            vec![Some(-3), Some(7)]
+        ]
+    );
+}

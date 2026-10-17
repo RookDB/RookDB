@@ -493,16 +493,12 @@ impl PhysicalPlanner {
         extra_projections: Vec<(Expr, String, DataType)>,
         sort_keys: Vec<(usize, bool)>,
     ) -> RookResult<Box<dyn PhysicalOperator>> {
-        // Option 1: Project all existing columns + extra sort columns
+        // Project all existing columns + extra sort columns. Columns pass
+        // through by position: two of them may share a name.
         let mut all_projections: Vec<(Expr, String, DataType)> = child_schema
             .iter()
-            .map(|ci| {
-                let expr = Expr::Column {
-                    table: None,
-                    column: ci.name.clone(),
-                };
-                (expr, ci.name.clone(), ci.data_type.clone())
-            })
+            .enumerate()
+            .map(|(i, ci)| (Expr::Slot(i), ci.name.clone(), ci.data_type.clone()))
             .collect();
         all_projections.extend(extra_projections);
         let child_with_extra = Box::new(ProjectionOperator::new(child, all_projections));
