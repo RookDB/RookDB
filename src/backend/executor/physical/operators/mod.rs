@@ -21,6 +21,7 @@
 //! - `tests.rs`: unit tests (mock operator + operator behaviour)
 
 mod aggregate;
+mod correlated_lookup;
 mod estimated;
 mod filter_project;
 mod insert;
@@ -37,6 +38,7 @@ mod utils;
 mod tests;
 
 // Re-export everything from submodules
+pub use correlated_lookup::CorrelatedLookupOperator;
 pub use estimated::Estimated;
 pub use insert::{InsertOperator, ValuesOperator};
 pub use joins::{HashJoinOperator, IndexNestedLoopJoinOperator, JoinType, NestedLoopJoinOperator};

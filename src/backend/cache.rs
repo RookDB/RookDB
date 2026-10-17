@@ -610,12 +610,14 @@ pub fn with_btree<T, E>(
     open: impl FnOnce() -> Result<crate::backend::index::btree::BTree, E>,
     f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> Result<T, E>,
 ) -> Result<T, E> {
-    btree_call(engine, path, open, f, true)
+    btree_call(engine, path, false, open, f, true)
 }
 
+/// `resolved` says `path` is already [`canonical`].
 fn btree_call<T, E>(
     engine: &Engine,
     path: &Path,
+    resolved: bool,
     open: impl FnOnce() -> Result<crate::backend::index::btree::BTree, E>,
     f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> Result<T, E>,
     mutation: bool,
@@ -626,27 +628,33 @@ fn btree_call<T, E>(
         return f(&mut open()?);
     }
 
-    let key = canonical(path);
-    let mut cache = lock(&engine.btrees);
-
-    let hit = cache.contains_key(&key);
-    engine.cache_counters.record(CacheSite::BTree, hit);
-    if !hit {
-        let tree = open()?;
-        cache.insert(key.clone(), (tree, 0));
-    }
-    let (tree, ops) = cache.get_mut(&key).expect("just inserted");
-    let out = f(tree)?;
-    if mutation {
-        *ops += 1;
-        if *ops >= BTREE_SYNC_INTERVAL {
-            if let Err(e) = tree.sync() {
-                log::warn!("[cache] btree sync {:?} failed: {}", key, e);
+    let key = if resolved {
+        std::borrow::Cow::Borrowed(path)
+    } else {
+        std::borrow::Cow::Owned(canonical(path))
+    };
+    let run = |(tree, ops): &mut (crate::backend::index::btree::BTree, u32)| {
+        let out = f(tree)?;
+        if mutation {
+            *ops += 1;
+            if *ops >= BTREE_SYNC_INTERVAL {
+                if let Err(e) = tree.sync() {
+                    log::warn!("[cache] btree sync {:?} failed: {}", path, e);
+                }
+                *ops = 0;
             }
-            *ops = 0;
         }
+        Ok(out)
+    };
+    let mut cache = lock(&engine.btrees);
+    // A hit looks the path up once: hashing a `Path` walks its components.
+    if let Some(entry) = cache.get_mut(key.as_ref()) {
+        engine.cache_counters.record(CacheSite::BTree, true);
+        return run(entry);
     }
-    Ok(out)
+    engine.cache_counters.record(CacheSite::BTree, false);
+    let entry = cache.entry(key.into_owned()).or_insert((open()?, 0));
+    run(entry)
 }
 
 /// An index a query reads through the engine's cached handle, so it sees
@@ -656,14 +664,19 @@ pub struct CachedIndex {
     engine: Arc<Engine>,
     path: PathBuf,
     key_types: Vec<crate::types::DataType>,
+    /// `path` resolved once, when the file existed at creation, so a query
+    /// probing the index per outer row does not resolve it on every read.
+    resolved: Option<PathBuf>,
 }
 
 impl CachedIndex {
     pub fn new(engine: Arc<Engine>, path: PathBuf, key_types: Vec<crate::types::DataType>) -> Self {
+        let resolved = path.exists().then(|| canonical(&path));
         CachedIndex {
             engine,
             path,
             key_types,
+            resolved,
         }
     }
 
@@ -683,7 +696,8 @@ impl CachedIndex {
         let mut f = Some(f);
         let hit = btree_call(
             &self.engine,
-            &self.path,
+            self.resolved.as_deref().unwrap_or(&self.path),
+            self.resolved.is_some(),
             open,
             |btree| {
                 if btree.key_types() != self.key_types.as_slice() {

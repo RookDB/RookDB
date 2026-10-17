@@ -327,6 +327,23 @@ impl IndexScanOperator {
         self
     }
 
+    /// Look up `key` from now on, starting over: a correlated subquery's
+    /// probe moves to each outer row's value this way.
+    pub fn repoint(&mut self, key: DataValue) {
+        self.mode = IndexScanMode::PointLookup(key);
+        self.results.clear();
+        self.pos = 0;
+        self.ready.clear();
+        self.loaded = false;
+    }
+
+    /// Rows in the table, from its heap header.
+    pub fn table_rows(&self) -> usize {
+        self.heap_manager
+            .header()
+            .map_or(0, |h| h.total_tuples as usize)
+    }
+
     /// Run this scan's lookup against `btree`.
     fn lookup(mode: &IndexScanMode, btree: &mut BTree) -> RookResult<Vec<(u32, u32)>> {
         match mode {
@@ -462,15 +479,10 @@ impl PhysicalOperator for IndexScanOperator {
     }
 
     fn estimate_cardinality(&self) -> usize {
-        let table_rows = || {
-            self.heap_manager
-                .header()
-                .map_or(0, |h| h.total_tuples as usize)
-        };
         match &self.mode {
             IndexScanMode::PointLookup(_) | IndexScanMode::CompositePointLookup(_) => 1,
-            IndexScanMode::RangeLookup(..) => table_rows() / 3,
-            IndexScanMode::FullScan => table_rows(),
+            IndexScanMode::RangeLookup(..) => self.table_rows() / 3,
+            IndexScanMode::FullScan => self.table_rows(),
         }
     }
 

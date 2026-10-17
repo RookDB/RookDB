@@ -27,7 +27,8 @@ struct InnerScope {
     columns: Vec<String>,
 }
 use super::super::operators::{
-    FilterOperator, LimitOperator, PhysicalOperator, ProjectionOperator,
+    CorrelatedLookupOperator, FilterOperator, IndexScanOperator, LimitOperator, PhysicalOperator,
+    ProjectionOperator,
 };
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
@@ -952,6 +953,10 @@ impl PhysicalPlanner {
         let names = super::super::expr::binding_names(inner_base.schema());
         let mut params = Vec::new();
         let mut outer_indices = Vec::new();
+        // Inner columns compared for equality, with their parameters: the
+        // lookup keys that let the inner rows be hashed once.
+        let mut lookup_columns = Vec::new();
+        let mut lookup_params = Vec::new();
         let mut filter: Option<Predicate> = None;
         let mut and = |p: Predicate| {
             filter = Some(match filter.take() {
@@ -966,6 +971,12 @@ impl PhysicalPlanner {
                     name: outer_name.clone(),
                 })?;
             let param = Rc::new(RefCell::new(None));
+            if op == rook_ast::ComparisonOp::Eq
+                && let Ok(Some(col)) = resolve_column(inner_base.schema(), None, &inner_col)
+            {
+                lookup_columns.push(col);
+                lookup_params.push(param.clone());
+            }
             and(Predicate::Compare(
                 Expr::Column {
                     table: None,
@@ -984,11 +995,44 @@ impl PhysicalPlanner {
             }
         }
         let filter = filter.expect("at least one correlation");
+        let inner_base: Box<dyn PhysicalOperator> = if lookup_columns.is_empty() {
+            inner_base
+        } else {
+            let probe = match lookup_columns.as_slice() {
+                [column] => self.inner_index_probe(select, inner_base.schema(), *column),
+                _ => None,
+            };
+            let lookup = CorrelatedLookupOperator::new(inner_base, lookup_columns, lookup_params);
+            Box::new(match probe {
+                Some((scan, key_type)) => lookup.with_index_probe(scan, key_type),
+                None => lookup,
+            })
+        };
         Ok(Some(SimpleCorrelation {
             filtered: Box::new(FilterOperator::new(inner_base, filter)),
             params,
             outer_indices,
         }))
+    }
+
+    /// An index probe on `column` of the subquery's table, when it reads a
+    /// table (not a CTE) with a single-column index there.
+    fn inner_index_probe(
+        &self,
+        select: &rook_ast::SelectPlan,
+        schema: &[ColumnInfo],
+        column: usize,
+    ) -> Option<(IndexScanOperator, DataType)> {
+        let table = &select.from.first()?.name;
+        if table.starts_with("__cte__:")
+            || select
+                .ctes
+                .iter()
+                .any(|c| c.name.eq_ignore_ascii_case(table))
+        {
+            return None;
+        }
+        self.plan_index_probe(table, schema.to_vec(), column)
     }
 
     /// Bind a subquery for the general path: resolve each outer column it

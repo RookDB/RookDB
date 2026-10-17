@@ -193,6 +193,51 @@ impl PhysicalPlanner {
         Ok(None)
     }
 
+    /// A point-lookup scan of `table` through a single-column index on
+    /// `column_info[column]`, with the indexed column's type, for a
+    /// correlated subquery to repoint at each outer value. `column_info` is
+    /// the table's full schema as the subquery's scan names it.
+    pub(crate) fn plan_index_probe(
+        &self,
+        table: &str,
+        column_info: Vec<ColumnInfo>,
+        column: usize,
+    ) -> Option<(IndexScanOperator, DataType)> {
+        let col = column_info.get(column)?;
+        let key_type = col.data_type.clone();
+        let indexes = crate::backend::executor::create_index::load_table_indexes_multi(
+            self.catalog.engine(),
+            &self.db_name,
+            table,
+        )
+        .ok()?;
+        let (idx_name, _, _) = indexes.iter().find(
+            |(_, cols, _)| matches!(cols.as_slice(), [c] if c.eq_ignore_ascii_case(&col.name)),
+        )?;
+        let paths = self.catalog.engine().paths();
+        let idx_path = paths.index(&self.db_name, table, idx_name);
+        let heap_path = paths.heap(&self.db_name, table);
+        if !idx_path.exists() {
+            return None;
+        }
+        let heap =
+            crate::backend::cache::lease_heap_owned(self.catalog.engine(), &heap_path).ok()?;
+        let index = crate::backend::cache::CachedIndex::new(
+            std::sync::Arc::clone(self.catalog.engine()),
+            idx_path,
+            vec![key_type.clone()],
+        );
+        let scan = IndexScanOperator::new(
+            index,
+            heap,
+            IndexScanMode::FullScan,
+            column_info,
+            vec![column],
+        )
+        .described(table, idx_name);
+        Some((scan, key_type))
+    }
+
     /// Extract an exact composite key from an AND-conjunction of equality
     /// predicates over ALL of `col_names` (in key order).
     ///

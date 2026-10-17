@@ -652,7 +652,7 @@ const HASH_ENTRY_OVERHEAD: usize = 96;
 const BUILD_SIDE: usize = 0;
 const PROBE_SIDE: usize = 1;
 
-fn spill_budget() -> usize {
+pub(super) fn spill_budget() -> usize {
     let configured = SPILL_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
     if configured > 0 {
         return configured;
