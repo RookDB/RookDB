@@ -73,6 +73,14 @@ fn a_prepared_select_takes_new_parameter_values() {
         0
     );
     assert!(stmt.execute(&s.catalog, &[]).is_err());
+    for bad in ["' OR 1 = 1 --", "4G", "ab'"] {
+        assert!(
+            stmt.execute(&s.catalog, &[Literal::Hex(bad.to_string())])
+                .is_err(),
+            "{} accepted as hex digits",
+            bad
+        );
+    }
 
     let by_id =
         PreparedStatement::prepare(&s.catalog, "ps", "SELECT id FROM t WHERE id = 1").unwrap();

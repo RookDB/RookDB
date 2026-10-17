@@ -848,7 +848,8 @@ fn is_number(text: &str) -> bool {
 }
 
 /// `template` with each `$n` placeholder replaced by `params[n - 1]` as SQL.
-/// A number is checked to be one, so a parameter can never add SQL of its own.
+/// A number or hex string is checked to be one, so a parameter can never add
+/// SQL of its own.
 fn bind_template(template: &str, params: &[Literal]) -> RookResult<String> {
     let tokens = tokenize_for_normalization(template)
         .map_err(|e| RookError::Internal(format!("prepared statement template: {}", e)))?;
@@ -863,10 +864,17 @@ fn bind_template(template: &str, params: &[Literal]) -> RookResult<String> {
             .and_then(|n| n.parse::<usize>().ok())
             .and_then(|n| params.get(n.checked_sub(1)?))
             .ok_or_else(|| RookError::Internal(format!("no value for parameter {}", p)))?;
-        if let Literal::Number(n) = param
-            && !is_number(n)
-        {
-            return Err(RookError::TypeMismatch(format!("'{}' is not a number", n)));
+        match param {
+            Literal::Number(n) if !is_number(n) => {
+                return Err(RookError::TypeMismatch(format!("'{}' is not a number", n)));
+            }
+            Literal::Hex(h) if !h.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                return Err(RookError::TypeMismatch(format!(
+                    "'{}' is not hex digits",
+                    h
+                )));
+            }
+            _ => {}
         }
         sql.push_str(&param.to_sql());
     }
@@ -987,5 +995,21 @@ mod tests {
         // own key, not a panic.
         let (norm, _params) = normalize_sql("SELECT 'oops FROM t");
         assert!(norm.starts_with("SELECT"));
+    }
+
+    #[test]
+    fn bound_parameters_cannot_add_sql() {
+        let template = "SELECT id FROM t WHERE b = $1";
+        let bound = |p: Literal| bind_template(template, &[p]);
+        assert_eq!(
+            bound(Literal::Hex("0aFF".into())).unwrap(),
+            "SELECT id FROM t WHERE b = X'0aFF'"
+        );
+        assert!(bound(Literal::Hex("' OR 1=1 --".into())).is_err());
+        assert!(bound(Literal::Number("1 OR 1=1".into())).is_err());
+        assert_eq!(
+            bound(Literal::Text("x' OR 'y".into())).unwrap(),
+            "SELECT id FROM t WHERE b = 'x'' OR ''y'"
+        );
     }
 }
