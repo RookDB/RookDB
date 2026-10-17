@@ -484,25 +484,25 @@ impl DataValue {
                 if bytes.len() == 17 && bytes.len() != expected {
                     let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                     let scale_byte = bytes[16];
-                    Ok(DataValue::Numeric(Box::new(NumericValue {
+                    Ok(DataValue::numeric(NumericValue {
                         unscaled,
                         scale: scale_byte,
-                    })))
+                    }))
                 } else if bytes.len() == 17 && expected == 17 {
                     match decode_numeric_bcd(bytes, *precision, *scale) {
-                        Ok(decoded) => Ok(DataValue::Numeric(Box::new(decoded))),
+                        Ok(decoded) => Ok(DataValue::numeric(decoded)),
                         Err(_) => {
                             let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                             let scale_byte = bytes[16];
-                            Ok(DataValue::Numeric(Box::new(NumericValue {
+                            Ok(DataValue::numeric(NumericValue {
                                 unscaled,
                                 scale: scale_byte,
-                            })))
+                            }))
                         }
                     }
                 } else {
                     let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
-                    Ok(DataValue::Numeric(Box::new(decoded)))
+                    Ok(DataValue::numeric(decoded))
                 }
             }
             DataType::Decimal { precision, scale } => {
@@ -510,25 +510,25 @@ impl DataValue {
                 if bytes.len() == 17 && bytes.len() != expected {
                     let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                     let scale_byte = bytes[16];
-                    Ok(DataValue::Numeric(Box::new(NumericValue {
+                    Ok(DataValue::numeric(NumericValue {
                         unscaled,
                         scale: scale_byte,
-                    })))
+                    }))
                 } else if bytes.len() == 17 && expected == 17 {
                     match decode_numeric_bcd(bytes, *precision, *scale) {
-                        Ok(decoded) => Ok(DataValue::Numeric(Box::new(decoded))),
+                        Ok(decoded) => Ok(DataValue::numeric(decoded)),
                         Err(_) => {
                             let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                             let scale_byte = bytes[16];
-                            Ok(DataValue::Numeric(Box::new(NumericValue {
+                            Ok(DataValue::numeric(NumericValue {
                                 unscaled,
                                 scale: scale_byte,
-                            })))
+                            }))
                         }
                     }
                 } else {
                     let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
-                    Ok(DataValue::Numeric(Box::new(decoded)))
+                    Ok(DataValue::numeric(decoded))
                 }
             }
             DataType::Bool => {
@@ -838,10 +838,10 @@ impl DataValue {
             DataType::Char(_) | DataType::Character(_) => DataValue::Char(String::new()),
             DataType::Bool => DataValue::Bool(false),
             DataType::Numeric { .. } | DataType::Decimal { .. } => {
-                DataValue::Numeric(Box::new(NumericValue {
+                DataValue::numeric(NumericValue {
                     unscaled: i128::MIN,
                     scale: 0,
-                }))
+                })
             }
             DataType::Bit(_) => DataValue::Bit("0".to_string()),
         }
@@ -872,10 +872,10 @@ impl DataValue {
             DataType::Char(_) | DataType::Character(_) => DataValue::Char("\u{10FFFF}".to_string()),
             DataType::Bool => DataValue::Bool(true),
             DataType::Numeric { .. } | DataType::Decimal { .. } => {
-                DataValue::Numeric(Box::new(NumericValue {
+                DataValue::numeric(NumericValue {
                     unscaled: i128::MAX,
                     scale: 0,
-                }))
+                })
             }
             DataType::Bit(_) => DataValue::Bit("1".to_string()),
         }
@@ -894,10 +894,10 @@ impl DataValue {
                 Some(DataValue::DoublePrecision(OrderedF64(v.0.next_up())))
             }
             DataValue::Numeric(v) => v.unscaled.checked_add(1).map(|unscaled| {
-                DataValue::Numeric(Box::new(NumericValue {
+                DataValue::numeric(NumericValue {
                     unscaled,
                     scale: v.scale,
-                }))
+                })
             }),
             DataValue::Date(v) => v.succ_opt().map(DataValue::Date),
             _ => None,
@@ -917,10 +917,10 @@ impl DataValue {
                 Some(DataValue::DoublePrecision(OrderedF64(v.0.next_down())))
             }
             DataValue::Numeric(v) => v.unscaled.checked_sub(1).map(|unscaled| {
-                DataValue::Numeric(Box::new(NumericValue {
+                DataValue::numeric(NumericValue {
                     unscaled,
                     scale: v.scale,
-                }))
+                })
             }),
             DataValue::Date(v) => v.pred_opt().map(DataValue::Date),
             _ => None,

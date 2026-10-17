@@ -760,7 +760,7 @@ where
             }),
         // Exact NUMERIC ↔ NUMERIC arithmetic
         (Some(DataValue::Numeric(a)), Some(DataValue::Numeric(b))) => {
-            numeric_op(*a, *b).map(|v| Some(DataValue::Numeric(Box::new(v))))
+            numeric_op(*a, *b).map(|v| Some(DataValue::numeric(v)))
         }
         // Cross-type NUMERIC ↔ INTEGER: exact promotion to NumericValue (scale 0)
         (Some(DataValue::Numeric(a)), Some(DataValue::SmallInt(b))) => numeric_op(
@@ -770,7 +770,7 @@ where
                 scale: 0,
             },
         )
-        .map(|v| Some(DataValue::Numeric(Box::new(v)))),
+        .map(|v| Some(DataValue::numeric(v))),
         (Some(DataValue::SmallInt(a)), Some(DataValue::Numeric(b))) => numeric_op(
             crate::types::value::NumericValue {
                 unscaled: a as i128,
@@ -778,7 +778,7 @@ where
             },
             *b,
         )
-        .map(|v| Some(DataValue::Numeric(Box::new(v)))),
+        .map(|v| Some(DataValue::numeric(v))),
         (Some(DataValue::Numeric(a)), Some(DataValue::Int(b))) => numeric_op(
             *a,
             crate::types::value::NumericValue {
@@ -786,7 +786,7 @@ where
                 scale: 0,
             },
         )
-        .map(|v| Some(DataValue::Numeric(Box::new(v)))),
+        .map(|v| Some(DataValue::numeric(v))),
         (Some(DataValue::Int(a)), Some(DataValue::Numeric(b))) => numeric_op(
             crate::types::value::NumericValue {
                 unscaled: a as i128,
@@ -794,7 +794,7 @@ where
             },
             *b,
         )
-        .map(|v| Some(DataValue::Numeric(Box::new(v)))),
+        .map(|v| Some(DataValue::numeric(v))),
         (Some(DataValue::Numeric(a)), Some(DataValue::BigInt(b))) => numeric_op(
             *a,
             crate::types::value::NumericValue {
@@ -802,7 +802,7 @@ where
                 scale: 0,
             },
         )
-        .map(|v| Some(DataValue::Numeric(Box::new(v)))),
+        .map(|v| Some(DataValue::numeric(v))),
         (Some(DataValue::BigInt(a)), Some(DataValue::Numeric(b))) => numeric_op(
             crate::types::value::NumericValue {
                 unscaled: a as i128,
@@ -810,7 +810,7 @@ where
             },
             *b,
         )
-        .map(|v| Some(DataValue::Numeric(Box::new(v)))),
+        .map(|v| Some(DataValue::numeric(v))),
         // Cross-type NUMERIC ↔ FLOAT: convert both to f64, use double_op
         (Some(DataValue::Numeric(a)), Some(DataValue::Real(b))) => {
             double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b.0 as f64).map(|v| {

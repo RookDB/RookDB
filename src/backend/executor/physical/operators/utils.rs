@@ -83,6 +83,23 @@ pub fn canonical_key(dv: DataValue) -> DataValue {
     }
 }
 
+/// [`canonical_key`] of a borrowed value, borrowing it when it is its own
+/// key, so a lookup of a VARCHAR or BIGINT allocates nothing.
+pub fn canonical_key_ref(dv: &DataValue) -> std::borrow::Cow<'_, DataValue> {
+    use std::borrow::Cow;
+    match dv {
+        DataValue::SmallInt(v) => Cow::Owned(DataValue::BigInt(*v as i64)),
+        DataValue::Int(v) => Cow::Owned(DataValue::BigInt(*v as i64)),
+        DataValue::BigInt(_)
+        | DataValue::Bool(_)
+        | DataValue::Varchar(_)
+        | DataValue::Time(_)
+        | DataValue::Timestamp(_)
+        | DataValue::Bit(_) => Cow::Borrowed(dv),
+        other => Cow::Owned(canonical_key(other.clone())),
+    }
+}
+
 /// Key for a whole row.
 pub fn canonical_row_key(values: &[Option<DataValue>]) -> Vec<Option<DataValue>> {
     values
@@ -164,6 +181,31 @@ mod tests {
             DataValue::DoublePrecision(OrderedF64(1.0)),
         ] {
             assert_eq!(canonical_key(v), one);
+        }
+    }
+
+    #[test]
+    fn borrowed_keys_match_owned_keys() {
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        for v in [
+            DataValue::SmallInt(-3),
+            DataValue::Int(7),
+            DataValue::BigInt(9),
+            DataValue::numeric(NumericValue {
+                unscaled: 150,
+                scale: 2,
+            }),
+            DataValue::Real(OrderedF32(2.0)),
+            DataValue::DoublePrecision(OrderedF64(0.1)),
+            DataValue::Bool(true),
+            DataValue::Char("ab  ".into()),
+            DataValue::Varchar("ab  ".into()),
+            DataValue::Date(date),
+            DataValue::Timestamp(date.and_hms_opt(1, 2, 3).unwrap()),
+            DataValue::Time(chrono::NaiveTime::from_hms_opt(1, 2, 3).unwrap()),
+            DataValue::Bit("101".into()),
+        ] {
+            assert_eq!(*canonical_key_ref(&v), canonical_key(v.clone()), "{:?}", v);
         }
     }
 

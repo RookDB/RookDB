@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::types::comparison::compare_nullable;
 use crate::types::value::DataValue;
 
-use super::super::operators::{KeyClass, PhysicalOperator, canonical_key};
+use super::super::operators::{KeyClass, PhysicalOperator, canonical_key, canonical_key_ref};
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::Expr;
 
@@ -94,7 +94,7 @@ impl InList {
         if let (Some(lhs), Some((class, keys))) = (lhs, &self.keys)
             && KeyClass::of_value(lhs) == *class
         {
-            return Ok(if keys.contains(&canonical_key(lhs.clone())) {
+            return Ok(if keys.contains(canonical_key_ref(lhs).as_ref()) {
                 Some(!negated)
             } else if self.has_null {
                 None

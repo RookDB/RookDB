@@ -328,12 +328,10 @@ pub fn abs(value: &DataValue) -> Result<DataValue, FunctionError> {
             crate::types::value::OrderedF64(v.0.abs()),
         )),
         DataValue::Numeric(v) => match v.unscaled.checked_abs() {
-            Some(x) => Ok(DataValue::Numeric(Box::new(
-                crate::types::value::NumericValue {
-                    unscaled: x,
-                    scale: v.scale,
-                },
-            ))),
+            Some(x) => Ok(DataValue::numeric(crate::types::value::NumericValue {
+                unscaled: x,
+                scale: v.scale,
+            })),
             None => Err(FunctionError::InvalidArgument(
                 "NUMERIC value overflow in ABS".to_string(),
             )),
@@ -416,12 +414,10 @@ pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError>
                 let exp = (-places) as u32;
                 let delta = v.scale as u32 + exp;
                 if delta >= 38 {
-                    return Ok(DataValue::Numeric(Box::new(
-                        crate::types::value::NumericValue {
-                            unscaled: 0,
-                            scale: 0,
-                        },
-                    )));
+                    return Ok(DataValue::numeric(crate::types::value::NumericValue {
+                        unscaled: 0,
+                        scale: 0,
+                    }));
                 }
                 let div = pow10(delta);
                 let q = v.unscaled / div;
@@ -432,12 +428,10 @@ pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError>
                     q
                 };
                 let mult = pow10(exp);
-                Ok(DataValue::Numeric(Box::new(
-                    crate::types::value::NumericValue {
-                        unscaled: rounded * mult,
-                        scale: 0,
-                    },
-                )))
+                Ok(DataValue::numeric(crate::types::value::NumericValue {
+                    unscaled: rounded * mult,
+                    scale: 0,
+                }))
             } else {
                 let target_scale = places as u8;
                 if target_scale >= v.scale {
@@ -454,12 +448,10 @@ pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError>
                 } else {
                     q
                 };
-                Ok(DataValue::Numeric(Box::new(
-                    crate::types::value::NumericValue {
-                        unscaled: rounded,
-                        scale: target_scale,
-                    },
-                )))
+                Ok(DataValue::numeric(crate::types::value::NumericValue {
+                    unscaled: rounded,
+                    scale: target_scale,
+                }))
             }
         }
         _ => Err(FunctionError::TypeMismatch {
@@ -691,12 +683,10 @@ pub fn floor(value: &DataValue) -> Result<DataValue, FunctionError> {
             if v.unscaled < 0 && v.unscaled % div != 0 {
                 q -= 1;
             }
-            Ok(DataValue::Numeric(Box::new(
-                crate::types::value::NumericValue {
-                    unscaled: q,
-                    scale: 0,
-                },
-            )))
+            Ok(DataValue::numeric(crate::types::value::NumericValue {
+                unscaled: q,
+                scale: 0,
+            }))
         }
         _ => Err(FunctionError::TypeMismatch {
             expected: "numeric type".to_string(),
@@ -726,12 +716,10 @@ pub fn ceiling(value: &DataValue) -> Result<DataValue, FunctionError> {
             if v.unscaled > 0 && v.unscaled % div != 0 {
                 q += 1;
             }
-            Ok(DataValue::Numeric(Box::new(
-                crate::types::value::NumericValue {
-                    unscaled: q,
-                    scale: 0,
-                },
-            )))
+            Ok(DataValue::numeric(crate::types::value::NumericValue {
+                unscaled: q,
+                scale: 0,
+            }))
         }
         _ => Err(FunctionError::TypeMismatch {
             expected: "numeric type".to_string(),

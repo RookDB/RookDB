@@ -201,7 +201,7 @@ impl PerGroupState {
                             self.sum_int = 0;
                             n
                         });
-                        self.sum_numeric = Some(add_numeric(current, *v.clone())?);
+                        self.sum_numeric = Some(add_numeric(current, (**v).clone())?);
                     }
                     self.has_sum = true;
                 }
@@ -310,10 +310,10 @@ enum SumValue {
 fn sum_as_declared(sum: SumValue, declared: &DataType) -> RookResult<DataValue> {
     Ok(match (sum, declared) {
         (SumValue::Int(v), DataType::Numeric { .. } | DataType::Decimal { .. }) => {
-            DataValue::Numeric(Box::new(NumericValue {
+            DataValue::numeric(NumericValue {
                 unscaled: v,
                 scale: 0,
-            }))
+            })
         }
         (SumValue::Int(v), DataType::Real) => DataValue::Real(OrderedF32(v as f32)),
         (SumValue::Int(v), DataType::DoublePrecision) => {
@@ -332,7 +332,7 @@ fn sum_as_declared(sum: SumValue, declared: &DataType) -> RookResult<DataValue> 
             DataValue::Real(OrderedF32(narrowed))
         }
         (SumValue::Float(v), _) => DataValue::DoublePrecision(OrderedF64(v)),
-        (SumValue::Numeric(v), _) => DataValue::Numeric(Box::new(v)),
+        (SumValue::Numeric(v), _) => DataValue::numeric(v),
     })
 }
 
