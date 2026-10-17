@@ -129,38 +129,57 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
                 else_result: else_expr,
             })
         }
+        // Boolean expressions evaluate as predicates: one implementation of
+        // comparison and three-valued logic for WHERE and SELECT alike.
         rook_ast::ExprNode::Compare { left, op, right } => {
-            let l = expr_from_ast(left, column_names)?;
-            let r = expr_from_ast(right, column_names)?;
-            match op {
-                rook_ast::ComparisonOp::Eq => Ok(Expr::Eq(Box::new(l), Box::new(r))),
-                rook_ast::ComparisonOp::Ne => Ok(Expr::Ne(Box::new(l), Box::new(r))),
-                rook_ast::ComparisonOp::Lt => Ok(Expr::Lt(Box::new(l), Box::new(r))),
-                rook_ast::ComparisonOp::Le => Ok(Expr::Le(Box::new(l), Box::new(r))),
-                rook_ast::ComparisonOp::Gt => Ok(Expr::Gt(Box::new(l), Box::new(r))),
-                rook_ast::ComparisonOp::Ge => Ok(Expr::Ge(Box::new(l), Box::new(r))),
-            }
+            Ok(Expr::Predicate(Box::new(Predicate::Compare(
+                expr_from_ast(left, column_names)?,
+                comparison_op(*op),
+                expr_from_ast(right, column_names)?,
+            ))))
         }
         rook_ast::ExprNode::Logical { left, op, right } => {
-            let l = expr_from_ast(left, column_names)?;
-            let r = expr_from_ast(right, column_names)?;
-            match op {
-                rook_ast::BinaryOp::And => Ok(Expr::And(Box::new(l), Box::new(r))),
-                rook_ast::BinaryOp::Or => Ok(Expr::Or(Box::new(l), Box::new(r))),
-            }
+            let l = as_predicate(expr_from_ast(left, column_names)?);
+            let r = as_predicate(expr_from_ast(right, column_names)?);
+            Ok(Expr::Predicate(Box::new(match op {
+                rook_ast::BinaryOp::And => Predicate::and(l, r),
+                rook_ast::BinaryOp::Or => Predicate::or(l, r),
+            })))
         }
-        rook_ast::ExprNode::Not(inner) => {
-            let inner_expr = expr_from_ast(inner, column_names)?;
-            Ok(Expr::Not(Box::new(inner_expr)))
-        }
-        rook_ast::ExprNode::IsNull(inner) => {
-            let inner_expr = expr_from_ast(inner, column_names)?;
-            Ok(Expr::IsNull(Box::new(inner_expr)))
-        }
-        rook_ast::ExprNode::IsNotNull(inner) => {
-            let inner_expr = expr_from_ast(inner, column_names)?;
-            Ok(Expr::IsNotNull(Box::new(inner_expr)))
-        }
+        rook_ast::ExprNode::Not(inner) => Ok(Expr::Predicate(Box::new(Predicate::not(
+            as_predicate(expr_from_ast(inner, column_names)?),
+        )))),
+        rook_ast::ExprNode::IsNull(inner) => Ok(Expr::Predicate(Box::new(Predicate::IsNull(
+            expr_from_ast(inner, column_names)?,
+        )))),
+        rook_ast::ExprNode::IsNotNull(inner) => Ok(Expr::Predicate(Box::new(
+            Predicate::IsNotNull(expr_from_ast(inner, column_names)?),
+        ))),
+    }
+}
+
+/// `expr` as a condition: a boolean expression is its predicate, any other
+/// value `value = TRUE` (TRUE, FALSE or NULL for a boolean value, a type
+/// error for anything else).
+fn as_predicate(expr: Expr) -> Predicate {
+    match expr {
+        Expr::Predicate(p) => *p,
+        other => Predicate::Compare(
+            other,
+            ComparisonOp::Equals,
+            Expr::Constant(DataValue::Bool(true)),
+        ),
+    }
+}
+
+fn comparison_op(op: rook_ast::ComparisonOp) -> ComparisonOp {
+    match op {
+        rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
+        rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
+        rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
+        rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
+        rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
+        rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
     }
 }
 
@@ -184,15 +203,7 @@ pub fn predicate_from_ast(
         rook_ast::PredicateNode::Compare { left, op, right } => {
             let l = expr_from_ast(left, column_names)?;
             let r = expr_from_ast(right, column_names)?;
-            let cmp_op = match op {
-                rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
-                rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
-                rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
-                rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
-                rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
-                rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
-            };
-            Ok(Predicate::Compare(l, cmp_op, r))
+            Ok(Predicate::Compare(l, comparison_op(*op), r))
         }
         rook_ast::PredicateNode::IsNull(expr) => {
             let e = expr_from_ast(expr, column_names)?;

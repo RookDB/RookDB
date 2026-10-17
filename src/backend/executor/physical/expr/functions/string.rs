@@ -138,59 +138,41 @@ pub(super) fn eval_substring(evaluated: Vec<Option<DataValue>>) -> RookResult<Op
             ));
         }
     };
-    let start = match iter.next() {
-        Some(Some(DataValue::Int(s))) => {
-            if s <= 0 {
-                return Err(RookError::Evaluation(
-                    "SUBSTRING start position must be >= 1".to_string(),
-                ));
-            }
-            s as usize
-        }
-        Some(Some(DataValue::BigInt(s))) => {
-            if s <= 0 {
-                return Err(RookError::Evaluation(
-                    "SUBSTRING start position must be >= 1".to_string(),
-                ));
-            }
-            s as usize
-        }
+    let int_arg = |arg: Option<Option<DataValue>>, what: &str| match arg {
+        Some(Some(DataValue::SmallInt(v))) => Ok(Some(Some(v as i64))),
+        Some(Some(DataValue::Int(v))) => Ok(Some(Some(v as i64))),
+        Some(Some(DataValue::BigInt(v))) => Ok(Some(Some(v))),
+        Some(None) => Ok(Some(None)),
+        None => Ok(None),
+        Some(Some(_)) => Err(RookError::Evaluation(format!(
+            "SUBSTRING requires integer {}",
+            what
+        ))),
+    };
+    let start = match int_arg(iter.next(), "start position")? {
+        Some(Some(s)) => s,
         Some(None) => return Ok(None),
-        _ => {
+        None => {
             return Err(RookError::Evaluation(
-                "SUBSTRING requires integer start position".to_string(),
+                "SUBSTRING requires a start position".to_string(),
             ));
         }
     };
-    let len = match iter.next() {
-        Some(Some(DataValue::Int(l))) => {
-            if l < 0 {
-                return Ok(None);
-            }
-            l as usize
-        }
-        Some(Some(DataValue::BigInt(l))) => {
-            if l < 0 {
-                return Ok(None);
-            }
-            l as usize
-        }
+    // As in PostgreSQL, the result is the characters at positions
+    // start .. start + len - 1 that exist: a start before 1 counts toward
+    // the length, so SUBSTRING('hello', 0, 2) is 'h'.
+    let end = match int_arg(iter.next(), "length")? {
+        Some(Some(l)) if l < 0 => return Ok(None),
+        Some(Some(l)) => Some(start.saturating_add(l)),
         Some(None) => return Ok(None),
-        // Default: rest of string (use string length via evaluating the value first)
-        None => match &val {
-            DataValue::Varchar(s) | DataValue::Char(s) => s.chars().count(),
-            _ => {
-                return Err(RookError::Evaluation(
-                    "SUBSTRING requires a string value".to_string(),
-                ));
-            }
-        },
-        _ => {
-            return Err(RookError::Evaluation(
-                "SUBSTRING requires integer length".to_string(),
-            ));
-        }
+        None => None,
     };
+    let from = start.max(1);
+    let len = match end {
+        Some(end) => end.saturating_sub(from).max(0) as usize,
+        None => usize::MAX,
+    };
+    let start = usize::try_from(from).unwrap_or(usize::MAX);
     crate::types::functions::substring(&val, start, len)
         .map(Some)
         .context("SUBSTRING error")

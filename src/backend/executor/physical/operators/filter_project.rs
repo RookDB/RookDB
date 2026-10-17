@@ -165,7 +165,8 @@ impl FilterOperator {
         let schema = child.schema().to_vec();
         Self {
             child,
-            predicate,
+            // Rows are always evaluated against `schema`: bind once.
+            predicate: predicate.bind(&schema),
             schema,
             child_buffer: Vec::new(),
             buffer_pos: 0,
@@ -333,6 +334,14 @@ impl ProjectionOperator {
                 _ => None,
             })
             .collect();
+        // Computed outputs read their columns by position, bound once.
+        let projections = match positions {
+            Some(_) => projections,
+            None => projections
+                .into_iter()
+                .map(|(expr, name, dt)| (expr.bind(&child_schema), name, dt))
+                .collect(),
+        };
         Self {
             child,
             projections,
@@ -515,8 +524,10 @@ impl PhysicalOperator for ProjectionOperator {
             let mut mapped_order = Vec::new();
             for (child_idx, desc) in child_order {
                 let child_col_name = self.child_schema.get(child_idx).map(|c| &c.name)?;
-                if let Some(pos) = self.projections.iter().position(|(expr, _, _)| {
-                    matches!(expr, Expr::Column { column, .. } if column == child_col_name)
+                if let Some(pos) = self.projections.iter().position(|(expr, _, _)| match expr {
+                    Expr::Column { column, .. } => column == child_col_name,
+                    Expr::Slot(i) => *i == child_idx,
+                    _ => false,
                 }) {
                     mapped_order.push((pos, desc));
                 } else {

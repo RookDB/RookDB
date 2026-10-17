@@ -5,7 +5,7 @@
 mod tests {
     use super::super::super::operators::PhysicalOperator;
     use super::super::super::tuple::{ColumnInfo, Tuple};
-    use super::super::{BooleanTest, Expr, Predicate, evaluate_predicate};
+    use super::super::{BooleanTest, ComparisonOp, Expr, Predicate, evaluate_predicate};
     use crate::backend::error::RookResult;
 
     use crate::types::datatype::DataType;
@@ -80,6 +80,48 @@ mod tests {
             data_type: DataType::Int,
             table: None,
         }]
+    }
+
+    /// `val <> 0 AND 10 / val >= 1` (or the OR form) on `val`.
+    fn guarded_division(and: bool) -> Expr {
+        let col = || {
+            Box::new(Expr::Column {
+                table: None,
+                column: "val".into(),
+            })
+        };
+        let int = |v| Box::new(Expr::Constant(DataValue::Int(v)));
+        let compare = |l: Box<Expr>, op, r: Box<Expr>| Predicate::Compare(*l, op, *r);
+        let quotient = compare(
+            Box::new(Expr::Div(int(10), col())),
+            ComparisonOp::GreaterOrEqual,
+            int(1),
+        );
+        Expr::Predicate(Box::new(if and {
+            Predicate::and(compare(col(), ComparisonOp::NotEquals, int(0)), quotient)
+        } else {
+            Predicate::or(compare(col(), ComparisonOp::Equals, int(0)), quotient)
+        }))
+    }
+
+    #[test]
+    fn test_and_or_short_circuit_in_expressions() {
+        let schema = int_schema();
+        let zero = Tuple::new(vec![Some(DataValue::Int(0))]);
+        assert_eq!(
+            guarded_division(true).evaluate(&zero, &schema).unwrap(),
+            Some(DataValue::Bool(false))
+        );
+        assert_eq!(
+            guarded_division(false).evaluate(&zero, &schema).unwrap(),
+            Some(DataValue::Bool(true))
+        );
+        // The right side still runs when the left does not decide.
+        let five = Tuple::new(vec![Some(DataValue::Int(5))]);
+        assert_eq!(
+            guarded_division(true).evaluate(&five, &schema).unwrap(),
+            Some(DataValue::Bool(true))
+        );
     }
 
     #[test]

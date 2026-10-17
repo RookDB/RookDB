@@ -455,6 +455,20 @@ impl AggregateOperator {
             });
         }
 
+        // Keys and arguments are evaluated against the child's rows: bind
+        // their columns once. HAVING reads the output rows.
+        let group_by_exprs = group_by_exprs
+            .iter()
+            .map(|e| e.bind(child_schema))
+            .collect();
+        let aggregates = aggregates
+            .into_iter()
+            .map(|agg| AggregateInfo {
+                input: agg.input.map(|e| e.bind(child_schema)),
+                ..agg
+            })
+            .collect();
+        let having = having.map(|h| h.bind(&output_schema));
         Self {
             child,
             group_by_exprs,

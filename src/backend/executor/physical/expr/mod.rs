@@ -27,7 +27,7 @@ use super::tuple::{ColumnInfo, Tuple};
 // ── Expressions ───────────────────────────────────────────────────────────────
 
 /// An expression that can be evaluated against a deserialised tuple.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Expr {
     /// A reference to a column by name, with optional table qualifier.
     ///
@@ -38,6 +38,9 @@ pub enum Expr {
         table: Option<String>,
         column: String,
     },
+    /// A column bound to its position in the rows the expression is
+    /// evaluated against, by [`Expr::bind`]: read without a name lookup.
+    Slot(usize),
     Constant(DataValue),
     Null,
     Add(Box<Expr>, Box<Expr>),
@@ -71,79 +74,81 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
-    Eq(Box<Expr>, Box<Expr>),
-    Ne(Box<Expr>, Box<Expr>),
-    Lt(Box<Expr>, Box<Expr>),
-    Le(Box<Expr>, Box<Expr>),
-    Gt(Box<Expr>, Box<Expr>),
-    Ge(Box<Expr>, Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
-    Or(Box<Expr>, Box<Expr>),
-    Not(Box<Expr>),
-    IsNull(Box<Expr>),
-    IsNotNull(Box<Expr>),
-}
-
-impl std::fmt::Debug for Expr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Expr::Column { table, column } => f
-                .debug_struct("Column")
-                .field("table", table)
-                .field("column", column)
-                .finish(),
-            Expr::Constant(dv) => f.debug_tuple("Constant").field(dv).finish(),
-            Expr::Null => write!(f, "Null"),
-            Expr::Add(l, r) => f.debug_tuple("Add").field(l).field(r).finish(),
-            Expr::Sub(l, r) => f.debug_tuple("Sub").field(l).field(r).finish(),
-            Expr::Mul(l, r) => f.debug_tuple("Mul").field(l).field(r).finish(),
-            Expr::Div(l, r) => f.debug_tuple("Div").field(l).field(r).finish(),
-            Expr::Cast(e, dt) => f.debug_tuple("Cast").field(e).field(dt).finish(),
-            Expr::CorrelatedParam(p) => f.debug_tuple("CorrelatedParam").field(p).finish(),
-            Expr::SubqueryScalar(sub) => f.debug_tuple("SubqueryScalar").field(sub).finish(),
-            Expr::CorrelatedScalarSubquery {
-                inner_plan: _,
-                params,
-                outer_col_indices,
-            } => f
-                .debug_struct("CorrelatedScalarSubquery")
-                .field("inner_plan", &"<op>")
-                .field("param_count", &params.len())
-                .field("outer_col_indices", outer_col_indices)
-                .finish(),
-            Expr::Case {
-                when_then_pairs,
-                else_result,
-            } => f
-                .debug_struct("Case")
-                .field("when_then_pairs", when_then_pairs)
-                .field("else_result", else_result)
-                .finish(),
-            Expr::Function { name, args } => f
-                .debug_struct("Function")
-                .field("name", name)
-                .field("args", args)
-                .finish(),
-            Expr::Eq(l, r) => f.debug_tuple("Eq").field(l).field(r).finish(),
-            Expr::Ne(l, r) => f.debug_tuple("Ne").field(l).field(r).finish(),
-            Expr::Lt(l, r) => f.debug_tuple("Lt").field(l).field(r).finish(),
-            Expr::Le(l, r) => f.debug_tuple("Le").field(l).field(r).finish(),
-            Expr::Gt(l, r) => f.debug_tuple("Gt").field(l).field(r).finish(),
-            Expr::Ge(l, r) => f.debug_tuple("Ge").field(l).field(r).finish(),
-            Expr::And(l, r) => f.debug_tuple("And").field(l).field(r).finish(),
-            Expr::Or(l, r) => f.debug_tuple("Or").field(l).field(r).finish(),
-            Expr::Not(e) => f.debug_tuple("Not").field(e).finish(),
-            Expr::IsNull(e) => f.debug_tuple("IsNull").field(e).finish(),
-            Expr::IsNotNull(e) => f.debug_tuple("IsNotNull").field(e).finish(),
-        }
-    }
+    /// A comparison, AND / OR / NOT or IS [NOT] NULL used as a value
+    /// (`SELECT x > 1`): evaluated by [`evaluate_predicate`], the one
+    /// implementation of SQL's three-valued logic, as TRUE, FALSE or NULL.
+    Predicate(Box<Predicate>),
 }
 
 impl Expr {
+    /// This expression with every column it names bound to its position in
+    /// `schema`, so evaluating it against rows of `schema` skips the
+    /// per-row name lookup. Names `schema` lacks are left for
+    /// [`Expr::evaluate`] to report; subqueries bind their own columns.
+    pub fn bind(&self, schema: &[ColumnInfo]) -> Expr {
+        let b = |e: &Expr| Box::new(e.bind(schema));
+        match self {
+            Expr::Column { table, column } => {
+                match column_position(schema, table.as_deref(), column) {
+                    Some(i) => Expr::Slot(i),
+                    None => self.clone(),
+                }
+            }
+            Expr::Slot(_)
+            | Expr::Constant(_)
+            | Expr::Null
+            | Expr::CorrelatedParam(_)
+            | Expr::CorrelatedScalarSubquery { .. }
+            | Expr::SubqueryScalar(_) => self.clone(),
+            Expr::Add(l, r) => Expr::Add(b(l), b(r)),
+            Expr::Sub(l, r) => Expr::Sub(b(l), b(r)),
+            Expr::Mul(l, r) => Expr::Mul(b(l), b(r)),
+            Expr::Div(l, r) => Expr::Div(b(l), b(r)),
+            Expr::Predicate(p) => Expr::Predicate(Box::new(p.bind(schema))),
+            Expr::Cast(e, ty) => Expr::Cast(b(e), ty.clone()),
+            Expr::Case {
+                when_then_pairs,
+                else_result,
+            } => Expr::Case {
+                when_then_pairs: when_then_pairs
+                    .iter()
+                    .map(|(w, t)| (w.bind(schema), t.bind(schema)))
+                    .collect(),
+                else_result: else_result.as_deref().map(b),
+            },
+            Expr::Function { name, args } => Expr::Function {
+                name: name.clone(),
+                args: args.iter().map(|a| a.bind(schema)).collect(),
+            },
+        }
+    }
+
+    /// [`Expr::evaluate`], borrowing the value from the row or the
+    /// expression when it is a column or a constant instead of copying it:
+    /// comparing a text column allocates nothing.
+    pub fn evaluate_ref<'a>(
+        &'a self,
+        tuple: &'a Tuple,
+        schema: &[ColumnInfo],
+    ) -> RookResult<Option<std::borrow::Cow<'a, DataValue>>> {
+        use std::borrow::Cow;
+        Ok(match self {
+            Expr::Slot(i) => slot_value(tuple, *i)?.map(Cow::Borrowed),
+            Expr::Constant(dv) => Some(Cow::Borrowed(dv)),
+            Expr::Null => None,
+            Expr::Column { table, column } => {
+                match column_position(schema, table.as_deref(), column) {
+                    Some(i) => slot_value(tuple, i)?.map(Cow::Borrowed),
+                    None => evaluate_column(table, column, tuple, schema)?.map(Cow::Owned),
+                }
+            }
+            other => other.evaluate(tuple, schema)?.map(Cow::Owned),
+        })
+    }
+
     /// Evaluate this expression against a tuple and schema, returning the resulting value
     /// (or `None` for NULL).
     pub fn evaluate(&self, tuple: &Tuple, schema: &[ColumnInfo]) -> RookResult<Option<DataValue>> {
-        use std::cmp::Ordering;
         match self {
             Expr::CorrelatedScalarSubquery {
                 inner_plan,
@@ -152,6 +157,7 @@ impl Expr {
             } => evaluate_correlated_scalar_subquery(inner_plan, params, outer_col_indices, tuple),
             Expr::SubqueryScalar(sub) => evaluate_subquery_scalar(sub, tuple),
             Expr::Column { table, column } => evaluate_column(table, column, tuple, schema),
+            Expr::Slot(i) => Ok(slot_value(tuple, *i)?.cloned()),
             Expr::Constant(dv) => Ok(Some(dv.clone())),
             Expr::Null => Ok(None),
             Expr::Add(l, r) => add_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
@@ -167,29 +173,7 @@ impl Expr {
                 else_result,
             } => evaluate_case(when_then_pairs, else_result, tuple, schema),
             Expr::Function { name, args } => evaluate_scalar_function(name, args, tuple, schema),
-            Expr::Eq(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o == Ordering::Equal),
-            Expr::Ne(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o != Ordering::Equal),
-            Expr::Lt(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o == Ordering::Less),
-            Expr::Le(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o != Ordering::Greater),
-            Expr::Gt(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o == Ordering::Greater),
-            Expr::Ge(l, r) => evaluate_comparison(l, r, tuple, schema, |o| o != Ordering::Less),
-            Expr::And(l, r) => and_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
-            Expr::Or(l, r) => or_values(l.evaluate(tuple, schema)?, r.evaluate(tuple, schema)?),
-            Expr::Not(inner) => {
-                let v = inner.evaluate(tuple, schema)?;
-                match v {
-                    Some(DataValue::Bool(b)) => Ok(Some(DataValue::Bool(!b))),
-                    _ => Ok(None),
-                }
-            }
-            Expr::IsNull(inner) => {
-                let v = inner.evaluate(tuple, schema)?;
-                Ok(Some(DataValue::Bool(v.is_none())))
-            }
-            Expr::IsNotNull(inner) => {
-                let v = inner.evaluate(tuple, schema)?;
-                Ok(Some(DataValue::Bool(v.is_some())))
-            }
+            Expr::Predicate(p) => Ok(evaluate_predicate(p, tuple, schema)?.map(DataValue::Bool)),
         }
     }
 }
@@ -246,6 +230,17 @@ fn evaluate_subquery_scalar(
     }
 }
 
+/// The value at position `i` of `tuple`, for a bound column.
+fn slot_value(tuple: &Tuple, i: usize) -> RookResult<Option<&DataValue>> {
+    tuple.values.get(i).map(Option::as_ref).ok_or_else(|| {
+        RookError::Internal(format!(
+            "Column position {} out of bounds (arity {})",
+            i,
+            tuple.arity()
+        ))
+    })
+}
+
 /// Look up a column value in the tuple by name (and optional table qualifier).
 fn evaluate_column(
     table: &Option<String>,
@@ -300,6 +295,14 @@ fn evaluate_column(
 
 /// SQL addition of two nullable values, promoting across numeric types.
 fn add_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
+    match (&lv, &rv) {
+        (Some(DataValue::Date(d)), Some(n)) | (Some(n), Some(DataValue::Date(d))) => {
+            if let Some(days) = integer_days(n) {
+                return shift_date(*d, days);
+            }
+        }
+        _ => {}
+    }
     arithmetic_op(
         lv,
         rv,
@@ -321,8 +324,35 @@ fn add_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option
     )
 }
 
+/// An integer value as a count of days, for `date ± n`.
+fn integer_days(v: &DataValue) -> Option<i64> {
+    match v {
+        DataValue::SmallInt(n) => Some(*n as i64),
+        DataValue::Int(n) => Some(*n as i64),
+        DataValue::BigInt(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// `date + days`, as in PostgreSQL: a DATE plus an integer is a DATE.
+fn shift_date(date: chrono::NaiveDate, days: i64) -> RookResult<Option<DataValue>> {
+    let n = chrono::Days::new(days.unsigned_abs());
+    if days < 0 {
+        date.checked_sub_days(n)
+    } else {
+        date.checked_add_days(n)
+    }
+    .map(|d| Some(DataValue::Date(d)))
+    .ok_or_else(|| RookError::Evaluation("date out of range".to_string()))
+}
+
 /// SQL subtraction of two nullable values, promoting across numeric types.
 fn sub_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
+    if let (Some(DataValue::Date(d)), Some(n)) = (&lv, &rv)
+        && let Some(days) = integer_days(n)
+    {
+        return shift_date(*d, days.checked_neg().unwrap_or(i64::MAX));
+    }
     arithmetic_op(
         lv,
         rv,
@@ -447,52 +477,6 @@ fn evaluate_case(
     match else_result {
         Some(else_expr) => else_expr.evaluate(tuple, schema),
         None => Ok(None),
-    }
-}
-
-/// Evaluate both operands and compare them; NULL if either is NULL, otherwise
-/// `test` maps the ordering to the boolean result.
-fn evaluate_comparison(
-    l: &Expr,
-    r: &Expr,
-    tuple: &Tuple,
-    schema: &[ColumnInfo],
-    test: impl FnOnce(std::cmp::Ordering) -> bool,
-) -> RookResult<Option<DataValue>> {
-    let lv = l.evaluate(tuple, schema)?;
-    let rv = r.evaluate(tuple, schema)?;
-    match (lv, rv) {
-        (Some(l), Some(r)) => {
-            let ord = crate::types::Comparable::compare(&l, &r).context("Comparison error")?;
-            Ok(Some(DataValue::Bool(test(ord))))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// SQL three-valued AND of two evaluated operands.
-fn and_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
-    match (lv, rv) {
-        (Some(DataValue::Bool(false)), _) | (_, Some(DataValue::Bool(false))) => {
-            Ok(Some(DataValue::Bool(false)))
-        }
-        (Some(DataValue::Bool(true)), Some(DataValue::Bool(true))) => {
-            Ok(Some(DataValue::Bool(true)))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// SQL three-valued OR of two evaluated operands.
-fn or_values(lv: Option<DataValue>, rv: Option<DataValue>) -> RookResult<Option<DataValue>> {
-    match (lv, rv) {
-        (Some(DataValue::Bool(true)), _) | (_, Some(DataValue::Bool(true))) => {
-            Ok(Some(DataValue::Bool(true)))
-        }
-        (Some(DataValue::Bool(false)), Some(DataValue::Bool(false))) => {
-            Ok(Some(DataValue::Bool(false)))
-        }
-        _ => Ok(None),
     }
 }
 

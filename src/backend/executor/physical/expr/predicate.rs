@@ -51,10 +51,7 @@ pub enum SubqueryKind {
 }
 
 /// A predicate that can be evaluated against a deserialised tuple.
-///
-/// Manual `Debug` impl because `CorrelatedExists`/`CorrelatedInSubquery` contain
-/// `Box<dyn PhysicalOperator>` which does not implement `Debug`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Predicate {
     Compare(Expr, ComparisonOp, Expr),
     And(Box<Predicate>, Box<Predicate>),
@@ -118,81 +115,45 @@ pub enum Predicate {
     },
 }
 
-impl std::fmt::Debug for Predicate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Predicate {
+    /// This predicate with its expressions bound to positions in `schema`;
+    /// see [`Expr::bind`].
+    pub fn bind(&self, schema: &[ColumnInfo]) -> Predicate {
+        let b = |p: &Predicate| Box::new(p.bind(schema));
         match self {
-            Predicate::Compare(l, op, r) => f
-                .debug_tuple("Compare")
-                .field(l)
-                .field(op)
-                .field(r)
-                .finish(),
-            Predicate::And(l, r) => f.debug_tuple("And").field(l).field(r).finish(),
-            Predicate::Or(l, r) => f.debug_tuple("Or").field(l).field(r).finish(),
-            Predicate::Not(inner) => f.debug_tuple("Not").field(inner).finish(),
-            Predicate::IsNull(e) => f.debug_tuple("IsNull").field(e).finish(),
-            Predicate::IsNotNull(e) => f.debug_tuple("IsNotNull").field(e).finish(),
-            Predicate::Like(e, pat, esc) => f
-                .debug_tuple("Like")
-                .field(e)
-                .field(pat)
-                .field(esc)
-                .finish(),
-            Predicate::AlwaysTrue => f.write_str("AlwaysTrue"),
-            Predicate::ExistsResult(v) => f.debug_tuple("ExistsResult").field(v).finish(),
-            Predicate::InSubqueryResult(e, vals, neg) => f
-                .debug_tuple("InSubqueryResult")
-                .field(e)
-                .field(&format!("{} values", vals.len()))
-                .field(neg)
-                .finish(),
-            Predicate::CorrelatedExists {
-                inner_plan: _,
-                params,
-                outer_col_indices,
-            } => f
-                .debug_struct("CorrelatedExists")
-                .field("inner_plan", &"<op>")
-                .field("param_count", &params.len())
-                .field("outer_col_indices", outer_col_indices)
-                .finish(),
-            Predicate::CorrelatedInSubquery {
-                inner_plan: _,
-                params,
-                outer_col_indices,
-                lhs_expr,
-                negated,
-            } => f
-                .debug_struct("CorrelatedInSubquery")
-                .field("inner_plan", &"<op>")
-                .field("param_count", &params.len())
-                .field("outer_col_indices", outer_col_indices)
-                .field("lhs_expr", lhs_expr)
-                .field("negated", negated)
-                .finish(),
-            Predicate::CorrelatedSubquery { sub, kind } => f
-                .debug_struct("CorrelatedSubquery")
-                .field("sub", sub)
-                .field("kind", kind)
-                .finish(),
+            Predicate::Compare(l, op, r) => Predicate::Compare(l.bind(schema), *op, r.bind(schema)),
+            Predicate::And(l, r) => Predicate::And(b(l), b(r)),
+            Predicate::Or(l, r) => Predicate::Or(b(l), b(r)),
+            Predicate::Not(p) => Predicate::Not(b(p)),
+            Predicate::IsNull(e) => Predicate::IsNull(e.bind(schema)),
+            Predicate::IsNotNull(e) => Predicate::IsNotNull(e.bind(schema)),
+            Predicate::Like(e, pattern, escape) => {
+                Predicate::Like(e.bind(schema), pattern.clone(), *escape)
+            }
+            Predicate::InSubqueryResult(e, values, negated) => {
+                Predicate::InSubqueryResult(e.bind(schema), values.clone(), *negated)
+            }
             Predicate::IsDistinctFrom(l, r) => {
-                f.debug_tuple("IsDistinctFrom").field(l).field(r).finish()
+                Predicate::IsDistinctFrom(l.bind(schema), r.bind(schema))
             }
             Predicate::IsBoolean {
                 expr,
                 test,
                 negated,
-            } => f
-                .debug_struct("IsBoolean")
-                .field("expr", expr)
-                .field("test", test)
-                .field("negated", negated)
-                .finish(),
+            } => Predicate::IsBoolean {
+                expr: expr.bind(schema),
+                test: *test,
+                negated: *negated,
+            },
+            // Subqueries read the outer row by their own indices.
+            Predicate::AlwaysTrue
+            | Predicate::ExistsResult(_)
+            | Predicate::CorrelatedExists { .. }
+            | Predicate::CorrelatedInSubquery { .. }
+            | Predicate::CorrelatedSubquery { .. } => self.clone(),
         }
     }
-}
 
-impl Predicate {
     pub fn and(left: Predicate, right: Predicate) -> Self {
         Predicate::And(Box::new(left), Box::new(right))
     }
@@ -229,13 +190,13 @@ pub fn evaluate_predicate(
         Predicate::AlwaysTrue => Ok(Some(true)),
 
         Predicate::Compare(left, op, right) => {
-            let lv = left.evaluate(tuple, schema)?;
-            let rv = right.evaluate(tuple, schema)?;
+            let lv = left.evaluate_ref(tuple, schema)?;
+            let rv = right.evaluate_ref(tuple, schema)?;
 
             match (lv, rv) {
                 (None, _) | (_, None) => Ok(None), // NULL → UNKNOWN
                 (Some(a), Some(b)) => {
-                    let ordering = compare_nullable(Some(&a), Some(&b))?.unwrap(); // Safe: both non-NULL
+                    let ordering = compare_nullable(Some(a.as_ref()), Some(b.as_ref()))?.unwrap(); // Safe: both non-NULL
                     let result = match op {
                         ComparisonOp::Equals => ordering == Ordering::Equal,
                         ComparisonOp::NotEquals => ordering != Ordering::Equal,
@@ -284,21 +245,15 @@ pub fn evaluate_predicate(
             Ok(iv.map(|b| !b))
         }
 
-        Predicate::IsNull(expr) => {
-            let val = expr.evaluate(tuple, schema)?;
-            Ok(Some(val.is_none()))
-        }
+        Predicate::IsNull(expr) => Ok(Some(expr.evaluate_ref(tuple, schema)?.is_none())),
 
-        Predicate::IsNotNull(expr) => {
-            let val = expr.evaluate(tuple, schema)?;
-            Ok(Some(val.is_some()))
-        }
+        Predicate::IsNotNull(expr) => Ok(Some(expr.evaluate_ref(tuple, schema)?.is_some())),
 
         Predicate::Like(expr, pattern, escape_char) => {
-            let val = expr.evaluate(tuple, schema)?;
-            match val {
+            let val = expr.evaluate_ref(tuple, schema)?;
+            match val.as_deref() {
                 None => Ok(None), // NULL LIKE anything → UNKNOWN
-                Some(DataValue::Varchar(s)) => Ok(Some(like_match(&s, pattern, *escape_char))),
+                Some(DataValue::Varchar(s)) => Ok(Some(like_match(s, pattern, *escape_char))),
                 Some(DataValue::Char(s)) => {
                     Ok(Some(like_match(s.trim_end(), pattern, *escape_char)))
                 }
@@ -309,9 +264,9 @@ pub fn evaluate_predicate(
         Predicate::ExistsResult(exists) => Ok(Some(*exists)),
 
         Predicate::InSubqueryResult(expr, values, negated) => {
-            let val = expr.evaluate(tuple, schema)?;
+            let val = expr.evaluate_ref(tuple, schema)?;
             in_result(
-                val.as_ref(),
+                val.as_deref(),
                 values.iter().map(|v| Ok(v.as_ref())),
                 *negated,
             )
@@ -380,8 +335,8 @@ pub fn evaluate_predicate(
         },
 
         Predicate::IsDistinctFrom(left, right) => {
-            let lv = left.evaluate(tuple, schema)?;
-            let rv = right.evaluate(tuple, schema)?;
+            let lv = left.evaluate_ref(tuple, schema)?;
+            let rv = right.evaluate_ref(tuple, schema)?;
 
             // IS DISTINCT FROM: true if values differ OR one is NULL
             // (NULL IS DISTINCT FROM NULL → false; NULL IS DISTINCT FROM 5 → true)
@@ -389,7 +344,7 @@ pub fn evaluate_predicate(
                 (None, None) => Ok(Some(false)), // both NULL → not distinct
                 (None, Some(_)) | (Some(_), None) => Ok(Some(true)), // one NULL → distinct
                 (Some(a), Some(b)) => {
-                    let ordering = compare_nullable(Some(&a), Some(&b))?.unwrap(); // Safe: both non-NULL
+                    let ordering = compare_nullable(Some(a.as_ref()), Some(b.as_ref()))?.unwrap(); // Safe: both non-NULL
                     Ok(Some(ordering != Ordering::Equal))
                 }
             }
@@ -430,41 +385,47 @@ pub fn evaluate_predicate(
 }
 
 /// SQL LIKE pattern matching with optional escape character.
+///
+/// `%` matches any run of characters, `_` any one, and the escape character
+/// makes the character after it literal. A greedy scan that, on a mismatch,
+/// lets the last `%` absorb one more character: linear for typical
+/// patterns, and it allocates nothing.
 fn like_match(text: &str, pattern: &str, escape_char: Option<char>) -> bool {
-    let t: Vec<char> = text.chars().collect();
-    let p: Vec<char> = pattern.chars().collect();
-    like_match_inner(&t, &p, escape_char)
-}
-
-fn like_match_inner(t: &[char], p: &[char], escape_char: Option<char>) -> bool {
-    match (t, p) {
-        (_, []) => t.is_empty(),
-        // % matches any sequence (including empty)
-        (_, ['%', rest @ ..]) => {
-            for i in 0..=t.len() {
-                if like_match_inner(&t[i..], rest, escape_char) {
-                    return true;
+    let char_at = |s: &str, i: usize| s[i..].chars().next();
+    let (mut ti, mut pi) = (0usize, 0usize);
+    // Pattern position after the last `%`, and the text position it resumes at.
+    let mut star: Option<(usize, usize)> = None;
+    loop {
+        if let Some(pc) = char_at(pattern, pi) {
+            let after_pc = pi + pc.len_utf8();
+            if pc == '%' {
+                star = Some((after_pc, ti));
+                pi = after_pc;
+                continue;
+            }
+            if let Some(tc) = char_at(text, ti) {
+                let (matched, next_pi) = match char_at(pattern, after_pc) {
+                    Some(lit) if Some(pc) == escape_char => (tc == lit, after_pc + lit.len_utf8()),
+                    _ => (pc == '_' || tc == pc, after_pc),
+                };
+                if matched {
+                    ti += tc.len_utf8();
+                    pi = next_pi;
+                    continue;
                 }
             }
-            false
+        } else if ti == text.len() {
+            return true;
         }
-        ([], _) => false,
-        // Escape character: skip it and treat the next char as literal
-        // ec is a &char from pattern slice; compare against escape_char
-        ([_tc, tr @ ..], [ec, pr @ ..]) if Some(*ec) == escape_char && !pr.is_empty() => {
-            // Next pattern char is literal (not a wildcard)
-            let next_pc = pr[0];
-            let rest_p = &pr[1..];
-            if t[0] == next_pc {
-                like_match_inner(&t[1..], rest_p, escape_char)
-            } else {
-                false
+        match star {
+            Some((star_pi, star_ti)) if star_ti < text.len() => {
+                let resume = star_ti + char_at(text, star_ti).map_or(1, char::len_utf8);
+                star = Some((star_pi, resume));
+                pi = star_pi;
+                ti = resume;
             }
+            _ => return false,
         }
-        // _ matches any single character
-        ([_tc, tr @ ..], ['_', pr @ ..]) => like_match_inner(tr, pr, escape_char),
-        // Regular character comparison
-        ([tc, tr @ ..], [pc, pr @ ..]) => tc == pc && like_match_inner(tr, pr, escape_char),
     }
 }
 
@@ -499,5 +460,53 @@ fn in_result<T: std::borrow::Borrow<DataValue>>(
         Ok(None)
     } else {
         Ok(Some(negated))
+    }
+}
+
+#[cfg(test)]
+mod like_tests {
+    use super::like_match;
+
+    /// The recursive definition of LIKE, as the oracle.
+    fn reference(t: &[char], p: &[char], esc: Option<char>) -> bool {
+        match (t, p) {
+            (_, []) => t.is_empty(),
+            (_, ['%', rest @ ..]) => (0..=t.len()).any(|i| reference(&t[i..], rest, esc)),
+            ([], _) => false,
+            ([tc, tr @ ..], [ec, lit, pr @ ..]) if Some(*ec) == esc => {
+                tc == lit && reference(tr, pr, esc)
+            }
+            ([_, tr @ ..], ['_', pr @ ..]) => reference(tr, pr, esc),
+            ([tc, tr @ ..], [pc, pr @ ..]) => tc == pc && reference(tr, pr, esc),
+        }
+    }
+
+    #[test]
+    fn matches_the_recursive_definition() {
+        let alphabet = ['a', 'b', 'é', '%', '_', '!'];
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut pick = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let text: String = (0..pick(7)).map(|_| alphabet[pick(3)]).collect();
+            let pattern: String = (0..pick(6))
+                .map(|_| alphabet[pick(alphabet.len())])
+                .collect();
+            let esc = [None, Some('!')][pick(2)];
+            let t: Vec<char> = text.chars().collect();
+            let p: Vec<char> = pattern.chars().collect();
+            assert_eq!(
+                like_match(&text, &pattern, esc),
+                reference(&t, &p, esc),
+                "{:?} LIKE {:?} ESCAPE {:?}",
+                text,
+                pattern,
+                esc
+            );
+        }
     }
 }

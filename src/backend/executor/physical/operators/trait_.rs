@@ -5,6 +5,14 @@ use crate::backend::error::{RookError, RookResult};
 /// Default batch size for vectorized execution.
 pub const DEFAULT_BATCH_SIZE: usize = 1024;
 
+/// An operator prints as its name, so expressions and predicates that hold
+/// a subquery's plan can derive `Debug`.
+impl std::fmt::Debug for dyn PhysicalOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{}>", self.name())
+    }
+}
+
 /// A Volcano-style physical operator that produces tuples lazily.
 ///
 /// Call `next()` repeatedly to get the result stream. Returns `Ok(None)` when
