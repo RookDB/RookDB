@@ -49,12 +49,29 @@ pub(super) fn show_tables(catalog: &Catalog, db: &str) -> StatementResult {
 pub(super) fn create_database(
     catalog: &mut Catalog,
     params: &CreateDatabasePlan,
-) -> StatementResult {
-    crate::catalog::create_database(catalog, &params.database);
-    StatementResult::message(format!(
+) -> RookResult<StatementResult> {
+    if catalog.databases.contains_key(&params.database) {
+        if params.if_not_exists {
+            return Ok(StatementResult::message(format!(
+                "Database '{}' already exists (IF NOT EXISTS specified, skipping).",
+                params.database
+            )));
+        }
+        return Err(RookError::AlreadyExists(format!(
+            "Database '{}' already exists",
+            params.database
+        )));
+    }
+    if !crate::catalog::create_database(catalog, &params.database) {
+        return Err(RookError::Internal(format!(
+            "Database '{}' was not created",
+            params.database
+        )));
+    }
+    Ok(StatementResult::message(format!(
         "Database '{}' created successfully.",
         params.database
-    ))
+    )))
 }
 
 pub(super) fn drop_database(
@@ -67,14 +84,16 @@ pub(super) fn drop_database(
 
     let catalog = std::sync::Arc::make_mut(&mut session.catalog);
     if !catalog.databases.contains_key(db_name) {
-        return Ok(StatementResult::message(if params.if_exists {
-            format!(
+        if params.if_exists {
+            return Ok(StatementResult::message(format!(
                 "Database '{}' does not exist (IF EXISTS specified, skipping).",
                 db_name
-            )
-        } else {
-            format!("Database '{}' does not exist.", db_name)
-        }));
+            )));
+        }
+        return Err(RookError::NotFound {
+            entity: "Database",
+            name: db_name.to_string(),
+        });
     }
 
     let mut lines = Vec::new();
@@ -145,8 +164,14 @@ pub(super) fn create_table(
         .get(db)
         .is_some_and(|d| d.tables.contains_key(&params.table))
     {
-        return Ok(StatementResult::message(format!(
-            "Table '{}' already exists in database '{}'.",
+        if params.if_not_exists {
+            return Ok(StatementResult::message(format!(
+                "Table '{}' already exists (IF NOT EXISTS specified, skipping).",
+                params.table
+            )));
+        }
+        return Err(RookError::AlreadyExists(format!(
+            "Table '{}' already exists in database '{}'",
             params.table, db
         )));
     }

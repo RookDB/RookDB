@@ -128,7 +128,7 @@ impl Session {
         match plan {
             QueryPlan::ShowDatabases => Ok(ddl::show_databases(&self.catalog)),
             QueryPlan::CreateDatabase(p) => {
-                Ok(ddl::create_database(Arc::make_mut(&mut self.catalog), p))
+                ddl::create_database(Arc::make_mut(&mut self.catalog), p)
             }
             QueryPlan::DropDatabase(p) => ddl::drop_database(self, p),
             QueryPlan::UseDatabase(name) => Ok(ddl::use_database(self, name)),
