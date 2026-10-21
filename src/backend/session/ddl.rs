@@ -336,6 +336,12 @@ pub(super) fn create_table(
     // references), index those referenced columns now that it does.
     ensure_fk_parent_indexes(catalog, db, &params.table);
 
+    if !params.ignored_indexes.is_empty() {
+        lines.push(format!(
+            "Warning: MySQL index definition(s) ignored: [{}]. Use CREATE INDEX to create indexes.",
+            params.ignored_indexes.join(", ")
+        ));
+    }
     Ok(StatementResult::lines(lines))
 }
 

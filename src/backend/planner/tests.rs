@@ -1182,6 +1182,7 @@ fn test_plan_query_ddl_rejected() {
             columns: vec![],
             if_not_exists: false,
             constraints: vec![],
+            ignored_indexes: vec![],
         }),
         QueryPlan::ShowTables,
         QueryPlan::UseDatabase("test_db".to_string()),
