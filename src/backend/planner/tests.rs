@@ -1221,7 +1221,7 @@ fn test_plan_query_set_operation_dispatch() {
 
     let catalog = make_test_catalog();
     let query = QueryPlan::SetOperation(SetOperationPlan {
-        left: SelectPlan {
+        left: SetOperand::Select(Box::new(SelectPlan {
             projections: vec![SelectExpr::Wildcard],
             from: vec![TableRef {
                 name: "users".to_string(),
@@ -1235,8 +1235,8 @@ fn test_plan_query_set_operation_dispatch() {
             limit: None,
             distinct: false,
             ctes: vec![],
-        },
-        right: SelectPlan {
+        })),
+        right: SetOperand::Select(Box::new(SelectPlan {
             projections: vec![SelectExpr::Wildcard],
             from: vec![TableRef {
                 name: "orders".to_string(),
@@ -1250,7 +1250,7 @@ fn test_plan_query_set_operation_dispatch() {
             limit: None,
             distinct: false,
             ctes: vec![],
-        },
+        })),
         op: "UNION".to_string(),
         all: true,
         ctes: vec![],

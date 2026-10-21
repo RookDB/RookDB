@@ -243,6 +243,28 @@ fn default_to_constant(dv: &crate::types::DataValue) -> ConstantValue {
     }
 }
 
+/// A set operation's two sides combined, without its ORDER BY / LIMIT.
+fn plan_set_operation(
+    set_op: &SetOperationPlan,
+    catalog: &Catalog,
+    db_name: &str,
+) -> RookResult<LogicalPlan> {
+    let operand = |side: &SetOperand| match side {
+        SetOperand::Select(select) => plan_select(select, catalog, db_name),
+        SetOperand::SetOperation(inner) => plan_set_operation(inner, catalog, db_name),
+    };
+    Ok(LogicalPlan::SetOp(LogicalSetOp {
+        left: Box::new(operand(&set_op.left)?),
+        right: Box::new(operand(&set_op.right)?),
+        op: match set_op.op.to_ascii_uppercase().as_str() {
+            "INTERSECT" => logical::SetOpType::Intersect,
+            "EXCEPT" => logical::SetOpType::Except,
+            _ => logical::SetOpType::Union,
+        },
+        all: set_op.all,
+    }))
+}
+
 /// Plan a `QueryPlan` into a `LogicalPlan` using the given catalog.
 pub fn plan_query(query: &QueryPlan, catalog: &Catalog, db_name: &str) -> RookResult<LogicalPlan> {
     match query {
@@ -251,18 +273,7 @@ pub fn plan_query(query: &QueryPlan, catalog: &Catalog, db_name: &str) -> RookRe
             Ok(optimizer_for(db_name, catalog, &plan).optimize(plan))
         }
         QueryPlan::SetOperation(set_op) => {
-            let left = plan_select(&set_op.left, catalog, db_name)?;
-            let right = plan_select(&set_op.right, catalog, db_name)?;
-            let mut plan = LogicalPlan::SetOp(LogicalSetOp {
-                left: Box::new(left),
-                right: Box::new(right),
-                op: match set_op.op.to_ascii_uppercase().as_str() {
-                    "INTERSECT" => logical::SetOpType::Intersect,
-                    "EXCEPT" => logical::SetOpType::Except,
-                    _ => logical::SetOpType::Union,
-                },
-                all: set_op.all,
-            });
+            let mut plan = plan_set_operation(set_op, catalog, db_name)?;
             if !set_op.order_by.is_empty() {
                 let limit_hint = set_op.limit.as_ref().map(|l| l.limit);
                 plan = LogicalPlan::Sort(LogicalSort {
