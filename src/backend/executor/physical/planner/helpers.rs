@@ -121,6 +121,35 @@ pub fn data_value_to_constant_value(dv: &DataValue) -> rook_ast::ConstantValue {
     }
 }
 
+/// The broad kind of a type. Values of one kind compare with each other;
+/// values of different kinds do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TypeKind {
+    Number,
+    Bool,
+    Text,
+    DateTime,
+    Time,
+    Bit,
+}
+
+pub(crate) fn type_kind(t: &DataType) -> TypeKind {
+    match t {
+        DataType::SmallInt
+        | DataType::Int
+        | DataType::BigInt
+        | DataType::Real
+        | DataType::DoublePrecision
+        | DataType::Numeric { .. }
+        | DataType::Decimal { .. } => TypeKind::Number,
+        DataType::Bool => TypeKind::Bool,
+        DataType::Char(_) | DataType::Character(_) | DataType::Varchar(_) => TypeKind::Text,
+        DataType::Date | DataType::Timestamp => TypeKind::DateTime,
+        DataType::Time => TypeKind::Time,
+        DataType::Bit(_) => TypeKind::Bit,
+    }
+}
+
 /// Derive a display name from an AST expression node.
 pub fn ast_expr_to_output_name(expr: &rook_ast::ExprNode) -> String {
     match expr {
@@ -194,6 +223,37 @@ fn infer_type(
         }
         Ok(None)
     };
+    // The type of COALESCE / CASE: that of the first branch whose type is
+    // known; every other branch must be of the same kind, or rows of one
+    // column would hold values that cannot be compared (`COALESCE(text, 1)`).
+    // A string literal is untyped, as in PostgreSQL, and fits any kind.
+    let branches =
+        |what: &str, exprs: &mut dyn Iterator<Item = &E>| -> RookResult<Option<DataType>> {
+            let mut result: Option<DataType> = None;
+            let mut typed: Option<DataType> = None;
+            for e in exprs {
+                let Some(t) = infer_type(e, schema, subquery_type)? else {
+                    continue;
+                };
+                if result.is_none() {
+                    result = Some(t.clone());
+                }
+                if matches!(e, E::Constant(CV::Text(_))) {
+                    continue;
+                }
+                match &typed {
+                    None => typed = Some(t),
+                    Some(first) if type_kind(first) != type_kind(&t) => {
+                        return Err(RookError::TypeMismatch(format!(
+                            "{} types {} and {} cannot be matched",
+                            what, first, t
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
+            Ok(result)
+        };
     Ok(match expr {
         E::Column(name) => column(None, name)?,
         E::Compound(parts) => {
@@ -276,7 +336,8 @@ fn infer_type(
                     Some(e) => infer_type(e, schema, subquery_type)?,
                     None => None,
                 },
-                "MOD" | "COALESCE" => first_known(&mut arg_exprs)?,
+                "MOD" => first_known(&mut arg_exprs)?,
+                "COALESCE" => branches("COALESCE", &mut arg_exprs)?,
                 _ => {
                     return Err(RookError::Evaluation(format!(
                         "Unknown scalar function: '{}'",
@@ -288,7 +349,8 @@ fn infer_type(
         E::Case {
             when_then_pairs,
             else_result,
-        } => first_known(
+        } => branches(
+            "CASE",
             &mut when_then_pairs
                 .iter()
                 .map(|(_, then)| then.as_ref())

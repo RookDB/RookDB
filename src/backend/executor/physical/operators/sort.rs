@@ -6,6 +6,7 @@ use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
 use crate::backend::error::RookResult;
 
+use crate::types::DataValue;
 use crate::types::comparison::compare_nullable;
 
 // ── Sort Operator ─────────────────────────────────────────────────────────────
@@ -194,11 +195,36 @@ impl SortOperator {
 
 /// Order two rows by `keys` (column, descending): NULLs first ascending,
 /// last descending.
+/// The kind of a value, for [`compare_rows`]: values of one kind compare.
+fn value_kind(v: &DataValue) -> u8 {
+    match v {
+        DataValue::SmallInt(_)
+        | DataValue::Int(_)
+        | DataValue::BigInt(_)
+        | DataValue::Real(_)
+        | DataValue::DoublePrecision(_)
+        | DataValue::Numeric(_) => 0,
+        DataValue::Bool(_) => 1,
+        DataValue::Char(_) | DataValue::Varchar(_) => 2,
+        DataValue::Date(_) | DataValue::Timestamp(_) => 3,
+        DataValue::Time(_) => 4,
+        DataValue::Bit(_) => 5,
+    }
+}
+
 pub(crate) fn compare_rows(keys: &[(usize, bool)], a: &Tuple, b: &Tuple) -> Ordering {
     for &(key_idx, descending) in keys {
         let av = a.values.get(key_idx).and_then(|v| v.as_ref());
         let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
         let ordering = match (av, bv) {
+            // Values of different kinds (only an untyped string literal
+            // beside a date, say, puts them in one column) are ordered by
+            // kind, so the order stays total: comparing across kinds only
+            // sometimes works ('5' with 3, not 'x'), and sort_by panics on
+            // an order that is not total.
+            (Some(a_val), Some(b_val)) if value_kind(a_val) != value_kind(b_val) => {
+                value_kind(a_val).cmp(&value_kind(b_val))
+            }
             (Some(a_val), Some(b_val)) => compare_nullable(Some(a_val), Some(b_val))
                 .unwrap_or(None)
                 .unwrap_or(Ordering::Equal),
@@ -320,5 +346,37 @@ impl PhysicalOperator for SortOperator {
 
     fn ordering(&self) -> Option<Vec<(usize, bool)>> {
         Some(self.sort_keys.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Values of different kinds in one sort column (an untyped string
+    /// literal in COALESCE beside a number, say) must still sort: an order
+    /// that is not total makes `sort_by` panic.
+    #[test]
+    fn mixed_kinds_sort_without_panicking() {
+        let mut rows: Vec<Tuple> = (0..200)
+            .map(|i| {
+                let value = match i % 4 {
+                    0 => DataValue::Int(i),
+                    1 => DataValue::Varchar(format!("{}", i / 3)),
+                    2 => DataValue::Varchar(format!("{}a", i)),
+                    _ => {
+                        DataValue::DoublePrecision(crate::types::value::OrderedF64(i as f64 / 7.0))
+                    }
+                };
+                Tuple::new(vec![Some(value)])
+            })
+            .collect();
+        rows.sort_by(|a, b| compare_rows(&[(0, false)], a, b));
+        // Numbers first, then strings, each group in order.
+        let kinds: Vec<u8> = rows
+            .iter()
+            .map(|t| value_kind(t.values[0].as_ref().unwrap()))
+            .collect();
+        assert!(kinds.windows(2).all(|w| w[0] <= w[1]));
     }
 }
