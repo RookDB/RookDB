@@ -736,79 +736,13 @@ pub(super) fn rewrite_having_aggregates(
     logical_aggs: &[rook_ast::logical::AggregateExpr],
     physical_aggs: &[AggregateInfo],
 ) -> rook_ast::PredicateNode {
-    use rook_ast::PredicateNode as P;
-
-    match node {
-        P::BinaryOp { left, op, right } => P::BinaryOp {
-            left: Box::new(rewrite_having_aggregates(left, logical_aggs, physical_aggs)),
-            op: *op,
-            right: Box::new(rewrite_having_aggregates(
-                right,
-                logical_aggs,
-                physical_aggs,
-            )),
-        },
-        P::Not(inner) => P::Not(Box::new(rewrite_having_aggregates(
-            inner,
-            logical_aggs,
-            physical_aggs,
-        ))),
-        P::Compare { left, op, right } => P::Compare {
-            left: Box::new(rewrite_having_expr(left, logical_aggs, physical_aggs)),
-            op: *op,
-            right: Box::new(rewrite_having_expr(right, logical_aggs, physical_aggs)),
-        },
-        P::IsNull(e) => P::IsNull(Box::new(rewrite_having_expr(
-            e,
-            logical_aggs,
-            physical_aggs,
-        ))),
-        P::IsNotNull(e) => P::IsNotNull(Box::new(rewrite_having_expr(
-            e,
-            logical_aggs,
-            physical_aggs,
-        ))),
-        P::Between { expr, low, high } => P::Between {
-            expr: Box::new(rewrite_having_expr(expr, logical_aggs, physical_aggs)),
-            low: Box::new(rewrite_having_expr(low, logical_aggs, physical_aggs)),
-            high: Box::new(rewrite_having_expr(high, logical_aggs, physical_aggs)),
-        },
-        P::InList { expr, list } => P::InList {
-            expr: Box::new(rewrite_having_expr(expr, logical_aggs, physical_aggs)),
-            list: list
-                .iter()
-                .map(|e| rewrite_having_expr(e, logical_aggs, physical_aggs))
-                .collect(),
-        },
-        P::Like {
-            expr,
-            pattern,
-            escape_char,
-        } => P::Like {
-            expr: Box::new(rewrite_having_expr(expr, logical_aggs, physical_aggs)),
-            pattern: pattern.clone(),
-            escape_char: *escape_char,
-        },
-        P::IsDistinctFrom { left, right } => P::IsDistinctFrom {
-            left: Box::new(rewrite_having_expr(left, logical_aggs, physical_aggs)),
-            right: Box::new(rewrite_having_expr(right, logical_aggs, physical_aggs)),
-        },
-        P::IsBoolean {
-            expr,
-            test,
-            negated,
-        } => P::IsBoolean {
-            expr: Box::new(rewrite_having_expr(expr, logical_aggs, physical_aggs)),
-            test: *test,
-            negated: *negated,
-        },
-        // Subquery predicates are materialised elsewhere; leave them untouched.
-        other => other.clone(),
-    }
+    node.map_exprs(&mut |e| rewrite_having_expr(e, logical_aggs, physical_aggs))
 }
 
-/// Rewrite one HAVING expression, replacing aggregate function calls with
-/// column references to their computed output columns.
+/// Rewrite one HAVING expression, replacing aggregate function calls at any
+/// depth (`MIN(x) + 1 > 2`) with column references to their computed output
+/// columns. A call matches the computed aggregate with the same function,
+/// DISTINCT and argument expressions.
 fn rewrite_having_expr(
     expr: &rook_ast::ExprNode,
     logical_aggs: &[rook_ast::logical::AggregateExpr],
@@ -816,28 +750,32 @@ fn rewrite_having_expr(
 ) -> rook_ast::ExprNode {
     use rook_ast::ExprNode as E;
 
-    match expr {
-        E::Function {
-            name,
-            args,
-            distinct,
-        } if is_aggregate_name(name) => {
-            let wanted_args = render_function_args(args);
-            for (i, agg) in logical_aggs.iter().enumerate() {
-                if aggregate_function_name(agg.function) == name.to_ascii_uppercase()
-                    && agg.distinct == *distinct
-                    && render_agg_args(agg) == wanted_args
-                {
-                    // Found the matching computed aggregate — reference it.
-                    return E::Column(physical_aggs[i].output_name.clone());
-                }
+    if let E::Function {
+        name,
+        args,
+        distinct,
+    } = expr
+        && is_aggregate_name(name)
+    {
+        // `COUNT(*)` carries no arguments once extracted.
+        let wanted = args.iter().filter_map(|a| match a {
+            rook_ast::FunctionArg::Expr(e) => Some(e.as_ref()),
+            rook_ast::FunctionArg::Star => None,
+        });
+        let upper = name.to_ascii_uppercase();
+        for (i, agg) in logical_aggs.iter().enumerate() {
+            if aggregate_function_name(agg.function) == upper
+                && agg.distinct == *distinct
+                && agg.args.iter().eq(wanted.clone())
+            {
+                return E::Column(physical_aggs[i].output_name.clone());
             }
-            // No matching computed aggregate — keep the call; evaluation will
-            // report a clear error instead of silently passing.
-            expr.clone()
         }
-        _ => expr.clone(),
+        // No matching computed aggregate — keep the call; evaluation will
+        // report a clear error instead of silently passing.
+        return expr.clone();
     }
+    expr.map_children(&mut |e| rewrite_having_expr(e, logical_aggs, physical_aggs))
 }
 
 fn is_aggregate_name(name: &str) -> bool {
@@ -856,32 +794,6 @@ fn aggregate_function_name(f: rook_ast::logical::AggregateFunction) -> String {
         F::Avg => "AVG".to_string(),
         F::Min => "MIN".to_string(),
         F::Max => "MAX".to_string(),
-    }
-}
-
-/// Render the argument list of a HAVING function call for comparison:
-/// `*` for the star argument, output names otherwise.
-fn render_function_args(args: &[rook_ast::FunctionArg]) -> String {
-    args.iter()
-        .map(|a| match a {
-            rook_ast::FunctionArg::Star => "*".to_string(),
-            rook_ast::FunctionArg::Expr(e) => super::helpers::ast_expr_to_output_name(e),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Render a logical aggregate's arguments the same way. `COUNT(*)` carries no
-/// AST arguments (the star is stripped during extraction), so it renders as "*".
-fn render_agg_args(agg: &rook_ast::logical::AggregateExpr) -> String {
-    if agg.args.is_empty() {
-        "*".to_string()
-    } else {
-        agg.args
-            .iter()
-            .map(super::helpers::ast_expr_to_output_name)
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 }
 
