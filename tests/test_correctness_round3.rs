@@ -104,7 +104,8 @@ fn fullscan_index_drops_null_key_rows() {
             col("id", DataType::Int, false),
             col("v", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -155,7 +156,8 @@ fn seqscan_no_index_returns_all_rows() {
             col("id", DataType::Int, false),
             col("v", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -183,7 +185,8 @@ fn position_returns_char_offset_for_multibyte() {
             col("id", DataType::Int, false),
             col("s", DataType::Varchar(40), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -225,7 +228,8 @@ fn select_star_join_duplicate_column_names() {
             col("id", DataType::Int, false),
             col("aval", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     create_table(
         &mut catalog,
         "testdb",
@@ -234,7 +238,8 @@ fn select_star_join_duplicate_column_names() {
             col("id", DataType::Int, false),
             col("bval", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -287,7 +292,8 @@ fn insert_select_roundtrip_quoted_string() {
             col("id", DataType::Int, false),
             col("name", DataType::Varchar(30), true),
         ],
-    );
+    )
+    .unwrap();
     create_table(
         &mut catalog,
         "testdb",
@@ -296,7 +302,8 @@ fn insert_select_roundtrip_quoted_string() {
             col("id", DataType::Int, false),
             col("name", DataType::Varchar(30), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();

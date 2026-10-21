@@ -120,7 +120,8 @@ fn a_fk_restrict_blocks_delete_of_bigint_parent_key() {
         "db9",
         "parent",
         vec![col("id", DataType::BigInt, false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -128,7 +129,8 @@ fn a_fk_restrict_blocks_delete_of_bigint_parent_key() {
         "db9",
         "child",
         vec![col("pid", DataType::BigInt, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
@@ -194,7 +196,8 @@ fn a_fk_restrict_blocks_delete_of_numeric_parent_key() {
             },
             false,
         )],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -209,7 +212,8 @@ fn a_fk_restrict_blocks_delete_of_numeric_parent_key() {
             },
             true,
         )],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
@@ -261,7 +265,8 @@ fn control_a_fk_restrict_still_blocks_int_parent_key() {
         "db9",
         "parent",
         vec![col("id", DataType::Int, false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -269,7 +274,8 @@ fn control_a_fk_restrict_still_blocks_int_parent_key() {
         "db9",
         "child",
         vec![col("pid", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
@@ -320,7 +326,8 @@ fn a_update_restrict_blocks_bigint_parent_key_change() {
         "db9",
         "parent",
         vec![col("id", DataType::BigInt, false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -328,7 +335,8 @@ fn a_update_restrict_blocks_bigint_parent_key_change() {
         "db9",
         "child",
         vec![col("pid", DataType::BigInt, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
@@ -489,7 +497,8 @@ fn c_numeric_index_point_lookup_returns_row() {
                 true,
             ),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
     assert!(insert_single_tuple(&catalog, "db9", "items", &["1", "5.50"]).unwrap());

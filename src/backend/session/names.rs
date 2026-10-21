@@ -168,7 +168,7 @@ pub(super) fn save_table_constraint(
     db: &str,
     table: &str,
     constraint: &TableConstraint,
-) {
+) -> crate::backend::error::RookResult<()> {
     use crate::backend::system_table::insert_constraint_metadata;
 
     let join = crate::backend::system_table::join_column_list;
@@ -177,7 +177,7 @@ pub(super) fn save_table_constraint(
         ReferentialAction::SetNull => format!(" {} SET NULL", keyword),
         ReferentialAction::NoAction | ReferentialAction::Restrict => String::new(),
     };
-    let _ = match constraint {
+    match constraint {
         TableConstraint::PrimaryKey { columns } => {
             insert_constraint_metadata(engine, db, table, "PRIMARY KEY", &join(columns), None, None)
         }
@@ -209,5 +209,5 @@ pub(super) fn save_table_constraint(
         TableConstraint::Check(expr) => {
             insert_constraint_metadata(engine, db, table, "CHECK", expr, None, None)
         }
-    };
+    }
 }

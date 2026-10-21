@@ -118,7 +118,8 @@ fn vacuum_stale_btree_handle_loses_new_rows() {
             col("id", DataType::Int, false),
             col("v", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -198,7 +199,8 @@ fn order_by_control_sorted_output_when_all_keys_non_null() {
             col("id", DataType::Int, false),
             col("v", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -243,7 +245,8 @@ fn order_by_with_null_key_row_violates_claimed_ordering() {
             col("id", DataType::Int, false),
             col("v", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -294,7 +297,8 @@ fn order_by_no_index_control_nulls_first() {
             col("id", DataType::Int, false),
             col("v", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -342,7 +346,8 @@ fn update_set_literal_with_arith_char_survives_end_to_end() {
             col("id", DataType::Int, false),
             col("v", DataType::Varchar(50), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -384,7 +389,8 @@ fn control_delete_pointers_target_expected_rows() {
             col("id", DataType::Int, false),
             col("v", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();

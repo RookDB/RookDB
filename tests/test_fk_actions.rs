@@ -129,9 +129,9 @@ fn create_three_tier_schema(catalog: &mut Catalog, db_name: &str) {
         },
     ];
 
-    create_table(catalog, db_name, "users", users_cols);
-    create_table(catalog, db_name, "orders", orders_cols);
-    create_table(catalog, db_name, "order_items", order_items_cols);
+    create_table(catalog, db_name, "users", users_cols).unwrap();
+    create_table(catalog, db_name, "orders", orders_cols).unwrap();
+    create_table(catalog, db_name, "order_items", order_items_cols).unwrap();
 }
 
 /// Count the number of tuples (rows) in a table by scanning the heap.
@@ -255,8 +255,8 @@ fn test_minimal_delete_cascade() {
         },
     ];
 
-    create_table(&mut catalog, db_name, "users", users_cols);
-    create_table(&mut catalog, db_name, "orders", orders_cols);
+    create_table(&mut catalog, db_name, "users", users_cols).unwrap();
+    create_table(&mut catalog, db_name, "orders", orders_cols).unwrap();
 
     // FK: orders.user_id → users.id ON DELETE CASCADE
     storage_manager::backend::system_table::insert_constraint_metadata(
@@ -652,9 +652,9 @@ fn test_recursive_update_cascade_same_column_chain() {
         },
     ];
 
-    create_table(&mut catalog, db_name, "users", users_cols);
-    create_table(&mut catalog, db_name, "orders", orders_cols);
-    create_table(&mut catalog, db_name, "order_items", order_items_cols);
+    create_table(&mut catalog, db_name, "users", users_cols).unwrap();
+    create_table(&mut catalog, db_name, "orders", orders_cols).unwrap();
+    create_table(&mut catalog, db_name, "order_items", order_items_cols).unwrap();
 
     // FK: orders.fk_user_id → users.id ON UPDATE CASCADE
     storage_manager::backend::system_table::insert_constraint_metadata(
@@ -879,9 +879,9 @@ fn test_recursive_update_set_null_same_column_chain() {
         },
     ];
 
-    create_table(&mut catalog, db_name, "users", users_cols);
-    create_table(&mut catalog, db_name, "orders", orders_cols);
-    create_table(&mut catalog, db_name, "order_items", order_items_cols);
+    create_table(&mut catalog, db_name, "users", users_cols).unwrap();
+    create_table(&mut catalog, db_name, "orders", orders_cols).unwrap();
+    create_table(&mut catalog, db_name, "order_items", order_items_cols).unwrap();
 
     // FK: orders.fk_user_id → users.id ON UPDATE SET NULL
     storage_manager::backend::system_table::insert_constraint_metadata(
@@ -1007,8 +1007,8 @@ fn test_cycle_detection_delete_cascade() {
         },
     ];
 
-    create_table(&mut catalog, db_name, "table_a", a_cols);
-    create_table(&mut catalog, db_name, "table_b", b_cols);
+    create_table(&mut catalog, db_name, "table_a", a_cols).unwrap();
+    create_table(&mut catalog, db_name, "table_b", b_cols).unwrap();
 
     // Circular FK chain:
     //   table_a.a_ref → table_b.id ON DELETE CASCADE
@@ -1113,8 +1113,8 @@ fn test_fk_restrict_blocks_delete() {
         },
     ];
 
-    create_table(&mut catalog, db_name, "parents", parents_cols);
-    create_table(&mut catalog, db_name, "children", children_cols);
+    create_table(&mut catalog, db_name, "parents", parents_cols).unwrap();
+    create_table(&mut catalog, db_name, "children", children_cols).unwrap();
 
     // FK with RESTRICT (default): just "FOREIGN KEY"
     storage_manager::backend::system_table::insert_constraint_metadata(

@@ -36,7 +36,8 @@ fn setup() -> storage_manager::catalog::Catalog {
                 constraints: Default::default(),
             },
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     load_catalog()
 }

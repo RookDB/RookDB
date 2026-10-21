@@ -32,7 +32,7 @@ fn col(name: &str, ty: DataType, nullable: bool) -> Column {
 }
 
 fn create_test_table(catalog: &mut Catalog, table: &str, cols: Vec<Column>) {
-    create_table(catalog, "testdb", table, cols);
+    create_table(catalog, "testdb", table, cols).unwrap();
     assert!(
         catalog
             .databases

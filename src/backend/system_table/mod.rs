@@ -21,10 +21,12 @@ use crate::types::DataType;
 
 use save::strip_check_wrapper;
 
+mod change;
 mod info_schema;
 mod metadata;
 mod save;
 
+pub use change::{CatalogChange, begin_catalog_change, in_catalog_change};
 pub use info_schema::*;
 pub use metadata::*;
 pub use save::*;
@@ -136,7 +138,7 @@ fn datatype_to_string(dt: &DataType) -> String {
 pub fn load_catalog_from_system(
     engine: &std::sync::Arc<crate::backend::engine::Engine>,
 ) -> RookResult<Catalog> {
-    recover_system_dir(engine.paths())?;
+    recover_unless_changing(engine)?;
     let mut catalog = Catalog::new(std::sync::Arc::clone(engine));
 
     let databases = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
@@ -487,8 +489,20 @@ fn create_system_table_files(engine: &crate::backend::engine::Engine) -> RookRes
 /// missing. Called during startup to support incremental schema additions
 /// (e.g. adding `sys_views` to an existing system catalog).
 pub fn ensure_system_tables(engine: &crate::backend::engine::Engine) -> RookResult<()> {
-    recover_system_dir(engine.paths())?;
+    recover_unless_changing(engine)?;
     create_system_table_files(engine)
+}
+
+/// [`recover_system_dir`], unless this engine has a catalog change open:
+/// its undo copy is in use, not left by a crash.
+fn recover_unless_changing(engine: &crate::backend::engine::Engine) -> RookResult<()> {
+    if engine
+        .catalog_change_open
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(());
+    }
+    recover_system_dir(engine.paths())
 }
 
 /// fsync a directory, making the creates and renames inside it durable.
@@ -511,6 +525,10 @@ fn sync_dir(dir: &std::path::Path) -> RookResult<()> {
 ///   `system.new` is complete and is the catalog. Without one, `system.old`
 ///   goes back.
 fn recover_system_dir(paths: &crate::backend::paths::Paths) -> RookResult<()> {
+    if restore_undo_dir(paths)? {
+        log::warn!("[SystemCatalog] rolled back a catalog change a crash interrupted");
+        return Ok(());
+    }
     let system = paths.system_dir();
     let staging = paths.system_staging_dir();
     let old = paths.system_old_dir();
@@ -532,6 +550,36 @@ fn recover_system_dir(paths: &crate::backend::paths::Paths) -> RookResult<()> {
         }
     }
     Ok(())
+}
+
+/// Put back the undo copy of an uncommitted catalog change, if there is one
+/// (see `change.rs`): it is the catalog, whatever the change left in the
+/// other directories. Returns whether there was one.
+fn restore_undo_dir(paths: &crate::backend::paths::Paths) -> RookResult<bool> {
+    let undo = paths.system_undo_dir();
+    for leftover in [
+        crate::backend::paths::with_suffix(&undo, ".tmp"),
+        crate::backend::paths::with_suffix(&undo, ".done"),
+    ] {
+        if leftover.exists() {
+            std::fs::remove_dir_all(&leftover)?;
+        }
+    }
+    if !undo.exists() {
+        return Ok(false);
+    }
+    for dir in [
+        paths.system_dir(),
+        paths.system_staging_dir(),
+        paths.system_old_dir(),
+    ] {
+        if dir.exists() {
+            std::fs::remove_dir_all(dir)?;
+        }
+    }
+    std::fs::rename(&undo, paths.system_dir())?;
+    sync_dir(&paths.data_dir())?;
+    Ok(true)
 }
 
 /// Write `rows` as a fresh, fsynced system table `name` under `dir`.

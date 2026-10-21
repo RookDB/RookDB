@@ -47,7 +47,8 @@ fn setup_tables(db: &str) -> Catalog {
             column("salary", DataType::Int),
             column("dept_id", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     create_table(
         &mut catalog,
         db,
@@ -56,7 +57,8 @@ fn setup_tables(db: &str) -> Catalog {
             column("id", DataType::Int),
             column("dept_name", DataType::Varchar(50)),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     for row in [
@@ -348,7 +350,8 @@ fn insert_into_select_copies_rows() {
             column("salary", DataType::Int),
             column("dept_id", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
 
     let plan =
         parse_sql("INSERT INTO engineers SELECT * FROM employees WHERE dept_id = 10").unwrap();

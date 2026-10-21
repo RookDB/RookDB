@@ -60,7 +60,8 @@ fn catalog_round_trips_through_system_tables() {
                 constraints: Default::default(),
             },
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     // A fresh load (as a new session would do) sees the same metadata.

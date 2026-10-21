@@ -64,6 +64,24 @@ pub struct Session {
     pub current_db: Option<String>,
 }
 
+/// Statements that may write the system tables.
+fn changes_catalog(plan: &QueryPlan) -> bool {
+    matches!(
+        plan,
+        QueryPlan::CreateDatabase(_)
+            | QueryPlan::DropDatabase(_)
+            | QueryPlan::CreateTable(_)
+            | QueryPlan::CreateTableAsSelect(_)
+            | QueryPlan::DropTable(_)
+            | QueryPlan::AlterTable(_)
+            | QueryPlan::CreateIndex(_)
+            | QueryPlan::DropIndex(_)
+            | QueryPlan::CreateView(_)
+            | QueryPlan::DropView(_)
+            | QueryPlan::Truncate(_)
+    )
+}
+
 impl Session {
     pub fn new(catalog: Catalog) -> Self {
         Session {
@@ -73,9 +91,41 @@ impl Session {
     }
 
     /// Execute one parsed statement.
+    ///
+    /// A statement that changes the catalog runs as one catalog change: if
+    /// it fails, the system tables and the in-memory catalog go back to how
+    /// they were before it.
     pub fn execute(&mut self, plan: QueryPlan) -> RookResult<StatementResult> {
         let plan = names::resolve_table_names(plan, &self.catalog, &self.current_db);
-        match &plan {
+        if !changes_catalog(&plan) {
+            return self.execute_resolved(&plan);
+        }
+        let engine = Arc::clone(self.catalog.engine());
+        let change = crate::backend::system_table::begin_catalog_change(&engine)?;
+        let result = self.execute_resolved(&plan);
+        let result = match result {
+            Ok(done) => change.commit().map(|()| done),
+            Err(e) => {
+                change.rollback();
+                Err(e)
+            }
+        };
+        if result.is_err() {
+            // The in-memory catalog may hold part of the change.
+            self.catalog = Arc::new(crate::catalog::try_load_catalog_in(&engine).map_err(|e| {
+                e.with_context("Failed to reload the catalog after a failed statement")
+            })?);
+            if let Some(db) = &self.current_db
+                && !self.catalog.databases.contains_key(db)
+            {
+                self.current_db = None;
+            }
+        }
+        result
+    }
+
+    fn execute_resolved(&mut self, plan: &QueryPlan) -> RookResult<StatementResult> {
+        match plan {
             QueryPlan::ShowDatabases => Ok(ddl::show_databases(&self.catalog)),
             QueryPlan::CreateDatabase(p) => {
                 Ok(ddl::create_database(Arc::make_mut(&mut self.catalog), p))
@@ -87,9 +137,9 @@ impl Session {
                 let db = self.db()?.to_string();
                 ddl::create_table(Arc::make_mut(&mut self.catalog), &db, p)
             }
-            QueryPlan::Insert(_) => dml::insert(&self.catalog, self.db()?, &plan),
+            QueryPlan::Insert(_) => dml::insert(&self.catalog, self.db()?, plan),
             QueryPlan::Select(_) | QueryPlan::SetOperation(_) => {
-                dml::query(&self.catalog, self.db()?, &plan)
+                dml::query(&self.catalog, self.db()?, plan)
             }
             QueryPlan::Update(p) => dml::update(&self.catalog, self.db()?, p),
             QueryPlan::Delete(p) => dml::delete(&self.catalog, self.db()?, p),
@@ -104,7 +154,7 @@ impl Session {
             // Statements whose failures the shell reports as `Error: ...`.
             _ => {
                 let db = self.db()?.to_string();
-                self.execute_ddl(&db, &plan)
+                self.execute_ddl(&db, plan)
                     .map_err(|e| e.bare_io().with_context("Error"))
             }
         }

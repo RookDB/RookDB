@@ -34,7 +34,8 @@ fn setup_join_db(db: &str) -> Catalog {
             column("id", DataType::Int),
             column("name", DataType::Varchar(50)),
         ],
-    );
+    )
+    .unwrap();
 
     create_table(
         &mut catalog,
@@ -45,7 +46,8 @@ fn setup_join_db(db: &str) -> Catalog {
             column("name", DataType::Varchar(50)),
             column("dept_id", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     // Insert departments (larger lookup table)
@@ -209,7 +211,8 @@ fn setup_items_db(db: &str) -> Catalog {
         db,
         "items",
         vec![column("id", DataType::Int), column("price", DataType::Int)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     for (id, price) in [(1, 40), (2, 10), (3, 50), (4, 20), (5, 30)] {

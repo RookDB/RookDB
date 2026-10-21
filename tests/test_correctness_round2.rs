@@ -70,7 +70,7 @@ fn setup_empty(db: &str, table: &str, cols: Vec<Column>, tag: &str) {
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, db), "create db");
     let mut catalog = load_catalog();
-    create_table(&mut catalog, db, table, cols);
+    create_table(&mut catalog, db, table, cols).unwrap();
     save_catalog(&catalog).unwrap();
 
     // Ensure the .dat exists, then empty it.
@@ -91,7 +91,7 @@ fn setup_with_rows(
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, db), "create db");
     let mut catalog = load_catalog();
-    create_table(&mut catalog, db, table, cols);
+    create_table(&mut catalog, db, table, cols).unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();

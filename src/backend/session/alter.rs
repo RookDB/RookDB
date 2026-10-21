@@ -69,17 +69,15 @@ pub(super) fn alter_table(
         }
     }
 
-    update_constraint_metadata(catalog, db, alter, &mut lines);
+    update_constraint_metadata(catalog, db, alter)?;
 
     if let Some(d) = catalog.databases.get_mut(db) {
         d.tables.insert(alter.table.clone(), updated_table);
     }
-    if let Err(e) = crate::catalog::save_catalog(catalog) {
-        lines.push(format!(
-            "[AlterTable] Warning: failed to save catalog after altering table '{}': {}",
-            alter.table, e
-        ));
-    }
+    crate::catalog::save_catalog(catalog).context(format!(
+        "Failed to save catalog after altering table '{}'",
+        alter.table
+    ))?;
 
     reindex_after_alter(catalog, db, alter, &indexes, &mut lines)?;
 
@@ -348,56 +346,53 @@ fn drop_not_null(updated_table: &mut Table, table: &str, column: &str) -> RookRe
     Ok(())
 }
 
-/// Update sys_constraints metadata for column operations; failures become warnings.
+/// Update sys_constraints metadata for column operations.
 fn update_constraint_metadata(
     catalog: &Catalog,
     db: &str,
     alter: &AlterTablePlan,
-    lines: &mut Vec<String>,
-) {
+) -> RookResult<()> {
     match &alter.action {
         AlterTableAction::DropColumn { column } => {
-            if let Err(e) = crate::backend::system_table::delete_column_constraints(
+            crate::backend::system_table::delete_column_constraints(
                 catalog.engine(),
                 db,
                 &alter.table,
                 column,
-            ) {
-                lines.push(format!(
-                    "[AlterTable] Warning: failed to clean up constraint metadata for column '{}': {}",
-                    column, e
-                ));
-            }
+            )
+            .context(format!(
+                "Failed to clean up constraint metadata for column '{}'",
+                column
+            ))?;
         }
         AlterTableAction::RenameColumn { old_name, new_name } => {
-            if let Err(e) = crate::backend::system_table::rename_column_in_constraints(
+            crate::backend::system_table::rename_column_in_constraints(
                 catalog.engine(),
                 db,
                 &alter.table,
                 old_name,
                 new_name,
-            ) {
-                lines.push(format!(
-                    "[AlterTable] Warning: failed to update constraint metadata for column rename '{}' → '{}': {}",
-                    old_name, new_name, e
-                ));
-            }
+            )
+            .context(format!(
+                "Failed to update constraint metadata for column rename '{}' → '{}'",
+                old_name, new_name
+            ))?;
             // Foreign keys of other tables name this table's column too.
-            if let Err(e) = crate::backend::system_table::rename_referenced_column_in_constraints(
+            crate::backend::system_table::rename_referenced_column_in_constraints(
                 catalog.engine(),
                 db,
                 &alter.table,
                 old_name,
                 new_name,
-            ) {
-                lines.push(format!(
-                    "[AlterTable] Warning: failed to update referencing foreign keys for column rename '{}' → '{}': {}",
-                    old_name, new_name, e
-                ));
-            }
+            )
+            .context(format!(
+                "Failed to update referencing foreign keys for column rename '{}' → '{}'",
+                old_name, new_name
+            ))?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// Re-index after the change: rebuild the indexes of moved rows, or rename
@@ -515,27 +510,19 @@ fn rename_table(
     crate::backend::cache::drop_statistics(catalog.engine(), db, old_name);
 
     let mut lines = Vec::new();
-    if let Err(e) = crate::backend::system_table::rename_table_in_system(
-        catalog.engine(),
-        db,
-        old_name,
-        new_name,
-    ) {
-        lines.push(format!(
-            "[AlterTable] Warning: failed to rename '{}' in the system tables: {}",
-            old_name, e
-        ));
-    }
+    crate::backend::system_table::rename_table_in_system(catalog.engine(), db, old_name, new_name)
+        .context(format!(
+            "Failed to rename '{}' in the system tables",
+            old_name
+        ))?;
     if let Some(d) = catalog.databases.get_mut(db) {
         d.tables.remove(old_name);
         d.tables.insert(new_name.to_string(), table);
     }
-    if let Err(e) = crate::catalog::save_catalog(catalog) {
-        lines.push(format!(
-            "[AlterTable] Warning: failed to save catalog after renaming table '{}' → '{}': {}",
-            old_name, new_name, e
-        ));
-    }
+    crate::catalog::save_catalog(catalog).context(format!(
+        "Failed to save catalog after renaming table '{}' → '{}'",
+        old_name, new_name
+    ))?;
     // A self-referencing table is its own child under the new name.
     let children: Vec<String> = referencing
         .iter()

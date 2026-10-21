@@ -80,6 +80,9 @@ pub struct Engine {
     /// The locked `rookdb.lock`, once [`Engine::lock_data_dir`] has run.
     /// Closing it when the engine drops releases the lock.
     dir_lock: Mutex<Option<std::fs::File>>,
+    /// Whether a catalog change (`system_table::begin_catalog_change`) is
+    /// open, so a nested one joins it.
+    pub(crate) catalog_change_open: std::sync::atomic::AtomicBool,
 }
 
 impl Engine {
@@ -119,6 +122,7 @@ impl Engine {
             visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
             dir_lock: Mutex::default(),
+            catalog_change_open: Default::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
                 crate::backend::planner::plan_cache::DEFAULT_CACHE_CAPACITY,
             )),

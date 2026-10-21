@@ -40,7 +40,8 @@ fn setup(db: &str) -> Catalog {
             col("salary", DataType::Int),
             col("dept_id", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     create_table(
         &mut catalog,
         db,
@@ -50,7 +51,8 @@ fn setup(db: &str) -> Catalog {
             col("dept_name", DataType::Varchar(50)),
             col("floor", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();

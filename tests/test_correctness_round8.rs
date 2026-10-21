@@ -622,7 +622,8 @@ fn h_update_cascade_growing_varchar_preserves_row() {
         "db8",
         "p",
         vec![col("k", DataType::Varchar(50), false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -630,7 +631,8 @@ fn h_update_cascade_growing_varchar_preserves_row() {
         "db8",
         "c",
         vec![col("v", DataType::Varchar(50), true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     insert_constraint_metadata(
@@ -702,7 +704,8 @@ fn i_bulk_load_maps_null_literal_to_null() {
             col("id", DataType::Int, false),
             col("s", DataType::Varchar(50), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
@@ -736,7 +739,8 @@ fn i_bulk_load_enforces_unique() {
         "db8",
         "u",
         vec![id_col, col("v", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
     create_index(&catalog, "db8", "u", "idx_u_id", &["id".to_string()]).expect("create index");
@@ -771,7 +775,8 @@ fn i_bulk_load_handles_quoted_comma() {
             col("a", DataType::Varchar(50), true),
             col("b", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 

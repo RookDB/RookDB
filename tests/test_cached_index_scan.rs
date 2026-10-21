@@ -38,7 +38,8 @@ fn setup() -> Catalog {
             column("id", DataType::Int),
             column("label", DataType::Varchar(16)),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
     create_index(&catalog, DB, "items", "idx_id", &[String::from("id")]).unwrap();

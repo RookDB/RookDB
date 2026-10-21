@@ -41,7 +41,8 @@ fn setup_table(db: &str) -> Catalog {
             column("name", DataType::Varchar(50)),
             column("salary", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     for row in [

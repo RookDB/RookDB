@@ -44,7 +44,8 @@ fn init_and_create(db: &str, table: &str, constraints: Constraints) {
                 },
             ),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 }
 
@@ -120,7 +121,8 @@ fn check_constraint_survives_save_load_cycle() {
             ),
             col("name", DataType::Varchar(30), true, Constraints::default()),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let reloaded: Catalog = load_catalog();
@@ -160,7 +162,8 @@ fn default_value_survives_save_load_cycle() {
                 ..Default::default()
             },
         )],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let reloaded: Catalog = load_catalog();
@@ -330,7 +333,8 @@ fn update_can_rewrite_row_without_self_unique_collision() {
             ),
             col("name", DataType::Varchar(30), true, Constraints::default()),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();

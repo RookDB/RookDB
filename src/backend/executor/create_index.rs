@@ -380,7 +380,8 @@ pub fn create_index_with_flags(
 
     // 9. Save index metadata to sys_indexes system table (comma-separated
     //     column list for composite indexes)
-    if let Err(e) = crate::backend::system_table::insert_index_metadata(
+    // An index sys_indexes does not list is never maintained: an error.
+    crate::backend::system_table::insert_index_metadata(
         catalog.engine(),
         db_name,
         table_name,
@@ -392,12 +393,8 @@ pub fn create_index_with_flags(
             .join(","),
         is_unique,
         is_primary,
-    ) {
-        log::warn!(
-            "[CreateIndex] Failed to save index metadata to sys_indexes: {}",
-            e
-        );
-    }
+    )
+    .map_err(|e| e.with_context("Failed to record the index in sys_indexes"))?;
 
     // DDL landed: forget memoised metadata/discovery for this table and any
     // stale handle for the freshly rewritten index file.
@@ -496,6 +493,22 @@ pub(crate) fn ensure_columns_index(
     if let Some(found) = find_columns_index(engine, db_name, table_name, columns) {
         return Ok(found);
     }
+    // Building one rewrites its sys_indexes row: all of it or none.
+    crate::backend::system_table::in_catalog_change(engine, || {
+        build_columns_index(catalog, db_name, table_name, columns, new_name, unique)
+    })
+}
+
+/// The building half of [`ensure_columns_index`].
+fn build_columns_index(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    columns: &[String],
+    new_name: &str,
+    unique: bool,
+) -> RookResult<(String, Vec<String>)> {
+    let engine = catalog.engine();
     // Only a table the system tables know can record an index.
     if crate::backend::cache::metadata(engine, db_name, table_name).is_none() {
         return Err(RookError::Internal(format!(
@@ -550,6 +563,17 @@ pub(crate) fn ensure_columns_index(
 /// Build again the file of the index `name`, which `sys_indexes` lists for the
 /// table but which is gone from disk.
 pub(crate) fn restore_index_file(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    name: &str,
+) -> RookResult<()> {
+    crate::backend::system_table::in_catalog_change(catalog.engine(), || {
+        rebuild_index_file(catalog, db_name, table_name, name)
+    })
+}
+
+fn rebuild_index_file(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,

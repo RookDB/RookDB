@@ -203,7 +203,8 @@ fn control_correlated_not_in_without_nulls() {
             col("id", DataType::Int, false),
             col("name", DataType::Varchar(30), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -211,7 +212,8 @@ fn control_correlated_not_in_without_nulls() {
         "t6db",
         "blocked",
         vec![col("uid", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -264,7 +266,8 @@ fn add_column_backfill_then_insert_is_durable() {
         "t6db",
         "t",
         vec![col("id", DataType::Int, false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -390,7 +393,8 @@ fn varchar_leading_and_trailing_apostrophe_roundtrip() {
             col("id", DataType::Int, false),
             col("s", DataType::Varchar(50), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();

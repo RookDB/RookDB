@@ -61,7 +61,7 @@ fn engine_rejects_traversal_table_names() {
     let mut catalog = load_catalog();
 
     for bad in ["../escape", "sub/dir", "back\\slash", "..\\..\\win"] {
-        create_table(&mut catalog, "safe", bad, vec![plain_col("id")]);
+        assert!(create_table(&mut catalog, "safe", bad, vec![plain_col("id")]).is_err());
         assert!(
             !catalog.databases["safe"].tables.contains_key(bad),
             "create_table must reject '{}'",
@@ -83,7 +83,8 @@ fn engine_accepts_ordinary_names() {
         "prod_2024",
         "order-items",
         vec![plain_col("id")],
-    );
+    )
+    .unwrap();
     assert!(
         catalog.databases["prod_2024"]
             .tables

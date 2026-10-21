@@ -84,7 +84,7 @@ fn database_and_table_ids_are_stable_across_repeated_saves() {
         ("zeta", "apple_t"),
     ] {
         let mut catalog = load_catalog();
-        create_table(&mut catalog, db, table, vec![plain_col("id")]);
+        create_table(&mut catalog, db, table, vec![plain_col("id")]).unwrap();
     }
 
     let dbs_first = current_db_ids();
@@ -111,9 +111,9 @@ fn ids_are_assigned_in_sorted_name_order() {
     }
     {
         let mut catalog = load_catalog();
-        create_table(&mut catalog, "a_db", "zebra", vec![plain_col("id")]);
-        create_table(&mut catalog, "a_db", "aardvark", vec![plain_col("id")]);
-        create_table(&mut catalog, "a_db", "mango", vec![plain_col("id")]);
+        create_table(&mut catalog, "a_db", "zebra", vec![plain_col("id")]).unwrap();
+        create_table(&mut catalog, "a_db", "aardvark", vec![plain_col("id")]).unwrap();
+        create_table(&mut catalog, "a_db", "mango", vec![plain_col("id")]).unwrap();
     }
 
     let mut dbs = current_db_ids();

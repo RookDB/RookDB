@@ -40,7 +40,8 @@ fn setup() -> Catalog {
             column("name", DataType::Varchar(24)),
             column("salary", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
     create_index(&catalog, DB, "staff", "idx_id", &[String::from("id")]).unwrap();

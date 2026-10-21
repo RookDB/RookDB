@@ -62,7 +62,7 @@ fn test_fsm_page_allocation() {
     ];
 
     // Add table to catalog via create_table and save
-    create_table(&mut catalog, db_name, "pages_test", columns);
+    create_table(&mut catalog, db_name, "pages_test", columns).unwrap();
 
     let _ = save_catalog(&catalog);
 

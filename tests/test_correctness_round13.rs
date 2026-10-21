@@ -89,7 +89,7 @@ fn col(name: &str, ty: DataType, nullable: bool) -> Column {
 
 fn make_table(db: &str, table: &str, columns: Vec<Column>) {
     let mut catalog = load_catalog();
-    create_table(&mut catalog, db, table, columns);
+    create_table(&mut catalog, db, table, columns).unwrap();
     save_catalog(&catalog).unwrap();
 }
 

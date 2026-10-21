@@ -146,7 +146,8 @@ fn g_plan_cache_insert_into_table_named_with_values_substring() {
         "db10g",
         "my_values",
         vec![col("a", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
@@ -193,7 +194,8 @@ fn h_plan_cache_multirow_insert_valid_sql_errors_instead() {
         "db10h",
         "mr1",
         vec![col("a", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
@@ -237,7 +239,8 @@ fn h2_plan_cache_silently_inserts_corrupted_row_for_invalid_sql() {
         "db10h2",
         "mr",
         vec![col("a", DataType::Int, true), col("b", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
@@ -283,7 +286,8 @@ fn i_plan_cache_unknown_column_silently_inserts_all_null_row() {
         "db10i",
         "t3",
         vec![col("a", DataType::Int, true), col("b", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
@@ -324,7 +328,8 @@ fn i2_plan_cache_extra_value_in_column_list_is_silently_dropped() {
         "db10i2",
         "t4",
         vec![col("a", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
@@ -365,7 +370,8 @@ fn j_plan_cache_missing_column_ignores_declared_default() {
             col("a", DataType::Int, true),
             col_with_default("b", DataType::Int, true, DataValue::Int(42)),
         ],
-    );
+    )
+    .unwrap();
     let catalog = catalog; // in-memory catalog with the declared default
 
     // Control: the planner path fills the declared default for unlisted
@@ -403,7 +409,8 @@ fn x_regression_plain_single_row_cached_insert_works() {
         "db10x",
         "plain",
         vec![col("a", DataType::Int, true), col("b", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 

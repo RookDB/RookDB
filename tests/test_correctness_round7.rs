@@ -112,7 +112,8 @@ fn set_operation_order_by_and_limit_apply_to_union_result() {
         "db7",
         "a",
         vec![col("v", DataType::Int, false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -120,7 +121,8 @@ fn set_operation_order_by_and_limit_apply_to_union_result() {
         "db7",
         "b",
         vec![col("v", DataType::Int, false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -170,7 +172,8 @@ fn on_delete_set_null_applies_to_unflushed_child_rows() {
         "db7",
         "parent",
         vec![col("id", DataType::Int, false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -181,7 +184,8 @@ fn on_delete_set_null_applies_to_unflushed_child_rows() {
             col("id", DataType::Int, false),
             col("pid", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     // Declare the FK action in sys_constraints (same as test_constraints.rs).
@@ -265,7 +269,8 @@ fn control_limit_offset_with_order_by_returns_window() {
         "db7",
         "t",
         vec![col("v", DataType::Int, false)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -301,7 +306,8 @@ fn control_insert_column_list_reorder() {
         "db7",
         "t",
         vec![col("a", DataType::Int, true), col("b", DataType::Int, true)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();

@@ -68,6 +68,12 @@ impl Paths {
         self.data_dir().join("system.old")
     }
 
+    /// The copy of the system directory a statement that changes the catalog
+    /// keeps until it finishes; see `system_table::begin_catalog_change`.
+    pub fn system_undo_dir(&self) -> PathBuf {
+        self.data_dir().join("system.undo")
+    }
+
     /// The heap file of the system table `name`.
     pub fn system_table(&self, name: &str) -> PathBuf {
         self.system_dir().join(format!("{}.dat", name))

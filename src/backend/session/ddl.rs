@@ -83,18 +83,9 @@ pub(super) fn drop_database(
     // Every cached table handle of the database must not outlive its files.
     let _ = crate::backend::cache::flush_and_clear_heaps(&engine);
     let _ = std::fs::remove_dir_all(engine.paths().database_dir(db_name));
-    if let Err(e) = crate::backend::system_table::delete_database_metadata(&engine, db_name) {
-        lines.push(format!(
-            "[DropDatabase] Warning: failed to clean up system table metadata: {}",
-            e
-        ));
-    }
-    if let Err(e) = crate::catalog::save_catalog(catalog) {
-        lines.push(format!(
-            "[DropDatabase] Warning: failed to save catalog: {}",
-            e
-        ));
-    }
+    crate::backend::system_table::delete_database_metadata(&engine, db_name)
+        .context("Failed to clean up system table metadata")?;
+    crate::catalog::save_catalog(catalog).context("Failed to save catalog")?;
     if session.current_db.as_deref() == Some(db_name.as_str()) {
         session.current_db = None;
     }
@@ -225,11 +216,13 @@ pub(super) fn create_table(
 
     check_forward_references(catalog, db, params).map_err(|e| not_created(&params.table, e))?;
 
-    catalog_create_table(catalog, db, &params.table, columns);
+    catalog_create_table(catalog, db, &params.table, columns)
+        .map_err(|e| not_created(&params.table, e))?;
     let mut lines = vec![format!("Table '{}' created successfully.", params.table)];
 
     for tc in &params.constraints {
-        save_table_constraint(catalog.engine(), db, &params.table, tc);
+        save_table_constraint(catalog.engine(), db, &params.table, tc)
+            .map_err(|e| not_created(&params.table, e))?;
     }
 
     // Auto-create B+ Tree indexes on PRIMARY KEY, UNIQUE, and REFERENCES columns.
@@ -246,30 +239,24 @@ pub(super) fn create_table(
     for col in &params.columns {
         let has = |c: &ColumnConstraint| col.constraints.contains(c);
         let cols = std::slice::from_ref(&col.name);
+        // The key is enforced through its index: a table without it is
+        // not created.
         if has(&ColumnConstraint::PrimaryKey) {
-            if let Err(e) = index(
+            index(
                 format!("pk_{}_{}", params.table, col.name),
                 cols,
                 true,
                 true,
-            ) {
-                lines.push(format!(
-                    "Warning: failed to auto-create PRIMARY KEY index: {}",
-                    e
-                ));
-            }
-        } else if has(&ColumnConstraint::Unique)
-            && let Err(e) = index(
+            )
+            .map_err(|e| not_created(&params.table, e.with_context("PRIMARY KEY index")))?;
+        } else if has(&ColumnConstraint::Unique) {
+            index(
                 format!("uq_{}_{}", params.table, col.name),
                 cols,
                 true,
                 false,
             )
-        {
-            lines.push(format!(
-                "Warning: failed to auto-create UNIQUE index: {}",
-                e
-            ));
+            .map_err(|e| not_created(&params.table, e.with_context("UNIQUE index")))?;
         }
     }
 
@@ -651,19 +638,16 @@ pub(super) fn drop_table(
     crate::backend::cache::drop_statistics(catalog.engine(), db, table);
     remove_index_files_for_table(catalog.engine(), db, table, None);
 
-    if let Err(e) = crate::backend::system_table::delete_table_metadata(catalog.engine(), db, table)
-    {
-        lines.push(format!(
-            "[DropTable] Warning: failed to clean up system table metadata for '{}.{}': {}",
-            db, table, e
-        ));
-    }
-    if let Err(e) = crate::catalog::save_catalog(catalog) {
-        lines.push(format!(
-            "[DropTable] Warning: failed to save catalog after dropping table '{}.{}': {}",
-            db, table, e
-        ));
-    }
+    crate::backend::system_table::delete_table_metadata(catalog.engine(), db, table).context(
+        format!(
+            "Failed to clean up system table metadata for '{}.{}'",
+            db, table
+        ),
+    )?;
+    crate::catalog::save_catalog(catalog).context(format!(
+        "Failed to save catalog after dropping table '{}.{}'",
+        db, table
+    ))?;
 
     lines.push(format!("Dropped table '{}' from database '{}'.", table, db));
     Ok(StatementResult::lines(lines))
@@ -857,7 +841,7 @@ pub(super) fn create_table_as_select(
             "Cannot determine column types for CREATE TABLE AS SELECT".to_string(),
         ));
     }
-    catalog_create_table(catalog, db, &ctas.table, columns);
+    catalog_create_table(catalog, db, &ctas.table, columns)?;
 
     let mut lines = Vec::new();
     let mut inserted = 0usize;
@@ -1118,18 +1102,12 @@ pub(super) fn drop_index(
         ))
     };
     let mut lines = Vec::new();
-    let mut forget = |table: &str| {
-        if let Err(e) = crate::backend::system_table::delete_index_metadata(
-            catalog.engine(),
-            db,
-            table,
-            index_name,
-        ) {
-            lines.push(format!(
-                "[DropIndex] Warning: failed to clean up sys_indexes for '{}': {}",
-                index_name, e
-            ));
-        }
+    let forget = |table: &str| {
+        crate::backend::system_table::delete_index_metadata(catalog.engine(), db, table, index_name)
+            .context(format!(
+                "Failed to clean up sys_indexes for '{}'",
+                index_name
+            ))
     };
 
     if !table_name.is_empty() {
@@ -1145,7 +1123,7 @@ pub(super) fn drop_index(
                 table_name
             )));
         }
-        forget(table_name);
+        forget(table_name)?;
         lines.push(format!(
             "Dropped index '{}' from table '{}'.",
             index_name, table_name
@@ -1175,7 +1153,7 @@ pub(super) fn drop_index(
         };
         std::fs::remove_file(entry.path())?;
         let tbl_name = tbl_name.to_string();
-        forget(&tbl_name);
+        forget(&tbl_name)?;
         lines.push(format!(
             "Dropped index '{}' from table '{}'.",
             index_name, tbl_name

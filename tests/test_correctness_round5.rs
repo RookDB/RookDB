@@ -121,7 +121,8 @@ fn set_numeric_column_preserves_value() {
                 true,
             ),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -160,7 +161,8 @@ fn control_set_int_column_still_works() {
             col("id", DataType::Int, false),
             col("n", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -198,7 +200,8 @@ fn insert_select_roundtrip_trailing_apostrophe() {
             col("id", DataType::Int, false),
             col("s", DataType::Varchar(50), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
     create_table(
@@ -209,7 +212,8 @@ fn insert_select_roundtrip_trailing_apostrophe() {
             col("id", DataType::Int, false),
             col("s", DataType::Varchar(50), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -276,7 +280,8 @@ fn abs_min_int_returns_error_not_panic() {
             col("id", DataType::Int, false),
             col("v", DataType::Int, true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -311,7 +316,8 @@ fn substring_negative_length_returns_error_not_panic() {
             col("id", DataType::Int, false),
             col("s", DataType::Varchar(50), true),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -568,7 +574,8 @@ fn numeric_arithmetic_preserves_exact_precision() {
                 true,
             ),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -612,7 +619,8 @@ fn distinct_aggregate_plans_and_executes_correctly() {
             col("grp", DataType::Int, false),
             col("val", DataType::Int, false),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();

@@ -34,7 +34,7 @@ fn int_cols(names: &[&str]) -> Vec<Column> {
 
 fn make_table(db: &str, table: &str, cols: &[&str], rows: &[&[&str]]) {
     let mut catalog = load_catalog();
-    create_table(&mut catalog, db, table, int_cols(cols));
+    create_table(&mut catalog, db, table, int_cols(cols)).unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
     for row in rows {

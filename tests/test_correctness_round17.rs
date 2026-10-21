@@ -149,7 +149,8 @@ fn ah_insert_with_composite_unique_index_does_not_crash() {
                 col("b", DataType::Int, true),
                 col("v", DataType::Varchar(10), true),
             ],
-        );
+        )
+        .unwrap();
         save_catalog(&catalog).unwrap();
     }
 
@@ -224,7 +225,8 @@ fn ai_update_respects_varchar_length_limit() {
                 col("id", DataType::Int, true),
                 uniq_col("name", DataType::Varchar(5)),
             ],
-        );
+        )
+        .unwrap();
         save_catalog(&catalog).unwrap();
     }
 
@@ -280,7 +282,8 @@ fn aj_batch_update_cannot_create_unique_violation() {
                 col("id", DataType::Int, true),
                 uniq_col("tag", DataType::Int),
             ],
-        );
+        )
+        .unwrap();
         save_catalog(&catalog).unwrap();
     }
 
@@ -346,7 +349,7 @@ fn ak_multirow_insert_atomicity_on_unique_violation() {
         let mut catalog = load_catalog();
         assert!(create_database(&mut catalog, db), "create db");
         let mut catalog = load_catalog();
-        create_table(&mut catalog, db, "t", vec![uniq_col("id", DataType::Int)]);
+        create_table(&mut catalog, db, "t", vec![uniq_col("id", DataType::Int)]).unwrap();
         save_catalog(&catalog).unwrap();
     }
 
@@ -392,7 +395,8 @@ fn x1_unique_lifecycle_and_char_padding_still_work() {
                 col("id", DataType::Int, true),
                 uniq_col("tag", DataType::Int),
             ],
-        );
+        )
+        .unwrap();
         save_catalog(&catalog).unwrap();
     }
 
@@ -444,7 +448,8 @@ fn x1_unique_lifecycle_and_char_padding_still_work() {
                 col("id", DataType::Int, true),
                 uniq_col("code", DataType::Char(4)),
             ],
-        );
+        )
+        .unwrap();
         save_catalog(&catalog).unwrap();
     }
     assert!(insert_single_tuple(&load_catalog(), db2, "c", &["1", "'ab'"]).unwrap());
@@ -474,7 +479,8 @@ fn x2_insert_select_string_roundtrip_still_work() {
                 col("id", DataType::Int, true),
                 col("name", DataType::Varchar(30), true),
             ],
-        );
+        )
+        .unwrap();
         create_table(
             &mut catalog,
             db,
@@ -483,7 +489,8 @@ fn x2_insert_select_string_roundtrip_still_work() {
                 col("id", DataType::Int, true),
                 col("name", DataType::Varchar(30), true),
             ],
-        );
+        )
+        .unwrap();
         save_catalog(&catalog).unwrap();
     }
 

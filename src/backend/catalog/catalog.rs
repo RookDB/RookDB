@@ -185,119 +185,48 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
     true
 }
 
-// Creates a new table, updates the catalog, and initializes its data file.
+/// Creates a new table: records it in the catalog, saves the catalog and
+/// creates its empty heap file.
 #[allow(deprecated)]
-pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, columns: Vec<Column>) {
-    // Step 0: Validate names (path-safety: reject separators, '..', NUL, …)
-    if let Err(e) = crate::backend::name_validation::validate_table_name(table_name) {
-        log::info!("{}", e);
-        println!("{}", e);
-        return;
-    }
-    if let Err(e) = crate::backend::name_validation::validate_database_name(db_name) {
-        log::info!("{}", e);
-        println!("{}", e);
-        return;
-    }
+pub fn create_table(
+    catalog: &mut Catalog,
+    db_name: &str,
+    table_name: &str,
+    columns: Vec<Column>,
+) -> crate::backend::error::RookResult<()> {
+    use crate::backend::error::RookError;
+    // Path-safety: reject separators, '..', NUL, …
+    crate::backend::name_validation::validate_table_name(table_name)?;
+    crate::backend::name_validation::validate_database_name(db_name)?;
 
-    // Step 1: Validate database existence
-    if !catalog.databases.contains_key(db_name) {
-        log::info!(
-            "Database '{}' does not exist. Cannot create table '{}'.",
-            db_name,
-            table_name
-        );
-
-        println!(
-            "Database '{}' does not exist. Cannot create table '{}'.",
-            db_name, table_name
-        );
-
-        return;
-    }
-
-    let database = catalog.databases.get_mut(db_name).unwrap();
-
-    // Prevent overwriting existing table
+    let Some(database) = catalog.databases.get_mut(db_name) else {
+        return Err(RookError::NotFound {
+            entity: "Database",
+            name: db_name.to_string(),
+        });
+    };
     if database.tables.contains_key(table_name) {
-        log::info!(
-            "Table '{}' already exists in database '{}'. Skipping creation.",
-            table_name,
-            db_name
-        );
-
-        println!(
-            "Table '{}' already exists in database '{}'. Skipping creation.",
+        return Err(RookError::AlreadyExists(format!(
+            "Table '{}' already exists in database '{}'",
             table_name, db_name
-        );
-
-        return;
+        )));
     }
+    database
+        .tables
+        .insert(table_name.to_string(), Table { columns });
+    save_catalog(catalog)?;
 
-    // Insert table metadata into catalog
-    let new_table = Table { columns };
-    database.tables.insert(table_name.to_string(), new_table);
-
-    // Persist catalog changes
-    if let Err(e) = save_catalog(catalog) {
-        log::warn!(
-            "Warning: Failed to save catalog immediately: {}. Table metadata may not be persisted.",
-            e
-        );
-
-        println!(
-            "Warning: Failed to save catalog immediately: {}. Table metadata may not be persisted.",
-            e
-        );
-
-        log::warn!("Continuing with table creation. Please save manually if needed.");
-
-        println!("Continuing with table creation. Please save manually if needed.");
-    }
-
-    // Construct table file path
-    let table_file_path = catalog.engine().paths().heap(db_name, table_name);
-
-    // Create and initialize table file
-    let table_path = Path::new(&table_file_path);
-
+    let table_path = catalog.engine().paths().heap(db_name, table_name);
     if !table_path.exists() {
-        match HeapManager::create(table_path.to_path_buf()) {
-            Ok(_) => {
-                log::info!(
-                    "Table data file created at '{}'.",
-                    table_file_path.display()
-                );
-            }
-
-            Err(e) => {
-                log::error!(
-                    "Failed to create table data file '{}': {}",
-                    table_file_path.display(),
-                    e
-                );
-
-                println!(
-                    "Failed to create table data file '{}': {}",
-                    table_file_path.display(),
-                    e
-                );
-
-                return;
-            }
-        }
-    } else {
-        log::info!(
-            "Table data file '{}' already exists.",
-            table_file_path.display()
-        );
+        HeapManager::create(table_path.clone()).map_err(|e| {
+            e.with_context(format!(
+                "Failed to create table data file '{}'",
+                table_path.display()
+            ))
+        })?;
     }
-
-    log::info!(
-        "Table '{}' created successfully in database '{}' and saved to catalog.",
-        table_name,
-        db_name
-    );
+    log::info!("Table '{}' created in database '{}'.", table_name, db_name);
+    Ok(())
 }
 
 /// Lists all tables in the specified database.

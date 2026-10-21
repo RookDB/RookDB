@@ -44,7 +44,8 @@ fn not_null_rejects_missing_value() {
         "nn",
         "t",
         vec![id_col, column("note", DataType::Varchar(10))],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
@@ -88,7 +89,8 @@ fn unique_with_index_rejects_duplicates() {
         "uq",
         "users",
         vec![column("id", DataType::Int), email],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     // NOTE: like the CLI shell, we keep one in-memory catalog for the whole
@@ -141,7 +143,8 @@ fn unique_without_index_falls_back_to_heap_scan() {
         "uq2",
         "people",
         vec![column("id", DataType::Int), name],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     insert_single_tuple(&catalog, "uq2", "people", &["1", "Zed"]).unwrap();
 
@@ -174,7 +177,8 @@ fn check_expression_is_enforced() {
         "ck",
         "items",
         vec![column("price", DataType::Int)],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     // Register CHECK (price > 0) the way the DDL handler does.
@@ -226,7 +230,8 @@ fn setup_fk(db: &str, action: &str) -> Catalog {
         db,
         "customers",
         vec![cust_id, column("cname", DataType::Varchar(30))],
-    );
+    )
+    .unwrap();
     create_table(
         &mut catalog,
         db,
@@ -235,7 +240,8 @@ fn setup_fk(db: &str, action: &str) -> Catalog {
             column("oid", DataType::Int),
             column("customer_id", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let _ = insert_constraint_metadata(
@@ -423,7 +429,7 @@ fn fk_restrict_protects_a_key_spelled_null() {
     let mut catalog = load_catalog();
     let mut code = column("code", DataType::Varchar(10));
     code.constraints.unique = true;
-    create_table(&mut catalog, "fkn", "parent", vec![code]);
+    create_table(&mut catalog, "fkn", "parent", vec![code]).unwrap();
     create_table(
         &mut catalog,
         "fkn",
@@ -432,7 +438,8 @@ fn fk_restrict_protects_a_key_spelled_null() {
             column("id", DataType::Int),
             column("code", DataType::Varchar(10)),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let _ = insert_constraint_metadata(
         &common::engine(),

@@ -34,7 +34,7 @@ fn setup(db: &str, check: &str, extra_cols: Vec<Column>) -> Catalog {
     ];
     cols.extend(extra_cols);
     cols[2].constraints.check = Some(check.to_string());
-    create_table(&mut catalog, db, "staff", cols);
+    create_table(&mut catalog, db, "staff", cols).unwrap();
     save_catalog(&catalog).unwrap();
     load_catalog()
 }

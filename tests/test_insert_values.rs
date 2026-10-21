@@ -38,7 +38,8 @@ fn setup(db: &str) -> Catalog {
             col("name", DataType::Varchar(30)),
             col("salary", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     load_catalog()
 }
@@ -145,7 +146,8 @@ fn column_subset_and_defaults_fill_missing_columns() {
             col("name", DataType::Varchar(30)),
             col("salary", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
@@ -199,7 +201,8 @@ fn constraint_violation_aborts_statement() {
             },
             col("salary", DataType::Int),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 

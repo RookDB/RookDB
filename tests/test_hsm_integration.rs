@@ -73,7 +73,7 @@ fn test_multiple_columns_insertion() {
     ];
 
     // Create table
-    create_table(&mut catalog, db_name, table_name, columns);
+    create_table(&mut catalog, db_name, table_name, columns).unwrap();
 
     save_catalog(&catalog).unwrap();
 
@@ -137,7 +137,7 @@ fn test_multiple_tables_isolation() {
         },
     ];
 
-    create_table(&mut catalog, db_name, table1, cols1);
+    create_table(&mut catalog, db_name, table1, cols1).unwrap();
 
     // Table 2
     let table2 = "orders";
@@ -163,7 +163,7 @@ fn test_multiple_tables_isolation() {
         },
     ];
 
-    create_table(&mut catalog, db_name, table2, cols2);
+    create_table(&mut catalog, db_name, table2, cols2).unwrap();
 
     save_catalog(&catalog).unwrap();
 

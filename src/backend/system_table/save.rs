@@ -12,8 +12,10 @@ use super::*;
 /// swapped in by two renames; [`recover_system_dir`] settles a crash between
 /// them. A crash at any point leaves the old catalog or the new one.
 pub fn save_catalog_to_system(catalog: &Catalog) -> RookResult<()> {
-    // Recovery relies on `system` existing whenever a save starts.
-    ensure_system_tables(catalog.engine())?;
+    // Recovery relies on `system` existing whenever a save starts. A save
+    // inside a catalog change must not run recovery, which would roll the
+    // change back.
+    create_system_table_files(catalog.engine())?;
 
     // 1. Load existing FOREIGN KEY constraints from sys_constraints before deleting it.
     //
@@ -117,8 +119,10 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> RookResult<()> {
     let system = paths.system_dir();
     let staging = paths.system_staging_dir();
     let old = paths.system_old_dir();
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging)?;
+    for leftover in [&staging, &old] {
+        if leftover.exists() {
+            std::fs::remove_dir_all(leftover)?;
+        }
     }
     std::fs::create_dir_all(&staging)?;
     populate_system_tables(catalog, fk_rows, saved_indexes, &staging)?;

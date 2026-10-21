@@ -54,7 +54,8 @@ fn setup(db: &str) -> Catalog {
             col("id", DataType::Int),
             col("label", DataType::Varchar(60)),
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
     load_catalog()
 }

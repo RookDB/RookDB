@@ -47,7 +47,8 @@ fn setup(db: &str) -> Catalog {
                 constraints: Default::default(),
             },
         ],
-    );
+    )
+    .unwrap();
     save_catalog(&catalog).unwrap();
 
     let catalog = load_catalog();
