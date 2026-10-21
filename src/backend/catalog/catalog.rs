@@ -33,6 +33,8 @@ pub fn init_catalog_in(
         )));
     }
 
+    engine.lock_data_dir()?;
+
     let base_dir = engine.paths().base_dir();
     fs::create_dir_all(&base_dir).map_err(|e| {
         crate::backend::error::RookError::Io(e).with_context(format!(
@@ -62,9 +64,15 @@ pub fn load_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) 
 }
 
 /// [`load_catalog_in`] that returns an unreadable catalog as an error.
+///
+/// Takes the data directory lock ([`Engine::lock_data_dir`]), which the
+/// catalog's engine then holds for as long as the catalog lives.
+///
+/// [`Engine::lock_data_dir`]: crate::backend::engine::Engine::lock_data_dir
 pub fn try_load_catalog_in(
     engine: &std::sync::Arc<crate::backend::engine::Engine>,
 ) -> crate::backend::error::RookResult<Catalog> {
+    engine.lock_data_dir()?;
     debug_print_catalog("Loading catalog from system tables.");
     crate::backend::system_table::load_catalog_from_system(engine)
 }

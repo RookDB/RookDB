@@ -13,6 +13,7 @@
 //! [`Engine::open`] returns the one engine of a directory: opening the same
 //! directory twice yields the same instance, as one process owns a data
 //! directory, so every catalog loaded from it sees the same caches.
+//! [`Engine::lock_data_dir`] enforces that ownership across processes.
 //!
 //! A few things stay process-wide on purpose:
 //!
@@ -76,6 +77,9 @@ pub struct Engine {
     /// Counts the times table metadata was invalidated, so what a statement
     /// resolved once can tell it is out of date.
     metadata_generation: std::sync::atomic::AtomicU64,
+    /// The locked `rookdb.lock`, once [`Engine::lock_data_dir`] has run.
+    /// Closing it when the engine drops releases the lock.
+    dir_lock: Mutex<Option<std::fs::File>>,
 }
 
 impl Engine {
@@ -114,6 +118,7 @@ impl Engine {
             metadata_generation: Default::default(),
             visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
+            dir_lock: Mutex::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
                 crate::backend::planner::plan_cache::DEFAULT_CACHE_CAPACITY,
             )),
@@ -121,6 +126,39 @@ impl Engine {
         open.retain(|_, e| e.strong_count() > 0);
         open.insert(root, Arc::downgrade(&engine));
         engine
+    }
+
+    /// Take the data directory for this process, failing if another process
+    /// has it: two processes on one directory would each cache pages the
+    /// other overwrites. Held until the engine drops; calling it again is a
+    /// no-op.
+    pub fn lock_data_dir(&self) -> crate::backend::error::RookResult<()> {
+        let mut held = lock(&self.dir_lock);
+        if held.is_some() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(self.paths.data_dir())?;
+        let path = self.paths.lock_file();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(crate::backend::error::RookError::io(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "The data directory {} is in use by another RookDB process",
+                        self.paths.root().display()
+                    ),
+                ));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+        *held = Some(file);
+        Ok(())
     }
 
     /// The engine of the working directory.

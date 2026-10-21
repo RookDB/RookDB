@@ -46,6 +46,11 @@ impl Paths {
         self.data_dir().join("base")
     }
 
+    /// The file a process holds locked while it has the directory open.
+    pub fn lock_file(&self) -> PathBuf {
+        self.data_dir().join("rookdb.lock")
+    }
+
     /// Directory holding the system tables.
     pub fn system_dir(&self) -> PathBuf {
         self.data_dir().join("system")
