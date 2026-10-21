@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rook_ast::{ConstantValue, ExprNode, FunctionArg, PredicateNode, SelectExpr, SelectPlan};
+use rook_ast::{
+    ConstantValue, ExprNode, FunctionArg, OuterRef, PredicateNode, SelectExpr, SelectPlan,
+};
 
 use super::super::engine::execute_shared;
 use super::super::tuple::Tuple;
@@ -112,18 +114,9 @@ impl CorrelatedSubquery {
 
     fn bind_exprs(&self, values: &[ExprNode]) -> SelectPlan {
         let mut select = self.template.clone();
-        let aliases: Vec<String> = select
-            .projections
-            .iter()
-            .filter_map(|p| match p {
-                SelectExpr::ExprWithAlias { alias, .. } => Some(alias.to_lowercase()),
-                _ => None,
-            })
-            .collect();
         let mut binder = Binder {
             bindings: &self.bindings,
             values,
-            aliases: &aliases,
             depth: 0,
         };
         rewrite_select(&mut select, &mut binder);
@@ -156,16 +149,47 @@ impl CorrelatedSubquery {
     }
 }
 
-/// `(qualifier, name)`, lower-cased, of a column reference node.
-pub fn ref_key(node: &ExprNode) -> Option<(Option<String>, String)> {
-    match node {
-        ExprNode::Column(n) => Some((None, n.to_ascii_lowercase())),
-        ExprNode::Compound(parts) if parts.len() >= 2 => Some((
-            Some(parts[parts.len() - 2].to_ascii_lowercase()),
-            parts[parts.len() - 1].to_ascii_lowercase(),
-        )),
-        _ => None,
+/// The key of an outer column: lower-cased qualifier and name.
+fn outer_key(r: &OuterRef) -> (Option<String>, String) {
+    (
+        r.table.as_ref().map(|t| t.to_ascii_lowercase()),
+        r.column.to_ascii_lowercase(),
+    )
+}
+
+/// The columns of the query directly around `select` that it reads (in
+/// its own clauses or in subqueries nested in them), as lower-cased
+/// (qualifier, name) in first-use order.
+pub fn outer_columns(select: &SelectPlan) -> Vec<(Option<String>, String)> {
+    struct Reach {
+        depth: usize,
+        refs: Vec<(Option<String>, String)>,
     }
+    impl Visitor for Reach {
+        fn expr(&mut self, node: &ExprNode) -> Option<ExprNode> {
+            if let ExprNode::OuterColumn(r) = node
+                && r.levels == self.depth + 1
+            {
+                let key = outer_key(r);
+                if !self.refs.contains(&key) {
+                    self.refs.push(key);
+                }
+            }
+            None
+        }
+
+        fn subquery(&mut self, select: &mut SelectPlan) {
+            self.depth += 1;
+            rewrite_select(select, self);
+            self.depth -= 1;
+        }
+    }
+    let mut reach = Reach {
+        depth: 0,
+        refs: Vec::new(),
+    };
+    rewrite_select(&mut select.clone(), &mut reach);
+    reach.refs
 }
 
 /// A value as an expression that keeps its type.
@@ -197,36 +221,19 @@ fn value_to_expr(value: Option<&DataValue>) -> ExprNode {
 
 // ── AST walk ──────────────────────────────────────────────────────────────────
 
-/// Name an outer reference takes once it has been moved out of the scope that
-/// resolves it: a nested subquery's reference to a column two or more levels
-/// up is rewritten to `Compound([OUTER_MARK, "qualifier.name"])` when the
-/// correlated template is built, so binding can find it at any depth without
-/// redoing scope resolution.
-pub const OUTER_MARK: &str = "__rookdb_outer__";
-
-/// The placeholder node for an outer reference.
-pub fn outer_placeholder(qualifier: Option<&str>, name: &str) -> ExprNode {
-    ExprNode::Compound(vec![
-        OUTER_MARK.to_string(),
-        format!("{}.{}", qualifier.unwrap_or(""), name),
-    ])
-}
-
 /// Receives the expressions (and nested subqueries) the AST walk visits.
 pub trait Visitor {
-    /// `Some(new)` swaps the node and stops descending into it;
-    /// `in_having` is true for HAVING and ORDER BY, where output aliases are
-    /// also in scope.
-    fn expr(&mut self, node: &ExprNode, in_having: bool) -> Option<ExprNode>;
+    /// `Some(new)` swaps the node and stops descending into it.
+    fn expr(&mut self, node: &ExprNode) -> Option<ExprNode>;
 
     /// A subquery nested in an expression. Not entered unless overridden: a
     /// nested subquery resolves names in its own scope first.
     fn subquery(&mut self, _select: &mut SelectPlan) {}
 }
 
-impl<F: FnMut(&ExprNode, bool) -> Option<ExprNode>> Visitor for F {
-    fn expr(&mut self, node: &ExprNode, in_having: bool) -> Option<ExprNode> {
-        self(node, in_having)
+impl<F: FnMut(&ExprNode) -> Option<ExprNode>> Visitor for F {
+    fn expr(&mut self, node: &ExprNode) -> Option<ExprNode> {
+        self(node)
     }
 }
 
@@ -237,87 +244,90 @@ pub fn rewrite_select<V: Visitor + ?Sized>(select: &mut SelectPlan, f: &mut V) {
     for p in &mut select.projections {
         match p {
             SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } => {
-                rewrite_expr(e, false, f)
+                rewrite_expr(e, f)
             }
             SelectExpr::Wildcard | SelectExpr::QualifiedWildcard(_) => {}
         }
     }
     for j in &mut select.joins {
         if let Some(c) = &mut j.condition {
-            rewrite_pred(c, false, f);
+            rewrite_pred(c, f);
         }
     }
     if let Some(s) = &mut select.selection {
-        rewrite_pred(s, false, f);
+        rewrite_pred(s, f);
     }
     for g in &mut select.group_by {
-        rewrite_expr(g, false, f);
+        rewrite_expr(g, f);
     }
     if let Some(h) = &mut select.having {
-        rewrite_pred(h, true, f);
+        rewrite_pred(h, f);
     }
     for o in &mut select.order_by {
-        rewrite_expr(&mut o.expr, true, f);
+        rewrite_expr(&mut o.expr, f);
     }
 }
 
-pub fn rewrite_pred<V: Visitor + ?Sized>(node: &mut PredicateNode, having: bool, f: &mut V) {
+pub fn rewrite_pred<V: Visitor + ?Sized>(node: &mut PredicateNode, f: &mut V) {
     match node {
         PredicateNode::BinaryOp { left, right, .. } => {
-            rewrite_pred(left, having, f);
-            rewrite_pred(right, having, f);
+            rewrite_pred(left, f);
+            rewrite_pred(right, f);
         }
-        PredicateNode::Not(p) => rewrite_pred(p, having, f),
+        PredicateNode::Not(p) => rewrite_pred(p, f),
         PredicateNode::Compare { left, right, .. }
         | PredicateNode::IsDistinctFrom { left, right } => {
-            rewrite_expr(left, having, f);
-            rewrite_expr(right, having, f);
+            rewrite_expr(left, f);
+            rewrite_expr(right, f);
         }
         PredicateNode::IsNull(e)
         | PredicateNode::IsNotNull(e)
         | PredicateNode::Like { expr: e, .. }
-        | PredicateNode::IsBoolean { expr: e, .. } => rewrite_expr(e, having, f),
+        | PredicateNode::IsBoolean { expr: e, .. } => rewrite_expr(e, f),
         PredicateNode::InSubquery { expr, subquery, .. } => {
-            rewrite_expr(expr, having, f);
+            rewrite_expr(expr, f);
             f.subquery(&mut subquery.select);
         }
         PredicateNode::Between { expr, low, high } => {
-            rewrite_expr(expr, having, f);
-            rewrite_expr(low, having, f);
-            rewrite_expr(high, having, f);
+            rewrite_expr(expr, f);
+            rewrite_expr(low, f);
+            rewrite_expr(high, f);
         }
         PredicateNode::InList { expr, list } => {
-            rewrite_expr(expr, having, f);
+            rewrite_expr(expr, f);
             for e in list {
-                rewrite_expr(e, having, f);
+                rewrite_expr(e, f);
             }
         }
         PredicateNode::Exists(info) => f.subquery(&mut info.select),
     }
 }
 
-pub fn rewrite_expr<V: Visitor + ?Sized>(node: &mut ExprNode, having: bool, f: &mut V) {
-    if let Some(new) = f.expr(node, having) {
+pub fn rewrite_expr<V: Visitor + ?Sized>(node: &mut ExprNode, f: &mut V) {
+    if let Some(new) = f.expr(node) {
         *node = new;
         return;
     }
     match node {
-        ExprNode::Column(_) | ExprNode::Compound(_) | ExprNode::Constant(_) => {}
+        ExprNode::Column(_)
+        | ExprNode::Compound(_)
+        | ExprNode::OuterColumn(_)
+        | ExprNode::Constant(_) => {}
         ExprNode::ScalarSubquery(info) => f.subquery(&mut info.select),
         ExprNode::Binary { left, right, .. }
         | ExprNode::Compare { left, right, .. }
         | ExprNode::Logical { left, right, .. } => {
-            rewrite_expr(left, having, f);
-            rewrite_expr(right, having, f);
+            rewrite_expr(left, f);
+            rewrite_expr(right, f);
         }
         ExprNode::Cast { expr, .. }
         | ExprNode::Not(expr)
         | ExprNode::IsNull(expr)
-        | ExprNode::IsNotNull(expr) => rewrite_expr(expr, having, f),
+        | ExprNode::IsNotNull(expr) => rewrite_expr(expr, f),
         ExprNode::Function { args, .. } => {
             for a in args {
                 if let FunctionArg::Expr(e) = a {
-                    rewrite_expr(e, having, f);
+                    rewrite_expr(e, f);
                 }
             }
         }
@@ -326,46 +336,38 @@ pub fn rewrite_expr<V: Visitor + ?Sized>(node: &mut ExprNode, having: bool, f: &
             else_result,
         } => {
             for (w, t) in when_then_pairs {
-                rewrite_expr(w, having, f);
-                rewrite_expr(t, having, f);
+                rewrite_expr(w, f);
+                rewrite_expr(t, f);
             }
             if let Some(e) = else_result {
-                rewrite_expr(e, having, f);
+                rewrite_expr(e, f);
             }
         }
-        ExprNode::Predicate(p) => rewrite_pred(p, having, f),
+        ExprNode::Predicate(p) => rewrite_pred(p, f),
     }
 }
 
-/// Substitutes bound values for a template's outer references: named
-/// references at the subquery's own level, and placeholders at any depth.
+/// Substitutes bound values for a template's outer columns: those that
+/// reach the query directly around the template, at any depth.
 struct Binder<'a> {
     bindings: &'a [OuterBinding],
     values: &'a [ExprNode],
-    /// Lower-cased output aliases of the subquery's own SELECT list: in
-    /// HAVING and ORDER BY a bare name that is one of them is the alias, not
-    /// an outer column.
-    aliases: &'a [String],
     depth: usize,
 }
 
 impl Visitor for Binder<'_> {
-    fn expr(&mut self, node: &ExprNode, in_having: bool) -> Option<ExprNode> {
-        let key = ref_key(node)?;
-        if in_having && self.depth == 0 && key.0.is_none() && self.aliases.contains(&key.1) {
-            return None;
-        }
-        let i = if key.0.as_deref() == Some(OUTER_MARK) {
-            self.bindings.iter().position(|b| {
-                format!("{}.{}", b.qualifier.as_deref().unwrap_or(""), b.name) == key.1
-            })?
-        } else if self.depth == 0 {
-            self.bindings
-                .iter()
-                .position(|b| b.qualifier == key.0 && b.name == key.1)?
-        } else {
+    fn expr(&mut self, node: &ExprNode) -> Option<ExprNode> {
+        let ExprNode::OuterColumn(r) = node else {
             return None;
         };
+        if r.levels != self.depth + 1 {
+            return None;
+        }
+        let key = outer_key(r);
+        let i = self
+            .bindings
+            .iter()
+            .position(|b| b.qualifier == key.0 && b.name == key.1)?;
         Some(self.values[i].clone())
     }
 

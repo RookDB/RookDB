@@ -104,6 +104,11 @@ pub fn expr_with(
                 column: column.clone(),
             })
         }
+        // Bound per outer row before the subquery holding it is planned.
+        rook_ast::ExprNode::OuterColumn(r) => Err(RookError::Internal(format!(
+            "outer column '{}' reached the executor unbound",
+            r.column
+        ))),
         rook_ast::ExprNode::Constant(cv) => constant_from_ast(cv).map(|c| match c {
             Some(dv) => Expr::Constant(dv),
             None => Expr::Null,

@@ -787,7 +787,7 @@ fn test_catalog_columns_to_schema() {
             constraints: Constraints::default(),
         },
     ];
-    let schema = crate::planner::semantic::catalog_columns_to_schema(&columns);
+    let schema = crate::planner::helpers::catalog_columns_to_schema(&columns);
     assert_eq!(schema.columns.len(), 2);
     assert_eq!(schema.columns[0].name, "id");
     assert_eq!(schema.columns[0].data_type, "INT");

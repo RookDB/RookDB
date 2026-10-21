@@ -14,7 +14,7 @@ use std::collections::HashSet;
 pub fn fold_expr(expr: &ExprNode) -> ExprNode {
     match expr {
         ExprNode::Column(_) | ExprNode::Constant(_) => expr.clone(),
-        ExprNode::Compound(_) => expr.clone(),
+        ExprNode::Compound(_) | ExprNode::OuterColumn(_) => expr.clone(),
         ExprNode::Cast {
             expr: inner,
             data_type,
@@ -326,7 +326,7 @@ fn extract_expr_columns_into(expr: &ExprNode, cols: &mut HashSet<String>) {
             extract_expr_columns_into(right, cols);
         }
         ExprNode::Cast { expr: inner, .. } => extract_expr_columns_into(inner, cols),
-        ExprNode::Constant(_) => {}
+        ExprNode::Constant(_) | ExprNode::OuterColumn(_) => {}
         ExprNode::ScalarSubquery(_) => {}
         ExprNode::Function { args, .. } => {
             for arg in args {
@@ -465,7 +465,10 @@ pub fn contains_subquery(pred: &PredicateNode) -> bool {
 pub fn expr_contains_subquery(expr: &ExprNode) -> bool {
     match expr {
         ExprNode::ScalarSubquery(_) => true,
-        ExprNode::Column(_) | ExprNode::Compound(_) | ExprNode::Constant(_) => false,
+        ExprNode::Column(_)
+        | ExprNode::Compound(_)
+        | ExprNode::OuterColumn(_)
+        | ExprNode::Constant(_) => false,
         ExprNode::Binary { left, right, .. }
         | ExprNode::Compare { left, right, .. }
         | ExprNode::Logical { left, right, .. } => {
@@ -557,7 +560,7 @@ fn extract_column_names_from_expr(expr: &ExprNode, names: &mut Vec<(Option<Strin
             extract_column_names_from_expr(right, names);
         }
         ExprNode::Cast { expr: inner, .. } => extract_column_names_from_expr(inner, names),
-        ExprNode::Constant(_) => {}
+        ExprNode::Constant(_) | ExprNode::OuterColumn(_) => {}
         ExprNode::ScalarSubquery(_) => {}
         ExprNode::Function { args, .. } => {
             for arg in args {

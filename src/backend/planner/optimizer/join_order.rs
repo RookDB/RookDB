@@ -148,7 +148,7 @@ impl OrderGuard {
                     self.unqualified.insert(name.to_ascii_lowercase());
                 }
             }
-            ExprNode::Constant(_) => {}
+            ExprNode::Constant(_) | ExprNode::OuterColumn(_) => {}
             ExprNode::ScalarSubquery(_) => self.strict = true,
             ExprNode::Binary { left, right, .. }
             | ExprNode::Compare { left, right, .. }

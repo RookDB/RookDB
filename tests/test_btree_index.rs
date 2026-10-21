@@ -170,7 +170,7 @@ fn plain_scan_stays_sequential_with_an_index() {
         LogicalPlan::TableScan(LogicalTableScan {
             table: "staff".to_string(),
             alias: None,
-            schema: storage_manager::planner::semantic::catalog_columns_to_schema(cols),
+            schema: storage_manager::planner::helpers::catalog_columns_to_schema(cols),
             system_table_name: None,
         })
     };

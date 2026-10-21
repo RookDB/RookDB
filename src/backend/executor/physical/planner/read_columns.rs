@@ -209,7 +209,7 @@ fn walk_expr(expr: &ExprNode, names: &mut HashSet<String>) -> Option<()> {
     match expr {
         ExprNode::Column(name) => add(name, names),
         ExprNode::Compound(parts) => add(parts.last()?, names),
-        ExprNode::Constant(_) => Some(()),
+        ExprNode::Constant(_) | ExprNode::OuterColumn(_) => Some(()),
         ExprNode::Binary { left, right, .. }
         | ExprNode::Compare { left, right, .. }
         | ExprNode::Logical { left, right, .. } => {

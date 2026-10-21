@@ -2,16 +2,15 @@
 //!
 //! The planner performs two main passes:
 //!
-//! 1. **Semantic analysis**: resolve column names, expand `SELECT *`, validate
-//!    table/column existence, apply type coercions.
+//! 1. **Binding** (`binder`): resolve every column name, expand `SELECT *`,
+//!    validate table/column existence.
 //! 2. **Plan building**: construct the logical operator tree matching the query's
 //!    intent (filter, project, sort, aggregate, join, etc.).
 
-pub mod alias;
+pub mod binder;
 pub mod helpers;
 pub mod optimizer;
 pub mod plan_cache;
-pub mod semantic;
 #[cfg(test)]
 pub mod tests;
 
@@ -345,25 +344,23 @@ fn plan_select_with_ctes(
         }
     }
 
+    // Resolve every name once (see `binder`): later stages read columns
+    // as the qualifier their rows carry and the stored column name.
+    let visible: binder::CteColumns = cte_registry
+        .iter()
+        .map(|(name, (_, schema))| {
+            let columns = schema.columns.iter().map(|c| c.name.clone()).collect();
+            (name.clone(), columns)
+        })
+        .collect();
+    let select = &binder::bind_select(select, catalog, db_name, &visible)?;
+
     for cte_def in &select.ctes {
         let inner_plan =
             plan_select_with_ctes(&cte_def.query, catalog, db_name, Some(&cte_registry))?;
         let schema = derive_schema(&inner_plan);
         cte_registry.insert(cte_def.name.to_ascii_lowercase(), (inner_plan, schema));
     }
-
-    // Resolve table aliases (e.g. `employees AS e`) so that qualified
-    // identifiers like `e.name` carry the real table name downstream.
-    // Scan operators stamp tuple columns with real table names, and the
-    // runtime resolver matches on them — an unresolved alias would make
-    // every aliased JOIN reference fail.
-    //
-    // NOTE: this mutates only a clone; CTE bodies are planned recursively
-    // with their own scope and are not affected.
-    let mut select = select.clone();
-    let alias_map = alias::build_alias_map(&select, db);
-    alias::rewrite_select_aliases(&mut select, &alias_map);
-    let select = &select;
 
     // 1. Resolve table references and build the base scan
     let mut current_plan = if select.from.is_empty() {
@@ -418,37 +415,8 @@ fn plan_select_with_ctes(
             }
         }
 
+        // Positions and output aliases were resolved by the binder.
         let mut group_by = select.group_by.clone();
-        for gb_expr in &mut group_by {
-            if let ExprNode::Constant(ConstantValue::Int(pos)) = gb_expr {
-                let pos_usize = *pos as usize;
-                if *pos >= 1 && pos_usize <= select.projections.len() {
-                    match &select.projections[pos_usize - 1] {
-                        SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } => {
-                            *gb_expr = e.clone();
-                        }
-                        _ => {
-                            let expanded = expand_projections(&select.projections, &current_plan)?;
-                            if pos_usize <= expanded.len() {
-                                *gb_expr = expanded[pos_usize - 1].expr.clone();
-                            } else {
-                                return Err(RookError::InvalidQuery(format!(
-                                    "GROUP BY position {} is out of range (1..{})",
-                                    pos,
-                                    expanded.len()
-                                )));
-                            }
-                        }
-                    }
-                } else {
-                    return Err(RookError::InvalidQuery(format!(
-                        "GROUP BY position {} is out of range (1..{})",
-                        pos,
-                        select.projections.len()
-                    )));
-                }
-            }
-        }
 
         // A repeated key groups nothing further, but would give the aggregate
         // two output columns of one name (`GROUP BY b, b`, `GROUP BY 1, ABS(b)`).
@@ -518,17 +486,13 @@ fn plan_select_with_ctes(
                 _ => None,
             })
             .collect();
-        // Positions line up only when no wildcard expanded the list.
-        let exprs_align = select_exprs.len() == projections.len();
         for ob in &mut order_by {
-            if exprs_align
-                && !matches!(
-                    ob.expr,
-                    rook_ast::ExprNode::Column(_)
-                        | rook_ast::ExprNode::Compound(_)
-                        | rook_ast::ExprNode::Constant(_)
-                )
-                && let Some(idx) = select_exprs.iter().position(|e| **e == ob.expr)
+            if !matches!(
+                ob.expr,
+                rook_ast::ExprNode::Column(_)
+                    | rook_ast::ExprNode::Compound(_)
+                    | rook_ast::ExprNode::Constant(_)
+            ) && let Some(idx) = select_exprs.iter().position(|e| **e == ob.expr)
             {
                 // `ORDER BY COUNT(*)` / `ORDER BY x + 1` repeating a SELECT item.
                 ob.expr = output_ref(idx);

@@ -27,6 +27,7 @@ mod filter_project;
 mod insert;
 mod joins;
 mod merged;
+mod relabel;
 mod scans;
 mod set_op;
 mod sort;
@@ -56,6 +57,7 @@ pub use filter_project::{
     ProjectionOperator, SingleRowOperator,
 };
 pub use merged::{MergedColumnsOperator, mark_merged};
+pub use relabel::RelabelOperator;
 pub use set_op::{SetOpOperator, SetOpType};
 pub use sort::SortOperator;
 pub(crate) use sort::compare_rows;

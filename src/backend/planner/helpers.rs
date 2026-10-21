@@ -60,7 +60,11 @@ pub fn resolve_from_item(
             .map_err(|e| {
                 RookError::Internal(format!("Failed to deserialise view '{}': {}", tref.name, e))
             })?;
-        return super::plan_select(&select_plan, catalog, db_name);
+        // The view's rows carry the name it is read by, as a table's do.
+        return Ok(LogicalPlan::Subquery(LogicalSubquery {
+            subquery: Box::new(super::plan_select(&select_plan, catalog, db_name)?),
+            alias: Some(tref.alias.clone().unwrap_or_else(|| tref.name.clone())),
+        }));
     }
     build_table_or_cte_scan(tref, db, cte_registry)
 }
@@ -93,15 +97,7 @@ pub fn build_table_or_cte_scan(
         }))
     } else if let Some(sys_name) = tref.name.strip_prefix("information_schema.") {
         let sys_lower = sys_name.to_ascii_lowercase();
-        let sys_table_name = match sys_lower.as_str() {
-            "schemata" => "databases",
-            "tables" => "tables",
-            "columns" => "columns",
-            "table_constraints" => "constraints",
-            "statistics" | "indexes" => "indexes",
-            "key_column_usage" => "columns",
-            other => other,
-        };
+        let sys_table_name = info_schema_table(&sys_lower);
         let column_schema = crate::backend::system_table::info_schema_column_schema(&sys_lower);
         Ok(LogicalPlan::TableScan(LogicalTableScan {
             table: sys_name.to_string(),
@@ -115,8 +111,7 @@ pub fn build_table_or_cte_scan(
             .tables
             .get(&resolved_name)
             .ok_or_else(|| not_found("Table", &resolved_name))?;
-        let column_schema =
-            crate::planner::semantic::catalog_columns_to_schema(&table_schema.columns);
+        let column_schema = catalog_columns_to_schema(&table_schema.columns);
         Ok(LogicalPlan::TableScan(LogicalTableScan {
             table: resolved_name,
             alias,
@@ -126,15 +121,39 @@ pub fn build_table_or_cte_scan(
     }
 }
 
+/// A catalog table's columns as a logical-plan schema.
+pub fn catalog_columns_to_schema(columns: &[crate::catalog::Column]) -> ColumnSchema {
+    ColumnSchema {
+        columns: columns
+            .iter()
+            .map(|col| ColumnInfo {
+                name: col.name.clone(),
+                data_type: col.data_type.to_string(),
+                nullable: col.nullable,
+            })
+            .collect(),
+    }
+}
+
+/// The system table an `information_schema` view (lower-cased) reads; its
+/// rows carry that table's name as their qualifier.
+pub fn info_schema_table(view: &str) -> &str {
+    match view {
+        "schemata" => "databases",
+        "table_constraints" => "constraints",
+        "statistics" | "indexes" => "indexes",
+        "key_column_usage" => "columns",
+        other => other,
+    }
+}
+
 // ── Projection Expansion ──────────────────────────────────────────────────────
 
-/// Expand SELECT items into named expressions, resolving `SELECT *`.
+/// The SELECT items (bound: `*` already expanded) as named expressions.
 pub fn expand_projections(
     projections: &[SelectExpr],
     current_plan: &LogicalPlan,
 ) -> RookResult<Vec<NamedExpr>> {
-    let qualified_schema = derive_qualified_schema(current_plan);
-
     // Above an Aggregate, a SELECT expression that repeats a GROUP BY
     // expression (`SELECT x + 1 ... GROUP BY x + 1`) reads that group key's
     // output column; its inputs no longer exist at this level.
@@ -169,43 +188,11 @@ pub fn expand_projections(
     let mut result = Vec::new();
     for item in projections {
         match item {
-            SelectExpr::Wildcard => {
-                for (expr, name) in star_items(current_plan) {
-                    result.push(NamedExpr { name, expr });
-                }
-            }
-            SelectExpr::QualifiedWildcard(prefix) => {
-                let mut matched = false;
-                for (table, col) in &qualified_schema {
-                    let is_match = match table {
-                        Some(tbl) => tbl.eq_ignore_ascii_case(prefix),
-                        None => col
-                            .name
-                            .split('.')
-                            .next()
-                            .map(|p| p.eq_ignore_ascii_case(prefix))
-                            .unwrap_or(false),
-                    };
-                    if is_match {
-                        matched = true;
-                        result.push(NamedExpr {
-                            name: col.name.clone(),
-                            expr: ExprNode::Compound(vec![prefix.clone(), col.name.clone()]),
-                        });
-                    }
-                }
-                if !matched {
-                    for (table, col) in &qualified_schema {
-                        let expr = match table {
-                            Some(tbl) => ExprNode::Compound(vec![tbl.clone(), col.name.clone()]),
-                            None => ExprNode::Column(col.name.clone()),
-                        };
-                        result.push(NamedExpr {
-                            name: col.name.clone(),
-                            expr,
-                        });
-                    }
-                }
+            // The binder expands `*` before planning.
+            SelectExpr::Wildcard | SelectExpr::QualifiedWildcard(_) => {
+                return Err(RookError::Internal(
+                    "SELECT * reached the planner unexpanded".to_string(),
+                ));
             }
             SelectExpr::UnnamedExpr(expr) => {
                 let name = expr_to_name(expr);
@@ -257,79 +244,6 @@ pub fn expand_projections(
         }
     }
     Ok(result)
-}
-
-/// The columns `SELECT *` shows, each as the expression that reads it.
-///
-/// A `USING` / `NATURAL` join shows each shared column once, first: the left
-/// copy, the right copy for a RIGHT join, or `COALESCE(left, right)` for a
-/// FULL join. The rest follow in table order.
-fn star_items(plan: &LogicalPlan) -> Vec<(ExprNode, String)> {
-    match plan {
-        LogicalPlan::Filter(f) => star_items(&f.child),
-        LogicalPlan::Sort(s) => star_items(&s.child),
-        LogicalPlan::Limit(l) => star_items(&l.child),
-        LogicalPlan::Distinct(d) => star_items(&d.child),
-        LogicalPlan::Join(j) => {
-            let left = star_items(&j.left);
-            let right = star_items(&j.right);
-            let has = |items: &[(ExprNode, String)], n: &str| {
-                items.iter().any(|(_, name)| name.eq_ignore_ascii_case(n))
-            };
-            let names: Vec<String> = match j.join_type {
-                JoinType::Natural => left
-                    .iter()
-                    .filter(|(_, n)| has(&right, n))
-                    .map(|(_, n)| n.clone())
-                    .collect(),
-                _ => j
-                    .using
-                    .iter()
-                    .filter(|n| has(&left, n) && has(&right, n))
-                    .cloned()
-                    .collect(),
-            };
-            let find = |items: &[(ExprNode, String)], n: &str| {
-                items
-                    .iter()
-                    .find(|(_, name)| name.eq_ignore_ascii_case(n))
-                    .map(|(e, _)| e.clone())
-            };
-            let mut out = Vec::new();
-            for n in &names {
-                let (Some(l), Some(r)) = (find(&left, n), find(&right, n)) else {
-                    continue;
-                };
-                let expr = match j.join_type {
-                    JoinType::Right => r,
-                    JoinType::Full => ExprNode::Function {
-                        name: "COALESCE".to_string(),
-                        args: vec![
-                            FunctionArg::Expr(Box::new(l)),
-                            FunctionArg::Expr(Box::new(r)),
-                        ],
-                        distinct: false,
-                    },
-                    _ => l,
-                };
-                out.push((expr, n.clone()));
-            }
-            let shared = |name: &str| names.iter().any(|n| n.eq_ignore_ascii_case(name));
-            out.extend(left.into_iter().filter(|(_, n)| !shared(n)));
-            out.extend(right.into_iter().filter(|(_, n)| !shared(n)));
-            out
-        }
-        other => derive_qualified_schema(other)
-            .into_iter()
-            .map(|(table, col)| {
-                let expr = match table {
-                    Some(tbl) => ExprNode::Compound(vec![tbl, col.name.clone()]),
-                    None => ExprNode::Column(col.name.clone()),
-                };
-                (expr, col.name)
-            })
-            .collect(),
-    }
 }
 
 // ── Schema Derivation ─────────────────────────────────────────────────────────
@@ -471,7 +385,10 @@ pub fn derive_qualified_schema(plan: &LogicalPlan) -> Vec<(Option<String>, Colum
             }
         }
         LogicalPlan::SetOp(s) => derive_qualified_schema(&s.left),
-        LogicalPlan::Subquery(sq) => derive_qualified_schema(&sq.subquery),
+        LogicalPlan::Subquery(sq) => derive_qualified_schema(&sq.subquery)
+            .into_iter()
+            .map(|(table, c)| (sq.alias.clone().or(table), c))
+            .collect(),
         LogicalPlan::Cte(c) => derive_qualified_schema(&c.outer),
         LogicalPlan::RecursiveCte(rc) => derive_qualified_schema(&rc.outer),
         LogicalPlan::CteScan(cs) => cs
@@ -491,6 +408,7 @@ pub fn expr_to_name(expr: &ExprNode) -> String {
     match expr {
         ExprNode::Column(name) => name.clone(),
         ExprNode::Compound(parts) => parts.last().cloned().unwrap_or_default(),
+        ExprNode::OuterColumn(r) => r.column.clone(),
         ExprNode::Constant(cv) => cv.to_string(),
         ExprNode::Binary { .. } => "expr".to_string(),
         ExprNode::Cast { data_type, .. } => format!("CAST({})", data_type),

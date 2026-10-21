@@ -155,6 +155,7 @@ pub fn ast_expr_to_output_name(expr: &rook_ast::ExprNode) -> String {
     match expr {
         rook_ast::ExprNode::Column(name) => name.clone(),
         rook_ast::ExprNode::Compound(parts) => parts.last().cloned().unwrap_or_default(),
+        rook_ast::ExprNode::OuterColumn(r) => r.column.clone(),
         rook_ast::ExprNode::Constant(cv) => cv.to_string(),
         rook_ast::ExprNode::Binary { .. } => "expr".to_string(),
         rook_ast::ExprNode::Cast { data_type, .. } => {
@@ -263,6 +264,7 @@ fn infer_type(
             let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
             column(table, name)?
         }
+        E::OuterColumn(_) => None,
         E::Constant(cv) => match cv {
             CV::Null => None,
             CV::Int(i) if i32::try_from(*i).is_ok() => Some(DataType::Int),

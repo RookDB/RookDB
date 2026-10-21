@@ -10,22 +10,14 @@ use std::rc::Rc;
 use super::super::engine::execute_shared;
 use super::super::expr::convert::{Subqueries, predicate_with};
 use super::super::expr::correlated::{
-    CorrelatedSubquery, OuterBinding, SubqueryUse, Visitor, outer_placeholder, ref_key,
-    rewrite_pred, rewrite_select,
+    CorrelatedSubquery, OuterBinding, SubqueryUse, outer_columns,
 };
 use super::super::expr::predicate::{InList, SubqueryKind};
 use super::super::expr::{ComparisonOp, Expr, Predicate, predicate_from_ast, resolve_column};
 
-/// An outer column a correlated subquery names: its qualifier, if written, and name.
+/// An outer column a correlated subquery reads: its qualifier and name.
 type OuterRef = (Option<String>, String);
 
-/// What a subquery's own FROM clause makes visible: the names a qualifier may
-/// use (alias, or table name) and the columns of its relations. A reference
-/// that matches neither belongs to the enclosing query (innermost scope wins).
-struct InnerScope {
-    qualifiers: Vec<String>,
-    columns: Vec<String>,
-}
 use super::super::operators::{
     CorrelatedLookupOperator, FilterOperator, IndexScanOperator, LimitOperator, PhysicalOperator,
     ProjectionOperator,
@@ -218,212 +210,17 @@ impl PhysicalPlanner {
     }
 }
 
-/// Finds a subquery's outer references (see `PhysicalPlanner::prepare_template`).
-struct Marker<'a> {
-    planner: &'a PhysicalPlanner,
-    /// Scope of the select being walked, with and without output aliases.
-    cur: InnerScope,
-    cur_having: InnerScope,
-    /// Scopes of the selects between the template root and the one walked,
-    /// the root included.
-    enclosing: Vec<InnerScope>,
-    refs: &'a mut Vec<OuterRef>,
-    /// Whether the walk is inside a nested subquery.
-    nested: bool,
-}
-
-impl Visitor for Marker<'_> {
-    fn expr(&mut self, node: &rook_ast::ExprNode, having: bool) -> Option<rook_ast::ExprNode> {
-        let scope = if having { &self.cur_having } else { &self.cur };
-        if !self.planner.expr_is_outer_ref(node, scope) {
-            return None;
-        }
-        let key = ref_key(node)?;
-        if self.nested {
-            // Resolved by an enclosing scope up to the template root?
-            if self
-                .enclosing
-                .iter()
-                .any(|s| !self.planner.expr_is_outer_ref(node, s))
-            {
-                return None;
-            }
-            let placeholder = outer_placeholder(key.0.as_deref(), &key.1);
-            if !self.refs.contains(&key) {
-                self.refs.push(key);
-            }
-            return Some(placeholder);
-        }
-        if !self.refs.contains(&key) {
-            self.refs.push(key);
-        }
-        None
-    }
-
-    fn subquery(&mut self, select: &mut rook_ast::SelectPlan) {
-        let scope = self.planner.inner_scope(select);
-        let having_scope = PhysicalPlanner::alias_scope(select, &scope);
-        let outer_cur = std::mem::replace(&mut self.cur, scope);
-        let outer_having = std::mem::replace(&mut self.cur_having, having_scope);
-        let was_nested = std::mem::replace(&mut self.nested, true);
-        self.enclosing.push(InnerScope {
-            qualifiers: outer_cur.qualifiers.clone(),
-            columns: outer_cur.columns.clone(),
-        });
-        rewrite_select(select, self);
-        self.enclosing.pop();
-        self.nested = was_nested;
-        self.cur_having = outer_having;
-        self.cur = outer_cur;
-    }
-}
-
 // ── Correlated subquery detection ─────────────────────────────────────────────
 
 impl PhysicalPlanner {
-    /// Whether a column reference names a column of the enclosing query.
-    ///
-    /// A qualified name is outer when its qualifier is not one of the
-    /// subquery's relations; an unqualified name is outer when no relation of
-    /// the subquery has such a column (innermost scope wins).
-    fn expr_is_outer_ref(&self, expr: &rook_ast::ExprNode, scope: &InnerScope) -> bool {
-        match expr {
-            rook_ast::ExprNode::Compound(parts) if parts.len() >= 2 => !scope
-                .qualifiers
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(&parts[parts.len() - 2])),
-            rook_ast::ExprNode::Column(name) => {
-                !scope.columns.iter().any(|c| c.eq_ignore_ascii_case(name))
-            }
-            _ => false,
-        }
-    }
-
-    /// The scope a clause sees where output aliases are also in scope
-    /// (HAVING, ORDER BY).
-    fn alias_scope(select: &rook_ast::SelectPlan, scope: &InnerScope) -> InnerScope {
-        let mut with_aliases = InnerScope {
-            qualifiers: scope.qualifiers.clone(),
-            columns: scope.columns.clone(),
-        };
-        for p in &select.projections {
-            if let rook_ast::SelectExpr::ExprWithAlias { alias, .. } = p {
-                with_aliases.columns.push(alias.clone());
-            }
-        }
-        with_aliases
-    }
-
-    /// The outer columns a subquery names, as lower-cased (qualifier, name),
-    /// in first-use order. Looks through the SELECT list, WHERE, JOIN ... ON,
-    /// GROUP BY, HAVING and ORDER BY (where output aliases are also in
-    /// scope), and into nested subqueries for references that neither the
-    /// nested subquery nor this one resolves.
+    /// The columns of the enclosing query a subquery reads, which the binder
+    /// marked as outer columns.
     fn outer_refs(&self, select: &rook_ast::SelectPlan) -> Vec<OuterRef> {
-        self.prepare_template(select).1
-    }
-
-    /// The template a correlated subquery is bound from, and its outer
-    /// references. A reference inside a nested subquery that no scope up to
-    /// and including `select` resolves reaches past `select` to the enclosing
-    /// query; it is rewritten to a placeholder so it can be bound wherever it
-    /// sits. References that `select` itself resolves are left for the nested
-    /// subquery's own planning.
-    fn prepare_template(
-        &self,
-        select: &rook_ast::SelectPlan,
-    ) -> (rook_ast::SelectPlan, Vec<OuterRef>) {
-        let scope = self.inner_scope(select);
-        let having_scope = Self::alias_scope(select, &scope);
-        let mut refs: Vec<OuterRef> = Vec::new();
-        let mut template = select.clone();
-        let mut marker = Marker {
-            planner: self,
-            cur: scope,
-            cur_having: having_scope,
-            enclosing: Vec::new(),
-            refs: &mut refs,
-            nested: false,
-        };
-        rewrite_select(&mut template, &mut marker);
-        (template, refs)
-    }
-
-    /// Whether `pred` names an outer column, given the subquery's `scope`.
-    fn pred_has_outer_ref(&self, pred: &rook_ast::PredicateNode, scope: &InnerScope) -> bool {
-        let mut found = false;
-        let mut probe = pred.clone();
-        rewrite_pred(
-            &mut probe,
-            false,
-            &mut |node: &rook_ast::ExprNode, _: bool| {
-                found |= self.expr_is_outer_ref(node, scope);
-                None
-            },
-        );
-        found
+        outer_columns(select)
     }
 
     pub(crate) fn is_subquery_correlated(&self, select: &rook_ast::SelectPlan) -> bool {
         !self.outer_refs(select).is_empty()
-    }
-
-    /// The scope a subquery's FROM clause (including JOINed relations) opens.
-    fn inner_scope(&self, select: &rook_ast::SelectPlan) -> InnerScope {
-        let mut qualifiers: Vec<String> = Vec::new();
-        let mut columns: Vec<String> = Vec::new();
-        let relations = select
-            .from
-            .iter()
-            .chain(select.joins.iter().map(|j| &j.relation));
-        for t in relations {
-            if let Some(ref alias) = t.alias {
-                qualifiers.push(alias.clone());
-            } else {
-                qualifiers.push(
-                    t.name
-                        .strip_prefix("__cte__:")
-                        .unwrap_or(&t.name)
-                        .to_string(),
-                );
-                qualifiers.push(t.name.clone());
-            }
-            // Columns come from the relation itself, never from its alias.
-            columns.extend(self.relation_column_names(select, t));
-        }
-        InnerScope {
-            qualifiers,
-            columns,
-        }
-    }
-
-    /// Column names of one FROM relation: a CTE's output or a table's schema.
-    fn relation_column_names(
-        &self,
-        select: &rook_ast::SelectPlan,
-        t: &rook_ast::TableRef,
-    ) -> Vec<String> {
-        let raw_name = t.name.strip_prefix("__cte__:").unwrap_or(&t.name);
-        if let Some(cte_def) = select
-            .ctes
-            .iter()
-            .find(|c| c.name.eq_ignore_ascii_case(raw_name))
-        {
-            return self.cte_output_columns(select, cte_def).unwrap_or_default();
-        }
-        self.resolve_table_schema(&t.name)
-            .map(|cols| cols.into_iter().map(|c| c.name).collect())
-            .unwrap_or_default()
-    }
-
-    /// Plan a CTE body and return its output column names.
-    fn cte_output_columns(
-        &self,
-        select: &rook_ast::SelectPlan,
-        cte_def: &rook_ast::CteDef,
-    ) -> RookResult<Vec<String>> {
-        let base = self.plan_cte_body(select, cte_def)?;
-        Ok(base.schema().iter().map(|c| c.name.clone()).collect())
     }
 
     /// Plan a CTE body into a physical operator.
@@ -517,6 +314,12 @@ struct SimpleCorrelation {
     outer_indices: Vec<usize>,
 }
 
+/// Whether `expr` reads a column of the enclosing query.
+fn reads_outer(expr: &rook_ast::ExprNode) -> bool {
+    matches!(expr, rook_ast::ExprNode::OuterColumn(_))
+        || expr.children().into_iter().any(reads_outer)
+}
+
 fn flatten_and<'a>(node: &'a rook_ast::PredicateNode, out: &mut Vec<&'a rook_ast::PredicateNode>) {
     match node {
         rook_ast::PredicateNode::BinaryOp {
@@ -591,35 +394,36 @@ impl PhysicalPlanner {
             return Ok(None);
         }
 
-        let scope = self.inner_scope(select);
         let mut conjuncts = Vec::new();
         flatten_and(selection, &mut conjuncts);
         // (inner column, outer reference, comparison read as inner <op> outer)
         let mut correlations: Vec<(String, OuterRef, rook_ast::ComparisonOp)> = Vec::new();
         let mut locals: Vec<&rook_ast::PredicateNode> = Vec::new();
         for c in conjuncts {
-            if !self.pred_has_outer_ref(c, &scope) {
+            if !c.exprs().into_iter().any(reads_outer) {
                 locals.push(c);
                 continue;
             }
             let rook_ast::PredicateNode::Compare { left, op, right } = c else {
                 return Ok(None);
             };
-            let side = |e: &rook_ast::ExprNode| match e {
-                rook_ast::ExprNode::Column(_) | rook_ast::ExprNode::Compound(_) => {
-                    ref_key(e).map(|k| (self.expr_is_outer_ref(e, &scope), k))
-                }
+            use rook_ast::ExprNode as E;
+            let inner = |e: &E| match e {
+                E::Column(name) => Some(name.clone()),
+                E::Compound(parts) => parts.last().cloned(),
                 _ => None,
             };
-            match (side(left), side(right)) {
-                (Some((false, (_, inner))), Some((true, outer))) => {
-                    correlations.push((inner, outer, *op))
-                }
-                (Some((true, outer)), Some((false, (_, inner)))) => {
-                    correlations.push((inner, outer, op.flipped()))
-                }
-                _ => return Ok(None),
-            }
+            let outer = |e: &E| match e {
+                E::OuterColumn(r) => Some((r.table.clone(), r.column.clone())),
+                _ => None,
+            };
+            correlations.push(
+                match (inner(left), outer(right), outer(left), inner(right)) {
+                    (Some(i), Some(o), _, _) => (i, o, *op),
+                    (_, _, Some(o), Some(i)) => (i, o, op.flipped()),
+                    _ => return Ok(None),
+                },
+            );
         }
         if correlations.is_empty() {
             return Ok(None);
@@ -721,7 +525,8 @@ impl PhysicalPlanner {
         outer_schema: &[ColumnInfo],
         usage: SubqueryUse,
     ) -> RookResult<(Rc<CorrelatedSubquery>, Vec<ColumnInfo>)> {
-        let (template, refs) = self.prepare_template(select);
+        let template = select.clone();
+        let refs = self.outer_refs(select);
         let mut bindings = Vec::new();
         for (qualifier, name) in refs {
             let index =

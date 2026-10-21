@@ -610,8 +610,10 @@ impl PhysicalPlanner {
 
         // If the subquery has an alias, it's a derived table in FROM clause.
         // Just return the inner plan directly — it acts as a scan of the subquery result.
-        if sq.alias.is_some() {
-            return Ok(inner);
+        if let Some(alias) = &sq.alias {
+            return Ok(Box::new(super::operators::RelabelOperator::new(
+                inner, alias,
+            )));
         }
 
         // No alias means this is likely a scalar subquery used in an expression.

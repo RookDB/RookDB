@@ -29,7 +29,7 @@ use rook_ast::{ExprNode, JoinType, PredicateNode};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::planner::helpers::derive_qualified_schema;
+use crate::planner::helpers::{derive_qualified_schema, derive_schema};
 use crate::statistics::TableStatistics;
 use crate::statistics::estimator::{Estimator, StatsSource};
 
@@ -370,29 +370,36 @@ impl Optimizer {
                 })
             }
             LogicalPlan::Project(p) => {
-                let passthrough_cols: HashSet<&str> = p
-                    .expressions
-                    .iter()
-                    .filter_map(|ne| match &ne.expr {
-                        ExprNode::Column(c) => Some(c.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                let pred_cols = extract_column_names(&pred);
-                if !contains_subquery(&pred)
-                    && pred_cols
-                        .iter()
-                        .all(|c| passthrough_cols.contains(c.as_str()))
-                {
-                    LogicalPlan::Project(LogicalProject {
+                let below = (!contains_subquery(&pred))
+                    .then(|| through_project(&pred, &p.expressions))
+                    .flatten();
+                match below {
+                    Some(below) => LogicalPlan::Project(LogicalProject {
                         expressions: p.expressions,
-                        child: Box::new(self.push_filter_down(pred, *p.child)),
-                    })
-                } else {
-                    LogicalPlan::Filter(LogicalFilter {
+                        child: Box::new(self.push_filter_down(below, *p.child)),
+                    }),
+                    None => LogicalPlan::Filter(LogicalFilter {
                         predicate: pred,
                         child: Box::new(LogicalPlan::Project(p)),
-                    })
+                    }),
+                }
+            }
+            LogicalPlan::Subquery(sq) => {
+                let below = match &sq.alias {
+                    Some(alias) if !contains_subquery(&pred) => {
+                        into_relation(&pred, alias, &derive_schema(&sq.subquery))
+                    }
+                    _ => None,
+                };
+                match below {
+                    Some(below) => LogicalPlan::Subquery(LogicalSubquery {
+                        subquery: Box::new(self.push_filter_down(below, *sq.subquery)),
+                        alias: sq.alias,
+                    }),
+                    None => LogicalPlan::Filter(LogicalFilter {
+                        predicate: pred,
+                        child: Box::new(LogicalPlan::Subquery(sq)),
+                    }),
                 }
             }
             LogicalPlan::Sort(s) => LogicalPlan::Sort(LogicalSort {
@@ -501,7 +508,6 @@ impl Optimizer {
             LogicalPlan::Limit(_)
             | LogicalPlan::Aggregate(_)
             | LogicalPlan::SetOp(_)
-            | LogicalPlan::Subquery(_)
             | LogicalPlan::Cte(_)
             | LogicalPlan::CteScan(_)
             | LogicalPlan::RecursiveCte(_)
@@ -1007,7 +1013,7 @@ fn expr_reads_input(
             })
         }
         ExprNode::Compound(_) => false,
-        ExprNode::ScalarSubquery(_) | ExprNode::Constant(_) => true,
+        ExprNode::ScalarSubquery(_) | ExprNode::Constant(_) | ExprNode::OuterColumn(_) => true,
         ExprNode::Function { name, args, .. } => {
             !crate::backend::planner::helpers::is_aggregate_function(&name.to_ascii_uppercase())
                 && args.iter().all(|a| match a {
@@ -1065,6 +1071,75 @@ impl StatsSource for NoStatistics {
 }
 
 /// Flatten a predicate into its top-level AND-ed conjuncts.
+/// `pred`, which reads the outputs of a projection, rewritten to read its
+/// input: each column it names becomes the output expression of that name.
+/// `None` when a name does not pick out exactly one output.
+fn through_project(pred: &PredicateNode, outputs: &[NamedExpr]) -> Option<PredicateNode> {
+    fn substitute(e: &ExprNode, outputs: &[NamedExpr], ok: &mut bool) -> ExprNode {
+        let (table, name) = match e {
+            ExprNode::Column(n) => (None, n),
+            ExprNode::Compound(parts) if parts.len() >= 2 => {
+                (Some(&parts[parts.len() - 2]), &parts[parts.len() - 1])
+            }
+            other => return other.map_children(&mut |c| substitute(c, outputs, ok)),
+        };
+        // An output passing a column through keeps that column's qualifier.
+        let qualifier = |e: &ExprNode| match e {
+            ExprNode::Compound(parts) if parts.len() >= 2 => Some(parts[parts.len() - 2].clone()),
+            _ => None,
+        };
+        let mut found = outputs.iter().filter(|o| {
+            o.name.eq_ignore_ascii_case(name)
+                && table
+                    .is_none_or(|t| qualifier(&o.expr).is_none_or(|q| q.eq_ignore_ascii_case(t)))
+        });
+        match (found.next(), found.next()) {
+            (Some(o), None) => o.expr.clone(),
+            _ => {
+                *ok = false;
+                e.clone()
+            }
+        }
+    }
+    let mut ok = true;
+    let below = pred.map_exprs(&mut |e| substitute(e, outputs, &mut ok));
+    ok.then_some(below)
+}
+
+/// `pred`, which reads relation `alias`'s columns as `alias.name`, rewritten
+/// to read the relation's own output (`schema`) by name. `None` when it names
+/// anything else, or a name the output has more than once.
+fn into_relation(
+    pred: &PredicateNode,
+    alias: &str,
+    schema: &ColumnSchema,
+) -> Option<PredicateNode> {
+    fn rename(e: &ExprNode, alias: &str, schema: &ColumnSchema, ok: &mut bool) -> ExprNode {
+        match e {
+            ExprNode::Compound(parts)
+                if parts.len() == 2
+                    && parts[0].eq_ignore_ascii_case(alias)
+                    && schema
+                        .columns
+                        .iter()
+                        .filter(|c| c.name.eq_ignore_ascii_case(&parts[1]))
+                        .count()
+                        == 1 =>
+            {
+                ExprNode::Column(parts[1].clone())
+            }
+            ExprNode::Column(_) | ExprNode::Compound(_) => {
+                *ok = false;
+                e.clone()
+            }
+            other => other.map_children(&mut |c| rename(c, alias, schema, ok)),
+        }
+    }
+    let mut ok = true;
+    let below = pred.map_exprs(&mut |e| rename(e, alias, schema, &mut ok));
+    ok.then_some(below)
+}
+
 fn split_conjuncts(pred: PredicateNode, out: &mut Vec<PredicateNode>) {
     match pred {
         PredicateNode::BinaryOp {
