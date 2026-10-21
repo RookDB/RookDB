@@ -130,58 +130,21 @@ fn datatype_to_string(dt: &DataType) -> String {
 /// Load the full `Catalog` from system table heap files.
 ///
 /// Scans each system table via direct disk reads and reconstructs the
-/// in-memory `Catalog` hierarchy.
+/// in-memory `Catalog` hierarchy. An unreadable system table is an error,
+/// not an empty catalog: the next DDL would save that empty catalog over
+/// the real one and orphan every table file.
 pub fn load_catalog_from_system(
     engine: &std::sync::Arc<crate::backend::engine::Engine>,
-) -> Catalog {
+) -> RookResult<Catalog> {
+    recover_system_dir(engine.paths())?;
     let mut catalog = Catalog::new(std::sync::Arc::clone(engine));
 
-    let databases = match scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA) {
-        Ok(rows) => rows,
-        Err(e) => {
-            log::error!("[SystemCatalog] Failed to read sys_databases: {}", e);
-            return catalog;
-        }
-    };
-
-    let tables = match scan_system_table(engine, "tables", SYS_TABLES_SCHEMA) {
-        Ok(rows) => rows,
-        Err(e) => {
-            log::error!("[SystemCatalog] Failed to read sys_tables: {}", e);
-            return catalog;
-        }
-    };
-
-    let columns = match scan_system_table(engine, "columns", SYS_COLUMNS_SCHEMA) {
-        Ok(rows) => rows,
-        Err(e) => {
-            log::error!("[SystemCatalog] Failed to read sys_columns: {}", e);
-            return catalog;
-        }
-    };
-
-    let views_data = match scan_system_table(engine, "views", SYS_VIEWS_SCHEMA) {
-        Ok(rows) => rows,
-        Err(e) => {
-            log::error!("[SystemCatalog] Failed to read sys_views: {}", e);
-            return catalog;
-        }
-    };
-
-    // Scan sys_constraints so per-column flags (NOT NULL / UNIQUE / CHECK)
-    // can be restored onto the rebuilt `Column` structs below.
-    //
-    // CRITICAL FIX (historical: ANALYSIS.md's "constraint persistence" item):
-    // without this mapping every
-    // Column was rebuilt with `Constraints::default()`, silently disabling
-    // NOT NULL/UNIQUE validation after any process restart.
-    let constraints = match scan_system_table(engine, "constraints", SYS_CONSTRAINTS_SCHEMA) {
-        Ok(rows) => rows,
-        Err(e) => {
-            log::error!("[SystemCatalog] Failed to read sys_constraints: {}", e);
-            Vec::new()
-        }
-    };
+    let databases = scan_system_table(engine, "databases", SYS_DATABASES_SCHEMA)?;
+    let tables = scan_system_table(engine, "tables", SYS_TABLES_SCHEMA)?;
+    let columns = scan_system_table(engine, "columns", SYS_COLUMNS_SCHEMA)?;
+    let views_data = scan_system_table(engine, "views", SYS_VIEWS_SCHEMA)?;
+    // Per-column flags (NOT NULL / UNIQUE / CHECK) are restored from here.
+    let constraints = scan_system_table(engine, "constraints", SYS_CONSTRAINTS_SCHEMA)?;
     // table_id → [(constraint_type, columns_field)]
     let mut constraints_by_table: std::collections::HashMap<i32, Vec<(String, String)>> =
         std::collections::HashMap::new();
@@ -425,7 +388,7 @@ pub fn load_catalog_from_system(
         catalog.databases.insert(db_name, database);
     }
 
-    catalog
+    Ok(catalog)
 }
 /// Internal helper to resolve (db_name, table_name) → (table_id, db_id).
 pub fn resolve_table_id(
@@ -487,18 +450,21 @@ pub fn resolve_table_id(
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+/// Every system table, by file stem.
+const SYSTEM_TABLES: [&str; 6] = [
+    "databases",
+    "tables",
+    "columns",
+    "constraints",
+    "indexes",
+    "views",
+];
+
 /// Create empty system table heap files (with HeapManager).
 fn create_system_table_files(engine: &crate::backend::engine::Engine) -> RookResult<()> {
     std::fs::create_dir_all(engine.paths().system_dir())?;
 
-    for name in &[
-        "databases",
-        "tables",
-        "columns",
-        "constraints",
-        "indexes",
-        "views",
-    ] {
+    for name in SYSTEM_TABLES {
         let path = sys_path(engine, name);
         if !path.exists() {
             crate::backend::heap::HeapManager::create(path.clone())
@@ -512,7 +478,76 @@ fn create_system_table_files(engine: &crate::backend::engine::Engine) -> RookRes
 /// missing. Called during startup to support incremental schema additions
 /// (e.g. adding `sys_views` to an existing system catalog).
 pub fn ensure_system_tables(engine: &crate::backend::engine::Engine) -> RookResult<()> {
+    recover_system_dir(engine.paths())?;
     create_system_table_files(engine)
+}
+
+/// fsync a directory, making the creates and renames inside it durable.
+fn sync_dir(dir: &std::path::Path) -> RookResult<()> {
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// Finish or roll back a catalog save that a crash interrupted.
+///
+/// A save builds `system.new`, fsyncs it, then renames `system` to
+/// `system.old` and `system.new` to `system`. A save only starts once
+/// `system` exists, so:
+/// - `system` present: it is the committed catalog; any `system.new`
+///   is unfinished or was never swapped in, and any `system.old` is stale.
+/// - `system` missing: the crash fell between the two renames, so
+///   `system.new` is complete and is the catalog. Without one, `system.old`
+///   goes back.
+fn recover_system_dir(paths: &crate::backend::paths::Paths) -> RookResult<()> {
+    let system = paths.system_dir();
+    let staging = paths.system_staging_dir();
+    let old = paths.system_old_dir();
+    if !system.exists() {
+        let committed = if staging.exists() { &staging } else { &old };
+        if !committed.exists() {
+            return Ok(());
+        }
+        log::warn!(
+            "[SystemCatalog] recovering an interrupted catalog save from {}",
+            committed.display()
+        );
+        std::fs::rename(committed, &system)?;
+        sync_dir(&paths.data_dir())?;
+    }
+    for leftover in [&staging, &old] {
+        if leftover.exists() {
+            std::fs::remove_dir_all(leftover)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write `rows` as a fresh, fsynced system table `name` under `dir`.
+///
+/// The file bypasses the engine's handle cache: it is about to be renamed,
+/// and a cached handle would outlive its path.
+fn write_system_table(
+    dir: &std::path::Path,
+    name: &str,
+    schema: &[DataType],
+    rows: &[Vec<Option<String>>],
+) -> RookResult<()> {
+    let path = dir.join(format!("{}.dat", name));
+    let write = || -> RookResult<()> {
+        let mut heap = crate::backend::heap::HeapManager::create(path.clone())?;
+        for row in rows {
+            let str_refs: Vec<Option<&str>> = row.iter().map(|opt| opt.as_deref()).collect();
+            let tuple_bytes = crate::types::serialize_nullable_row(schema, &str_refs)?;
+            heap.insert_tuple(&tuple_bytes)?;
+        }
+        heap.flush()
+    };
+    let written = write();
+    crate::backend::buffer_manager::shared_pool::invalidate(&path);
+    written.map_err(|e| e.with_context(format!("Failed to write sys_{}", name)))
 }
 /// Scan all rows from a system table and return decoded values.
 fn scan_system_table(

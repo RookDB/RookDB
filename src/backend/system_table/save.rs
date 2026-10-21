@@ -6,9 +6,15 @@ use super::*;
 
 /// Persist the in-memory catalog to system table heap files.
 ///
-/// Deletes and recreates all system table files from scratch to prevent
-/// duplicate rows on subsequent saves.
+/// The system tables are rebuilt from scratch, which keeps saves free of
+/// duplicate rows, and must change together: their rows refer to each other
+/// by table id. So the new files are built and fsynced in `system.new`, then
+/// swapped in by two renames; [`recover_system_dir`] settles a crash between
+/// them. A crash at any point leaves the old catalog or the new one.
 pub fn save_catalog_to_system(catalog: &Catalog) -> RookResult<()> {
+    // Recovery relies on `system` existing whenever a save starts.
+    ensure_system_tables(catalog.engine())?;
+
     // 1. Load existing FOREIGN KEY constraints from sys_constraints before deleting it.
     //
     // CRITICAL: FK rows store the child table's numeric `table_id`.  After system tables
@@ -107,28 +113,30 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> RookResult<()> {
     // Index rows only live in sys_indexes: read them before it is rebuilt.
     let saved_indexes = load_saved_indexes(catalog.engine());
 
-    // Delete existing system table files to start fresh
-    for name in &[
-        "databases",
-        "tables",
-        "columns",
-        "constraints",
-        "indexes",
-        "views",
-    ] {
-        let path = sys_path(catalog.engine(), name);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
-        let fsm_path_str = format!("{}.fsm", path.to_string_lossy());
-        let fsm_path = std::path::Path::new(&fsm_path_str);
-        if fsm_path.exists() {
-            std::fs::remove_file(fsm_path)?;
-        }
+    let paths = catalog.engine().paths();
+    let system = paths.system_dir();
+    let staging = paths.system_staging_dir();
+    let old = paths.system_old_dir();
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
     }
-    // Create fresh files and populate
-    create_system_table_files(catalog.engine())?;
-    populate_system_tables(catalog, fk_rows, saved_indexes);
+    std::fs::create_dir_all(&staging)?;
+    populate_system_tables(catalog, fk_rows, saved_indexes, &staging)?;
+    sync_dir(&staging)?;
+
+    // Cached handles hold the live files open: write them out and drop them
+    // before the files move.
+    for name in SYSTEM_TABLES {
+        crate::backend::cache::release_file(&sys_path(catalog.engine(), name))?;
+    }
+    std::fs::rename(&system, &old)?;
+    std::fs::rename(&staging, &system)?;
+    sync_dir(&paths.data_dir())?;
+    // The new catalog is committed; a leftover `system.old` is removed by
+    // the next recovery if this fails.
+    if let Err(e) = std::fs::remove_dir_all(&old) {
+        log::warn!("[SystemCatalog] could not remove {}: {}", old.display(), e);
+    }
     // System tables rewritten wholesale: table_ids may have changed and
     // constraint/index rows were rebuilt — forget all memoised metadata.
     catalog.engine().invalidate_metadata();
@@ -181,7 +189,8 @@ pub(crate) fn populate_system_tables(
     catalog: &Catalog,
     mut constr_rows: Vec<Vec<Option<String>>>,
     indexes: Vec<SavedIndex>,
-) {
+    dir: &std::path::Path,
+) -> RookResult<()> {
     // Sequence counters for auto-generated IDs
     let mut next_db_id = 1i32;
     let mut next_table_id = 1i32;
@@ -383,28 +392,10 @@ pub(crate) fn populate_system_tables(
     constr_rows.retain(|row| !row.is_empty());
 
     // Batch-write each system table
-    if let Err(e) = insert_system_rows(
-        catalog.engine(),
-        "databases",
-        SYS_DATABASES_SCHEMA,
-        &db_rows,
-    ) {
-        log::error!("[SystemCatalog] Failed to write sys_databases: {}", e);
-    }
-    if let Err(e) = insert_system_rows(catalog.engine(), "tables", SYS_TABLES_SCHEMA, &tbl_rows) {
-        log::error!("[SystemCatalog] Failed to write sys_tables: {}", e);
-    }
-    if let Err(e) = insert_system_rows(catalog.engine(), "columns", SYS_COLUMNS_SCHEMA, &col_rows) {
-        log::error!("[SystemCatalog] Failed to write sys_columns: {}", e);
-    }
-    if let Err(e) = insert_system_rows(
-        catalog.engine(),
-        "constraints",
-        SYS_CONSTRAINTS_SCHEMA,
-        &constr_rows,
-    ) {
-        log::error!("[SystemCatalog] Failed to write sys_constraints: {}", e);
-    }
+    write_system_table(dir, "databases", SYS_DATABASES_SCHEMA, &db_rows)?;
+    write_system_table(dir, "tables", SYS_TABLES_SCHEMA, &tbl_rows)?;
+    write_system_table(dir, "columns", SYS_COLUMNS_SCHEMA, &col_rows)?;
+    write_system_table(dir, "constraints", SYS_CONSTRAINTS_SCHEMA, &constr_rows)?;
 
     // ── Populate sys_views ──────────────────────────────────────────────
     let mut view_rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -431,11 +422,9 @@ pub(crate) fn populate_system_tables(
             next_view_id += 1;
         }
     }
-    if let Err(e) = insert_system_rows(catalog.engine(), "views", SYS_VIEWS_SCHEMA, &view_rows) {
-        log::error!("[SystemCatalog] Failed to write sys_views: {}", e);
-    }
+    write_system_table(dir, "views", SYS_VIEWS_SCHEMA, &view_rows)?;
 
-    write_saved_indexes(catalog.engine(), &indexes, &db_rows, &tbl_rows);
+    write_saved_indexes(catalog.engine(), &indexes, &db_rows, &tbl_rows, dir)?;
 
     let view_count: usize = catalog.databases.values().map(|d| d.views.len()).sum();
     log::info!(
@@ -451,6 +440,7 @@ pub(crate) fn populate_system_tables(
         next_constr_id - 1,
         view_count
     );
+    Ok(())
 }
 
 /// One `sys_indexes` row, identified by database and table name so it
@@ -574,7 +564,8 @@ fn write_saved_indexes(
     saved: &[SavedIndex],
     db_rows: &[Vec<Option<String>>],
     tbl_rows: &[Vec<Option<String>>],
-) {
+    dir: &std::path::Path,
+) -> RookResult<()> {
     // db_rows: [db_id, name]; tbl_rows: [table_id, db_id, name, file_path]
     let db_names: std::collections::HashMap<&str, &str> = db_rows
         .iter()
@@ -608,11 +599,7 @@ fn write_saved_indexes(
         })
         .collect();
 
-    if !idx_rows.is_empty()
-        && let Err(e) = insert_system_rows(engine, "indexes", SYS_INDEXES_SCHEMA, &idx_rows)
-    {
-        log::error!("[SystemCatalog] Failed to write sys_indexes: {}", e);
-    }
+    write_system_table(dir, "indexes", SYS_INDEXES_SCHEMA, &idx_rows)
 }
 
 /// Strip the `CHECK(...)` wrapper from a sys_constraints `columns` field.

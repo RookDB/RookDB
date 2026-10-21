@@ -46,14 +46,25 @@ pub fn init_catalog_in(
     crate::backend::system_table::ensure_system_tables(engine)
 }
 
-/// Loads the catalog from disk into memory.
-/// Returns an empty catalog if the file is missing or invalid.
+/// Loads the catalog from disk into memory. A data directory without system
+/// tables loads as an empty catalog.
+///
+/// # Panics
+/// If the system tables cannot be read; [`try_load_catalog_in`] returns the
+/// error instead.
 pub fn load_catalog() -> Catalog {
     load_catalog_in(&crate::backend::engine::Engine::current_dir())
 }
 
 /// [`load_catalog`] for the data directory of `engine`.
 pub fn load_catalog_in(engine: &std::sync::Arc<crate::backend::engine::Engine>) -> Catalog {
+    try_load_catalog_in(engine).unwrap_or_else(|e| panic!("failed to load the catalog: {}", e))
+}
+
+/// [`load_catalog_in`] that returns an unreadable catalog as an error.
+pub fn try_load_catalog_in(
+    engine: &std::sync::Arc<crate::backend::engine::Engine>,
+) -> crate::backend::error::RookResult<Catalog> {
     debug_print_catalog("Loading catalog from system tables.");
     crate::backend::system_table::load_catalog_from_system(engine)
 }

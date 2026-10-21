@@ -51,6 +51,18 @@ impl Paths {
         self.data_dir().join("system")
     }
 
+    /// Where a catalog save builds the next system directory before swapping
+    /// it in.
+    pub fn system_staging_dir(&self) -> PathBuf {
+        self.data_dir().join("system.new")
+    }
+
+    /// Where a catalog save parks the previous system directory during the
+    /// swap.
+    pub fn system_old_dir(&self) -> PathBuf {
+        self.data_dir().join("system.old")
+    }
+
     /// The heap file of the system table `name`.
     pub fn system_table(&self, name: &str) -> PathBuf {
         self.system_dir().join(format!("{}.dat", name))
