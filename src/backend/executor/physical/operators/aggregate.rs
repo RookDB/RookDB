@@ -403,6 +403,8 @@ pub struct AggregateOperator {
     aggregates: Vec<AggregateInfo>,
     having: Option<Predicate>,
     output_schema: Vec<ColumnInfo>,
+    /// How EXPLAIN shows each aggregate (`SUM(b)`); its output name when unset.
+    labels: Vec<String>,
 
     group_map: HashMap<Vec<Option<DataValue>>, usize>,
     /// Groups in first-seen order, which is the output order.
@@ -413,6 +415,12 @@ pub struct AggregateOperator {
 }
 
 impl AggregateOperator {
+    /// Show each aggregate in EXPLAIN as `labels` says, one per aggregate.
+    pub fn described(mut self, labels: Vec<String>) -> Self {
+        self.labels = labels;
+        self
+    }
+
     pub fn new(
         child: Box<dyn PhysicalOperator>,
         group_by_exprs: Vec<Expr>,
@@ -480,6 +488,7 @@ impl AggregateOperator {
             aggregates,
             having,
             output_schema,
+            labels: Vec::new(),
             group_map: HashMap::new(),
             groups: Vec::new(),
             output_pos: 0,
@@ -646,11 +655,14 @@ impl PhysicalOperator for AggregateOperator {
         if !self.group_by_names.is_empty() {
             node = node.with("group_by", self.group_by_names.join(", "));
         }
-        let aggregates: Vec<&str> = self
-            .aggregates
-            .iter()
-            .map(|a| a.output_name.as_str())
-            .collect();
+        let aggregates: Vec<&str> = match self.labels.len() == self.aggregates.len() {
+            true => self.labels.iter().map(String::as_str).collect(),
+            false => self
+                .aggregates
+                .iter()
+                .map(|a| a.output_name.as_str())
+                .collect(),
+        };
         if !aggregates.is_empty() {
             node = node.with("aggregates", aggregates.join(", "));
         }

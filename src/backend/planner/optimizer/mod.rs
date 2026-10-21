@@ -155,10 +155,15 @@ impl Optimizer {
             }
             LogicalPlan::Aggregate(a) => {
                 let child = self.constant_folding(*a.child);
-                // GROUP BY keys stay as written: the projection above reads a
-                // computed key by a name derived from its expression
-                // (`group_key_name`), which folding would change.
-                let group_by = a.group_by;
+                // Nodes above read a key by its name, which folding keeps.
+                let group_by = a
+                    .group_by
+                    .into_iter()
+                    .map(|k| NamedExpr {
+                        name: k.name,
+                        expr: fold_expr(&k.expr),
+                    })
+                    .collect();
                 let aggregates = a
                     .aggregates
                     .into_iter()
@@ -625,8 +630,11 @@ impl Optimizer {
                             .unwrap_or_default(),
                     )
                     .collect();
-                let gb_cols: HashSet<String> =
-                    a.group_by.iter().flat_map(extract_expr_columns).collect();
+                let gb_cols: HashSet<String> = a
+                    .group_by
+                    .iter()
+                    .flat_map(|k| extract_expr_columns(&k.expr))
+                    .collect();
                 let child_needed: HashSet<String> = agg_cols
                     .into_iter()
                     .chain(gb_cols)

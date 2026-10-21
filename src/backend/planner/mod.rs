@@ -8,6 +8,7 @@
 //!    intent (filter, project, sort, aggregate, join, etc.).
 
 pub mod binder;
+pub mod grouping;
 pub mod helpers;
 pub mod optimizer;
 pub mod plan_cache;
@@ -400,61 +401,19 @@ fn plan_select_with_ctes(
         });
     }
 
-    // 4. Apply GROUP BY / HAVING
-    let has_aggregates = !select.group_by.is_empty()
-        || select.having.is_some()
-        || select.projections.iter().any(contains_aggregate);
-
-    if has_aggregates {
-        let mut aggregates = extract_aggregates(&select.projections);
-
-        // Aggregates that appear only inside HAVING must still be computed.
-        // Merge them in, skipping calls already present in the SELECT list
-        // (same function applied to the same arguments).
-        if let Some(ref having) = select.having {
-            for agg in extract_aggregates_from_predicate(having) {
-                let id = aggregate_identity(&agg);
-                if !aggregates.iter().any(|a| aggregate_identity(a) == id) {
-                    aggregates.push(agg);
-                }
-            }
-        }
-
-        // Positions and output aliases were resolved by the binder.
-        let mut group_by = select.group_by.clone();
-
-        // A repeated key groups nothing further, but would give the aggregate
-        // two output columns of one name (`GROUP BY b, b`, `GROUP BY 1, ABS(b)`).
-        let mut seen = Vec::with_capacity(group_by.len());
-        group_by.retain(|e| {
-            let first = !seen.contains(e);
-            if first {
-                seen.push(e.clone());
-            }
-            first
-        });
-
-        for item in &select.projections {
-            if let SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } = item
-                && let Some(column) = ungrouped_column(e, &group_by)
-            {
-                return Err(RookError::InvalidQuery(format!(
-                    "column '{}' must appear in the GROUP BY clause or be used in an aggregate function",
-                    column
-                )));
-            }
-        }
-
-        current_plan = LogicalPlan::Aggregate(LogicalAggregate {
-            group_by,
-            aggregates,
-            having: select.having.clone(),
-            child: Box::new(current_plan),
-        });
-    }
-
-    // 5. Apply projection
-    let projections = expand_projections(&select.projections, &current_plan)?;
+    // 4. Apply GROUP BY / HAVING, and 5. the projection: above an
+    // aggregation, outputs read its key and aggregate columns.
+    let grouping = if grouping::is_grouped(select) {
+        let grouping = grouping::Grouping::new(select)?;
+        current_plan = grouping.aggregate(select.having.as_ref(), current_plan)?;
+        Some(grouping)
+    } else {
+        None
+    };
+    let projections = match &grouping {
+        Some(grouping) => grouping.outputs(&select.projections)?,
+        None => expand_projections(&select.projections)?,
+    };
     current_plan = LogicalPlan::Project(LogicalProject {
         expressions: projections.clone(),
         child: Box::new(current_plan),
@@ -513,6 +472,12 @@ fn plan_select_with_ctes(
                         projections.len()
                     )));
                 }
+                continue;
+            }
+            // Any other key of a grouped query is computed from the
+            // aggregation, beneath the projection.
+            if let Some(grouping) = &grouping {
+                ob.expr = grouping.rewrite(&ob.expr)?;
             }
         }
         // Positions are resolved by now, so a constant left as a key (an

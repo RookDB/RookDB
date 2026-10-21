@@ -386,8 +386,8 @@ fn collect_required_columns_recursive(plan: &LogicalPlan, cols: &mut HashSet<Str
         LogicalPlan::Distinct(d) => collect_required_columns_recursive(&d.child, cols),
         LogicalPlan::Limit(l) => collect_required_columns_recursive(&l.child, cols),
         LogicalPlan::Aggregate(a) => {
-            for expr in &a.group_by {
-                extract_expr_columns_into(expr, cols);
+            for key in &a.group_by {
+                extract_expr_columns_into(&key.expr, cols);
             }
             for ag in &a.aggregates {
                 for arg in &ag.args {

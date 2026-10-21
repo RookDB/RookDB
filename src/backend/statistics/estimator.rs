@@ -425,7 +425,8 @@ impl<'a> Estimator<'a> {
         if a.group_by.is_empty() {
             return 1.0;
         }
-        let groups = self.distinct_product(&a.group_by, &a.child, child);
+        let keys: Vec<ExprNode> = a.group_by.iter().map(|k| k.expr.clone()).collect();
+        let groups = self.distinct_product(&keys, &a.child, child);
         let rows = match groups {
             Some(g) => g.min(child),
             None => child * AGGREGATE_FACTOR,

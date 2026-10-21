@@ -99,8 +99,8 @@ impl OrderGuard {
             LogicalPlan::Distinct(d) => self.walk_plan(&d.child),
             LogicalPlan::Limit(l) => self.walk_plan(&l.child),
             LogicalPlan::Aggregate(a) => {
-                for e in &a.group_by {
-                    self.walk_expr(e);
+                for key in &a.group_by {
+                    self.walk_expr(&key.expr);
                 }
                 for e in a.aggregates.iter().flat_map(|agg| &agg.args) {
                     self.walk_expr(e);

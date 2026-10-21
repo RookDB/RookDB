@@ -10,7 +10,7 @@ use super::super::operators::{
     NestedLoopJoinOperator, PhysicalOperator, infer_aggregate_output_type, mark_merged,
 };
 use super::super::tuple::ColumnInfo;
-use super::helpers::infer_expr_type_with;
+use super::helpers::{ast_expr_to_output_name, infer_expr_type_with};
 use super::{PhysicalPlanner, PlannerStats};
 use crate::backend::error::{RookError, RookResult};
 use crate::statistics::estimator::{Estimator, hash_join_cost, index_nested_loop_cost};
@@ -376,21 +376,15 @@ impl PhysicalPlanner {
         let mut group_by_names = Vec::new();
         let mut group_by_types = Vec::new();
 
-        for expr_node in &a.group_by {
-            let expr = expr_with(expr_node, &column_names, &subqueries)?;
-            let name = crate::planner::helpers::group_key_name(expr_node);
-            let data_type = match expr_node {
-                rook_ast::ExprNode::Function { name, .. } if is_aggregate_name(name) => {
-                    return Err(RookError::InvalidQuery(
-                        "Aggregate function calls are not allowed in GROUP BY".to_string(),
-                    ));
-                }
+        for key in &a.group_by {
+            let expr = expr_with(&key.expr, &column_names, &subqueries)?;
+            let data_type = match &key.expr {
                 // A NULL key has no type of its own; any type holds it.
                 rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Null) => DataType::Int,
-                _ => type_of(expr_node)?,
+                other => type_of(other)?,
             };
             group_by_exprs.push(expr);
-            group_by_names.push(name);
+            group_by_names.push(key.name.clone());
             group_by_types.push(data_type);
         }
 
@@ -437,11 +431,8 @@ impl PhysicalPlanner {
 
         // ─── Resolve HAVING predicate ────────────────────────────────────
         let having = if let Some(ref having_node) = a.having {
-            // HAVING references the output schema (GROUP BY columns + aggregate columns).
-            // Aggregate calls inside HAVING (`HAVING COUNT(*) >= 2`) are rewritten
-            // into references to the corresponding computed output column so the
-            // predicate evaluates against the post-aggregation tuple.
-            let having_node = rewrite_having_aggregates(having_node, &a.aggregates, &aggregates);
+            // HAVING reads the output rows (key and aggregate columns); the
+            // logical planner rewrote it to name them.
             let mut having_schema: Vec<ColumnInfo> = group_by_names
                 .iter()
                 .zip(group_by_types.iter())
@@ -462,7 +453,7 @@ impl PhysicalPlanner {
             }
             let having_names = binding_names(&having_schema);
             Some(self.build_predicate_with_subqueries(
-                &having_node,
+                having_node,
                 &having_names,
                 &having_schema,
             )?)
@@ -470,14 +461,34 @@ impl PhysicalPlanner {
             None
         };
 
-        Ok(Box::new(AggregateOperator::new(
-            child,
-            group_by_exprs,
-            group_by_names,
-            group_by_types,
-            aggregates,
-            having,
-        )))
+        let labels = a
+            .aggregates
+            .iter()
+            .map(|agg| {
+                let args: Vec<String> = agg.args.iter().map(ast_expr_to_output_name).collect();
+                format!(
+                    "{}({}{})",
+                    aggregate_function_name(agg.function),
+                    if agg.distinct { "DISTINCT " } else { "" },
+                    if args.is_empty() {
+                        "*".to_string()
+                    } else {
+                        args.join(", ")
+                    }
+                )
+            })
+            .collect();
+        Ok(Box::new(
+            AggregateOperator::new(
+                child,
+                group_by_exprs,
+                group_by_names,
+                group_by_types,
+                aggregates,
+                having,
+            )
+            .described(labels),
+        ))
     }
 
     /// Plan a recursive CTE logical node into a physical operator via fixpoint iteration.
@@ -722,78 +733,15 @@ fn key_class(expr: &Expr, schema: &[ColumnInfo]) -> Option<KeyClass> {
 
 // ── HAVING aggregate rewriting ────────────────────────────────────────────────
 
-/// Rewrite aggregate calls inside a HAVING predicate into column references
-/// to the matching computed aggregate outputs.
-///
-/// `HAVING COUNT(*) >= 2` becomes `HAVING cnt >= 2`, where `cnt` is the
-/// output name the aggregate operator assigned (the SELECT alias when one
-/// was given, otherwise the canonical function name).
-///
-/// `logical_aggs[i]` and `physical_aggs[i]` describe the same aggregate call
-/// (they are built in lockstep by [`Self::plan_aggregate_with_ctes`]).
-pub(super) fn rewrite_having_aggregates(
-    node: &rook_ast::PredicateNode,
-    logical_aggs: &[rook_ast::logical::AggregateExpr],
-    physical_aggs: &[AggregateInfo],
-) -> rook_ast::PredicateNode {
-    node.map_exprs(&mut |e| rewrite_having_expr(e, logical_aggs, physical_aggs))
-}
-
-/// Rewrite one HAVING expression, replacing aggregate function calls at any
-/// depth (`MIN(x) + 1 > 2`) with column references to their computed output
-/// columns. A call matches the computed aggregate with the same function,
-/// DISTINCT and argument expressions.
-fn rewrite_having_expr(
-    expr: &rook_ast::ExprNode,
-    logical_aggs: &[rook_ast::logical::AggregateExpr],
-    physical_aggs: &[AggregateInfo],
-) -> rook_ast::ExprNode {
-    use rook_ast::ExprNode as E;
-
-    if let E::Function {
-        name,
-        args,
-        distinct,
-    } = expr
-        && is_aggregate_name(name)
-    {
-        // `COUNT(*)` carries no arguments once extracted.
-        let wanted = args.iter().filter_map(|a| match a {
-            rook_ast::FunctionArg::Expr(e) => Some(e.as_ref()),
-            rook_ast::FunctionArg::Star => None,
-        });
-        let upper = name.to_ascii_uppercase();
-        for (i, agg) in logical_aggs.iter().enumerate() {
-            if aggregate_function_name(agg.function) == upper
-                && agg.distinct == *distinct
-                && agg.args.iter().eq(wanted.clone())
-            {
-                return E::Column(physical_aggs[i].output_name.clone());
-            }
-        }
-        // No matching computed aggregate — keep the call; evaluation will
-        // report a clear error instead of silently passing.
-        return expr.clone();
-    }
-    expr.map_children(&mut |e| rewrite_having_expr(e, logical_aggs, physical_aggs))
-}
-
-fn is_aggregate_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_uppercase().as_str(),
-        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
-    )
-}
-
-/// Map a logical aggregate function to its SQL spelling.
-fn aggregate_function_name(f: rook_ast::logical::AggregateFunction) -> String {
+/// The SQL spelling of an aggregate function.
+fn aggregate_function_name(f: rook_ast::logical::AggregateFunction) -> &'static str {
     use rook_ast::logical::AggregateFunction as F;
     match f {
-        F::Count => "COUNT".to_string(),
-        F::Sum => "SUM".to_string(),
-        F::Avg => "AVG".to_string(),
-        F::Min => "MIN".to_string(),
-        F::Max => "MAX".to_string(),
+        F::Count => "COUNT",
+        F::Sum => "SUM",
+        F::Avg => "AVG",
+        F::Min => "MIN",
+        F::Max => "MAX",
     }
 }
 

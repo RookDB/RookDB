@@ -834,23 +834,42 @@ fn test_plan_query_with_stats_fallback() {
 
 // ── Recursive aggregate extraction tests ──────────────────────────────────────
 
+/// The aggregate calls a SELECT list makes, as the planner computes them.
+fn aggregates_of(projections: &[SelectExpr]) -> Vec<rook_ast::logical::AggregateExpr> {
+    grouping_of(projections).aggregates().to_vec()
+}
+
+fn grouping_of(projections: &[SelectExpr]) -> crate::planner::grouping::Grouping {
+    let select = SelectPlan {
+        ctes: vec![],
+        projections: projections.to_vec(),
+        from: vec![],
+        joins: vec![],
+        selection: None,
+        group_by: vec![],
+        having: None,
+        order_by: vec![],
+        limit: None,
+        distinct: false,
+    };
+    crate::planner::grouping::Grouping::new(&select).unwrap()
+}
+
 #[test]
 fn test_recursive_aggregate_extraction_simple() {
-    use crate::planner::helpers::extract_aggregates;
     // Simple top-level aggregate: SUM(price)
     let proj = vec![SelectExpr::UnnamedExpr(ExprNode::Function {
         name: "SUM".to_string(),
         args: vec![FunctionArg::Expr(Box::new(column("price")))],
         distinct: false,
     })];
-    let aggs = extract_aggregates(&proj);
+    let aggs = aggregates_of(&proj);
     assert_eq!(aggs.len(), 1);
     assert_eq!(aggs[0].function, rook_ast::logical::AggregateFunction::Sum);
 }
 
 #[test]
 fn test_recursive_aggregate_extraction_nested() {
-    use crate::planner::helpers::extract_aggregates;
     // Nested aggregate: SUM(price)+1
     let proj = vec![SelectExpr::UnnamedExpr(ExprNode::Binary {
         left: Box::new(ExprNode::Function {
@@ -861,14 +880,13 @@ fn test_recursive_aggregate_extraction_nested() {
         op: ArithOp::Add,
         right: Box::new(constant_int(1)),
     })];
-    let aggs = extract_aggregates(&proj);
+    let aggs = aggregates_of(&proj);
     assert_eq!(aggs.len(), 1, "SUM nested in Binary should be extracted");
     assert_eq!(aggs[0].function, rook_ast::logical::AggregateFunction::Sum);
 }
 
 #[test]
 fn test_recursive_aggregate_extraction_multiple() {
-    use crate::planner::helpers::extract_aggregates;
     // Multiple aggregates: SUM(price)+AVG(qty)
     let proj = vec![SelectExpr::UnnamedExpr(ExprNode::Binary {
         left: Box::new(ExprNode::Function {
@@ -883,7 +901,7 @@ fn test_recursive_aggregate_extraction_multiple() {
             distinct: false,
         }),
     })];
-    let aggs = extract_aggregates(&proj);
+    let aggs = aggregates_of(&proj);
     assert_eq!(aggs.len(), 2, "Both SUM and AVG should be extracted");
     assert!(
         aggs.iter()
@@ -897,20 +915,18 @@ fn test_recursive_aggregate_extraction_multiple() {
 
 #[test]
 fn test_recursive_aggregate_extraction_skips_non_aggregates() {
-    use crate::planner::helpers::extract_aggregates;
     // Non-aggregate function: UPPER(name)
     let proj = vec![SelectExpr::UnnamedExpr(ExprNode::Function {
         name: "UPPER".to_string(),
         args: vec![FunctionArg::Expr(Box::new(column("name")))],
         distinct: false,
     })];
-    let aggs = extract_aggregates(&proj);
+    let aggs = aggregates_of(&proj);
     assert_eq!(aggs.len(), 0, "UPPER is not an aggregate");
 }
 
 #[test]
 fn test_recursive_aggregate_extraction_with_alias() {
-    use crate::planner::helpers::extract_aggregates;
     // Aggregate with alias: MIN(age) AS min_age
     let proj = vec![SelectExpr::ExprWithAlias {
         expr: ExprNode::Function {
@@ -920,14 +936,19 @@ fn test_recursive_aggregate_extraction_with_alias() {
         },
         alias: "min_age".to_string(),
     }];
-    let aggs = extract_aggregates(&proj);
+    let aggs = aggregates_of(&proj);
     assert_eq!(aggs.len(), 1);
-    assert_eq!(aggs[0].alias, Some("min_age".to_string()));
+    // The aggregate's column has a planner-made name; the output takes the alias.
+    let outputs = grouping_of(&proj).outputs(&proj).unwrap();
+    assert_eq!(outputs[0].name, "min_age");
+    assert_eq!(
+        outputs[0].expr,
+        ExprNode::Column(aggs[0].alias.clone().unwrap())
+    );
 }
 
 #[test]
 fn test_recursive_aggregate_extraction_aggregate_in_cast() {
-    use crate::planner::helpers::extract_aggregates;
     // Aggregate inside CAST: CAST(SUM(price) AS DOUBLE)
     let proj = vec![SelectExpr::UnnamedExpr(ExprNode::Cast {
         expr: Box::new(ExprNode::Function {
@@ -937,7 +958,7 @@ fn test_recursive_aggregate_extraction_aggregate_in_cast() {
         }),
         data_type: "DOUBLE".to_string(),
     })];
-    let aggs = extract_aggregates(&proj);
+    let aggs = aggregates_of(&proj);
     assert_eq!(aggs.len(), 1, "SUM inside CAST should be extracted");
     assert_eq!(aggs[0].function, rook_ast::logical::AggregateFunction::Sum);
 }

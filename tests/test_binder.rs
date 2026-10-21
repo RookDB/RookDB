@@ -237,3 +237,64 @@ fn type_errors_are_reported_while_planning() {
         run(&mut s, sql);
     }
 }
+
+/// An aggregation's computed columns (aggregate results, computed keys) have
+/// planner-made names, so they never meet a user's alias or column, and
+/// HAVING and ORDER BY read them like the SELECT list does.
+#[test]
+fn aggregate_outputs_have_their_own_names() {
+    let (_ws, mut s) = session("grouping");
+    // An alias equal to a key's name.
+    let rows = run(&mut s, "SELECT a, SUM(b) AS a FROM t GROUP BY a");
+    assert_eq!(sorted(rows), [["1", "10"], ["2", "50"]]);
+    let rows = run(&mut s, "SELECT a AS b, SUM(b) AS a FROM t GROUP BY a");
+    assert_eq!(sorted(rows), [["1", "10"], ["2", "50"]]);
+    // HAVING reads the grouped column `a`, not the alias.
+    assert_eq!(
+        run(&mut s, "SELECT SUM(b) AS a FROM t GROUP BY a HAVING a > 1"),
+        [["50"]]
+    );
+    // A computed key in HAVING.
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT a + 1, SUM(b) FROM t GROUP BY a + 1 HAVING a + 1 > 2"
+        ),
+        [["3", "50"]]
+    );
+    // An aggregate only HAVING and ORDER BY name.
+    assert_eq!(
+        run(
+            &mut s,
+            "SELECT a FROM t GROUP BY a HAVING SUM(b) > 5 ORDER BY SUM(b) DESC"
+        ),
+        [["2"], ["1"]]
+    );
+    // EXPLAIN shows the call, not the internal name.
+    let plan = run(&mut s, "EXPLAIN SELECT a, SUM(b) AS s FROM t GROUP BY a");
+    assert!(
+        plan.iter().any(|r| r[0].contains("aggregates=SUM(b)")),
+        "{:?}",
+        plan
+    );
+    let e = try_run(&mut s, "SELECT b FROM t GROUP BY a").expect_err("b is not grouped");
+    assert!(matches!(e.root(), RookError::InvalidQuery(_)), "{:?}", e);
+}
+
+/// A correlated subquery that aggregates returned its first aggregate's
+/// value, whatever its SELECT list computed from it.
+#[test]
+fn correlated_aggregate_subquery_computes_its_select_list() {
+    let (_ws, mut s) = session("correlated_aggregate");
+    run(&mut s, "INSERT INTO u VALUES (2, 7)");
+    let rows = run(
+        &mut s,
+        "SELECT t.b, (SELECT MAX(c) + 100 FROM u WHERE u.a = t.a) FROM t ORDER BY t.b",
+    );
+    assert_eq!(rows, [["10", "NULL"], ["20", "107"], ["30", "107"]]);
+    let rows = run(
+        &mut s,
+        "SELECT t.b, (SELECT COUNT(*) * 10 FROM u WHERE u.a = t.a) FROM t ORDER BY t.b",
+    );
+    assert_eq!(rows, [["10", "0"], ["20", "20"], ["30", "20"]]);
+}

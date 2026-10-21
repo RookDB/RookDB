@@ -149,101 +149,26 @@ pub fn info_schema_table(view: &str) -> &str {
 
 // ── Projection Expansion ──────────────────────────────────────────────────────
 
-/// The SELECT items (bound: `*` already expanded) as named expressions.
-pub fn expand_projections(
-    projections: &[SelectExpr],
-    current_plan: &LogicalPlan,
-) -> RookResult<Vec<NamedExpr>> {
-    // Above an Aggregate, a SELECT expression that repeats a GROUP BY
-    // expression (`SELECT x + 1 ... GROUP BY x + 1`) reads that group key's
-    // output column; its inputs no longer exist at this level.
-    let group_by: &[ExprNode] = match current_plan {
-        LogicalPlan::Aggregate(a) => &a.group_by,
-        _ => &[],
-    };
-    let rewritten: Vec<SelectExpr>;
-    let projections = if group_by.iter().any(is_computed_group_key) {
-        rewritten = projections
-            .iter()
-            .map(|item| match item {
-                SelectExpr::UnnamedExpr(e) if contains_group_expr(e, group_by) => {
-                    // Keep the display name of the expression as written.
-                    SelectExpr::ExprWithAlias {
-                        expr: replace_group_exprs(e, group_by),
-                        alias: expr_to_name(e),
-                    }
-                }
-                SelectExpr::ExprWithAlias { expr, alias } => SelectExpr::ExprWithAlias {
-                    expr: replace_group_exprs(expr, group_by),
-                    alias: alias.clone(),
-                },
-                other => other.clone(),
-            })
-            .collect();
-        &rewritten[..]
-    } else {
-        projections
-    };
-
-    let mut result = Vec::new();
-    for item in projections {
-        match item {
+/// The SELECT items of an ungrouped query (bound: `*` already expanded)
+/// as named expressions.
+pub fn expand_projections(projections: &[SelectExpr]) -> RookResult<Vec<NamedExpr>> {
+    projections
+        .iter()
+        .map(|item| match item {
+            SelectExpr::UnnamedExpr(expr) => Ok(NamedExpr {
+                name: expr_to_name(expr),
+                expr: expr.clone(),
+            }),
+            SelectExpr::ExprWithAlias { expr, alias } => Ok(NamedExpr {
+                name: alias.clone(),
+                expr: expr.clone(),
+            }),
             // The binder expands `*` before planning.
-            SelectExpr::Wildcard | SelectExpr::QualifiedWildcard(_) => {
-                return Err(RookError::Internal(
-                    "SELECT * reached the planner unexpanded".to_string(),
-                ));
-            }
-            SelectExpr::UnnamedExpr(expr) => {
-                let name = expr_to_name(expr);
-                // For expressions containing nested aggregates (e.g. `SUM(a)+1`),
-                // recursively replace aggregate function calls with column references
-                // so the projection above the AggregateOperator resolves them correctly.
-                let resolved_expr = if contains_aggregate_expr(expr) {
-                    replace_aggregates_in_expr(expr)
-                } else {
-                    match expr {
-                        ExprNode::Function {
-                            name: fn_name,
-                            args,
-                            distinct,
-                        } => {
-                            let upper = fn_name.to_ascii_uppercase();
-                            if is_aggregate_function(&upper) {
-                                ExprNode::Column(aggregate_ref_name(fn_name, args, *distinct))
-                            } else {
-                                expr.clone()
-                            }
-                        }
-                        _ => expr.clone(),
-                    }
-                };
-                result.push(NamedExpr {
-                    name,
-                    expr: resolved_expr,
-                });
-            }
-            SelectExpr::ExprWithAlias { expr, alias } => {
-                // A top-level aliased aggregate (`COUNT(*) AS n`) computes a
-                // column named after the ALIAS — reference that. Otherwise
-                // rewrite nested aggregate calls (`SUM(a)+1`) recursively.
-                let resolved_expr = match expr {
-                    ExprNode::Function { name, .. }
-                        if is_aggregate_function(&name.to_ascii_uppercase()) =>
-                    {
-                        ExprNode::Column(alias.clone())
-                    }
-                    _ if contains_aggregate_expr(expr) => replace_aggregates_in_expr(expr),
-                    _ => expr.clone(),
-                };
-                result.push(NamedExpr {
-                    name: alias.clone(),
-                    expr: resolved_expr,
-                });
-            }
-        }
-    }
-    Ok(result)
+            SelectExpr::Wildcard | SelectExpr::QualifiedWildcard(_) => Err(RookError::Internal(
+                "SELECT * reached the planner unexpanded".to_string(),
+            )),
+        })
+        .collect()
 }
 
 // ── Schema Derivation ─────────────────────────────────────────────────────────
@@ -277,10 +202,9 @@ pub fn derive_schema(plan: &LogicalPlan) -> ColumnSchema {
         LogicalPlan::Aggregate(a) => {
             let child_schema = derive_schema(&a.child);
             let mut cols = Vec::new();
-            for expr in &a.group_by {
-                let name = group_key_name(expr);
+            for key in &a.group_by {
                 cols.push(ColumnInfo {
-                    name,
+                    name: key.name.clone(),
                     data_type: "UNKNOWN".to_string(),
                     nullable: true,
                 });
@@ -353,12 +277,18 @@ pub fn derive_qualified_schema(plan: &LogicalPlan) -> Vec<(Option<String>, Colum
         LogicalPlan::Limit(l) => derive_qualified_schema(&l.child),
         LogicalPlan::Aggregate(a) => {
             let mut cols = Vec::new();
-            for expr in &a.group_by {
-                let name = group_key_name(expr);
+            for key in &a.group_by {
+                // A column key keeps the column's qualifier.
+                let table = match &key.expr {
+                    ExprNode::Compound(parts) if parts.len() >= 2 => {
+                        Some(parts[parts.len() - 2].clone())
+                    }
+                    _ => None,
+                };
                 cols.push((
-                    None,
+                    table,
                     ColumnInfo {
-                        name,
+                        name: key.name.clone(),
                         data_type: "UNKNOWN".to_string(),
                         nullable: true,
                     },
@@ -424,273 +354,11 @@ pub fn expr_to_name(expr: &ExprNode) -> String {
     }
 }
 
-/// A GROUP BY key that is computed rather than a plain column.
-fn is_computed_group_key(expr: &ExprNode) -> bool {
-    !matches!(
-        expr,
-        ExprNode::Column(_) | ExprNode::Compound(_) | ExprNode::Constant(_)
-    )
-}
-
-/// Output-column name of a GROUP BY key. Computed keys get a name unique to
-/// the expression so two of them never share a column.
-pub fn group_key_name(expr: &ExprNode) -> String {
-    if is_computed_group_key(expr) {
-        format!("{:?}", expr)
-    } else {
-        expr_to_name(expr)
-    }
-}
-
-fn contains_group_expr(expr: &ExprNode, group_by: &[ExprNode]) -> bool {
-    replace_group_exprs(expr, group_by) != *expr
-}
-
-/// Replace every occurrence of a computed GROUP BY expression inside `expr`
-/// with a reference to that key's output column.
-fn replace_group_exprs(expr: &ExprNode, group_by: &[ExprNode]) -> ExprNode {
-    if is_computed_group_key(expr) && group_by.contains(expr) {
-        return ExprNode::Column(group_key_name(expr));
-    }
-    match expr {
-        // An aggregate's argument is read from the rows of the group.
-        ExprNode::Function { name, .. } if is_aggregate_function(&name.to_ascii_uppercase()) => {
-            expr.clone()
-        }
-        other => other.map_children(&mut |e| replace_group_exprs(e, group_by)),
-    }
-}
-
-/// The first column `expr` reads outside an aggregate call that is not a
-/// GROUP BY key, as written; such a column has no single value per group.
-pub fn ungrouped_column(expr: &ExprNode, group_by: &[ExprNode]) -> Option<String> {
-    if group_by.contains(expr) {
-        return None;
-    }
-    let last = |parts: &[String]| parts.last().cloned().unwrap_or_default();
-    let grouped = |table: Option<&str>, name: &str| {
-        group_by.iter().any(|g| match g {
-            ExprNode::Column(c) => c.eq_ignore_ascii_case(name),
-            ExprNode::Compound(parts) => {
-                last(parts).eq_ignore_ascii_case(name)
-                    && table.is_none_or(|t| {
-                        parts.len() < 2 || parts[parts.len() - 2].eq_ignore_ascii_case(t)
-                    })
-            }
-            _ => false,
-        })
-    };
-    match expr {
-        ExprNode::Column(name) => (!grouped(None, name)).then(|| name.clone()),
-        ExprNode::Compound(parts) => {
-            let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
-            (!grouped(table, &last(parts))).then(|| parts.join("."))
-        }
-        ExprNode::Function { name, .. } if is_aggregate_function(&name.to_ascii_uppercase()) => {
-            None
-        }
-        other => other
-            .children()
-            .into_iter()
-            .find_map(|e| ungrouped_column(e, group_by)),
-    }
-}
-
 // ── Aggregate Detection ───────────────────────────────────────────────────────
 
 /// Check if a function name is an aggregate function.
 pub fn is_aggregate_function(name: &str) -> bool {
     matches!(name, "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
-}
-
-/// Check if a SELECT expression contains an aggregate function.
-pub fn contains_aggregate(expr: &SelectExpr) -> bool {
-    match expr {
-        SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } => {
-            contains_aggregate_expr(e)
-        }
-        _ => false,
-    }
-}
-
-fn contains_aggregate_expr(expr: &ExprNode) -> bool {
-    match expr {
-        ExprNode::Function { name, .. } if is_aggregate_function(&name.to_ascii_uppercase()) => {
-            true
-        }
-        other => other.children().into_iter().any(contains_aggregate_expr),
-    }
-}
-
-/// Recursively replace aggregate function calls in an expression tree with column
-/// references.  This allows `SUM(a)+1` to become `Column("SUM")+1`, where `Column("SUM")`
-/// refers to the output column produced by the AggregateOperator.
-///
-/// Non-aggregate function calls (e.g. UPPER, LENGTH) are left untouched.
-pub fn replace_aggregates_in_expr(expr: &ExprNode) -> ExprNode {
-    match expr {
-        ExprNode::Function {
-            name,
-            args,
-            distinct,
-        } if is_aggregate_function(&name.to_ascii_uppercase()) => {
-            // A reference to the column extract_aggregates names for it.
-            ExprNode::Column(aggregate_ref_name(name, args, *distinct))
-        }
-        other => other.map_children(&mut replace_aggregates_in_expr),
-    }
-}
-
-/// Recursively extract aggregate function calls from an expression tree.
-///
-/// Walks the expression tree depth-first and collects all aggregate function
-/// nodes (COUNT, SUM, AVG, MIN, MAX) at any nesting depth. This handles
-/// expressions like `SUM(price)+1` where the aggregate is nested inside
-/// a binary arithmetic expression.
-fn extract_aggregates_from_expr(expr: &ExprNode) -> Vec<AggregateExpr> {
-    if let ExprNode::Function {
-        name,
-        args,
-        distinct,
-    } = expr
-    {
-        let function = match name.to_ascii_uppercase().as_str() {
-            "COUNT" => Some(AggregateFunction::Count),
-            "SUM" => Some(AggregateFunction::Sum),
-            "AVG" => Some(AggregateFunction::Avg),
-            "MIN" => Some(AggregateFunction::Min),
-            "MAX" => Some(AggregateFunction::Max),
-            _ => None,
-        };
-        if let Some(function) = function {
-            return vec![AggregateExpr {
-                function,
-                args: expr.children().into_iter().cloned().collect(),
-                alias: Some(aggregate_ref_name(name, args, *distinct)),
-                distinct: *distinct,
-            }];
-        }
-    }
-    expr.children()
-        .into_iter()
-        .flat_map(extract_aggregates_from_expr)
-        .collect()
-}
-
-/// Extract aggregate expressions from projection list.
-///
-/// Recursively searches each projection expression for aggregate function
-/// calls at any nesting depth. Handles `SUM(price)+1`, `SUM(price)*2`,
-/// `AVG(qty) - MIN(price)`, and other compound expressions.
-pub fn extract_aggregates(projections: &[SelectExpr]) -> Vec<AggregateExpr> {
-    let mut aggregates = Vec::new();
-    for item in projections {
-        let expr = match item {
-            SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } => e,
-            _ => continue,
-        };
-        // Recursively search for aggregates at any nesting depth
-        let mut found = extract_aggregates_from_expr(expr);
-
-        // For top-level aggregates with an explicit alias (e.g. `SUM(price) AS total`),
-        // apply the alias to the aggregate. For nested aggregates (e.g. inside Binary),
-        // the function name remains as the alias.
-        if found.len() == 1
-            && let SelectExpr::ExprWithAlias { alias, expr } = item
-            && matches!(expr, ExprNode::Function { name, .. }
-                if is_aggregate_function(&name.to_ascii_uppercase()))
-        {
-            found[0].alias = Some(alias.clone());
-        }
-
-        // A call repeated in the list (`COALESCE(MAX(x), 0), MAX(x) > 0`)
-        // is computed once: its output column has one name.
-        for agg in found {
-            if !aggregates
-                .iter()
-                .any(|a: &AggregateExpr| a.alias == agg.alias)
-            {
-                aggregates.push(agg);
-            }
-        }
-    }
-    aggregates
-}
-
-/// Extract aggregate calls from a HAVING (or WHERE-style) predicate tree.
-///
-/// `HAVING COUNT(*) >= 2` must compute `COUNT(*)` even when it does not
-/// appear in the SELECT list, so the logical planner merges these into the
-/// aggregate list as well.
-pub fn extract_aggregates_from_predicate(pred: &PredicateNode) -> Vec<AggregateExpr> {
-    use PredicateNode as P;
-    match pred {
-        P::BinaryOp { left, right, .. } => {
-            let mut out = self::extract_aggregates_from_predicate(left);
-            out.extend(extract_aggregates_from_predicate(right));
-            out
-        }
-        P::Not(inner) => extract_aggregates_from_predicate(inner),
-        P::Compare { left, right, .. } => {
-            let mut out = extract_aggregates_from_expr(left);
-            out.extend(extract_aggregates_from_expr(right));
-            out
-        }
-        P::IsNull(e) | P::IsNotNull(e) => extract_aggregates_from_expr(e),
-        P::Between { expr, low, high } => {
-            let mut out = extract_aggregates_from_expr(expr);
-            out.extend(extract_aggregates_from_expr(low));
-            out.extend(extract_aggregates_from_expr(high));
-            out
-        }
-        P::InList { expr, list } => {
-            let mut out = extract_aggregates_from_expr(expr);
-            for e in list {
-                out.extend(extract_aggregates_from_expr(e));
-            }
-            out
-        }
-        P::Like { expr, .. } => extract_aggregates_from_expr(expr),
-        P::IsDistinctFrom { left, right } => {
-            let mut out = extract_aggregates_from_expr(left);
-            out.extend(extract_aggregates_from_expr(right));
-            out
-        }
-        P::IsBoolean { expr, .. } => extract_aggregates_from_expr(expr),
-        // Subquery predicates carry their own scope; their aggregates are
-        // planned inside the subquery.
-        P::Exists(_) | P::InSubquery { .. } => Vec::new(),
-    }
-}
-
-/// Stable identity of an aggregate call, used to deduplicate repeated
-/// occurrences of the same expression across SELECT / HAVING.
-pub fn aggregate_identity(agg: &AggregateExpr) -> String {
-    format!(
-        "{:?}({}{:?})",
-        agg.function,
-        if agg.distinct { "DISTINCT " } else { "" },
-        agg.args
-    )
-}
-
-/// Internal output-column name of an aggregate call. It is unique per
-/// distinct call, so `SUM(a)` and `SUM(b)` in one SELECT never share a
-/// column; the display name of the result comes from the projection above.
-pub fn aggregate_ref_name(name: &str, args: &[rook_ast::FunctionArg], distinct: bool) -> String {
-    let rendered: Vec<String> = args
-        .iter()
-        .map(|a| match a {
-            rook_ast::FunctionArg::Star => "*".to_string(),
-            rook_ast::FunctionArg::Expr(e) => format!("{:?}", e),
-        })
-        .collect();
-    format!(
-        "{}({}{})",
-        name.to_ascii_uppercase(),
-        if distinct { "DISTINCT " } else { "" },
-        rendered.join(",")
-    )
 }
 
 // ── Plan Tree Labels ──────────────────────────────────────────────────────────

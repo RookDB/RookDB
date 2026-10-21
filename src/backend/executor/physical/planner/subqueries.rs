@@ -362,12 +362,7 @@ impl PhysicalPlanner {
         {
             return Ok(None);
         }
-        let has_aggregates = !select.group_by.is_empty()
-            || select.having.is_some()
-            || select
-                .projections
-                .iter()
-                .any(crate::planner::helpers::contains_aggregate);
+        let has_aggregates = crate::planner::grouping::is_grouped(select);
         if shape != Shape::Scalar && (has_aggregates || select.limit.is_some()) {
             return Ok(None);
         }
@@ -569,21 +564,33 @@ impl PhysicalPlanner {
         select: &rook_ast::SelectPlan,
         child: Box<dyn PhysicalOperator>,
     ) -> RookResult<(Box<dyn PhysicalOperator>, DataType)> {
+        let items = select
+            .projections
+            .iter()
+            .filter_map(|p| match p {
+                rook_ast::SelectExpr::UnnamedExpr(e) => Some((e.clone(), String::new())),
+                rook_ast::SelectExpr::ExprWithAlias { expr, alias } => {
+                    Some((expr.clone(), alias.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.project(items, child)
+    }
+
+    /// Compute `items` (expression, output name) over `child`; also the
+    /// type of the first, the subquery's value.
+    fn project(
+        &self,
+        items: Vec<(rook_ast::ExprNode, String)>,
+        child: Box<dyn PhysicalOperator>,
+    ) -> RookResult<(Box<dyn PhysicalOperator>, DataType)> {
         let child_schema = child.schema();
         let col_names = super::super::expr::binding_names(child_schema);
         let mut projections = Vec::new();
-        for p in &select.projections {
-            match p {
-                rook_ast::SelectExpr::UnnamedExpr(e) => {
-                    let (expr, dt) = self.plan_projection_expr(e, &col_names, child_schema)?;
-                    projections.push((expr, "".to_string(), dt));
-                }
-                rook_ast::SelectExpr::ExprWithAlias { expr: e, alias } => {
-                    let (expr, dt) = self.plan_projection_expr(e, &col_names, child_schema)?;
-                    projections.push((expr, alias.clone(), dt));
-                }
-                _ => {}
-            }
+        for (e, name) in items {
+            let (expr, dt) = self.plan_projection_expr(&e, &col_names, child_schema)?;
+            projections.push((expr, name, dt));
         }
         let dt = projections
             .first()
@@ -668,35 +675,28 @@ impl PhysicalPlanner {
             outer_indices,
         } = simple;
 
-        let has_aggregates = !select.group_by.is_empty()
-            || select.having.is_some()
-            || select
-                .projections
-                .iter()
-                .any(crate::planner::helpers::contains_aggregate);
-
-        let (mut op, data_type) = if has_aggregates {
-            let aggregates = crate::planner::helpers::extract_aggregates(&select.projections);
-            let log_agg = rook_ast::logical::LogicalAggregate {
-                child: Box::new(rook_ast::logical::LogicalPlan::TableScan(
-                    rook_ast::logical::LogicalTableScan {
-                        table: "".to_string(),
-                        alias: None,
-                        schema: rook_ast::logical::ColumnSchema::empty(),
-                        system_table_name: None,
-                    },
-                )),
-                group_by: select.group_by.clone(),
-                aggregates,
-                having: select.having.clone(),
+        let (mut op, data_type) = if crate::planner::grouping::is_grouped(select) {
+            // Aggregate the filtered rows, then compute the SELECT list from
+            // the aggregation's columns, as the logical planner does.
+            let grouping = crate::planner::grouping::Grouping::new(select)?;
+            let rook_ast::logical::LogicalPlan::Aggregate(aggregate) = grouping.aggregate(
+                select.having.as_ref(),
+                rook_ast::logical::LogicalPlan::TableScan(rook_ast::logical::LogicalTableScan {
+                    table: String::new(),
+                    alias: None,
+                    schema: rook_ast::logical::ColumnSchema::empty(),
+                    system_table_name: None,
+                }),
+            )?
+            else {
+                unreachable!("Grouping::aggregate plans an aggregation");
             };
-            let agg_op = self.plan_aggregate_on_child(filtered_op, &log_agg)?;
-            let dt = agg_op
-                .schema()
-                .first()
-                .map(|c| c.data_type.clone())
-                .unwrap_or(DataType::Int);
-            (agg_op, dt)
+            let aggregated = self.plan_aggregate_on_child(filtered_op, &aggregate)?;
+            let outputs = grouping.outputs(&select.projections)?;
+            self.project(
+                outputs.into_iter().map(|o| (o.expr, o.name)).collect(),
+                aggregated,
+            )?
         } else {
             self.project_select_list(select, filtered_op)?
         };

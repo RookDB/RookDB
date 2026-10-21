@@ -71,8 +71,8 @@ fn walk_above(
         }
         LogicalPlan::Limit(l) => walk_above(&l.child, &names, out),
         LogicalPlan::Aggregate(a) => {
-            for e in &a.group_by {
-                walk_expr(e, &mut names)?;
+            for key in &a.group_by {
+                walk_expr(&key.expr, &mut names)?;
             }
             for agg in &a.aggregates {
                 for e in &agg.args {
@@ -162,8 +162,8 @@ fn walk_plan(plan: &LogicalPlan, names: &mut HashSet<String>) -> Option<()> {
         }
         LogicalPlan::Limit(l) => walk_plan(&l.child, names),
         LogicalPlan::Aggregate(a) => {
-            for e in &a.group_by {
-                walk_expr(e, names)?;
+            for key in &a.group_by {
+                walk_expr(&key.expr, names)?;
             }
             for agg in &a.aggregates {
                 for e in &agg.args {
