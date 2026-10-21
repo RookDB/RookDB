@@ -200,24 +200,16 @@ impl FromStr for DataType {
                     && !upper.starts_with("CHARACTER(")
                 {
                     let inner = &upper[5..upper.len() - 1];
-                    inner.parse::<u16>().map(DataType::Char).map_err(|_| {
-                        RookError::TypeMismatch(format!("Invalid CHAR size: '{}'", inner))
-                    })
+                    type_length(inner, "CHAR").map(DataType::Char)
                 } else if upper.starts_with("CHARACTER(") && upper.ends_with(')') {
                     let inner = &upper[10..upper.len() - 1];
-                    inner.parse::<u16>().map(DataType::Character).map_err(|_| {
-                        RookError::TypeMismatch(format!("Invalid CHARACTER size: '{}'", inner))
-                    })
+                    type_length(inner, "CHARACTER").map(DataType::Character)
                 } else if upper.starts_with("VARCHAR(") && upper.ends_with(')') {
                     let inner = &upper[8..upper.len() - 1];
-                    inner.parse::<u16>().map(DataType::Varchar).map_err(|_| {
-                        RookError::TypeMismatch(format!("Invalid VARCHAR size: '{}'", inner))
-                    })
+                    type_length(inner, "VARCHAR").map(DataType::Varchar)
                 } else if upper.starts_with("BIT(") && upper.ends_with(')') {
                     let inner = &upper[4..upper.len() - 1];
-                    inner.parse::<u16>().map(DataType::Bit).map_err(|_| {
-                        RookError::TypeMismatch(format!("Invalid BIT size: '{}'", inner))
-                    })
+                    type_length(inner, "BIT").map(DataType::Bit)
                 } else {
                     Err(RookError::TypeMismatch(format!(
                         "Unknown data type: '{}'",
@@ -226,6 +218,21 @@ impl FromStr for DataType {
                 }
             }
         }
+    }
+}
+
+/// The length `n` of `CHAR(n)`, `VARCHAR(n)` or `BIT(n)`: 1 to 65535.
+fn type_length(inner: &str, type_name: &str) -> Result<u16, RookError> {
+    match inner.trim().parse::<u16>() {
+        Ok(0) => Err(RookError::TypeMismatch(format!(
+            "{} length must be at least 1",
+            type_name
+        ))),
+        Ok(n) => Ok(n),
+        Err(_) => Err(RookError::TypeMismatch(format!(
+            "Invalid {} size: '{}'",
+            type_name, inner
+        ))),
     }
 }
 
