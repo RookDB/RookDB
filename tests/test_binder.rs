@@ -189,3 +189,51 @@ fn star_follows_using_joins() {
     let rows = run(&mut s, "SELECT u.* FROM t JOIN u USING (a) WHERE t.b = 20");
     assert_eq!(rows, [["2", "5"]]);
 }
+
+/// Operands that cannot work together are a planning error, whatever the
+/// data: on an empty table these used to succeed, and on a full one fail
+/// only when a row reached them.
+#[test]
+fn type_errors_are_reported_while_planning() {
+    let (_ws, mut s) = session("types");
+    run(
+        &mut s,
+        "CREATE TABLE e (n INT, s VARCHAR(5), d DATE, f BOOLEAN)",
+    );
+    for sql in [
+        "SELECT n + s FROM e",
+        "SELECT n FROM e WHERE s = 1",
+        "SELECT n FROM e WHERE n IN (1, 'x')",
+        "SELECT n FROM e WHERE n LIKE '1%'",
+        "SELECT n FROM e WHERE NOT n",
+        "SELECT n FROM e WHERE n IS TRUE",
+        "SELECT SUM(s) FROM e",
+        "SELECT UPPER(n) FROM e",
+        "SELECT d - d FROM e",
+        "SELECT n FROM e WHERE n = (SELECT s FROM e)",
+        "SELECT n FROM e WHERE n IN (SELECT s FROM e)",
+        "SELECT CASE WHEN n THEN 1 END FROM e",
+        "SELECT n FROM e WHERE EXISTS (SELECT 1 FROM t WHERE t.a = e.s)",
+        "SELECT n FROM e GROUP BY n HAVING MAX(s) > 1",
+    ] {
+        let e = try_run(&mut s, sql).expect_err(sql);
+        assert!(
+            matches!(e.root(), RookError::TypeMismatch(_)),
+            "{}: {:?}",
+            sql,
+            e
+        );
+    }
+    let e = try_run(&mut s, "SELECT NOSUCH(n) FROM e WHERE n > 0").expect_err("unknown");
+    assert!(matches!(e.root(), RookError::InvalidQuery(_)), "{:?}", e);
+    // What the executor can compare still plans: dates with strings,
+    // numbers of any width, DATE ± days, and NULL beside anything.
+    for sql in [
+        "SELECT n FROM e WHERE d = '2024-01-02' AND n < 1.5",
+        "SELECT d + 1, d - 1, n * 2.5 FROM e",
+        "SELECT n FROM e WHERE s = NULL OR f",
+        "SELECT COALESCE(s, 'none'), s || n FROM e",
+    ] {
+        run(&mut s, sql);
+    }
+}

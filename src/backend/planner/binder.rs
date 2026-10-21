@@ -27,13 +27,18 @@ use std::collections::HashMap;
 use rook_ast::*;
 
 use super::helpers::{expr_to_name, not_found, resolve_table_ref};
+use super::types::{TypeEnv, check_predicate, expr_type};
 use crate::backend::error::{RookError, RookResult};
 use crate::catalog::{Catalog, Database};
+use crate::types::datatype::DataType;
 
 const CTE_PREFIX: &str = "__cte__:";
 
-/// Output column names of the CTEs a SELECT can read, by lower-cased name.
-pub type CteColumns = HashMap<String, Vec<String>>;
+/// A column a relation shows: its name and, when known, its type.
+pub type Column = (String, Option<DataType>);
+
+/// Output columns of the CTEs a SELECT can read, by lower-cased name.
+pub type CteColumns = HashMap<String, Vec<Column>>;
 
 /// A relation of a FROM clause.
 struct Relation {
@@ -41,12 +46,14 @@ struct Relation {
     names: Vec<String>,
     /// The qualifier its columns carry at run time.
     stamp: String,
-    columns: Vec<String>,
+    columns: Vec<Column>,
 }
 
 impl Relation {
-    fn column(&self, name: &str) -> Option<&String> {
-        self.columns.iter().find(|c| c.eq_ignore_ascii_case(name))
+    fn column(&self, name: &str) -> Option<&Column> {
+        self.columns
+            .iter()
+            .find(|(c, _)| c.eq_ignore_ascii_case(name))
     }
 
     fn reference(&self, column: &str) -> ExprNode {
@@ -66,6 +73,41 @@ struct Scope {
     outputs: Vec<(String, ExprNode)>,
 }
 
+/// The types of a SELECT's expressions, read from the scopes being bound.
+struct ScopeTypes<'b> {
+    scopes: &'b [Scope],
+    subqueries: &'b HashMap<*const SelectPlan, Option<DataType>>,
+}
+
+impl TypeEnv for ScopeTypes<'_> {
+    fn column(&self, expr: &ExprNode) -> RookResult<Option<DataType>> {
+        let (levels, table, name) = match expr {
+            ExprNode::Compound(parts) if parts.len() == 2 => (0, &parts[0], &parts[1]),
+            ExprNode::OuterColumn(OuterRef {
+                levels,
+                table: Some(table),
+                column,
+            }) => (*levels, table, column),
+            _ => return Ok(None),
+        };
+        Ok(self
+            .scopes
+            .len()
+            .checked_sub(levels + 1)
+            .and_then(|i| self.scopes[i].relation(table))
+            .and_then(|r| r.column(name))
+            .and_then(|(_, t)| t.clone()))
+    }
+
+    fn subquery(&self, info: &SubqueryInfo) -> RookResult<Option<DataType>> {
+        Ok(self
+            .subqueries
+            .get(&(&*info.select as *const SelectPlan))
+            .cloned()
+            .flatten())
+    }
+}
+
 impl Scope {
     /// A bare name: `Ok(None)` when no relation has it.
     fn bare(&self, name: &str) -> RookResult<Option<ExprNode>> {
@@ -79,7 +121,7 @@ impl Scope {
         let mut found = self
             .relations
             .iter()
-            .flat_map(|r| r.columns.iter().map(move |c| (r, c)))
+            .flat_map(|r| r.columns.iter().map(move |(c, _)| (r, c)))
             .filter(|(_, c)| c.eq_ignore_ascii_case(name));
         match (found.next(), found.next()) {
             (None, _) => Ok(None),
@@ -129,6 +171,16 @@ pub fn bind_select(
     db_name: &str,
     ctes: &CteColumns,
 ) -> RookResult<SelectPlan> {
+    bind(select, catalog, db_name, ctes).map(|(bound, _)| bound)
+}
+
+/// [`bind_select`], with the types of the output columns.
+fn bind(
+    select: &SelectPlan,
+    catalog: &Catalog,
+    db_name: &str,
+    ctes: &CteColumns,
+) -> RookResult<(SelectPlan, Vec<Option<DataType>>)> {
     let db = catalog
         .databases
         .get(db_name)
@@ -139,6 +191,7 @@ pub fn bind_select(
         db,
         scopes: Vec::new(),
         ctes: vec![ctes.clone()],
+        subqueries: HashMap::new(),
     };
     binder.select(select)
 }
@@ -164,10 +217,12 @@ struct Binder<'a> {
     scopes: Vec<Scope>,
     /// The CTEs visible, innermost WITH list last.
     ctes: Vec<CteColumns>,
+    /// The value type of each subquery bound, by the address of its SELECT.
+    subqueries: HashMap<*const SelectPlan, Option<DataType>>,
 }
 
 impl Binder<'_> {
-    fn select(&mut self, select: &SelectPlan) -> RookResult<SelectPlan> {
+    fn select(&mut self, select: &SelectPlan) -> RookResult<(SelectPlan, Vec<Option<DataType>>)> {
         self.ctes.push(CteColumns::new());
         self.scopes.push(Scope::default());
         let bound = self.select_in_scope(select);
@@ -180,7 +235,40 @@ impl Binder<'_> {
         self.scopes.last_mut().expect("binding inside a SELECT")
     }
 
-    fn select_in_scope(&mut self, select: &SelectPlan) -> RookResult<SelectPlan> {
+    /// A bound subquery, its value type noted for [`ScopeTypes`].
+    fn subquery(&mut self, select: &SelectPlan) -> RookResult<SubqueryInfo> {
+        let (bound, types) = self.select(select)?;
+        let bound = Box::new(bound);
+        let value = types.into_iter().next().flatten();
+        self.subqueries.insert(&*bound as *const SelectPlan, value);
+        Ok(SubqueryInfo { select: bound })
+    }
+
+    fn types(&self) -> ScopeTypes<'_> {
+        ScopeTypes {
+            scopes: &self.scopes,
+            subqueries: &self.subqueries,
+        }
+    }
+
+    /// Bind an expression and check its operands fit together.
+    fn typed_expr(&mut self, expr: &ExprNode, clause: Clause) -> RookResult<ExprNode> {
+        let bound = self.expr(expr, clause)?;
+        expr_type(&bound, &self.types())?;
+        Ok(bound)
+    }
+
+    /// Bind a condition and check its operands fit together.
+    fn typed_pred(&mut self, pred: &PredicateNode, clause: Clause) -> RookResult<PredicateNode> {
+        let bound = self.pred(pred, clause)?;
+        check_predicate(&bound, &self.types())?;
+        Ok(bound)
+    }
+
+    fn select_in_scope(
+        &mut self,
+        select: &SelectPlan,
+    ) -> RookResult<(SelectPlan, Vec<Option<DataType>>)> {
         let mut out = select.clone();
 
         // A CTE body sees earlier CTEs but no columns of this query.
@@ -198,7 +286,7 @@ impl Binder<'_> {
             let relation = self.relation(&join.relation)?;
             self.add_relation(relation, Some(join))?;
             if let Some(cond) = &join.condition {
-                out.joins[i].condition = Some(self.pred(cond, Clause::Input)?);
+                out.joins[i].condition = Some(self.typed_pred(cond, Clause::Input)?);
             }
         }
 
@@ -214,17 +302,17 @@ impl Binder<'_> {
                 SelectExpr::QualifiedWildcard(q) => {
                     let scope = self.scope();
                     let relation = scope.relation(q).ok_or_else(|| missing_relation(q))?;
-                    for c in &relation.columns {
+                    for (c, _) in &relation.columns {
                         projections.push(named(relation.reference(c), c.clone()));
                     }
                 }
                 SelectExpr::UnnamedExpr(e) => {
-                    let bound = self.expr(e, Clause::Input)?;
+                    let bound = self.typed_expr(e, Clause::Input)?;
                     projections.push(named(bound, expr_to_name(e)));
                 }
                 SelectExpr::ExprWithAlias { expr, alias } => {
                     projections.push(SelectExpr::ExprWithAlias {
-                        expr: self.expr(expr, Clause::Input)?,
+                        expr: self.typed_expr(expr, Clause::Input)?,
                         alias: alias.clone(),
                     });
                 }
@@ -242,7 +330,7 @@ impl Binder<'_> {
         out.projections = projections;
 
         if let Some(pred) = &select.selection {
-            out.selection = Some(self.pred(pred, Clause::Input)?);
+            out.selection = Some(self.typed_pred(pred, Clause::Input)?);
         }
 
         let mut group_by = Vec::with_capacity(select.group_by.len());
@@ -263,35 +351,41 @@ impl Binder<'_> {
                             ))
                         })?
                 }
-                other => self.expr(other, Clause::Grouping)?,
+                other => self.typed_expr(other, Clause::Grouping)?,
             });
         }
         out.group_by = group_by;
 
         if let Some(pred) = &select.having {
-            out.having = Some(self.pred(pred, Clause::Grouping)?);
+            out.having = Some(self.typed_pred(pred, Clause::Grouping)?);
         }
         for (ob, key) in out.order_by.iter_mut().zip(&select.order_by) {
             ob.expr = match &key.expr {
                 // A position is resolved against the output by the planner.
                 e @ ExprNode::Constant(_) => e.clone(),
-                e => self.expr(e, Clause::OrderBy)?,
+                e => self.typed_expr(e, Clause::OrderBy)?,
             };
         }
-        Ok(out)
+        let env = self.types();
+        let types = env.scopes.last().expect("a scope").outputs.iter();
+        let types = types
+            .map(|(_, e)| expr_type(e, &env))
+            .collect::<RookResult<_>>()?;
+        Ok((out, types))
     }
 
     /// Bind a WITH list in order, making each CTE visible to the next.
     fn ctes(&mut self, ctes: &mut [CteDef]) -> RookResult<()> {
         for cte in ctes {
-            *cte.query = self.select(&cte.query)?;
-            let columns = output_names(&cte.query);
+            let (body, types) = self.select(&cte.query)?;
+            let columns = output_names(&body).into_iter().zip(types).collect();
+            *cte.query = body;
             self.ctes
                 .last_mut()
                 .expect("a CTE frame")
                 .insert(cte.name.to_ascii_lowercase(), columns);
             if let Some(term) = &cte.recursive_term {
-                cte.recursive_term = Some(Box::new(self.select(term)?));
+                cte.recursive_term = Some(Box::new(self.select(term)?.0));
             }
         }
         Ok(())
@@ -313,7 +407,7 @@ impl Binder<'_> {
         let right: Vec<(ExprNode, String)> = relation
             .columns
             .iter()
-            .map(|c| (relation.reference(c), c.clone()))
+            .map(|(c, _)| (relation.reference(c), c.clone()))
             .collect();
         let Some(join) = join else {
             scope.star = right;
@@ -380,7 +474,7 @@ impl Binder<'_> {
     /// What a FROM item is: its names, run-time qualifier and columns.
     fn relation(&self, tref: &TableRef) -> RookResult<Relation> {
         let alias = tref.alias.as_ref();
-        let named = |stamp: String, columns: Vec<String>| Relation {
+        let named = |stamp: String, columns: Vec<Column>| Relation {
             names: vec![stamp.to_ascii_lowercase()],
             stamp,
             columns,
@@ -404,7 +498,7 @@ impl Binder<'_> {
             let columns = crate::backend::system_table::info_schema_column_schema(&view)
                 .columns
                 .into_iter()
-                .map(|c| c.name)
+                .map(|c| (c.name, None))
                 .collect();
             let system_table = super::helpers::info_schema_table(&view);
             return Ok(match alias {
@@ -420,15 +514,16 @@ impl Binder<'_> {
             let query: SelectPlan = serde_json::from_str(&view.query_json).map_err(|e| {
                 RookError::Internal(format!("Failed to deserialise view '{}': {}", tref.name, e))
             })?;
-            let bound = bind_select(&query, self.catalog, self.db_name, &CteColumns::new())?;
+            let (bound, types) = bind(&query, self.catalog, self.db_name, &CteColumns::new())?;
             let stamp = alias.cloned().unwrap_or_else(|| tref.name.clone());
-            return Ok(named(stamp, output_names(&bound)));
+            let columns = output_names(&bound).into_iter().zip(types).collect();
+            return Ok(named(stamp, columns));
         }
         let (table, alias) = resolve_table_ref(tref, self.db)?;
         let columns = self.db.tables[&table]
             .columns
             .iter()
-            .map(|c| c.name.clone())
+            .map(|c| (c.name.clone(), Some(c.data_type.clone())))
             .collect();
         Ok(named(alias.unwrap_or(table), columns))
     }
@@ -441,9 +536,9 @@ impl Binder<'_> {
                 [name] => self.column(None, name, clause),
                 [.., q, name] => self.column(Some(q), name, clause),
             },
-            ExprNode::ScalarSubquery(info) => Ok(ExprNode::ScalarSubquery(SubqueryInfo {
-                select: Box::new(self.select(&info.select)?),
-            })),
+            ExprNode::ScalarSubquery(info) => {
+                Ok(ExprNode::ScalarSubquery(self.subquery(&info.select)?))
+            }
             ExprNode::Predicate(p) => Ok(ExprNode::Predicate(Box::new(self.pred(p, clause)?))),
             other => {
                 let mut error = None;
@@ -467,18 +562,14 @@ impl Binder<'_> {
                 right: Box::new(self.pred(right, clause)?),
             },
             PredicateNode::Not(p) => PredicateNode::Not(Box::new(self.pred(p, clause)?)),
-            PredicateNode::Exists(info) => PredicateNode::Exists(SubqueryInfo {
-                select: Box::new(self.select(&info.select)?),
-            }),
+            PredicateNode::Exists(info) => PredicateNode::Exists(self.subquery(&info.select)?),
             PredicateNode::InSubquery {
                 expr,
                 subquery,
                 negated,
             } => PredicateNode::InSubquery {
                 expr: Box::new(self.expr(expr, clause)?),
-                subquery: SubqueryInfo {
-                    select: Box::new(self.select(&subquery.select)?),
-                },
+                subquery: self.subquery(&subquery.select)?,
                 negated: *negated,
             },
             other => {
@@ -517,12 +608,14 @@ impl Binder<'_> {
             }
             let found = match qualifier {
                 Some(q) => match scope.relation(q) {
-                    Some(r) => Some(r.column(name).map(|c| r.reference(c)).ok_or_else(|| {
-                        RookError::NotFound {
-                            entity: "Column",
-                            name: written(),
-                        }
-                    })?),
+                    Some(r) => {
+                        Some(r.column(name).map(|(c, _)| r.reference(c)).ok_or_else(|| {
+                            RookError::NotFound {
+                                entity: "Column",
+                                name: written(),
+                            }
+                        })?)
+                    }
                     None => None,
                 },
                 None => scope.bare(name)?,

@@ -6,98 +6,7 @@ use crate::backend::error::{RookError, RookResult};
 use crate::types::DataValue;
 use crate::types::datatype::DataType;
 
-use super::super::operators::{AggregateFunction, infer_aggregate_output_type};
-
-/// Promote two types to a common type using SQL-99 implicit promotion rules.
-///
-/// Rules:
-///   - If either is DOUBLE → DOUBLE
-///   - If either is REAL → DOUBLE
-///   - If either is NUMERIC → DOUBLE
-///   - If either is BIGINT → BIGINT
-///   - If either is INT → INT
-///   - SMALLINT + SMALLINT → SMALLINT
-///   - Otherwise → INT (non-numeric fallback)
-pub fn promote_numeric_type(a: &DataType, b: &DataType) -> DataType {
-    use DataType as DT;
-
-    let is_numeric = |t: &DataType| -> bool {
-        matches!(
-            t,
-            DT::SmallInt
-                | DT::Int
-                | DT::BigInt
-                | DT::Real
-                | DT::DoublePrecision
-                | DT::Numeric { .. }
-                | DT::Decimal { .. }
-        )
-    };
-
-    if !is_numeric(a) || !is_numeric(b) {
-        return DT::Int;
-    }
-
-    let rank = |t: &DataType| -> u8 {
-        match t {
-            DT::SmallInt => 1,
-            DT::Int => 2,
-            DT::BigInt => 3,
-            DT::Real => 4,
-            DT::Numeric { .. } | DT::Decimal { .. } => 4,
-            DT::DoublePrecision => 5,
-            _ => 0,
-        }
-    };
-
-    match rank(a).max(rank(b)) {
-        1 => DT::SmallInt,
-        2 => DT::Int,
-        3 => DT::BigInt,
-        _ => DT::DoublePrecision,
-    }
-}
-
-/// Result type of arithmetic between a NUMERIC and another exact number
-/// (NUMERIC or an integer), which the executor computes exactly as a NUMERIC:
-/// `SUM(bigint_col) + 1` is a NUMERIC, not a DOUBLE PRECISION. `None` when
-/// neither side is a NUMERIC or one side is not exact.
-fn exact_numeric_result_type(
-    a: &DataType,
-    op: rook_ast::ArithOp,
-    b: &DataType,
-) -> Option<DataType> {
-    use DataType as DT;
-
-    // Scale of an exact operand; integers have none.
-    let scale = |t: &DataType| -> Option<u8> {
-        match t {
-            DT::SmallInt | DT::Int | DT::BigInt => Some(0),
-            DT::Numeric { scale, .. } | DT::Decimal { scale, .. } => Some(*scale),
-            _ => None,
-        }
-    };
-    let is_decimal = |t: &DataType| matches!(t, DT::Numeric { .. } | DT::Decimal { .. });
-    if !is_decimal(a) && !is_decimal(b) {
-        return None;
-    }
-    let (sa, sb) = (scale(a)?, scale(b)?);
-    // The scales the executor's numeric_add/sub/mul/div produce.
-    let scale = match op {
-        rook_ast::ArithOp::Mul => sa.saturating_add(sb).min(MAX_NUMERIC_PRECISION),
-        rook_ast::ArithOp::Div => {
-            crate::backend::executor::physical::expr::numeric_division_scale(sa, sb)
-        }
-        _ => sa.max(sb),
-    };
-    Some(DT::Numeric {
-        precision: MAX_NUMERIC_PRECISION,
-        scale,
-    })
-}
-
-/// Widest NUMERIC precision the engine has.
-const MAX_NUMERIC_PRECISION: u8 = 38;
+use crate::planner::types::{TypeEnv, expr_type};
 
 /// Convert a `DataValue` (from the physical engine) to a `ConstantValue` (AST node).
 /// Used only for nested scalar subqueries inside Binary/Cast expressions.
@@ -118,35 +27,6 @@ pub fn data_value_to_constant_value(dv: &DataValue) -> rook_ast::ConstantValue {
             rook_ast::ConstantValue::Text(format!("{:?}", dv))
         }
         DV::Bit(_) => rook_ast::ConstantValue::Int(0),
-    }
-}
-
-/// The broad kind of a type. Values of one kind compare with each other;
-/// values of different kinds do not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum TypeKind {
-    Number,
-    Bool,
-    Text,
-    DateTime,
-    Time,
-    Bit,
-}
-
-pub(crate) fn type_kind(t: &DataType) -> TypeKind {
-    match t {
-        DataType::SmallInt
-        | DataType::Int
-        | DataType::BigInt
-        | DataType::Real
-        | DataType::DoublePrecision
-        | DataType::Numeric { .. }
-        | DataType::Decimal { .. } => TypeKind::Number,
-        DataType::Bool => TypeKind::Bool,
-        DataType::Char(_) | DataType::Character(_) | DataType::Varchar(_) => TypeKind::Text,
-        DataType::Date | DataType::Timestamp => TypeKind::DateTime,
-        DataType::Time => TypeKind::Time,
-        DataType::Bit(_) => TypeKind::Bit,
     }
 }
 
@@ -194,19 +74,34 @@ pub fn infer_expr_type_with(
     schema: &[super::super::tuple::ColumnInfo],
     subquery_type: &dyn Fn(&rook_ast::SubqueryInfo) -> Option<DataType>,
 ) -> RookResult<DataType> {
-    Ok(infer_type(expr, schema, subquery_type)?.unwrap_or(DataType::Int))
+    let env = SchemaTypes {
+        schema,
+        subquery_type,
+    };
+    Ok(expr_type(expr, &env)?.unwrap_or(DataType::Int))
 }
 
-/// [`infer_expr_type_with`]; `None` is the unknown type of NULL.
-fn infer_type(
-    expr: &rook_ast::ExprNode,
-    schema: &[super::super::tuple::ColumnInfo],
-    subquery_type: &dyn Fn(&rook_ast::SubqueryInfo) -> Option<DataType>,
-) -> RookResult<Option<DataType>> {
-    use rook_ast::{ConstantValue as CV, ExprNode as E, FunctionArg};
-    let column = |table: Option<&str>, name: &str| {
-        super::super::expr::column_position(schema, table, name)
-            .map(|i| Some(schema[i].data_type.clone()))
+/// Types of an expression's columns read from rows of `schema`.
+struct SchemaTypes<'a> {
+    schema: &'a [super::super::tuple::ColumnInfo],
+    subquery_type: &'a dyn Fn(&rook_ast::SubqueryInfo) -> Option<DataType>,
+}
+
+impl TypeEnv for SchemaTypes<'_> {
+    fn column(&self, expr: &rook_ast::ExprNode) -> RookResult<Option<DataType>> {
+        let (table, name) = match expr {
+            rook_ast::ExprNode::Column(name) => (None, name.as_str()),
+            rook_ast::ExprNode::Compound(parts) => (
+                parts.len().checked_sub(2).map(|i| parts[i].as_str()),
+                parts
+                    .last()
+                    .ok_or_else(|| RookError::Internal("Empty compound identifier".to_string()))?
+                    .as_str(),
+            ),
+            _ => return Ok(None),
+        };
+        super::super::expr::column_position(self.schema, table, name)
+            .map(|i| Some(self.schema[i].data_type.clone()))
             .ok_or_else(|| RookError::NotFound {
                 entity: "Column",
                 name: match table {
@@ -214,155 +109,13 @@ fn infer_type(
                     None => name.to_string(),
                 },
             })
-    };
-    // The first argument or branch whose type is known.
-    let first_known = |exprs: &mut dyn Iterator<Item = &E>| -> RookResult<Option<DataType>> {
-        for e in exprs {
-            if let Some(t) = infer_type(e, schema, subquery_type)? {
-                return Ok(Some(t));
-            }
-        }
-        Ok(None)
-    };
-    // The type of COALESCE / CASE: that of the first branch whose type is
-    // known; every other branch must be of the same kind, or rows of one
-    // column would hold values that cannot be compared (`COALESCE(text, 1)`).
-    // A string literal is untyped, as in PostgreSQL, and fits any kind.
-    let branches =
-        |what: &str, exprs: &mut dyn Iterator<Item = &E>| -> RookResult<Option<DataType>> {
-            let mut result: Option<DataType> = None;
-            let mut typed: Option<DataType> = None;
-            for e in exprs {
-                let Some(t) = infer_type(e, schema, subquery_type)? else {
-                    continue;
-                };
-                if result.is_none() {
-                    result = Some(t.clone());
-                }
-                if matches!(e, E::Constant(CV::Text(_))) {
-                    continue;
-                }
-                match &typed {
-                    None => typed = Some(t),
-                    Some(first) if type_kind(first) != type_kind(&t) => {
-                        return Err(RookError::TypeMismatch(format!(
-                            "{} types {} and {} cannot be matched",
-                            what, first, t
-                        )));
-                    }
-                    Some(_) => {}
-                }
-            }
-            Ok(result)
-        };
-    Ok(match expr {
-        E::Column(name) => column(None, name)?,
-        E::Compound(parts) => {
-            let name = parts
-                .last()
-                .ok_or_else(|| RookError::Internal("Empty compound identifier".to_string()))?;
-            let table = parts.len().checked_sub(2).map(|i| parts[i].as_str());
-            column(table, name)?
-        }
-        E::OuterColumn(_) => None,
-        E::Constant(cv) => match cv {
-            CV::Null => None,
-            CV::Int(i) if i32::try_from(*i).is_ok() => Some(DataType::Int),
-            CV::Int(_) => Some(DataType::BigInt),
-            CV::Float(_) => Some(DataType::DoublePrecision),
-            CV::Text(_) => Some(DataType::Varchar(u16::MAX)),
-            CV::Boolean(_) => Some(DataType::Bool),
-        },
-        E::Binary { left, op, right } => {
-            match (
-                infer_type(left, schema, subquery_type)?,
-                infer_type(right, schema, subquery_type)?,
-            ) {
-                // DATE ± integer days is a DATE.
-                (Some(DataType::Date), Some(_)) | (Some(_), Some(DataType::Date))
-                    if matches!(op, rook_ast::ArithOp::Add | rook_ast::ArithOp::Sub) =>
-                {
-                    Some(DataType::Date)
-                }
-                (Some(l), Some(r)) => Some(
-                    exact_numeric_result_type(&l, *op, &r)
-                        .unwrap_or_else(|| promote_numeric_type(&l, &r)),
-                ),
-                (known, None) | (None, known) => known,
-            }
-        }
-        E::Cast { data_type, .. } => Some(data_type.parse::<DataType>().map_err(|e| {
-            RookError::TypeMismatch(format!("Invalid CAST target type '{}': {}", data_type, e))
-        })?),
-        E::ScalarSubquery(info) => match subquery_type(info) {
-            Some(t) => Some(t),
-            None => {
-                return Err(RookError::Internal(
-                    "Scalar subqueries must be planned before type inference".to_string(),
-                ));
-            }
-        },
-        E::Function { name, args, .. } => {
-            let mut arg_exprs = args.iter().filter_map(|a| match a {
-                FunctionArg::Expr(e) => Some(e.as_ref()),
-                FunctionArg::Star => None,
-            });
-            let upper = name.to_ascii_uppercase();
-            let aggregate = match upper.as_str() {
-                "COUNT" => Some(AggregateFunction::Count),
-                "SUM" => Some(AggregateFunction::Sum),
-                "AVG" => Some(AggregateFunction::Avg),
-                "MIN" => Some(AggregateFunction::Min),
-                "MAX" => Some(AggregateFunction::Max),
-                _ => None,
-            };
-            if let Some(function) = aggregate {
-                let input = match arg_exprs.next() {
-                    Some(e) => infer_type(e, schema, subquery_type)?,
-                    None => None,
-                };
-                return Ok(Some(infer_aggregate_output_type(function, input.as_ref())));
-            }
-            match upper.as_str() {
-                "UPPER" | "UCASE" | "LOWER" | "LCASE" | "TRIM" | "LTRIM" | "RTRIM"
-                | "SUBSTRING" | "SUBSTR" | "||" | "CONCAT" => Some(DataType::Varchar(u16::MAX)),
-                "LENGTH" | "LEN" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "POSITION"
-                | "CHARINDEX" | "EXTRACT" | "DATE_PART" => Some(DataType::Int),
-                "POWER" | "POW" | "SQRT" => Some(DataType::DoublePrecision),
-                "CURRENT_DATE" => Some(DataType::Date),
-                "CURRENT_TIME" => Some(DataType::Time),
-                "CURRENT_TIMESTAMP" | "NOW" => Some(DataType::Timestamp),
-                // The result has the type of the (first) argument.
-                "ABS" | "FLOOR" | "CEIL" | "CEILING" | "ROUND" | "NULLIF" => match arg_exprs.next()
-                {
-                    Some(e) => infer_type(e, schema, subquery_type)?,
-                    None => None,
-                },
-                "MOD" => first_known(&mut arg_exprs)?,
-                "COALESCE" => branches("COALESCE", &mut arg_exprs)?,
-                _ => {
-                    return Err(RookError::Evaluation(format!(
-                        "Unknown scalar function: '{}'",
-                        name
-                    )));
-                }
-            }
-        }
-        E::Case {
-            when_then_pairs,
-            else_result,
-        } => branches(
-            "CASE",
-            &mut when_then_pairs
-                .iter()
-                .map(|(_, then)| then.as_ref())
-                .chain(else_result.as_deref()),
-        )?,
-        E::Compare { .. }
-        | E::Logical { .. }
-        | E::Not(_)
-        | E::IsNull(_)
-        | E::IsNotNull(_)
-        | E::Predicate(_) => Some(DataType::Bool),
-    })
+    }
+
+    fn subquery(&self, info: &rook_ast::SubqueryInfo) -> RookResult<Option<DataType>> {
+        Ok((self.subquery_type)(info))
+    }
+
+    fn strict(&self) -> bool {
+        false
+    }
 }

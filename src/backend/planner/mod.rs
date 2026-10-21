@@ -13,6 +13,7 @@ pub mod optimizer;
 pub mod plan_cache;
 #[cfg(test)]
 pub mod tests;
+pub mod types;
 
 use rook_ast::logical::*;
 use rook_ast::*;
@@ -349,7 +350,11 @@ fn plan_select_with_ctes(
     let visible: binder::CteColumns = cte_registry
         .iter()
         .map(|(name, (_, schema))| {
-            let columns = schema.columns.iter().map(|c| c.name.clone()).collect();
+            let columns = schema
+                .columns
+                .iter()
+                .map(|c| (c.name.clone(), c.data_type.parse().ok()))
+                .collect();
             (name.clone(), columns)
         })
         .collect();
