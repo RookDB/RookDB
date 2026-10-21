@@ -22,7 +22,7 @@ use storage_manager::backend::session::Session;
 use storage_manager::types::DataValue;
 
 const ROWS: usize = 40;
-const STRINGS: &[&str] = &["x", "y", "ab", "abc", "Z", "b_c", ""];
+const STRINGS: &[&str] = &["x", "y", "ab", "abc", "Z", "b_c", "", " a "];
 const PATTERNS: &[&str] = &["a%", "%b", "_b%", "%", "x", "%c%", "b\\_c"];
 
 /// xorshift64*: deterministic across platforms and needs no crate.
@@ -78,7 +78,32 @@ impl Gen<'_> {
                 self.int_lit()
             };
         }
-        match self.rng.below(6) {
+        match self.rng.below(11) {
+            // Division and remainder truncate toward zero in both; a zero
+            // divisor is NULL in SQLite and an error in RookDB, so avoid it.
+            6 => format!(
+                "({} / NULLIF({}, 0))",
+                self.int_expr(s, depth - 1),
+                self.int_expr(s, depth - 1)
+            ),
+            7 => format!(
+                "({} % NULLIF({}, 0))",
+                self.int_expr(s, depth - 1),
+                self.int_expr(s, depth - 1)
+            ),
+            8 => format!("LENGTH({})", self.str_expr(s, depth - 1)),
+            9 => format!(
+                "NULLIF({}, {})",
+                self.int_expr(s, depth - 1),
+                self.int_expr(s, depth - 1)
+            ),
+            10 if depth >= 2 => self.scalar_subquery(s),
+            10 => format!(
+                "COALESCE({}, {}, {})",
+                self.int_expr(s, depth - 1),
+                self.int_expr(s, depth - 1),
+                self.int_lit()
+            ),
             0 => format!(
                 "({} + {})",
                 self.int_expr(s, depth - 1),
@@ -116,12 +141,48 @@ impl Gen<'_> {
         }
     }
 
-    fn str_expr(&mut self, s: &Scope) -> String {
-        if self.rng.chance(80) {
-            s.strs[self.rng.below(s.strs.len())].to_string()
-        } else {
-            self.str_lit()
+    fn str_expr(&mut self, s: &Scope, depth: u32) -> String {
+        if depth == 0 || self.rng.chance(60) {
+            return if self.rng.chance(80) {
+                s.strs[self.rng.below(s.strs.len())].to_string()
+            } else {
+                self.str_lit()
+            };
         }
+        let inner = self.str_expr(s, depth - 1);
+        match self.rng.below(6) {
+            0 => format!("UPPER({})", inner),
+            1 => format!("LOWER({})", inner),
+            2 => format!("TRIM({})", inner),
+            3 => format!(
+                "SUBSTRING({} FROM {} FOR {})",
+                inner,
+                1 + self.rng.below(3),
+                1 + self.rng.below(3)
+            ),
+            4 => format!("({} || {})", inner, self.str_expr(s, depth - 1)),
+            _ => format!("COALESCE({}, {})", inner, self.str_lit()),
+        }
+    }
+
+    /// A scalar subquery over t2, correlated to `x` half the time.
+    fn scalar_subquery(&mut self, s: &Scope) -> String {
+        let inner = Scope {
+            ints: vec!["z.a", "z.d"],
+            strs: vec!["z.e"],
+        };
+        let mut filter = self.pred(&inner, 0);
+        if s.ints.contains(&"x.a") && self.rng.chance(50) {
+            filter = format!("{} AND z.a = x.a", filter);
+        }
+        let agg = self.rng.pick(&[
+            "COUNT(*)",
+            "MIN(z.d)",
+            "MAX(z.d)",
+            "SUM(z.d)",
+            "COUNT(DISTINCT z.d)",
+        ]);
+        format!("(SELECT {} FROM t2 z WHERE {})", agg, filter)
     }
 
     fn cmp(&mut self) -> &'static str {
@@ -131,21 +192,30 @@ impl Gen<'_> {
     fn pred(&mut self, s: &Scope, depth: u32) -> String {
         let leaf = depth == 0 || self.rng.chance(40);
         if leaf {
-            return match self.rng.below(8) {
+            return match self.rng.below(9) {
+                8 => {
+                    let not = if self.rng.chance(50) { "NOT " } else { "" };
+                    format!(
+                        "{} IS {}DISTINCT FROM {}",
+                        self.int_expr(s, 1),
+                        not,
+                        self.int_expr(s, 1)
+                    )
+                }
                 0 | 1 => {
                     let op = self.cmp();
                     format!("{} {} {}", self.int_expr(s, 1), op, self.int_expr(s, 1))
                 }
                 2 => {
                     let op = self.cmp();
-                    format!("{} {} {}", self.str_expr(s), op, self.str_expr(s))
+                    format!("{} {} {}", self.str_expr(s, 1), op, self.str_expr(s, 1))
                 }
                 3 => {
                     let not = if self.rng.chance(50) { "NOT " } else { "" };
                     if self.rng.chance(50) {
                         format!("{} IS {}NULL", self.int_expr(s, 1), not)
                     } else {
-                        format!("{} IS {}NULL", self.str_expr(s), not)
+                        format!("{} IS {}NULL", self.str_expr(s, 1), not)
                     }
                 }
                 4 => {
@@ -205,8 +275,16 @@ impl Gen<'_> {
             strs: vec!["z.e"],
         };
         let mut filter = self.pred(&inner, 0);
-        if self.rng.chance(50) {
+        if s.ints.contains(&"x.a") && self.rng.chance(50) {
             filter = format!("{} AND z.a = x.a", filter);
+        }
+        if self.rng.chance(20) {
+            // A subquery inside the subquery, correlated to it.
+            filter = format!(
+                "{} AND z.d {} (SELECT MAX(w.d) FROM t2 w WHERE w.a = z.a)",
+                filter,
+                self.cmp()
+            );
         }
         match self.rng.below(3) {
             0 => {
@@ -238,17 +316,40 @@ impl Gen<'_> {
         }
     }
 
+    /// The FROM clause, any WITH clause it needs, and its columns.
     fn from(&mut self) -> (String, Scope) {
-        match self.rng.below(4) {
-            0 | 1 => (
-                "t1 x".to_string(),
+        let t1 = || Scope {
+            ints: vec!["x.a", "x.b"],
+            strs: vec!["x.c"],
+        };
+        match self.rng.below(9) {
+            0 | 1 => ("t1 x".to_string(), t1()),
+            // A derived table standing in for t1.
+            2 => {
+                let w = self.pred(&t1(), 1);
+                (
+                    format!(
+                        "(SELECT x.a AS a, x.b AS b, x.c AS c FROM t1 x WHERE {}) x",
+                        w
+                    ),
+                    t1(),
+                )
+            }
+            // Comma join filtered in WHERE by the caller's predicate.
+            3 => (
+                "t1 x, t2 y".to_string(),
                 Scope {
-                    ints: vec!["x.a", "x.b"],
-                    strs: vec!["x.c"],
+                    ints: vec!["x.a", "x.b", "y.a", "y.d"],
+                    strs: vec!["x.c", "y.e"],
                 },
             ),
             n => {
-                let kind = if n == 2 { "JOIN" } else { "LEFT JOIN" };
+                let kind = match n {
+                    4 | 5 => "JOIN",
+                    6 => "LEFT JOIN",
+                    7 => "RIGHT JOIN",
+                    _ => "FULL JOIN",
+                };
                 let on = if self.rng.chance(70) {
                     "x.a = y.a".to_string()
                 } else {
@@ -273,14 +374,15 @@ impl Gen<'_> {
         }
     }
 
-    fn projection(&mut self, s: &Scope) -> Vec<String> {
+    /// SELECT list items, each with whether it is text.
+    fn projection(&mut self, s: &Scope) -> Vec<(String, bool)> {
         let n = 1 + self.rng.below(3);
         (0..n)
             .map(|_| {
                 if self.rng.chance(70) {
-                    self.int_expr(s, 2)
+                    (self.int_expr(s, 2), false)
                 } else {
-                    self.str_expr(s)
+                    (self.str_expr(s, 1), true)
                 }
             })
             .collect()
@@ -288,12 +390,33 @@ impl Gen<'_> {
 
     /// One query, and whether its row order is part of the result.
     fn query(&mut self) -> (String, bool) {
+        let (sql, ordered) = self.query_body();
+        if self.rng.chance(15) && sql.contains("FROM t1 x") {
+            // The same query reading t1 through a CTE.
+            let w = self.pred(
+                &Scope {
+                    ints: vec!["v.a", "v.b"],
+                    strs: vec!["v.c"],
+                },
+                1,
+            );
+            let sql = sql.replacen("FROM t1 x", "FROM w x", 1);
+            return (
+                format!("WITH w AS (SELECT * FROM t1 v WHERE {}) {}", w, sql),
+                ordered,
+            );
+        }
+        (sql, ordered)
+    }
+
+    fn query_body(&mut self) -> (String, bool) {
         let (from, s) = self.from();
         match self.rng.below(10) {
             // SELECT [DISTINCT] ... [WHERE]
             0..=3 => {
                 let distinct = if self.rng.chance(25) { "DISTINCT " } else { "" };
-                let mut cols = self.projection(&s);
+                let mut cols: Vec<String> =
+                    self.projection(&s).into_iter().map(|(c, _)| c).collect();
                 // A predicate as a value: TRUE / FALSE / NULL (1 / 0 in SQLite).
                 if self.rng.chance(30) {
                     cols.push(self.pred(&s, 1));
@@ -312,10 +435,24 @@ impl Gen<'_> {
                     s.strs[self.rng.below(s.strs.len())].to_string()
                 };
                 let arg = self.int_expr(&s, 1);
-                let agg = self
+                let mut agg = self
                     .rng
-                    .pick(&["COUNT(*)", "COUNT({})", "SUM({})", "MIN({})", "MAX({})"])
+                    .pick(&[
+                        "COUNT(*)",
+                        "COUNT({})",
+                        "SUM({})",
+                        "MIN({})",
+                        "MAX({})",
+                        "AVG({})",
+                        "COUNT(DISTINCT {})",
+                        "SUM(DISTINCT {})",
+                    ])
                     .replace("{}", &arg);
+                if self.rng.chance(30) {
+                    let text = self.str_expr(&s, 1);
+                    let f = self.rng.pick(&["MIN", "MAX", "COUNT"]);
+                    agg = format!("{}, {}({})", agg, f, text);
+                }
                 let w = self.where_clause(&s);
                 let grouped = self.rng.chance(85);
                 let (key_col, group_by) = if grouped {
@@ -324,7 +461,16 @@ impl Gen<'_> {
                     (String::new(), String::new())
                 };
                 let having = if grouped && self.rng.chance(40) {
-                    format!(" HAVING COUNT(*) > {}", self.rng.below(3))
+                    let arg = self.int_expr(&s, 1);
+                    let f = self
+                        .rng
+                        .pick(&["COUNT(*)", "SUM({})", "MAX({})", "MIN({})"]);
+                    format!(
+                        " HAVING {} {} {}",
+                        f.replace("{}", &arg),
+                        self.cmp(),
+                        self.int_lit()
+                    )
                 } else {
                     String::new()
                 };
@@ -353,38 +499,42 @@ impl Gen<'_> {
                 let lw = self.pred(&left_scope, 1);
                 let r = self.int_expr(&right_scope, 1);
                 let rw = self.pred(&right_scope, 0);
-                (
-                    format!(
-                        "SELECT {} FROM t1 x WHERE {} {} SELECT {} FROM t2 z WHERE {}",
-                        l, lw, op, r, rw
-                    ),
-                    false,
-                )
+                let mut sql = format!(
+                    "SELECT {} FROM t1 x WHERE {} {} SELECT {} FROM t2 z WHERE {}",
+                    l, lw, op, r, rw
+                );
+                if self.rng.chance(30) {
+                    // SQLite applies set operators left to right; RookDB, like
+                    // the standard, binds INTERSECT tighter, so only chain
+                    // UNION / EXCEPT behind a non-INTERSECT.
+                    let op2 = self.rng.pick(&["UNION", "UNION ALL", "EXCEPT"]);
+                    if op != "INTERSECT" {
+                        let r2 = self.int_expr(&left_scope, 1);
+                        let w2 = self.pred(&left_scope, 0);
+                        sql = format!("{} {} SELECT {} FROM t1 x WHERE {}", sql, op2, r2, w2);
+                    }
+                }
+                (sql, false)
             }
             // ORDER BY every output (NULLs coalesced) + LIMIT/OFFSET
             _ => {
                 let cols = self.projection(&s);
                 let w = self.where_clause(&s);
-                let keys: Vec<String> = cols
-                    .iter()
-                    .map(|c| {
-                        let is_str = s.strs.contains(&c.as_str()) || c.starts_with('\'');
-                        let dir = if self.rng.chance(50) { " DESC" } else { "" };
-                        if is_str {
-                            format!("COALESCE({}, '~'){}", c, dir)
-                        } else {
-                            format!("COALESCE({}, 99999){}", c, dir)
-                        }
-                    })
-                    .collect();
                 let selected: Vec<String> = cols
                     .iter()
-                    .map(|c| {
-                        if s.strs.contains(&c.as_str()) || c.starts_with('\'') {
+                    .map(|(c, is_str)| {
+                        if *is_str {
                             format!("COALESCE({}, '~')", c)
                         } else {
                             format!("COALESCE({}, 99999)", c)
                         }
+                    })
+                    .collect();
+                let keys: Vec<String> = selected
+                    .iter()
+                    .map(|c| {
+                        let dir = if self.rng.chance(50) { " DESC" } else { "" };
+                        format!("{}{}", c, dir)
                     })
                     .collect();
                 let offset = if self.rng.chance(30) {
@@ -542,7 +692,18 @@ fn random_queries_match_sqlite() {
     for i in 0..queries {
         let (sql, ordered) = Gen { rng: &mut rng }.query();
         let expected = run_sqlite(&sqlite, &sql);
-        let actual = run_rook(&mut session, &sql);
+        // A panic is a failure of this query, reported with the rest.
+        let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_rook(&mut session, &sql)
+        }))
+        .unwrap_or_else(|panic| {
+            let text = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            Err(format!("panic: {}", text))
+        });
         let same = match (&expected, &actual) {
             (Ok(e), Ok(a)) if ordered => e == a,
             (Ok(e), Ok(a)) => {
