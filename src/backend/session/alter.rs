@@ -84,10 +84,38 @@ pub(super) fn alter_table(
     reindex_after_alter(catalog, db, alter, &indexes, &mut lines)?;
 
     lines.push(format!(
-        "Altered table '{}': {:?}.",
-        alter.table, alter.action
+        "Altered table '{}': {}.",
+        alter.table,
+        describe_action(&alter.action)
     ));
     Ok(StatementResult::lines(lines))
+}
+
+/// What an ALTER TABLE action did, in words.
+fn describe_action(action: &AlterTableAction) -> String {
+    match action {
+        AlterTableAction::AddColumn { column_def } => format!(
+            "added column '{}' {}",
+            column_def.name, column_def.data_type
+        ),
+        AlterTableAction::DropColumn { column } => format!("dropped column '{}'", column),
+        AlterTableAction::RenameColumn { old_name, new_name } => {
+            format!("renamed column '{}' to '{}'", old_name, new_name)
+        }
+        AlterTableAction::RenameTable { new_name } => format!("renamed to '{}'", new_name),
+        AlterTableAction::SetDefault { column, .. } => {
+            format!("set the default of column '{}'", column)
+        }
+        AlterTableAction::DropDefault { column } => {
+            format!("dropped the default of column '{}'", column)
+        }
+        AlterTableAction::SetNotNull { column } => {
+            format!("column '{}' set NOT NULL", column)
+        }
+        AlterTableAction::DropNotNull { column } => {
+            format!("column '{}' dropped NOT NULL", column)
+        }
+    }
 }
 
 /// Find a column by name (case-insensitive) in `table`'s column list.
