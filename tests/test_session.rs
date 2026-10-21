@@ -195,7 +195,7 @@ fn a_session_keeps_every_file_under_its_engine_root() {
         ),
         [vec![int(1), int(10)], vec![int(2), int(21)]]
     );
-    storage_manager::backend::cache::checkpoint_durable();
+    storage_manager::backend::cache::checkpoint_durable().unwrap();
 
     assert!(root.join("database/base/app/p.dat").exists());
     assert!(root.join("database/base/app/kids.dat").exists());

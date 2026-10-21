@@ -144,7 +144,7 @@ fn index_survives_a_catalog_save_and_stays_maintained() {
         storage_manager::insert_single_tuple(&catalog, "idx_db", "staff", &["9", "Ida", "77777"])
             .unwrap()
     );
-    storage_manager::backend::cache::checkpoint();
+    storage_manager::backend::cache::checkpoint().unwrap();
     let mut btree = storage_manager::backend::index::btree::BTree::open(common::path(
         "database/base/idx_db/staff.by_salary.idx",
     ))

@@ -63,7 +63,7 @@ fn setup(db: &str) -> Catalog {
 fn dead_count(db: &str, table: &str) -> u32 {
     let path = common::path(format!("database/base/{}/{}.dat", db, table));
     // The counter is kept in the pooled header page; write it out first.
-    storage_manager::backend::cache::checkpoint();
+    storage_manager::backend::cache::checkpoint().unwrap();
     // Bytes 20..24 of the header page.
     let bytes = std::fs::read(&path).unwrap();
     u32::from_le_bytes(bytes[20..24].try_into().unwrap())

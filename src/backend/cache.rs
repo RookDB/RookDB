@@ -780,31 +780,40 @@ pub fn evict_btree(engine: &Engine, path: &Path) {
 /// and never trigger file-reopen churn. Callers include statement
 /// boundaries and process exit. Use [`flush_and_clear_heaps`] /
 /// [`sync_and_clear_btrees`] to actually release resources.
-pub fn checkpoint() {
+///
+/// A failed write is returned, after every other handle has been written:
+/// the statements before it are not on disk.
+pub fn checkpoint() -> RookResult<()> {
+    let mut result = Ok(());
     for engine in crate::backend::engine::open_engines() {
-        checkpoint_engine(&engine);
+        result = result.and(checkpoint_engine(&engine));
     }
+    result
 }
 
 /// [`checkpoint`] with an unconditional fsync. Call before the process exits.
-pub fn checkpoint_durable() {
+pub fn checkpoint_durable() -> RookResult<()> {
+    let mut result = Ok(());
     for engine in crate::backend::engine::open_engines() {
-        *lock(&engine.last_sync) = Some(std::time::Instant::now());
-        flush_caches(&engine, true);
+        result = result.and(sync_engine(&engine, true));
     }
+    result
 }
 
 /// [`checkpoint`] for one engine.
-pub fn checkpoint_engine(engine: &Engine) {
-    let due = {
-        let mut last = lock(&engine.last_sync);
-        let due = last.is_none_or(|t| t.elapsed() >= SYNC_INTERVAL);
-        if due {
-            *last = Some(std::time::Instant::now());
-        }
-        due
-    };
-    flush_caches(engine, due);
+pub fn checkpoint_engine(engine: &Engine) -> RookResult<()> {
+    let due = lock(&engine.last_sync).is_none_or(|t| t.elapsed() >= SYNC_INTERVAL);
+    sync_engine(engine, due)
+}
+
+/// [`flush_caches`], recording a successful fsync so the next one waits
+/// for [`SYNC_INTERVAL`]. A failed one is retried at the next checkpoint.
+fn sync_engine(engine: &Engine, durable: bool) -> RookResult<()> {
+    let result = flush_caches(engine, durable);
+    if durable {
+        *lock(&engine.last_sync) = result.is_ok().then(std::time::Instant::now);
+    }
+    result
 }
 
 /// Write out and drop every cached handle on `path` (heap manager, B-tree
@@ -833,7 +842,10 @@ pub fn evict_heap_everywhere(path: &Path) -> RookResult<()> {
     Ok(())
 }
 
-fn flush_caches(engine: &Engine, durable: bool) {
+/// Write every cached handle through to its file (and fsync if `durable`),
+/// returning the first failure once all have been tried.
+fn flush_caches(engine: &Engine, durable: bool) -> RookResult<()> {
+    let mut result = Ok(());
     {
         let mut cache = lock(&engine.heaps);
         for entry in cache.values_mut() {
@@ -842,10 +854,12 @@ fn flush_caches(engine: &Engine, durable: bool) {
             } else {
                 entry.manager.write_through()
             };
-            if let Err(e) = flushed {
-                log::warn!("[cache] heap checkpoint flush failed: {}", e);
+            match flushed {
+                Ok(()) => entry.ops_since_flush = 0,
+                Err(e) => {
+                    result = result.and(Err(e.with_context("Checkpoint failed to write a table")))
+                }
             }
-            entry.ops_since_flush = 0;
         }
     }
     {
@@ -856,16 +870,18 @@ fn flush_caches(engine: &Engine, durable: bool) {
             } else {
                 tree.write_through()
             };
-            if let Err(e) = flushed {
-                log::warn!("[cache] btree checkpoint sync failed: {}", e);
-            }
-            if durable {
-                *ops = 0;
+            match flushed {
+                Ok(()) if durable => *ops = 0,
+                Ok(()) => {}
+                Err(e) => {
+                    result = result.and(Err(e.with_context("Checkpoint failed to write an index")))
+                }
             }
         }
     }
     // Metadata/discovery caches stay valid across checkpoints — they only go
     // stale on DDL, which calls invalidate_metadata explicitly.
+    result
 }
 
 // ── table metadata cache ─────────────────────────────────────────────────────

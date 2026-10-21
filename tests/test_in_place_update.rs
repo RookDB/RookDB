@@ -54,7 +54,7 @@ fn setup() -> Catalog {
         let refs: Vec<&str> = row.iter().map(|s| s.as_str()).collect();
         insert_single_tuple(&catalog, DB, "staff", &refs).unwrap();
     }
-    storage_manager::backend::cache::checkpoint();
+    storage_manager::backend::cache::checkpoint().unwrap();
     catalog
 }
 
@@ -90,7 +90,7 @@ fn query(catalog: &Catalog, sql: &str) -> Vec<Vec<String>> {
 }
 
 fn dead_tuples() -> u32 {
-    storage_manager::backend::cache::checkpoint();
+    storage_manager::backend::cache::checkpoint().unwrap();
     let mut file = std::fs::File::open(common::path(format!("database/base/{}/staff.dat", DB)))
         .expect("open heap");
     read_dead_tuple_count(&mut file).unwrap()
