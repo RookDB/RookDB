@@ -16,3 +16,7 @@ regex = "1"
 sysinfo = "0.33"
 log = "0.4"
 env_logger = "0.11"
+
+[dev-dependencies]
+# Differential test against SQLite; bundled, so no system library is needed.
+rusqlite = { version = "0.32", features = ["bundled"] }
