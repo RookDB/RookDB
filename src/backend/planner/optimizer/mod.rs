@@ -1031,6 +1031,7 @@ fn expr_reads_input(
                     .as_ref()
                     .is_none_or(|e| expr_reads_input(e, input))
         }
+        ExprNode::Predicate(p) => all(&p.exprs()),
     }
 }
 

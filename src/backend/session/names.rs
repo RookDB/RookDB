@@ -107,28 +107,15 @@ fn expr_references_table(expr: &rook_ast::ExprNode, table: &str) -> bool {
         rook_ast::ExprNode::Compound(parts) => {
             parts.len() >= 2 && parts[parts.len() - 2].eq_ignore_ascii_case(table)
         }
-        rook_ast::ExprNode::Binary { left, right, .. } => {
-            expr_references_table(left, table) || expr_references_table(right, table)
-        }
-        rook_ast::ExprNode::Cast { expr: inner, .. } => expr_references_table(inner, table),
-        rook_ast::ExprNode::Case {
-            when_then_pairs,
-            else_result,
-        } => {
-            when_then_pairs
-                .iter()
-                .any(|(w, t)| expr_references_table(w, table) || expr_references_table(t, table))
-                || else_result
-                    .as_ref()
-                    .is_some_and(|el| expr_references_table(el, table))
-        }
-        rook_ast::ExprNode::Function { args, .. } => args.iter().any(|arg| {
-            matches!(arg, rook_ast::FunctionArg::Expr(inner) if expr_references_table(inner, table))
-        }),
         rook_ast::ExprNode::ScalarSubquery(info) => {
             select_plan_references_table(&info.select, table)
         }
-        _ => false,
+        // Its EXISTS / IN subqueries are not expression children.
+        rook_ast::ExprNode::Predicate(p) => predicate_node_references_table(p, table),
+        other => other
+            .children()
+            .into_iter()
+            .any(|e| expr_references_table(e, table)),
     }
 }
 

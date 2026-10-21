@@ -333,6 +333,7 @@ pub fn rewrite_expr<V: Visitor + ?Sized>(node: &mut ExprNode, having: bool, f: &
                 rewrite_expr(e, having, f);
             }
         }
+        ExprNode::Predicate(p) => rewrite_pred(p, having, f),
     }
 }
 

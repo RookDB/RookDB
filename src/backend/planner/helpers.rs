@@ -502,6 +502,7 @@ pub fn expr_to_name(expr: &ExprNode) -> String {
         ExprNode::Not(..) => "expr".to_string(),
         ExprNode::IsNull(..) => "expr".to_string(),
         ExprNode::IsNotNull(..) => "expr".to_string(),
+        ExprNode::Predicate(..) => "expr".to_string(),
     }
 }
 

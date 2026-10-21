@@ -150,6 +150,7 @@ pub fn rewrite_expr(expr: &mut ExprNode, map: &HashMap<String, String>) {
         ExprNode::Not(inner) | ExprNode::IsNull(inner) | ExprNode::IsNotNull(inner) => {
             rewrite_expr(inner, map);
         }
+        ExprNode::Predicate(p) => rewrite_predicate(p, map),
         // Columns, constants, scalar subqueries: nothing to rewrite.
         _ => {}
     }

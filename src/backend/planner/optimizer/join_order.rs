@@ -179,6 +179,7 @@ impl OrderGuard {
                     self.walk_expr(e);
                 }
             }
+            ExprNode::Predicate(p) => self.walk_pred(p),
         }
     }
 

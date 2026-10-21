@@ -2,16 +2,15 @@
 
 use rook_ast::logical::*;
 
-use super::super::expr::{
-    ComparisonOp, Expr, Predicate, binding_names, expr_from_ast, predicate_from_ast,
-};
+use super::super::expr::convert::expr_with;
+use super::super::expr::{ComparisonOp, Expr, Predicate, binding_names, predicate_from_ast};
 use super::super::operators::{
     AggregateFunction, AggregateInfo, AggregateOperator, HashJoinOperator,
     IndexNestedLoopJoinOperator, JoinType as PhysicalJoinType, KeyClass, MergedColumnsOperator,
     NestedLoopJoinOperator, PhysicalOperator, infer_aggregate_output_type, mark_merged,
 };
 use super::super::tuple::ColumnInfo;
-use super::helpers::infer_expr_type_in_schema;
+use super::helpers::infer_expr_type_with;
 use super::{PhysicalPlanner, PlannerStats};
 use crate::backend::error::{RookError, RookResult};
 use crate::statistics::estimator::{Estimator, hash_join_cost, index_nested_loop_cost};
@@ -365,6 +364,12 @@ impl PhysicalPlanner {
     ) -> RookResult<Box<dyn PhysicalOperator>> {
         let child_schema = child.schema();
         let column_names = binding_names(child_schema);
+        // Subqueries in keys and aggregate arguments are planned against the
+        // input rows, like those of a projection.
+        let subqueries = super::subqueries::PlanSubqueries::new(self, child_schema);
+        let type_of = |e: &rook_ast::ExprNode| {
+            infer_expr_type_with(e, child_schema, &|info| subqueries.scalar_type(info))
+        };
 
         // ─── Resolve GROUP BY expressions ────────────────────────────────
         let mut group_by_exprs = Vec::new();
@@ -372,14 +377,9 @@ impl PhysicalPlanner {
         let mut group_by_types = Vec::new();
 
         for expr_node in &a.group_by {
-            let expr = expr_from_ast(expr_node, &column_names)?;
+            let expr = expr_with(expr_node, &column_names, &subqueries)?;
             let name = crate::planner::helpers::group_key_name(expr_node);
             let data_type = match expr_node {
-                rook_ast::ExprNode::ScalarSubquery(_) => {
-                    return Err(RookError::InvalidQuery(
-                        "Scalar subqueries are not allowed in GROUP BY".to_string(),
-                    ));
-                }
                 rook_ast::ExprNode::Function { name, .. } if is_aggregate_name(name) => {
                     return Err(RookError::InvalidQuery(
                         "Aggregate function calls are not allowed in GROUP BY".to_string(),
@@ -387,7 +387,7 @@ impl PhysicalPlanner {
                 }
                 // A NULL key has no type of its own; any type holds it.
                 rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Null) => DataType::Int,
-                _ => infer_expr_type_in_schema(expr_node, child_schema)?,
+                _ => type_of(expr_node)?,
             };
             group_by_exprs.push(expr);
             group_by_names.push(name);
@@ -401,7 +401,7 @@ impl PhysicalPlanner {
             let input_expr = if agg_expr.args.is_empty() {
                 None
             } else {
-                Some(expr_from_ast(&agg_expr.args[0], &column_names)?)
+                Some(expr_with(&agg_expr.args[0], &column_names, &subqueries)?)
             };
 
             // Determine output name
@@ -420,7 +420,7 @@ impl PhysicalPlanner {
             };
 
             let input_type = if let Some(arg) = agg_expr.args.first() {
-                infer_expr_type_in_schema(arg, child_schema).ok()
+                type_of(arg).ok()
             } else {
                 None
             };

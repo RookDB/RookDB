@@ -7,10 +7,61 @@ use crate::types::value::DataValue;
 use super::Expr;
 use super::predicate::{BooleanTest, ComparisonOp, Predicate};
 
+/// Turns the subqueries met while converting an expression into physical
+/// expressions. The physical planner runs them (or plans them per outer row);
+/// elsewhere a subquery is an error ([`NoSubqueries`]).
+pub trait Subqueries {
+    /// `(SELECT ...)` used as a value.
+    fn scalar(&self, info: &rook_ast::SubqueryInfo) -> RookResult<Expr>;
+    /// `EXISTS (SELECT ...)`.
+    fn exists(&self, info: &rook_ast::SubqueryInfo) -> RookResult<Predicate>;
+    /// `lhs [NOT] IN (SELECT ...)`.
+    fn in_subquery(
+        &self,
+        lhs: Expr,
+        info: &rook_ast::SubqueryInfo,
+        negated: bool,
+    ) -> RookResult<Predicate>;
+}
+
+/// For callers with no subquery planner: any subquery is an internal error.
+pub struct NoSubqueries;
+
+impl Subqueries for NoSubqueries {
+    fn scalar(&self, _: &rook_ast::SubqueryInfo) -> RookResult<Expr> {
+        Err(RookError::Internal(
+            "Scalar subqueries must be materialized before expr_from_ast".to_string(),
+        ))
+    }
+    fn exists(&self, _: &rook_ast::SubqueryInfo) -> RookResult<Predicate> {
+        Err(RookError::Internal(
+            "Subquery predicates must be materialized before predicate_from_ast".to_string(),
+        ))
+    }
+    fn in_subquery(
+        &self,
+        _: Expr,
+        info: &rook_ast::SubqueryInfo,
+        _: bool,
+    ) -> RookResult<Predicate> {
+        self.exists(info)
+    }
+}
+
 /// Convert a `rook_ast::ExprNode` into a physical `Expr`, resolving column
 /// names against a schema. `column_names` come from `binding_names`, so a
 /// bare name that two columns share is rejected as ambiguous.
 pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> RookResult<Expr> {
+    expr_with(node, column_names, &NoSubqueries)
+}
+
+/// [`expr_from_ast`], with subqueries anywhere in the tree turned into
+/// physical expressions by `sq`.
+pub fn expr_with(
+    node: &rook_ast::ExprNode,
+    column_names: &[String],
+    sq: &dyn Subqueries,
+) -> RookResult<Expr> {
     match node {
         rook_ast::ExprNode::Column(name) => {
             // Unqualified column reference — just store the column name.
@@ -58,8 +109,8 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
             None => Expr::Null,
         }),
         rook_ast::ExprNode::Binary { left, op, right } => {
-            let l = expr_from_ast(left, column_names)?;
-            let r = expr_from_ast(right, column_names)?;
+            let l = expr_with(left, column_names, sq)?;
+            let r = expr_with(right, column_names, sq)?;
             match op {
                 rook_ast::ArithOp::Add => Ok(Expr::Add(Box::new(l), Box::new(r))),
                 rook_ast::ArithOp::Sub => Ok(Expr::Sub(Box::new(l), Box::new(r))),
@@ -68,7 +119,7 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
             }
         }
         rook_ast::ExprNode::Cast { expr, data_type } => {
-            let inner = expr_from_ast(expr, column_names)?;
+            let inner = expr_with(expr, column_names, sq)?;
             let target_dt: crate::types::datatype::DataType =
                 data_type.parse().map_err(|e: RookError| {
                     RookError::TypeMismatch(format!(
@@ -78,10 +129,7 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
                 })?;
             Ok(Expr::Cast(Box::new(inner), target_dt))
         }
-        // Scalar subqueries should be materialized before reaching this function.
-        rook_ast::ExprNode::ScalarSubquery(_) => Err(RookError::Internal(
-            "Scalar subqueries must be materialized before expr_from_ast".to_string(),
-        )),
+        rook_ast::ExprNode::ScalarSubquery(info) => sq.scalar(info),
         // Scalar function calls — convert each argument and create an Expr::Function.
         // Aggregate functions (COUNT, SUM, AVG, MIN, MAX) are handled by the
         // AggregateOperator and should not reach this path (the physical planner
@@ -95,7 +143,7 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
             for arg in args {
                 match arg {
                     rook_ast::FunctionArg::Expr(inner) => {
-                        let inner_expr = expr_from_ast(inner, column_names)?;
+                        let inner_expr = expr_with(inner, column_names, sq)?;
                         expr_args.push(inner_expr);
                     }
                     rook_ast::FunctionArg::Star => {
@@ -116,12 +164,12 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
         } => {
             let mut pairs = Vec::new();
             for (cond, res) in when_then_pairs {
-                let cond_expr = expr_from_ast(cond, column_names)?;
-                let res_expr = expr_from_ast(res, column_names)?;
+                let cond_expr = expr_with(cond, column_names, sq)?;
+                let res_expr = expr_with(res, column_names, sq)?;
                 pairs.push((cond_expr, res_expr));
             }
             let else_expr = match else_result {
-                Some(expr) => Some(Box::new(expr_from_ast(expr, column_names)?)),
+                Some(expr) => Some(Box::new(expr_with(expr, column_names, sq)?)),
                 None => None,
             };
             Ok(Expr::Case {
@@ -133,28 +181,33 @@ pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> Rook
         // comparison and three-valued logic for WHERE and SELECT alike.
         rook_ast::ExprNode::Compare { left, op, right } => {
             Ok(Expr::Predicate(Box::new(Predicate::Compare(
-                expr_from_ast(left, column_names)?,
+                expr_with(left, column_names, sq)?,
                 comparison_op(*op),
-                expr_from_ast(right, column_names)?,
+                expr_with(right, column_names, sq)?,
             ))))
         }
         rook_ast::ExprNode::Logical { left, op, right } => {
-            let l = as_predicate(expr_from_ast(left, column_names)?);
-            let r = as_predicate(expr_from_ast(right, column_names)?);
+            let l = as_predicate(expr_with(left, column_names, sq)?);
+            let r = as_predicate(expr_with(right, column_names, sq)?);
             Ok(Expr::Predicate(Box::new(match op {
                 rook_ast::BinaryOp::And => Predicate::and(l, r),
                 rook_ast::BinaryOp::Or => Predicate::or(l, r),
             })))
         }
         rook_ast::ExprNode::Not(inner) => Ok(Expr::Predicate(Box::new(Predicate::not(
-            as_predicate(expr_from_ast(inner, column_names)?),
+            as_predicate(expr_with(inner, column_names, sq)?),
         )))),
         rook_ast::ExprNode::IsNull(inner) => Ok(Expr::Predicate(Box::new(Predicate::IsNull(
-            expr_from_ast(inner, column_names)?,
+            expr_with(inner, column_names, sq)?,
         )))),
         rook_ast::ExprNode::IsNotNull(inner) => Ok(Expr::Predicate(Box::new(
-            Predicate::IsNotNull(expr_from_ast(inner, column_names)?),
+            Predicate::IsNotNull(expr_with(inner, column_names, sq)?),
         ))),
+        rook_ast::ExprNode::Predicate(p) => Ok(Expr::Predicate(Box::new(predicate_with(
+            p,
+            column_names,
+            sq,
+        )?))),
     }
 }
 
@@ -188,45 +241,55 @@ pub fn predicate_from_ast(
     node: &rook_ast::PredicateNode,
     column_names: &[String],
 ) -> RookResult<Predicate> {
+    predicate_with(node, column_names, &NoSubqueries)
+}
+
+/// [`predicate_from_ast`], with subqueries anywhere in the tree turned into
+/// physical predicates and expressions by `sq`.
+pub fn predicate_with(
+    node: &rook_ast::PredicateNode,
+    column_names: &[String],
+    sq: &dyn Subqueries,
+) -> RookResult<Predicate> {
     match node {
         rook_ast::PredicateNode::BinaryOp { left, op, right } => {
-            let l = predicate_from_ast(left, column_names)?;
-            let r = predicate_from_ast(right, column_names)?;
+            let l = predicate_with(left, column_names, sq)?;
+            let r = predicate_with(right, column_names, sq)?;
             match op {
                 rook_ast::BinaryOp::And => Ok(Predicate::and(l, r)),
                 rook_ast::BinaryOp::Or => Ok(Predicate::or(l, r)),
             }
         }
         rook_ast::PredicateNode::Not(inner) => {
-            predicate_from_ast(inner, column_names).map(Predicate::not)
+            predicate_with(inner, column_names, sq).map(Predicate::not)
         }
         rook_ast::PredicateNode::Compare { left, op, right } => {
-            let l = expr_from_ast(left, column_names)?;
-            let r = expr_from_ast(right, column_names)?;
+            let l = expr_with(left, column_names, sq)?;
+            let r = expr_with(right, column_names, sq)?;
             Ok(Predicate::Compare(l, comparison_op(*op), r))
         }
         rook_ast::PredicateNode::IsNull(expr) => {
-            let e = expr_from_ast(expr, column_names)?;
+            let e = expr_with(expr, column_names, sq)?;
             Ok(Predicate::IsNull(e))
         }
         rook_ast::PredicateNode::IsNotNull(expr) => {
-            let e = expr_from_ast(expr, column_names)?;
+            let e = expr_with(expr, column_names, sq)?;
             Ok(Predicate::IsNotNull(e))
         }
         rook_ast::PredicateNode::Between { expr, low, high } => {
-            let e = expr_from_ast(expr, column_names)?;
-            let l = expr_from_ast(low, column_names)?;
-            let h = expr_from_ast(high, column_names)?;
+            let e = expr_with(expr, column_names, sq)?;
+            let l = expr_with(low, column_names, sq)?;
+            let h = expr_with(high, column_names, sq)?;
             Ok(Predicate::and(
                 Predicate::Compare(e.clone(), ComparisonOp::GreaterOrEqual, l),
                 Predicate::Compare(e, ComparisonOp::LessOrEqual, h),
             ))
         }
         rook_ast::PredicateNode::InList { expr, list } => {
-            let e = expr_from_ast(expr, column_names)?;
+            let e = expr_with(expr, column_names, sq)?;
             let items: RookResult<Vec<Expr>> = list
                 .iter()
-                .map(|item| expr_from_ast(item, column_names))
+                .map(|item| expr_with(item, column_names, sq))
                 .collect();
             let items = items?;
             // x IN (a, b, c) → (x = a) OR (x = b) OR (x = c)
@@ -244,12 +307,12 @@ pub fn predicate_from_ast(
             pattern,
             escape_char,
         } => {
-            let e = expr_from_ast(expr, column_names)?;
+            let e = expr_with(expr, column_names, sq)?;
             Ok(Predicate::Like(e, pattern.clone(), *escape_char))
         }
         rook_ast::PredicateNode::IsDistinctFrom { left, right } => {
-            let l = expr_from_ast(left, column_names)?;
-            let r = expr_from_ast(right, column_names)?;
+            let l = expr_with(left, column_names, sq)?;
+            let r = expr_with(right, column_names, sq)?;
             Ok(Predicate::IsDistinctFrom(l, r))
         }
         rook_ast::PredicateNode::IsBoolean {
@@ -257,7 +320,7 @@ pub fn predicate_from_ast(
             test,
             negated,
         } => {
-            let e = expr_from_ast(expr, column_names)?;
+            let e = expr_with(expr, column_names, sq)?;
             let bt = match test {
                 rook_ast::BooleanTest::True => BooleanTest::True,
                 rook_ast::BooleanTest::False => BooleanTest::False,
@@ -269,14 +332,12 @@ pub fn predicate_from_ast(
                 negated: *negated,
             })
         }
-        // EXISTS and IN-subquery predicates are materialized by the
-        // PhysicalPlanner before reaching this converter. If they appear
-        // here, something went wrong in the planning pipeline.
-        rook_ast::PredicateNode::Exists(_) | rook_ast::PredicateNode::InSubquery { .. } => {
-            Err(RookError::Internal(
-                "Subquery predicates must be materialized before predicate_from_ast".to_string(),
-            ))
-        }
+        rook_ast::PredicateNode::Exists(info) => sq.exists(info),
+        rook_ast::PredicateNode::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => sq.in_subquery(expr_with(expr, column_names, sq)?, subquery, *negated),
     }
 }
 

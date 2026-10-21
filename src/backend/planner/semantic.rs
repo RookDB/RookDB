@@ -140,6 +140,7 @@ fn resolve_expr_columns(expr: &ExprNode, schema: &ColumnSchema, errors: &mut Vec
         ExprNode::Not(inner) | ExprNode::IsNull(inner) | ExprNode::IsNotNull(inner) => {
             resolve_expr_columns(inner, schema, errors);
         }
+        ExprNode::Predicate(p) => resolve_predicate_columns_recursive(p, schema, errors),
     }
 }
 

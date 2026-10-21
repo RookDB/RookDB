@@ -89,6 +89,7 @@ pub fn fold_expr(expr: &ExprNode) -> ExprNode {
         ExprNode::Not(inner) => ExprNode::Not(Box::new(fold_expr(inner))),
         ExprNode::IsNull(inner) => ExprNode::IsNull(Box::new(fold_expr(inner))),
         ExprNode::IsNotNull(inner) => ExprNode::IsNotNull(Box::new(fold_expr(inner))),
+        ExprNode::Predicate(p) => ExprNode::Predicate(Box::new(fold_predicate(p))),
     }
 }
 
@@ -353,6 +354,7 @@ fn extract_expr_columns_into(expr: &ExprNode, cols: &mut HashSet<String>) {
         ExprNode::Not(inner) | ExprNode::IsNull(inner) | ExprNode::IsNotNull(inner) => {
             extract_expr_columns_into(inner, cols);
         }
+        ExprNode::Predicate(p) => columns_in_predicate_recursive(p, cols),
     }
 }
 
@@ -485,6 +487,7 @@ pub fn expr_contains_subquery(expr: &ExprNode) -> bool {
                 .any(|(when, then)| expr_contains_subquery(when) || expr_contains_subquery(then))
                 || else_result.as_deref().is_some_and(expr_contains_subquery)
         }
+        ExprNode::Predicate(p) => contains_subquery(p),
     }
 }
 
@@ -582,5 +585,6 @@ fn extract_column_names_from_expr(expr: &ExprNode, names: &mut Vec<(Option<Strin
         ExprNode::Not(inner) | ExprNode::IsNull(inner) | ExprNode::IsNotNull(inner) => {
             extract_column_names_from_expr(inner, names);
         }
+        ExprNode::Predicate(p) => extract_column_names_recursive(p, names),
     }
 }

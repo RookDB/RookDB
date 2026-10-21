@@ -139,6 +139,7 @@ pub fn ast_expr_to_output_name(expr: &rook_ast::ExprNode) -> String {
         rook_ast::ExprNode::Not(_) => "not".to_string(),
         rook_ast::ExprNode::IsNull(_) => "is_null".to_string(),
         rook_ast::ExprNode::IsNotNull(_) => "is_not_null".to_string(),
+        rook_ast::ExprNode::Predicate(_) => "predicate".to_string(),
     }
 }
 
@@ -153,13 +154,24 @@ pub fn infer_expr_type_in_schema(
     expr: &rook_ast::ExprNode,
     schema: &[super::super::tuple::ColumnInfo],
 ) -> RookResult<DataType> {
-    Ok(infer_type(expr, schema)?.unwrap_or(DataType::Int))
+    infer_expr_type_with(expr, schema, &|_| None)
 }
 
-/// [`infer_expr_type_in_schema`]; `None` is the unknown type of NULL.
+/// [`infer_expr_type_in_schema`] for an expression whose scalar subqueries
+/// are already planned: `subquery_type` gives each one's result type.
+pub fn infer_expr_type_with(
+    expr: &rook_ast::ExprNode,
+    schema: &[super::super::tuple::ColumnInfo],
+    subquery_type: &dyn Fn(&rook_ast::SubqueryInfo) -> Option<DataType>,
+) -> RookResult<DataType> {
+    Ok(infer_type(expr, schema, subquery_type)?.unwrap_or(DataType::Int))
+}
+
+/// [`infer_expr_type_with`]; `None` is the unknown type of NULL.
 fn infer_type(
     expr: &rook_ast::ExprNode,
     schema: &[super::super::tuple::ColumnInfo],
+    subquery_type: &dyn Fn(&rook_ast::SubqueryInfo) -> Option<DataType>,
 ) -> RookResult<Option<DataType>> {
     use rook_ast::{ConstantValue as CV, ExprNode as E, FunctionArg};
     let column = |table: Option<&str>, name: &str| {
@@ -176,7 +188,7 @@ fn infer_type(
     // The first argument or branch whose type is known.
     let first_known = |exprs: &mut dyn Iterator<Item = &E>| -> RookResult<Option<DataType>> {
         for e in exprs {
-            if let Some(t) = infer_type(e, schema)? {
+            if let Some(t) = infer_type(e, schema, subquery_type)? {
                 return Ok(Some(t));
             }
         }
@@ -200,7 +212,10 @@ fn infer_type(
             CV::Boolean(_) => Some(DataType::Bool),
         },
         E::Binary { left, op, right } => {
-            match (infer_type(left, schema)?, infer_type(right, schema)?) {
+            match (
+                infer_type(left, schema, subquery_type)?,
+                infer_type(right, schema, subquery_type)?,
+            ) {
                 // DATE ± integer days is a DATE.
                 (Some(DataType::Date), Some(_)) | (Some(_), Some(DataType::Date))
                     if matches!(op, rook_ast::ArithOp::Add | rook_ast::ArithOp::Sub) =>
@@ -217,11 +232,14 @@ fn infer_type(
         E::Cast { data_type, .. } => Some(data_type.parse::<DataType>().map_err(|e| {
             RookError::TypeMismatch(format!("Invalid CAST target type '{}': {}", data_type, e))
         })?),
-        E::ScalarSubquery(_) => {
-            return Err(RookError::Internal(
-                "Scalar subqueries must be materialized before type inference".to_string(),
-            ));
-        }
+        E::ScalarSubquery(info) => match subquery_type(info) {
+            Some(t) => Some(t),
+            None => {
+                return Err(RookError::Internal(
+                    "Scalar subqueries must be planned before type inference".to_string(),
+                ));
+            }
+        },
         E::Function { name, args, .. } => {
             let mut arg_exprs = args.iter().filter_map(|a| match a {
                 FunctionArg::Expr(e) => Some(e.as_ref()),
@@ -238,7 +256,7 @@ fn infer_type(
             };
             if let Some(function) = aggregate {
                 let input = match arg_exprs.next() {
-                    Some(e) => infer_type(e, schema)?,
+                    Some(e) => infer_type(e, schema, subquery_type)?,
                     None => None,
                 };
                 return Ok(Some(infer_aggregate_output_type(function, input.as_ref())));
@@ -255,7 +273,7 @@ fn infer_type(
                 // The result has the type of the (first) argument.
                 "ABS" | "FLOOR" | "CEIL" | "CEILING" | "ROUND" | "NULLIF" => match arg_exprs.next()
                 {
-                    Some(e) => infer_type(e, schema)?,
+                    Some(e) => infer_type(e, schema, subquery_type)?,
                     None => None,
                 },
                 "MOD" | "COALESCE" => first_known(&mut arg_exprs)?,
@@ -276,8 +294,11 @@ fn infer_type(
                 .map(|(_, then)| then.as_ref())
                 .chain(else_result.as_deref()),
         )?,
-        E::Compare { .. } | E::Logical { .. } | E::Not(_) | E::IsNull(_) | E::IsNotNull(_) => {
-            Some(DataType::Bool)
-        }
+        E::Compare { .. }
+        | E::Logical { .. }
+        | E::Not(_)
+        | E::IsNull(_)
+        | E::IsNotNull(_)
+        | E::Predicate(_) => Some(DataType::Bool),
     })
 }

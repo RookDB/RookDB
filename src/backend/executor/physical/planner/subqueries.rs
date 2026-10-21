@@ -4,17 +4,17 @@
 //! and predicate building with subquery support.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::super::engine::execute_shared;
+use super::super::expr::convert::{Subqueries, predicate_with};
 use super::super::expr::correlated::{
     CorrelatedSubquery, OuterBinding, SubqueryUse, Visitor, outer_placeholder, ref_key,
     rewrite_pred, rewrite_select,
 };
 use super::super::expr::predicate::{InList, SubqueryKind};
-use super::super::expr::{
-    ComparisonOp, Expr, Predicate, expr_from_ast, predicate_from_ast, resolve_column,
-};
+use super::super::expr::{ComparisonOp, Expr, Predicate, predicate_from_ast, resolve_column};
 
 /// An outer column a correlated subquery names: its qualifier, if written, and name.
 type OuterRef = (Option<String>, String);
@@ -37,157 +37,90 @@ use crate::planner::optimizer::helpers::contains_subquery;
 use crate::types::DataValue;
 use crate::types::datatype::DataType;
 
+/// The physical planner's [`Subqueries`]: an uncorrelated subquery runs once
+/// while planning and becomes its result; a correlated one is planned to run
+/// per outer row, binding outer columns against `schema`.
+pub(crate) struct PlanSubqueries<'a> {
+    planner: &'a PhysicalPlanner,
+    schema: &'a [ColumnInfo],
+    /// The result type of each scalar subquery planned, by its address in
+    /// the AST, for [`PlanSubqueries::scalar_type`].
+    scalar_types: RefCell<HashMap<*const rook_ast::SubqueryInfo, DataType>>,
+}
+
+impl<'a> PlanSubqueries<'a> {
+    pub(crate) fn new(planner: &'a PhysicalPlanner, schema: &'a [ColumnInfo]) -> Self {
+        PlanSubqueries {
+            planner,
+            schema,
+            scalar_types: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// The result type of a scalar subquery this has already planned.
+    pub(crate) fn scalar_type(&self, info: &rook_ast::SubqueryInfo) -> Option<DataType> {
+        self.scalar_types.borrow().get(&(info as *const _)).cloned()
+    }
+}
+
+impl Subqueries for PlanSubqueries<'_> {
+    fn scalar(&self, info: &rook_ast::SubqueryInfo) -> RookResult<Expr> {
+        let p = self.planner;
+        let (expr, data_type) = if p.is_subquery_correlated(&info.select) {
+            p.build_correlated_scalar_subquery(info, self.schema)?
+        } else {
+            let (value, data_type) = p.materialize_scalar_subquery(&info.select)?;
+            (value.map_or(Expr::Null, Expr::Constant), data_type)
+        };
+        self.scalar_types
+            .borrow_mut()
+            .insert(info as *const _, data_type);
+        Ok(expr)
+    }
+
+    fn exists(&self, info: &rook_ast::SubqueryInfo) -> RookResult<Predicate> {
+        let p = self.planner;
+        if p.is_subquery_correlated(&info.select) {
+            p.note(|| "Correlated EXISTS subquery: evaluated per outer row".to_string());
+            p.build_correlated_exists(info, self.schema)
+        } else {
+            let exists = p.materialize_exists_subquery(info.select.as_ref())?;
+            p.note(|| format!("EXISTS subquery evaluated once while planning: {}", exists));
+            Ok(Predicate::ExistsResult(exists))
+        }
+    }
+
+    fn in_subquery(
+        &self,
+        lhs: Expr,
+        info: &rook_ast::SubqueryInfo,
+        negated: bool,
+    ) -> RookResult<Predicate> {
+        let p = self.planner;
+        if p.is_subquery_correlated(&info.select) {
+            p.note(|| "Correlated IN subquery: evaluated per outer row".to_string());
+            p.build_correlated_in_subquery(info, lhs, negated, self.schema)
+        } else {
+            let values = p.materialize_in_subquery(info.select.as_ref())?;
+            Ok(Predicate::InSubqueryResult(
+                lhs,
+                Rc::new(InList::new(values)),
+                negated,
+            ))
+        }
+    }
+}
+
 impl PhysicalPlanner {
-    /// Recursively convert a `PredicateNode` to a physical `Predicate`,
-    /// materializing any subqueries (EXISTS, IN subquery) at plan time.
+    /// Convert a `PredicateNode` to a physical `Predicate`, planning any
+    /// subqueries in it wherever they appear (see [`PlanSubqueries`]).
     pub(crate) fn build_predicate_with_subqueries(
         &self,
         node: &rook_ast::PredicateNode,
         column_names: &[String],
         schema: &[ColumnInfo],
     ) -> RookResult<Predicate> {
-        let materialized_node = self.materialize_subqueries_in_predicate(node)?;
-        self.build_predicate_with_subqueries_inner(&materialized_node, column_names, schema)
-    }
-
-    fn build_predicate_with_subqueries_inner(
-        &self,
-        node: &rook_ast::PredicateNode,
-        column_names: &[String],
-        schema: &[ColumnInfo],
-    ) -> RookResult<Predicate> {
-        match node {
-            rook_ast::PredicateNode::BinaryOp { left, op, right } => {
-                let l = self.build_predicate_with_subqueries_inner(left, column_names, schema)?;
-                let r = self.build_predicate_with_subqueries_inner(right, column_names, schema)?;
-                match op {
-                    rook_ast::BinaryOp::And => Ok(Predicate::and(l, r)),
-                    rook_ast::BinaryOp::Or => Ok(Predicate::or(l, r)),
-                }
-            }
-            rook_ast::PredicateNode::Not(inner) => {
-                let inner =
-                    self.build_predicate_with_subqueries_inner(inner, column_names, schema)?;
-                Ok(Predicate::not(inner))
-            }
-            rook_ast::PredicateNode::Exists(subquery_info) => {
-                if self.is_subquery_correlated(&subquery_info.select) {
-                    self.note(|| "Correlated EXISTS subquery: evaluated per outer row".to_string());
-                    self.build_correlated_exists(subquery_info, schema)
-                } else {
-                    let exists = self.materialize_exists_subquery(subquery_info.select.as_ref())?;
-                    self.note(|| {
-                        format!("EXISTS subquery evaluated once while planning: {}", exists)
-                    });
-                    Ok(Predicate::ExistsResult(exists))
-                }
-            }
-            rook_ast::PredicateNode::InSubquery {
-                expr,
-                subquery,
-                negated,
-            } => {
-                if self.is_subquery_correlated(&subquery.select) {
-                    self.note(|| "Correlated IN subquery: evaluated per outer row".to_string());
-                    let lhs_expr = expr_from_ast(expr, column_names)?;
-                    self.build_correlated_in_subquery(subquery, lhs_expr, *negated, schema)
-                } else {
-                    let lhs_expr = expr_from_ast(expr, column_names)?;
-                    let values = self.materialize_in_subquery(subquery.select.as_ref())?;
-                    Ok(Predicate::InSubqueryResult(
-                        lhs_expr,
-                        Rc::new(InList::new(values)),
-                        *negated,
-                    ))
-                }
-            }
-            // Compare nodes — handle correlated scalar subqueries if present
-            rook_ast::PredicateNode::Compare { left, op, right } => {
-                let l = self.build_expr_with_correlated_subquery(left, column_names, schema)?;
-                let r = self.build_expr_with_correlated_subquery(right, column_names, schema)?;
-                let phys_op = match op {
-                    rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
-                    rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
-                    rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
-                    rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
-                    rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
-                    rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
-                };
-                Ok(Predicate::Compare(l, phys_op, r))
-            }
-            // IS DISTINCT FROM and IS Boolean — handle directly
-            rook_ast::PredicateNode::IsDistinctFrom { left, right } => {
-                let l = expr_from_ast(left, column_names)?;
-                let r = expr_from_ast(right, column_names)?;
-                Ok(Predicate::IsDistinctFrom(l, r))
-            }
-            rook_ast::PredicateNode::IsBoolean {
-                expr,
-                test,
-                negated,
-            } => {
-                let e = expr_from_ast(expr, column_names)?;
-                let bt = match test {
-                    rook_ast::BooleanTest::True => super::super::expr::BooleanTest::True,
-                    rook_ast::BooleanTest::False => super::super::expr::BooleanTest::False,
-                    rook_ast::BooleanTest::Unknown => super::super::expr::BooleanTest::Unknown,
-                };
-                Ok(Predicate::IsBoolean {
-                    expr: e,
-                    test: bt,
-                    negated: *negated,
-                })
-            }
-            // All standard predicate nodes delegate to predicate_from_ast
-            _ => {
-                // Use the standard converter
-                predicate_from_ast(node, column_names)
-            }
-        }
-    }
-
-    pub(crate) fn build_expr_with_correlated_subquery(
-        &self,
-        expr: &rook_ast::ExprNode,
-        column_names: &[String],
-        schema: &[ColumnInfo],
-    ) -> RookResult<Expr> {
-        match expr {
-            rook_ast::ExprNode::ScalarSubquery(info) => {
-                if self.is_subquery_correlated(&info.select) {
-                    let (phys_expr, _) = self.build_correlated_scalar_subquery(info, schema)?;
-                    Ok(phys_expr)
-                } else {
-                    let (value, _) = self.materialize_scalar_subquery(&info.select)?;
-                    let constant = match value {
-                        Some(dv) => Expr::Constant(dv),
-                        None => Expr::Null,
-                    };
-                    Ok(constant)
-                }
-            }
-            rook_ast::ExprNode::Binary { left, op, right } => {
-                let l = self.build_expr_with_correlated_subquery(left, column_names, schema)?;
-                let r = self.build_expr_with_correlated_subquery(right, column_names, schema)?;
-                let phys_op = match op {
-                    rook_ast::ArithOp::Add => Expr::Add(Box::new(l), Box::new(r)),
-                    rook_ast::ArithOp::Sub => Expr::Sub(Box::new(l), Box::new(r)),
-                    rook_ast::ArithOp::Mul => Expr::Mul(Box::new(l), Box::new(r)),
-                    rook_ast::ArithOp::Div => Expr::Div(Box::new(l), Box::new(r)),
-                };
-                Ok(phys_op)
-            }
-            rook_ast::ExprNode::Cast {
-                expr: inner,
-                data_type,
-            } => {
-                let inner_expr =
-                    self.build_expr_with_correlated_subquery(inner, column_names, schema)?;
-                let dt: DataType = data_type.parse()?;
-                Ok(Expr::Cast(Box::new(inner_expr), dt))
-            }
-            _ => expr_from_ast(expr, column_names),
-        }
+        predicate_with(node, column_names, &PlanSubqueries::new(self, schema))
     }
 
     /// Plan and execute an EXISTS subquery, returning whether any rows exist.
@@ -281,227 +214,6 @@ impl PhysicalPlanner {
                 "Scalar subquery returned more than one row (got {})",
                 n
             ))),
-        }
-    }
-
-    /// Recursively walk an `ExprNode` tree and replace any `ScalarSubquery`
-    /// nodes with `Constant` nodes. Used for nested subqueries inside
-    /// `Binary`, `Cast`, etc.
-    pub(crate) fn materialize_nested_subqueries(
-        &self,
-        expr: &rook_ast::ExprNode,
-    ) -> RookResult<rook_ast::ExprNode> {
-        match expr {
-            rook_ast::ExprNode::ScalarSubquery(info) => {
-                if self.is_subquery_correlated(&info.select) {
-                    Ok(expr.clone())
-                } else {
-                    let (value, _) = self.materialize_scalar_subquery(&info.select)?;
-                    let constant = match value {
-                        Some(dv) => super::helpers::data_value_to_constant_value(&dv),
-                        None => rook_ast::ConstantValue::Null,
-                    };
-                    Ok(rook_ast::ExprNode::Constant(constant))
-                }
-            }
-            rook_ast::ExprNode::Binary { left, op, right } => {
-                let left = self.materialize_nested_subqueries(left)?;
-                let right = self.materialize_nested_subqueries(right)?;
-                Ok(rook_ast::ExprNode::Binary {
-                    left: Box::new(left),
-                    op: *op,
-                    right: Box::new(right),
-                })
-            }
-            rook_ast::ExprNode::Cast {
-                expr: inner,
-                data_type,
-            } => {
-                let inner = self.materialize_nested_subqueries(inner)?;
-                Ok(rook_ast::ExprNode::Cast {
-                    expr: Box::new(inner),
-                    data_type: data_type.clone(),
-                })
-            }
-            rook_ast::ExprNode::Function {
-                name,
-                args,
-                distinct,
-            } => {
-                let mut new_args = Vec::new();
-                for arg in args {
-                    match arg {
-                        rook_ast::FunctionArg::Expr(e) => {
-                            let materialized = self.materialize_nested_subqueries(e)?;
-                            new_args.push(rook_ast::FunctionArg::Expr(Box::new(materialized)));
-                        }
-                        rook_ast::FunctionArg::Star => new_args.push(rook_ast::FunctionArg::Star),
-                    }
-                }
-                Ok(rook_ast::ExprNode::Function {
-                    name: name.clone(),
-                    args: new_args,
-                    distinct: *distinct,
-                })
-            }
-            rook_ast::ExprNode::Case {
-                when_then_pairs,
-                else_result,
-            } => {
-                let mut new_pairs = Vec::new();
-                for (when, then) in when_then_pairs {
-                    new_pairs.push((
-                        Box::new(self.materialize_nested_subqueries(when)?),
-                        Box::new(self.materialize_nested_subqueries(then)?),
-                    ));
-                }
-                let new_else = match else_result {
-                    Some(e) => Some(Box::new(self.materialize_nested_subqueries(e)?)),
-                    None => None,
-                };
-                Ok(rook_ast::ExprNode::Case {
-                    when_then_pairs: new_pairs,
-                    else_result: new_else,
-                })
-            }
-            rook_ast::ExprNode::Compare { left, op, right } => {
-                let left = self.materialize_nested_subqueries(left)?;
-                let right = self.materialize_nested_subqueries(right)?;
-                Ok(rook_ast::ExprNode::Compare {
-                    left: Box::new(left),
-                    op: *op,
-                    right: Box::new(right),
-                })
-            }
-            rook_ast::ExprNode::Logical { left, op, right } => {
-                let left = self.materialize_nested_subqueries(left)?;
-                let right = self.materialize_nested_subqueries(right)?;
-                Ok(rook_ast::ExprNode::Logical {
-                    left: Box::new(left),
-                    op: *op,
-                    right: Box::new(right),
-                })
-            }
-            rook_ast::ExprNode::Not(inner) => {
-                let inner = self.materialize_nested_subqueries(inner)?;
-                Ok(rook_ast::ExprNode::Not(Box::new(inner)))
-            }
-            rook_ast::ExprNode::IsNull(inner) => {
-                let inner = self.materialize_nested_subqueries(inner)?;
-                Ok(rook_ast::ExprNode::IsNull(Box::new(inner)))
-            }
-            rook_ast::ExprNode::IsNotNull(inner) => {
-                let inner = self.materialize_nested_subqueries(inner)?;
-                Ok(rook_ast::ExprNode::IsNotNull(Box::new(inner)))
-            }
-            // Leaf nodes: Column, Compound, Constant — no subqueries inside
-            _ => Ok(expr.clone()),
-        }
-    }
-
-    /// Recursively walk a `PredicateNode` tree and replace any `ScalarSubquery`
-    /// nodes within its expressions with `Constant` nodes.
-    pub(crate) fn materialize_subqueries_in_predicate(
-        &self,
-        node: &rook_ast::PredicateNode,
-    ) -> RookResult<rook_ast::PredicateNode> {
-        match node {
-            rook_ast::PredicateNode::BinaryOp { left, op, right } => {
-                let left = self.materialize_subqueries_in_predicate(left)?;
-                let right = self.materialize_subqueries_in_predicate(right)?;
-                Ok(rook_ast::PredicateNode::BinaryOp {
-                    left: Box::new(left),
-                    op: *op,
-                    right: Box::new(right),
-                })
-            }
-            rook_ast::PredicateNode::Not(inner) => {
-                let inner = self.materialize_subqueries_in_predicate(inner)?;
-                Ok(rook_ast::PredicateNode::Not(Box::new(inner)))
-            }
-            rook_ast::PredicateNode::Compare { left, op, right } => {
-                let left = self.materialize_nested_subqueries(left)?;
-                let right = self.materialize_nested_subqueries(right)?;
-                Ok(rook_ast::PredicateNode::Compare {
-                    left: Box::new(left),
-                    op: *op,
-                    right: Box::new(right),
-                })
-            }
-            rook_ast::PredicateNode::IsNull(expr) => {
-                let expr = self.materialize_nested_subqueries(expr)?;
-                Ok(rook_ast::PredicateNode::IsNull(Box::new(expr)))
-            }
-            rook_ast::PredicateNode::IsNotNull(expr) => {
-                let expr = self.materialize_nested_subqueries(expr)?;
-                Ok(rook_ast::PredicateNode::IsNotNull(Box::new(expr)))
-            }
-            rook_ast::PredicateNode::Between { expr, low, high } => {
-                let expr = self.materialize_nested_subqueries(expr)?;
-                let low = self.materialize_nested_subqueries(low)?;
-                let high = self.materialize_nested_subqueries(high)?;
-                Ok(rook_ast::PredicateNode::Between {
-                    expr: Box::new(expr),
-                    low: Box::new(low),
-                    high: Box::new(high),
-                })
-            }
-            rook_ast::PredicateNode::InList { expr, list } => {
-                let expr = self.materialize_nested_subqueries(expr)?;
-                let mut new_list = Vec::new();
-                for item in list {
-                    new_list.push(self.materialize_nested_subqueries(item)?);
-                }
-                Ok(rook_ast::PredicateNode::InList {
-                    expr: Box::new(expr),
-                    list: new_list,
-                })
-            }
-            rook_ast::PredicateNode::Like {
-                expr,
-                pattern,
-                escape_char,
-            } => {
-                let expr = self.materialize_nested_subqueries(expr)?;
-                Ok(rook_ast::PredicateNode::Like {
-                    expr: Box::new(expr),
-                    pattern: pattern.clone(),
-                    escape_char: *escape_char,
-                })
-            }
-            rook_ast::PredicateNode::Exists(_) => Ok(node.clone()),
-            rook_ast::PredicateNode::InSubquery {
-                expr,
-                subquery,
-                negated,
-            } => {
-                let expr = self.materialize_nested_subqueries(expr)?;
-                Ok(rook_ast::PredicateNode::InSubquery {
-                    expr: Box::new(expr),
-                    subquery: subquery.clone(),
-                    negated: *negated,
-                })
-            }
-            rook_ast::PredicateNode::IsDistinctFrom { left, right } => {
-                let left = self.materialize_nested_subqueries(left)?;
-                let right = self.materialize_nested_subqueries(right)?;
-                Ok(rook_ast::PredicateNode::IsDistinctFrom {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                })
-            }
-            rook_ast::PredicateNode::IsBoolean {
-                expr,
-                test,
-                negated,
-            } => {
-                let expr = self.materialize_nested_subqueries(expr)?;
-                Ok(rook_ast::PredicateNode::IsBoolean {
-                    expr: Box::new(expr),
-                    test: *test,
-                    negated: *negated,
-                })
-            }
         }
     }
 }

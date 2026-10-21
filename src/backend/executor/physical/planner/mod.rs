@@ -7,6 +7,7 @@
 use rook_ast::logical::*;
 
 use super::explain::{PlanNode, PlanTrace};
+use super::expr::convert::expr_with;
 use super::expr::{Expr, Predicate, binding_names, expr_from_ast, resolve_column};
 use super::operators::{
     CteScanOperator, DistinctOperator, Estimated, FilterOperator, InsertOperator, LimitOperator,
@@ -17,7 +18,7 @@ use super::operators::{
 use super::tuple::ColumnInfo;
 use crate::types::datatype::DataType;
 
-use self::helpers::infer_expr_type_in_schema;
+use self::helpers::infer_expr_type_with;
 use crate::backend::catalog::types::Catalog;
 use crate::backend::error::{RookError, RookResult};
 use crate::statistics::estimator::{Estimator, StatsSource};
@@ -1038,71 +1039,21 @@ impl PhysicalPlanner {
 // ── Projection expression planning ────────────────────────────────────────────
 
 impl PhysicalPlanner {
-    /// Plan a single projection expression, handling `ScalarSubquery` nodes
-    /// directly without going through the ConstantValue round-trip.
+    /// Plan a single projection expression and its type, planning any
+    /// subqueries in it wherever they appear (see [`PlanSubqueries`]). Outer
+    /// references bind against `child_schema`, so a qualifier (`r.id` vs
+    /// `l.id`) picks the right column.
     pub(crate) fn plan_projection_expr(
         &self,
         expr: &rook_ast::ExprNode,
         column_names: &[String],
         child_schema: &[ColumnInfo],
     ) -> RookResult<(Expr, DataType)> {
-        match expr {
-            // Top-level scalar subquery: materialize or build correlated.
-            // Outer references bind against `child_schema`, so a qualifier
-            // (`r.id` vs `l.id`) picks the right column.
-            rook_ast::ExprNode::ScalarSubquery(info) => {
-                if self.is_subquery_correlated(&info.select) {
-                    let (phys_expr, dt) =
-                        self.build_correlated_scalar_subquery(info, child_schema)?;
-                    Ok((phys_expr, dt))
-                } else {
-                    let (value, data_type) = self.materialize_scalar_subquery(&info.select)?;
-                    let phys_expr = match value {
-                        Some(dv) => Expr::Constant(dv),
-                        None => Expr::Null,
-                    };
-                    Ok((phys_expr, data_type))
-                }
-            }
-            // Nested subqueries inside Binary or Cast
-            rook_ast::ExprNode::Binary { left, op, right } => {
-                let left_expr =
-                    self.build_expr_with_correlated_subquery(left, column_names, child_schema)?;
-                let right_expr =
-                    self.build_expr_with_correlated_subquery(right, column_names, child_schema)?;
-                let phys_op = match op {
-                    rook_ast::ArithOp::Add => Expr::Add(Box::new(left_expr), Box::new(right_expr)),
-                    rook_ast::ArithOp::Sub => Expr::Sub(Box::new(left_expr), Box::new(right_expr)),
-                    rook_ast::ArithOp::Mul => Expr::Mul(Box::new(left_expr), Box::new(right_expr)),
-                    rook_ast::ArithOp::Div => Expr::Div(Box::new(left_expr), Box::new(right_expr)),
-                };
-                let data_type = infer_expr_type_in_schema(expr, child_schema)?;
-                Ok((phys_op, data_type))
-            }
-            rook_ast::ExprNode::Cast {
-                expr: inner,
-                data_type,
-            } => {
-                let inner_expr =
-                    self.build_expr_with_correlated_subquery(inner, column_names, child_schema)?;
-                let target_dt: DataType = data_type.parse().map_err(|e: RookError| {
-                    RookError::TypeMismatch(format!(
-                        "Invalid CAST target type '{}': {}",
-                        data_type, e
-                    ))
-                })?;
-                Ok((
-                    Expr::Cast(Box::new(inner_expr), target_dt.clone()),
-                    target_dt,
-                ))
-            }
-            // All other expression types: use the standard converter
-            _ => {
-                let e = expr_from_ast(expr, column_names)?;
-                let data_type = infer_expr_type_in_schema(expr, child_schema)?;
-                Ok((e, data_type))
-            }
-        }
+        let subqueries = subqueries::PlanSubqueries::new(self, child_schema);
+        let e = expr_with(expr, column_names, &subqueries)?;
+        let data_type =
+            infer_expr_type_with(expr, child_schema, &|info| subqueries.scalar_type(info))?;
+        Ok((e, data_type))
     }
 }
 

@@ -243,6 +243,7 @@ fn walk_expr(expr: &ExprNode, names: &mut HashSet<String>) -> Option<()> {
             }
         }
         ExprNode::ScalarSubquery(_) => None,
+        ExprNode::Predicate(p) => walk_predicate(p, names),
     }
 }
 
