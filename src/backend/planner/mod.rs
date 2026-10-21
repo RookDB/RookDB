@@ -18,24 +18,11 @@ pub mod tests;
 use rook_ast::logical::*;
 use rook_ast::*;
 
+use crate::backend::error::{RookError, RookResult};
 use crate::catalog::Catalog;
 // statistics collection now routed through backend::cache (size-validated)
 
 use self::helpers::*;
-
-/// Errors produced during planning / semantic analysis.
-#[derive(Debug, Clone)]
-pub struct PlanError {
-    pub message: String,
-}
-
-impl std::fmt::Display for PlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for PlanError {}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -142,7 +129,7 @@ pub fn plan_insert(
     insert: &InsertPlan,
     catalog: &Catalog,
     db_name: &str,
-) -> Result<LogicalPlan, PlanError> {
+) -> RookResult<LogicalPlan> {
     let dummy_child = || {
         Box::new(LogicalPlan::TableScan(LogicalTableScan {
             table: "__singlerow__".to_string(),
@@ -164,17 +151,19 @@ pub fn plan_insert(
 
     // ── INSERT ... VALUES ────────────────────────────────────────────────
     if insert.values.is_empty() {
-        return Err(PlanError {
-            message: "INSERT requires a VALUES clause or a SELECT source".to_string(),
-        });
+        return Err(RookError::InvalidQuery(
+            "INSERT requires a VALUES clause or a SELECT source".to_string(),
+        ));
     }
 
-    let db = catalog.databases.get(db_name).ok_or_else(|| PlanError {
-        message: format!("Database '{}' not found", db_name),
-    })?;
-    let table = db.tables.get(&insert.table).ok_or_else(|| PlanError {
-        message: format!("Table '{}' not found", insert.table),
-    })?;
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| not_found("Database", db_name))?;
+    let table = db
+        .tables
+        .get(&insert.table)
+        .ok_or_else(|| not_found("Table", &insert.table))?;
 
     // Expand every row to full table arity:
     //   explicit column list → position mapping
@@ -182,24 +171,24 @@ pub fn plan_insert(
     let mut values_rows: Vec<Vec<ExprNode>> = Vec::with_capacity(insert.values.len());
     for row in &insert.values {
         if !insert.columns.is_empty() {
+            if row.len() != insert.columns.len() {
+                return Err(RookError::InvalidQuery(format!(
+                    "INSERT row has {} value(s) but {} column(s) listed",
+                    row.len(),
+                    insert.columns.len()
+                )));
+            }
             let mut full: Vec<Option<&ExprNode>> = vec![None; table.columns.len()];
-            for (pos, col_name) in insert.columns.iter().enumerate() {
-                let expr = row.get(pos).ok_or_else(|| PlanError {
-                    message: format!(
-                        "INSERT row has {} value(s) but {} column(s) listed",
-                        row.len(),
-                        insert.columns.len()
-                    ),
-                })?;
+            for (col_name, expr) in insert.columns.iter().zip(row) {
                 let target = table
                     .columns
                     .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(col_name))
-                    .ok_or_else(|| PlanError {
-                        message: format!(
-                            "Column '{}' does not exist in table '{}'",
-                            col_name, insert.table
-                        ),
+                    .ok_or_else(|| RookError::NotFoundIn {
+                        entity: "Column",
+                        name: col_name.clone(),
+                        container_kind: "table",
+                        container: insert.table.clone(),
                     })?;
                 full[target] = Some(expr);
             }
@@ -220,14 +209,12 @@ pub fn plan_insert(
             values_rows.push(expanded);
         } else {
             if row.len() != table.columns.len() {
-                return Err(PlanError {
-                    message: format!(
-                        "INSERT row has {} value(s) but table '{}' has {} column(s)",
-                        row.len(),
-                        insert.table,
-                        table.columns.len()
-                    ),
-                });
+                return Err(RookError::InvalidQuery(format!(
+                    "INSERT row has {} value(s) but table '{}' has {} column(s)",
+                    row.len(),
+                    insert.table,
+                    table.columns.len()
+                )));
             }
             values_rows.push(row.clone());
         }
@@ -257,11 +244,7 @@ fn default_to_constant(dv: &crate::types::DataValue) -> ConstantValue {
 }
 
 /// Plan a `QueryPlan` into a `LogicalPlan` using the given catalog.
-pub fn plan_query(
-    query: &QueryPlan,
-    catalog: &Catalog,
-    db_name: &str,
-) -> Result<LogicalPlan, PlanError> {
+pub fn plan_query(query: &QueryPlan, catalog: &Catalog, db_name: &str) -> RookResult<LogicalPlan> {
     match query {
         QueryPlan::Select(select) => {
             let plan = plan_select(select, catalog, db_name)?;
@@ -309,26 +292,21 @@ pub fn plan_query(
         | QueryPlan::CreateTableAsSelect(_)
         | QueryPlan::ShowTables
         | QueryPlan::ShowDatabases
-        | QueryPlan::UseDatabase(_) => Err(PlanError {
-            message: format!(
-                "DDL/DQL statement '{}' must be handled by the executor, not the logical planner",
-                query.statement_type()
-            ),
-        }),
-        _ => Err(PlanError {
-            message: format!("Planning not yet supported for {}", query.statement_type()),
-        }),
+        | QueryPlan::UseDatabase(_) => Err(RookError::Internal(format!(
+            "DDL/DQL statement '{}' must be handled by the executor, not the logical planner",
+            query.statement_type()
+        ))),
+        _ => Err(RookError::Unsupported(format!(
+            "Planning not yet supported for {}",
+            query.statement_type()
+        ))),
     }
 }
 
 // ── SELECT planning ───────────────────────────────────────────────────────────
 
 /// Plan a SELECT query into a LogicalPlan.
-fn plan_select(
-    select: &SelectPlan,
-    catalog: &Catalog,
-    db_name: &str,
-) -> Result<LogicalPlan, PlanError> {
+fn plan_select(select: &SelectPlan, catalog: &Catalog, db_name: &str) -> RookResult<LogicalPlan> {
     plan_select_with_ctes(select, catalog, db_name, None)
 }
 
@@ -338,11 +316,12 @@ fn plan_select_with_ctes(
     catalog: &Catalog,
     db_name: &str,
     existing_ctes: Option<&std::collections::HashMap<String, (LogicalPlan, ColumnSchema)>>,
-) -> Result<LogicalPlan, PlanError> {
+) -> RookResult<LogicalPlan> {
     // 0. Resolve CTEs and build a registry
-    let db = catalog.databases.get(db_name).ok_or_else(|| PlanError {
-        message: format!("Database '{}' not found", db_name),
-    })?;
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| not_found("Database", db_name))?;
 
     let mut cte_registry: std::collections::HashMap<String, (LogicalPlan, ColumnSchema)> =
         std::collections::HashMap::new();
@@ -442,24 +421,20 @@ fn plan_select_with_ctes(
                             if pos_usize <= expanded.len() {
                                 *gb_expr = expanded[pos_usize - 1].expr.clone();
                             } else {
-                                return Err(PlanError {
-                                    message: format!(
-                                        "GROUP BY position {} is out of range (1..{})",
-                                        pos,
-                                        expanded.len()
-                                    ),
-                                });
+                                return Err(RookError::InvalidQuery(format!(
+                                    "GROUP BY position {} is out of range (1..{})",
+                                    pos,
+                                    expanded.len()
+                                )));
                             }
                         }
                     }
                 } else {
-                    return Err(PlanError {
-                        message: format!(
-                            "GROUP BY position {} is out of range (1..{})",
-                            pos,
-                            select.projections.len()
-                        ),
-                    });
+                    return Err(RookError::InvalidQuery(format!(
+                        "GROUP BY position {} is out of range (1..{})",
+                        pos,
+                        select.projections.len()
+                    )));
                 }
             }
         }
@@ -479,12 +454,10 @@ fn plan_select_with_ctes(
             if let SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } = item
                 && let Some(column) = ungrouped_column(e, &group_by)
             {
-                return Err(PlanError {
-                    message: format!(
-                        "column '{}' must appear in the GROUP BY clause or be used in an aggregate function",
-                        column
-                    ),
-                });
+                return Err(RookError::InvalidQuery(format!(
+                    "column '{}' must appear in the GROUP BY clause or be used in an aggregate function",
+                    column
+                )));
             }
         }
 
@@ -554,13 +527,11 @@ fn plan_select_with_ctes(
                 if *pos >= 1 && (*pos as usize) <= projections.len() {
                     ob.expr = output_ref((*pos as usize) - 1);
                 } else {
-                    return Err(PlanError {
-                        message: format!(
-                            "ORDER BY position {} is out of range (1..{})",
-                            pos,
-                            projections.len()
-                        ),
-                    });
+                    return Err(RookError::InvalidQuery(format!(
+                        "ORDER BY position {} is out of range (1..{})",
+                        pos,
+                        projections.len()
+                    )));
                 }
             }
         }

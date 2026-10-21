@@ -23,7 +23,7 @@ pub(super) fn insert(
     plan: &QueryPlan,
 ) -> RookResult<StatementResult> {
     let logical = crate::planner::plan_query(plan, catalog, db)
-        .map_err(|e| RookError::Internal(e.to_string()).with_context("Insert planning error"))?;
+        .map_err(|e| e.with_context("Insert planning error"))?;
     // Inserting reports a count, not the written rows.
     let n = execute_shared(&logical, Arc::clone(catalog), db)
         .map_err(|e| e.with_context("Insert failed"))?
@@ -43,7 +43,7 @@ pub(super) fn query(
     plan: &QueryPlan,
 ) -> RookResult<StatementResult> {
     let logical = crate::planner::plan_query(plan, catalog, db)
-        .map_err(|e| RookError::Internal(e.to_string()).with_context("Planning error"))?;
+        .map_err(|e| e.with_context("Planning error"))?;
     let (rows, schema) = execute_shared(&logical, Arc::clone(catalog), db)
         .map_err(|e| e.with_context("Execution error"))?;
     let count = format!("{} row(s) returned.\n", rows.len());
@@ -89,13 +89,11 @@ pub(super) fn explain(
     db: &str,
     explain: &ExplainPlan,
 ) -> RookResult<StatementResult> {
-    let planning = |e: crate::planner::PlanError| {
-        RookError::Internal(e.to_string()).with_context("Planning error")
-    };
     // The plan to describe, and the writing operator it feeds, if any.
     let (logical, writer) = match explain.statement.as_ref() {
         statement @ (QueryPlan::Select(_) | QueryPlan::SetOperation(_) | QueryPlan::Insert(_)) => (
-            crate::planner::plan_query(statement, catalog, db).map_err(planning)?,
+            crate::planner::plan_query(statement, catalog, db)
+                .map_err(|e| e.with_context("Planning error"))?,
             None,
         ),
         QueryPlan::Update(upd) => (
@@ -113,7 +111,7 @@ pub(super) fn explain(
             Some(PlanNode::new("Delete").with("table", &del.table)),
         ),
         other => {
-            return Err(RookError::Internal(format!(
+            return Err(RookError::Unsupported(format!(
                 "EXPLAIN supports SELECT, INSERT, UPDATE and DELETE, not {}",
                 other.statement_type()
             )));
@@ -125,7 +123,7 @@ pub(super) fn explain(
         explain_shared(&logical, Arc::clone(catalog), db)
             .map_err(|e| e.with_context("Planning error"))?
     } else if writes {
-        return Err(RookError::Internal(
+        return Err(RookError::Unsupported(
             "EXPLAIN ANALYZE runs the statement and supports only queries".to_string(),
         ));
     } else {

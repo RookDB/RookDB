@@ -1,6 +1,7 @@
 //! Tests for the logical planner — plan structure, error handling, wildcard expansion,
 //! semantic analysis, column schema, and INFORMATION_SCHEMA routing.
 
+use crate::backend::error::RookError;
 use crate::catalog::{Catalog, Column, Constraints, Database, Table};
 use crate::types::DataType;
 
@@ -372,7 +373,13 @@ fn test_table_not_found() {
     };
     let result = plan_select(&select, &catalog, "test_db");
     assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("not found"));
+    assert!(matches!(
+        result.unwrap_err(),
+        RookError::NotFound {
+            entity: "Table",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -395,12 +402,15 @@ fn test_database_not_found() {
     };
     let result = plan_select(&select, &catalog, "does_not_exist");
     assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .message
-            .contains("Database 'does_not_exist' not found")
-    );
+    let err = result.unwrap_err();
+    assert!(matches!(
+        err,
+        RookError::NotFound {
+            entity: "Database",
+            ..
+        }
+    ));
+    assert_eq!(err.to_string(), "Database 'does_not_exist' not found");
 }
 
 #[test]
@@ -994,9 +1004,9 @@ fn test_plan_insert_no_source() {
     );
     let err = result.unwrap_err();
     assert!(
-        err.message.contains("VALUES clause or a SELECT source"),
+        matches!(&err, RookError::InvalidQuery(m) if m.contains("VALUES clause or a SELECT source")),
         "Expected error about missing VALUES/SELECT source, got: {}",
-        err.message
+        err
     );
 }
 
@@ -1197,10 +1207,10 @@ fn test_plan_query_ddl_rejected() {
         );
         let err = result.unwrap_err();
         assert!(
-            err.message.contains("be handled by the executor")
-                || err.message.contains("not yet supported"),
+            err.to_string().contains("be handled by the executor")
+                || matches!(err, RookError::Unsupported(_)),
             "DDL error should mention executor: {}",
-            err.message
+            err
         );
     }
 }

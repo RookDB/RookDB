@@ -7,7 +7,7 @@
 //! mean what they mean outside a subquery. Results are cached by outer key,
 //! so outer rows that repeat a key do not re-run it.
 
-use crate::backend::error::{ResultContext, RookError, RookResult};
+use crate::backend::error::{ResultContext, RookResult};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -142,10 +142,8 @@ impl CorrelatedSubquery {
         }
         let select = self.bound_select(&key);
         let query = rook_ast::QueryPlan::Select(select);
-        let logical =
-            crate::planner::plan_query(&query, &self.catalog, &self.db_name).map_err(|e| {
-                RookError::Evaluation(format!("Correlated subquery planning error: {}", e.message))
-            })?;
+        let logical = crate::planner::plan_query(&query, &self.catalog, &self.db_name)
+            .context("Correlated subquery planning error")?;
         let (rows, _) = execute_shared(&logical, Arc::clone(&self.catalog), &self.db_name)
             .context("Correlated subquery error")?;
         let rows = Rc::new(rows);

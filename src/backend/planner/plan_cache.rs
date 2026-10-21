@@ -381,11 +381,11 @@ impl CachedInsert {
                     .columns
                     .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(col_name))
-                    .ok_or_else(|| {
-                        RookError::Internal(format!(
-                            "Column '{}' does not exist in table '{}'",
-                            col_name, self.table
-                        ))
+                    .ok_or_else(|| RookError::NotFoundIn {
+                        entity: "Column",
+                        name: col_name.clone(),
+                        container_kind: "table",
+                        container: self.table.clone(),
                     })?;
                 col_positions.push(pos);
             }
@@ -400,7 +400,7 @@ impl CachedInsert {
 
         let total_values_expected: usize = row_arities.iter().sum();
         if values.len() != total_values_expected {
-            return Err(RookError::TypeMismatch(format!(
+            return Err(RookError::InvalidQuery(format!(
                 "Expected {} values for table '{}', got {}",
                 total_values_expected,
                 self.table,
@@ -408,22 +408,18 @@ impl CachedInsert {
             )));
         }
 
-        for &row_len in &row_arities {
-            if self.columns.is_empty() {
-                if row_len != expected_row_len {
-                    return Err(RookError::TypeMismatch(format!(
-                        "INSERT row has {} value(s) but table '{}' has {} column(s)",
-                        row_len, self.table, expected_row_len
-                    )));
-                }
+        if let Some(&row_len) = row_arities.iter().find(|&&n| n != expected_row_len) {
+            return Err(RookError::InvalidQuery(if self.columns.is_empty() {
+                format!(
+                    "INSERT row has {} value(s) but table '{}' has {} column(s)",
+                    row_len, self.table, expected_row_len
+                )
             } else {
-                if row_len != expected_row_len {
-                    return Err(RookError::TypeMismatch(format!(
-                        "INSERT row has {} value(s) but {} column(s) listed",
-                        row_len, expected_row_len
-                    )));
-                }
-            }
+                format!(
+                    "INSERT row has {} value(s) but {} column(s) listed",
+                    row_len, expected_row_len
+                )
+            }));
         }
 
         // Execute row by row against one resolved table.
@@ -839,8 +835,7 @@ impl PreparedStatement {
                     })
                 }
                 plan => PlanCacheEntry::Plan {
-                    plan: crate::backend::planner::plan_query(&plan, catalog, db_name)
-                        .map_err(|e| RookError::Internal(e.to_string()))?,
+                    plan: crate::backend::planner::plan_query(&plan, catalog, db_name)?,
                     literals: literals.clone(),
                 },
             }
@@ -876,8 +871,7 @@ impl PreparedStatement {
                 })?;
                 let sql = bind_template(tokens, params)?;
                 let plan = rook_parser::parse_sql(&sql)?;
-                let logical = crate::backend::planner::plan_query(&plan, catalog, &self.db_name)
-                    .map_err(|e| RookError::Internal(e.to_string()))?;
+                let logical = crate::backend::planner::plan_query(&plan, catalog, &self.db_name)?;
                 crate::backend::executor::physical::engine::execute_plan_collect(
                     &logical,
                     catalog,
@@ -923,7 +917,7 @@ fn bind_template(tokens: &[Token], params: &[Literal]) -> RookResult<String> {
             .strip_prefix('$')
             .and_then(|n| n.parse::<usize>().ok())
             .and_then(|n| params.get(n.checked_sub(1)?))
-            .ok_or_else(|| RookError::Internal(format!("no value for parameter {}", p)))?;
+            .ok_or_else(|| RookError::InvalidQuery(format!("no value for parameter {}", p)))?;
         match param {
             Literal::Number(n) if !is_number(n) => {
                 return Err(RookError::TypeMismatch(format!("'{}' is not a number", n)));

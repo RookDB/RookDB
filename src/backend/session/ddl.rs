@@ -153,6 +153,12 @@ pub(super) fn create_table(
                 column,
                 message: suffix(message),
             },
+            RookError::TypeMismatch(m) => RookError::TypeMismatch(suffix(m)),
+            RookError::InvalidQuery(m) => RookError::InvalidQuery(suffix(m)),
+            RookError::Unsupported(m) => RookError::Unsupported(suffix(m)),
+            RookError::InvalidIdentifier(m) => RookError::InvalidIdentifier(suffix(m)),
+            RookError::AlreadyExists(m) => RookError::AlreadyExists(suffix(m)),
+            RookError::Evaluation(m) => RookError::Evaluation(suffix(m)),
             other => RookError::Internal(suffix(other.to_string())),
         }
     }
@@ -601,7 +607,7 @@ pub(super) fn drop_table(
         .map(|(name, _)| name.clone())
         .collect();
     if !ref_views.is_empty() && !cascade {
-        return Err(RookError::Internal(format!(
+        return Err(RookError::InvalidQuery(format!(
             "Cannot drop table '{}' because it is referenced by views: {}",
             table,
             ref_views.join(", ")
@@ -845,7 +851,7 @@ pub(super) fn create_table_as_select(
 
     let query_plan = rook_ast::QueryPlan::Select(*ctas.query.clone());
     let logical = crate::planner::plan_query(&query_plan, catalog, db)
-        .map_err(|e| RookError::Internal(format!("Failed to plan SELECT query: {}", e)))?;
+        .map_err(|e| e.with_context("Failed to plan SELECT query"))?;
     let (tuples, output_schema) =
         crate::backend::executor::physical::engine::execute_plan_collect_with_schema(
             &logical, catalog, db,

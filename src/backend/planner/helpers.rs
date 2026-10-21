@@ -8,7 +8,7 @@ use rook_ast::*;
 
 use crate::catalog::Catalog;
 
-use super::PlanError;
+use crate::backend::error::{RookError, RookResult};
 
 // ── Table Resolution ──────────────────────────────────────────────────────────
 
@@ -16,7 +16,7 @@ use super::PlanError;
 pub fn resolve_table_ref(
     tref: &TableRef,
     db: &crate::catalog::Database,
-) -> Result<(String, Option<String>), PlanError> {
+) -> RookResult<(String, Option<String>)> {
     if db.tables.contains_key(&tref.name) {
         Ok((tref.name.clone(), tref.alias.clone()))
     } else if let Some(stored) = unique_case_insensitive(db.tables.keys(), &tref.name) {
@@ -24,9 +24,15 @@ pub fn resolve_table_ref(
         // `t`. The stored spelling is what names the heap file.
         Ok((stored, tref.alias.clone()))
     } else {
-        Err(PlanError {
-            message: format!("Table '{}' not found", tref.name),
-        })
+        Err(not_found("Table", &tref.name))
+    }
+}
+
+/// `"{entity} '{name}' not found"`.
+pub fn not_found(entity: &'static str, name: &str) -> RookError {
+    RookError::NotFound {
+        entity,
+        name: name.to_string(),
     }
 }
 
@@ -48,11 +54,11 @@ pub fn resolve_from_item(
     catalog: &Catalog,
     db_name: &str,
     cte_registry: &std::collections::HashMap<String, (LogicalPlan, ColumnSchema)>,
-) -> Result<LogicalPlan, PlanError> {
+) -> RookResult<LogicalPlan> {
     if let Some(view_def) = db.views.get(&tref.name) {
         let select_plan: rook_ast::SelectPlan = serde_json::from_str(&view_def.query_json)
-            .map_err(|e| PlanError {
-                message: format!("Failed to deserialise view '{}': {}", tref.name, e),
+            .map_err(|e| {
+                RookError::Internal(format!("Failed to deserialise view '{}': {}", tref.name, e))
             })?;
         return super::plan_select(&select_plan, catalog, db_name);
     }
@@ -64,15 +70,15 @@ pub fn build_table_or_cte_scan(
     tref: &TableRef,
     db: &crate::catalog::Database,
     cte_registry: &std::collections::HashMap<String, (LogicalPlan, ColumnSchema)>,
-) -> Result<LogicalPlan, PlanError> {
+) -> RookResult<LogicalPlan> {
     const CTE_PREFIX: &str = "__cte__:";
     if let Some(cte_name) = tref.name.strip_prefix(CTE_PREFIX) {
         let key = cte_name.to_ascii_lowercase();
-        let (_inner, schema) = cte_registry.get(&key).ok_or_else(|| PlanError {
-            message: format!(
+        let (_inner, schema) = cte_registry.get(&key).ok_or_else(|| {
+            RookError::Internal(format!(
                 "CTE '{}' is referenced but not defined in WITH clause",
                 cte_name
-            ),
+            ))
         })?;
         Ok(LogicalPlan::CteScan(LogicalCteScan {
             name: cte_name.to_string(),
@@ -105,9 +111,10 @@ pub fn build_table_or_cte_scan(
         }))
     } else {
         let (resolved_name, alias) = resolve_table_ref(tref, db)?;
-        let table_schema = db.tables.get(&resolved_name).ok_or_else(|| PlanError {
-            message: format!("Table '{}' not found in database", resolved_name),
-        })?;
+        let table_schema = db
+            .tables
+            .get(&resolved_name)
+            .ok_or_else(|| not_found("Table", &resolved_name))?;
         let column_schema =
             crate::planner::semantic::catalog_columns_to_schema(&table_schema.columns);
         Ok(LogicalPlan::TableScan(LogicalTableScan {
@@ -125,7 +132,7 @@ pub fn build_table_or_cte_scan(
 pub fn expand_projections(
     projections: &[SelectExpr],
     current_plan: &LogicalPlan,
-) -> Result<Vec<NamedExpr>, PlanError> {
+) -> RookResult<Vec<NamedExpr>> {
     let qualified_schema = derive_qualified_schema(current_plan);
 
     // Above an Aggregate, a SELECT expression that repeats a GROUP BY

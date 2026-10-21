@@ -147,7 +147,7 @@ impl Session {
             QueryPlan::Vacuum(p) => ddl::vacuum(&self.catalog, self.db()?, &p.table),
             QueryPlan::Analyze(p) => ddl::analyze(&self.catalog, self.db()?, p.table.as_deref()),
             QueryPlan::CreateIndex(p) => ddl::create_index(&self.catalog, self.db()?, p),
-            QueryPlan::Unknown(msg) => Err(RookError::Internal(format!(
+            QueryPlan::Unknown(msg) => Err(RookError::Unsupported(format!(
                 "Unsupported SQL statement: {}",
                 msg
             ))),
@@ -174,7 +174,7 @@ impl Session {
             QueryPlan::DropIndex(p) => {
                 ddl::drop_index(catalog, db, &p.index_name, &p.table_name, p.if_exists)
             }
-            other => Err(RookError::Internal(format!(
+            other => Err(RookError::Unsupported(format!(
                 "Unsupported statement: {}",
                 other.statement_type()
             ))),
@@ -185,6 +185,6 @@ impl Session {
     fn db(&self) -> RookResult<&str> {
         self.current_db
             .as_deref()
-            .ok_or_else(|| RookError::Internal(NO_DATABASE.to_string()))
+            .ok_or_else(|| RookError::InvalidQuery(NO_DATABASE.to_string()))
     }
 }

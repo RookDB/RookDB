@@ -80,8 +80,5 @@ pub fn matching_rows_plan(
         distinct: false,
     };
 
-    Ok(
-        crate::planner::plan_query(&QueryPlan::Select(select), catalog, db_name)
-            .map_err(|e| e.to_string())?,
-    )
+    crate::planner::plan_query(&QueryPlan::Select(select), catalog, db_name)
 }

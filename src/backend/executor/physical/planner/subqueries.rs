@@ -32,7 +32,7 @@ use super::super::operators::{
 };
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
-use crate::backend::error::{RookError, RookResult};
+use crate::backend::error::{ResultContext, RookError, RookResult};
 use crate::planner::optimizer::helpers::contains_subquery;
 use crate::types::DataValue;
 use crate::types::datatype::DataType;
@@ -200,9 +200,7 @@ impl PhysicalPlanner {
 
         // Plan the inner query into a LogicalPlan
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-            .map_err(|e| {
-                RookError::Internal(e.message).with_context("Failed to plan EXISTS subquery")
-            })?;
+            .context("Failed to plan EXISTS subquery")?;
 
         // Execute the plan and check if any tuples are produced
         let tuples = execute_shared(
@@ -223,9 +221,7 @@ impl PhysicalPlanner {
         let query_plan = rook_ast::QueryPlan::Select(select.clone());
 
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-            .map_err(|e| {
-                RookError::Internal(e.message).with_context("Failed to plan IN subquery")
-            })?;
+            .context("Failed to plan IN subquery")?;
 
         // Execute and collect tuples
         let tuples = execute_shared(
@@ -260,9 +256,7 @@ impl PhysicalPlanner {
         let query_plan = rook_ast::QueryPlan::Select(select.clone());
 
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-            .map_err(|e| {
-                RookError::Internal(e.message).with_context("Failed to plan scalar subquery")
-            })?;
+            .context("Failed to plan scalar subquery")?;
 
         let tuples = execute_shared(
             &logical_plan,
@@ -283,7 +277,7 @@ impl PhysicalPlanner {
                     .unwrap_or(DataType::Int);
                 Ok((value, data_type))
             }
-            n => Err(RookError::Internal(format!(
+            n => Err(RookError::Evaluation(format!(
                 "Scalar subquery returned more than one row (got {})",
                 n
             ))),
@@ -732,10 +726,7 @@ impl PhysicalPlanner {
         }
         let query_plan = rook_ast::QueryPlan::Select(query);
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-            .map_err(|e| {
-                RookError::Internal(e.message)
-                    .with_context("Failed to plan CTE inner query in correlated subquery")
-            })?;
+            .context("Failed to plan CTE inner query in correlated subquery")?;
         let inner_planner =
             PhysicalPlanner::new(std::sync::Arc::clone(&self.catalog), self.db_name.clone());
         inner_planner.plan(&logical_plan)
@@ -1047,9 +1038,7 @@ impl PhysicalPlanner {
         );
         let query_plan = rook_ast::QueryPlan::Select(sub.probe_select(&types));
         let logical = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-            .map_err(|e| {
-                RookError::Internal(e.message).with_context("Failed to plan correlated subquery")
-            })?;
+            .context("Failed to plan correlated subquery")?;
         let probe =
             PhysicalPlanner::new(std::sync::Arc::clone(&self.catalog), self.db_name.clone())
                 .plan(&logical)?;

@@ -164,7 +164,7 @@ fn add_column(
                     ColumnConstraint::Unique => "UNIQUE",
                     _ => "CHECK",
                 };
-                return Err(RookError::Internal(format!(
+                return Err(RookError::Unsupported(format!(
                     "ALTER TABLE ADD COLUMN does not support the constraint '{}'",
                     name
                 )));

@@ -460,7 +460,7 @@ impl PhysicalPlanner {
                     if pos_usize >= 1 && pos_usize <= column_names.len() {
                         sort_keys.push((pos_usize - 1, !ob.ascending));
                     } else {
-                        return Err(RookError::Internal(format!(
+                        return Err(RookError::InvalidQuery(format!(
                             "ORDER BY position {} is out of range (1..={})",
                             pos,
                             column_names.len()
@@ -581,7 +581,7 @@ impl PhysicalPlanner {
         let right = self.plan_internal(&s.right, cte_registry)?;
 
         if left.schema().len() != right.schema().len() {
-            return Err(RookError::Internal(format!(
+            return Err(RookError::InvalidQuery(format!(
                 "Set operation queries must have the same number of columns: {} vs {}",
                 left.schema().len(),
                 right.schema().len()

@@ -376,12 +376,12 @@ impl PhysicalPlanner {
             let name = crate::planner::helpers::group_key_name(expr_node);
             let data_type = match expr_node {
                 rook_ast::ExprNode::ScalarSubquery(_) => {
-                    return Err(RookError::Internal(
+                    return Err(RookError::InvalidQuery(
                         "Scalar subqueries are not allowed in GROUP BY".to_string(),
                     ));
                 }
                 rook_ast::ExprNode::Function { name, .. } if is_aggregate_name(name) => {
-                    return Err(RookError::Internal(
+                    return Err(RookError::InvalidQuery(
                         "Aggregate function calls are not allowed in GROUP BY".to_string(),
                     ));
                 }
@@ -541,7 +541,7 @@ impl PhysicalPlanner {
         let mut iteration = 0;
         while !working_table.is_empty() {
             if iteration >= max_iterations {
-                return Err(RookError::Internal(format!(
+                return Err(RookError::Evaluation(format!(
                     "Recursive CTE '{}' did not terminate within {} iterations",
                     rc.name, max_iterations
                 )));

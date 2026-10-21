@@ -78,6 +78,12 @@ pub enum RookError {
     /// numeric overflow, an invalid function argument, a subquery that
     /// returned too many rows.
     Evaluation(String),
+    /// A statement that parses but cannot be run as written: an ORDER BY or
+    /// GROUP BY position out of range, an INSERT row of the wrong width, a
+    /// column neither grouped nor aggregated, no database selected.
+    InvalidQuery(String),
+    /// A statement or clause RookDB does not implement.
+    Unsupported(String),
     /// Keeping the indexes of a table in step with its rows failed, or the
     /// repair that follows such a failure did too; the indexes may be stale.
     IndexMaintenance(String),
@@ -176,6 +182,15 @@ impl RookError {
         }
     }
 
+    /// The error under any [`RookError::Contextual`] wrappers, for matching
+    /// on the kind of failure: `matches!(e.root(), RookError::NotFound { .. })`.
+    pub fn root(&self) -> &RookError {
+        match self {
+            RookError::Contextual { source, .. } => source.root(),
+            other => other,
+        }
+    }
+
     /// Show a top-level [`RookError::Io`] without its `I/O error:` prefix
     /// (as [`RookError::Storage`]), for callers that re-render an error the
     /// way the bare `io::Error` text used to read.
@@ -221,6 +236,8 @@ impl fmt::Display for RookError {
             RookError::InvalidIdentifier(message) => f.write_str(message),
             RookError::TypeMismatch(message) => f.write_str(message),
             RookError::Evaluation(message) => f.write_str(message),
+            RookError::InvalidQuery(message) => f.write_str(message),
+            RookError::Unsupported(message) => f.write_str(message),
             RookError::IndexMaintenance(message) => f.write_str(message),
             RookError::Io(e) => write!(f, "I/O error: {}", e),
             RookError::Storage {
@@ -386,6 +403,15 @@ mod tests {
         assert_eq!(e.to_string(), "Failed to open: x");
         let r: RookResult<()> = Err(RookError::TypeMismatch("bad".into()));
         assert_eq!(r.context("ctx").unwrap_err().to_string(), "ctx: bad");
+    }
+
+    #[test]
+    fn root_looks_through_contexts() {
+        let e = RookError::InvalidQuery("bad".into())
+            .with_context("inner")
+            .with_context("outer");
+        assert!(matches!(e.root(), RookError::InvalidQuery(_)));
+        assert_eq!(e.to_string(), "outer: inner: bad");
     }
 
     #[test]
