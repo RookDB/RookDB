@@ -484,7 +484,7 @@ pub fn expr_to_name(expr: &ExprNode) -> String {
     match expr {
         ExprNode::Column(name) => name.clone(),
         ExprNode::Compound(parts) => parts.last().cloned().unwrap_or_default(),
-        ExprNode::Constant(cv) => format!("{:?}", cv),
+        ExprNode::Constant(cv) => cv.to_string(),
         ExprNode::Binary { .. } => "expr".to_string(),
         ExprNode::Cast { data_type, .. } => format!("CAST({})", data_type),
         ExprNode::ScalarSubquery(_) => "(scalar subquery)".to_string(),

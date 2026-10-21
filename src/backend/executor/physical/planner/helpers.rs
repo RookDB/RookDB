@@ -126,7 +126,7 @@ pub fn ast_expr_to_output_name(expr: &rook_ast::ExprNode) -> String {
     match expr {
         rook_ast::ExprNode::Column(name) => name.clone(),
         rook_ast::ExprNode::Compound(parts) => parts.last().cloned().unwrap_or_default(),
-        rook_ast::ExprNode::Constant(cv) => format!("{:?}", cv),
+        rook_ast::ExprNode::Constant(cv) => cv.to_string(),
         rook_ast::ExprNode::Binary { .. } => "expr".to_string(),
         rook_ast::ExprNode::Cast { data_type, .. } => {
             format!("CAST({})", data_type)
