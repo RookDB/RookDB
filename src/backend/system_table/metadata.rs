@@ -368,7 +368,7 @@ pub fn delete_index_metadata(
     for (page_id, slot_id) in &to_delete {
         heap.delete_tuple(*page_id, *slot_id)?;
     }
-    heap.flush()?;
+    finish_edit(engine, &mut heap)?;
 
     log::info!(
         "[SystemCatalog] Deleted {} index row(s) for '{}.{}[{})'",
@@ -460,7 +460,7 @@ pub fn delete_column_constraints(
     for (page_id, slot_id) in &to_delete {
         heap.delete_tuple(*page_id, *slot_id)?;
     }
-    heap.flush()?;
+    finish_edit(engine, &mut heap)?;
 
     log::info!(
         "[SystemCatalog] Deleted {} constraint row(s) for column '{}.{}.{}'",
@@ -657,7 +657,7 @@ pub fn rename_column_in_constraints(
         let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)?;
         heap.insert_tuple(&tuple_bytes)?;
     }
-    heap.flush()?;
+    finish_edit(engine, &mut heap)?;
 
     log::info!(
         "[SystemCatalog] Renamed column in {} constraint row(s) for '{}.{}': '{}' → '{}'",
@@ -726,7 +726,7 @@ pub fn rename_referenced_table_in_constraints(
         let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)?;
         heap.insert_tuple(&tuple_bytes)?;
     }
-    heap.flush()?;
+    finish_edit(engine, &mut heap)?;
     Ok(updates.len())
 }
 
@@ -817,7 +817,7 @@ pub fn rename_referenced_column_in_constraints(
         let tuple_bytes = crate::types::serialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &str_refs)?;
         heap.insert_tuple(&tuple_bytes)?;
     }
-    heap.flush()?;
+    finish_edit(engine, &mut heap)?;
     Ok(updates.len())
 }
 
@@ -933,7 +933,7 @@ fn delete_rows_by_column(
     for (page_id, slot_id) in &to_delete {
         heap.delete_tuple(*page_id, *slot_id)?;
     }
-    heap.flush()?;
+    finish_edit(engine, &mut heap)?;
 
     log::trace!(
         "[SystemCatalog] delete_rows_by_column({}, col={}): removed {} rows for id={}",
@@ -1042,7 +1042,7 @@ pub fn delete_referencing_foreign_keys(
     for (page_id, slot_id) in &to_delete {
         heap.delete_tuple(*page_id, *slot_id)?;
     }
-    heap.flush()?;
+    finish_edit(engine, &mut heap)?;
     Ok(count)
 }
 
@@ -1088,7 +1088,7 @@ pub fn rename_table_in_system(
     let refs: Vec<Option<&str>> = row.iter().map(|o| o.as_deref()).collect();
     let bytes = crate::types::serialize_nullable_row(SYS_TABLES_SCHEMA, &refs)?;
     heap.insert_tuple(&bytes)?;
-    heap.flush()
+    finish_edit(engine, &mut heap)
 }
 
 #[cfg(test)]

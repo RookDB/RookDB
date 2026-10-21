@@ -234,6 +234,17 @@ impl HeapManager {
     /// # Returns
     /// HeapManager instance ready for inserts or error
     pub fn create(file_path: PathBuf) -> RookResult<Self> {
+        Self::create_with(file_path, true)
+    }
+
+    /// [`create`](Self::create) without the fsyncs: the file is written but
+    /// a power loss may lose it. For files the caller fsyncs later, in a
+    /// batch with others.
+    pub fn create_unsynced(file_path: PathBuf) -> RookResult<Self> {
+        Self::create_with(file_path, false)
+    }
+
+    fn create_with(file_path: PathBuf, durable: bool) -> RookResult<Self> {
         log::trace!(
             "[HeapManager::create] Creating new heap file at {:?}",
             file_path
@@ -282,7 +293,9 @@ impl HeapManager {
         file.write_all(&data_page.data)?;
 
         file.flush()?;
-        file.sync_all()?;
+        if durable {
+            file.sync_all()?;
+        }
 
         // Reset file cursor to start for the buffer pool
         file.seek(SeekFrom::Start(0))?;
@@ -318,7 +331,11 @@ impl HeapManager {
         manager.fsm.fsm_set_avail(1, initial_free, None)?;
 
         // Persist changes via buffer pool
-        manager.flush()?;
+        if durable {
+            manager.flush()?;
+        } else {
+            manager.write_through()?;
+        }
 
         log::trace!("[HeapManager::create] HeapManager successfully created");
 
@@ -752,6 +769,12 @@ impl HeapManager {
     /// - Syncs FSM fork
     pub fn flush(&mut self) -> RookResult<()> {
         self.flush_inner(true)
+    }
+
+    /// Let closing the file skip its fsync: the caller fsyncs it later, in a
+    /// batch with other files, or deletes it.
+    pub(crate) fn defer_sync(&self) {
+        Self::lock_pool(&self.pool).set_sync_on_detach(false);
     }
 
     /// Write all changes to the files without fsync.

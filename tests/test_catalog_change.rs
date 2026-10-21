@@ -1,6 +1,6 @@
-//! A statement that changes the catalog does so whole or not at all: an
-//! undo copy of the system tables is kept until it commits, and put back
-//! when it fails or the process dies first.
+//! A statement that changes the catalog does so whole or not at all: it
+//! edits a copy of the system tables, swapped in when it commits and
+//! deleted when it fails or the process dies first.
 
 mod common;
 
@@ -50,9 +50,9 @@ fn edit_catalog(ws: &common::TestWorkspace) {
 }
 
 #[test]
-fn committed_statements_leave_no_undo_copy() {
+fn committed_statements_leave_no_copy() {
     let (ws, _s) = session("commit");
-    assert!(!ws.engine().paths().system_undo_dir().exists());
+    assert!(!ws.engine().paths().system_staging_dir().exists());
     assert_eq!(databases(&ws), ["cc_db"]);
 }
 
@@ -63,14 +63,14 @@ fn an_uncommitted_change_is_rolled_back() {
     edit_catalog(&ws);
     drop(change);
     assert_eq!(databases(&ws), ["cc_db"]);
-    assert!(!ws.engine().paths().system_undo_dir().exists());
+    assert!(!ws.engine().paths().system_staging_dir().exists());
 }
 
 #[test]
 fn a_failed_statement_keeps_the_catalog_and_the_session_usable() {
     let (ws, mut s) = session("failed");
     assert!(exec(&mut s, "CREATE TABLE z (s VARCHAR(0))").is_err());
-    assert!(!ws.engine().paths().system_undo_dir().exists());
+    assert!(!ws.engine().paths().system_staging_dir().exists());
     assert!(!s.catalog.databases["cc_db"].tables.contains_key("z"));
     run(&mut s, "CREATE TABLE z (s VARCHAR(1))");
     run(&mut s, "INSERT INTO t VALUES (1)");

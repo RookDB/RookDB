@@ -56,8 +56,8 @@ impl Paths {
         self.data_dir().join("system")
     }
 
-    /// Where a catalog save builds the next system directory before swapping
-    /// it in.
+    /// The copy of the system directory a catalog change edits, swapped in
+    /// when it commits; see `system_table::begin_catalog_change`.
     pub fn system_staging_dir(&self) -> PathBuf {
         self.data_dir().join("system.new")
     }
@@ -68,10 +68,10 @@ impl Paths {
         self.data_dir().join("system.old")
     }
 
-    /// The copy of the system directory a statement that changes the catalog
-    /// keeps until it finishes; see `system_table::begin_catalog_change`.
-    pub fn system_undo_dir(&self) -> PathBuf {
-        self.data_dir().join("system.undo")
+    /// Where a catalog save inside a catalog change builds the new system
+    /// tables before they replace the change's copy.
+    pub fn system_build_dir(&self) -> PathBuf {
+        self.data_dir().join("system.build")
     }
 
     /// The heap file of the system table `name`.

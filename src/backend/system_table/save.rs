@@ -8,15 +8,17 @@ use super::*;
 ///
 /// The system tables are rebuilt from scratch, which keeps saves free of
 /// duplicate rows, and must change together: their rows refer to each other
-/// by table id. So the new files are built and fsynced in `system.new`, then
-/// swapped in by two renames; [`recover_system_dir`] settles a crash between
-/// them. A crash at any point leaves the old catalog or the new one.
+/// by table id. The save runs as a catalog change (joining the open one, if
+/// any), so a crash at any point leaves the old catalog or the new one.
 pub fn save_catalog_to_system(catalog: &Catalog) -> RookResult<()> {
-    // Recovery relies on `system` existing whenever a save starts. A save
-    // inside a catalog change must not run recovery, which would roll the
-    // change back.
+    // A change copies `system`, so it must exist first.
     create_system_table_files(catalog.engine())?;
+    in_catalog_change(catalog.engine(), || save_in_change(catalog))
+}
 
+/// [`save_catalog_to_system`] inside an open catalog change: build the new
+/// tables in `system.build`, then put them in place of the change's copy.
+fn save_in_change(catalog: &Catalog) -> RookResult<()> {
     // 1. Load existing FOREIGN KEY constraints from sys_constraints before deleting it.
     //
     // CRITICAL: FK rows store the child table's numeric `table_id`.  After system tables
@@ -115,32 +117,22 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> RookResult<()> {
     // Index rows only live in sys_indexes: read them before it is rebuilt.
     let saved_indexes = load_saved_indexes(catalog.engine());
 
-    let paths = catalog.engine().paths();
-    let system = paths.system_dir();
-    let staging = paths.system_staging_dir();
-    let old = paths.system_old_dir();
-    for leftover in [&staging, &old] {
-        if leftover.exists() {
-            std::fs::remove_dir_all(leftover)?;
-        }
+    let engine = catalog.engine();
+    let build = engine.paths().system_build_dir();
+    if build.exists() {
+        std::fs::remove_dir_all(&build)?;
     }
-    std::fs::create_dir_all(&staging)?;
-    populate_system_tables(catalog, fk_rows, saved_indexes, &staging)?;
-    sync_dir(&staging)?;
+    std::fs::create_dir_all(&build)?;
+    populate_system_tables(catalog, fk_rows, saved_indexes, &build)?;
 
-    // Cached handles hold the live files open: write them out and drop them
-    // before the files move.
+    let shadow = engine
+        .catalog_shadow()
+        .ok_or_else(|| RookError::Internal("catalog save outside a catalog change".to_string()))?;
     for name in SYSTEM_TABLES {
-        crate::backend::cache::release_file(&sys_path(catalog.engine(), name))?;
+        crate::backend::cache::discard_file(&shadow.join(format!("{}.dat", name)));
     }
-    std::fs::rename(&system, &old)?;
-    std::fs::rename(&staging, &system)?;
-    sync_dir(&paths.data_dir())?;
-    // The new catalog is committed; a leftover `system.old` is removed by
-    // the next recovery if this fails.
-    if let Err(e) = std::fs::remove_dir_all(&old) {
-        log::warn!("[SystemCatalog] could not remove {}: {}", old.display(), e);
-    }
+    std::fs::remove_dir_all(&shadow)?;
+    std::fs::rename(&build, &shadow)?;
     // System tables rewritten wholesale: table_ids may have changed and
     // constraint/index rows were rebuilt — forget all memoised metadata.
     catalog.engine().invalidate_metadata();

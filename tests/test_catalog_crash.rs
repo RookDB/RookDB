@@ -45,7 +45,7 @@ fn a_change_a_crash_interrupted_is_rolled_back_on_load() {
         save_catalog(&catalog).unwrap();
         std::mem::forget(change);
         storage_manager::backend::cache::checkpoint_durable().unwrap();
-        assert!(engine.paths().system_undo_dir().exists());
+        assert!(engine.paths().system_staging_dir().exists());
     }
 
     // The next process.
@@ -57,5 +57,5 @@ fn a_change_a_crash_interrupted_is_rolled_back_on_load() {
         .collect();
     names.sort();
     assert_eq!(names, ["kept"]);
-    assert!(!engine.paths().system_undo_dir().exists());
+    assert!(!engine.paths().system_staging_dir().exists());
 }

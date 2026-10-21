@@ -140,7 +140,7 @@ pub fn load_table_indexes_multi(
             Err(_) => return Ok(Vec::new()),
         };
 
-    let idx_path = engine.paths().system_table("indexes");
+    let idx_path = crate::backend::system_table::sys_path(engine, "indexes");
     if !idx_path.exists() {
         return Ok(Vec::new());
     }

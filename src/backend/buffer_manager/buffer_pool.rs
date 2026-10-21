@@ -576,6 +576,9 @@ pub struct BufferPool {
     file: Option<Arc<File>>,
     /// Total number of pages in the managed file (from header).
     total_pages: u32,
+    /// Whether detaching (and so dropping) fsyncs the file; see
+    /// [`BufferPool::set_sync_on_detach`].
+    sync_on_detach: bool,
 }
 
 fn no_file() -> io::Error {
@@ -597,7 +600,15 @@ impl BufferPool {
             file_path: None,
             file: None,
             total_pages: 0,
+            sync_on_detach: true,
         }
+    }
+
+    /// Whether detaching the file fsyncs it after writing its dirty pages.
+    /// Off for a file whose owner fsyncs it later, in a batch with others,
+    /// or deletes it.
+    pub fn set_sync_on_detach(&mut self, on: bool) {
+        self.sync_on_detach = on;
     }
 
     /// A second, empty view on the same store as `self`.
@@ -617,7 +628,12 @@ impl BufferPool {
     /// Flush and forget the attached file and all its frames.
     fn detach_file(&mut self) {
         if self.file_id.is_some() {
-            if let Err(e) = self.flush_all() {
+            let written = if self.sync_on_detach {
+                self.flush_all()
+            } else {
+                self.write_dirty()
+            };
+            if let Err(e) = written {
                 log::error!("BufferPool: error flushing on detach: {}", e);
             }
             let id = self.file_id.take().unwrap();

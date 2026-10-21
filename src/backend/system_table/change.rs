@@ -1,16 +1,16 @@
 //! All-or-nothing catalog changes.
 //!
 //! A statement that changes the catalog may edit several system tables in
-//! place and save the whole catalog. Before the first edit,
-//! [`begin_catalog_change`] copies `system/` to `system.undo/` and fsyncs
-//! the copy. [`CatalogChange::commit`] makes the edits durable and drops the
-//! copy; [`CatalogChange::rollback`] puts the copy back. After a crash,
-//! recovery puts it back too (see [`restore_undo_dir`]), so the catalog
-//! is always as one statement left it, or as it was before that statement.
+//! place and save the whole catalog. [`begin_catalog_change`] copies
+//! `system/` to `system.new/`, and until the change ends every system table
+//! is read and written in that copy (see [`sys_path`]). Nothing is fsynced
+//! along the way. [`CatalogChange::commit`] fsyncs each file of the copy
+//! once and swaps it in with two renames, which recovery completes after a
+//! crash (see [`recover_system_dir`]); [`CatalogChange::rollback`] deletes
+//! the copy. `system/` itself is never edited, so the catalog is always as
+//! one statement left it, or as it was before that statement.
 //!
 //! Data files (heaps, indexes) are not part of the copy.
-
-use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::backend::engine::Engine;
@@ -27,18 +27,18 @@ pub struct CatalogChange<'a> {
 
 /// Open a catalog change on `engine`, or join the one already open.
 pub fn begin_catalog_change(engine: &Engine) -> RookResult<CatalogChange<'_>> {
-    if engine.catalog_change_open.swap(true, Ordering::AcqRel) {
+    if engine.catalog_shadow().is_some() {
         return Ok(CatalogChange {
             engine,
             owner: false,
         });
     }
-    let change = CatalogChange {
+    copy_system_dir(engine).map_err(|e| e.with_context("Failed to start a catalog change"))?;
+    engine.set_catalog_shadow(Some(engine.paths().system_staging_dir()));
+    Ok(CatalogChange {
         engine,
         owner: true,
-    };
-    write_undo_copy(engine).map_err(|e| e.with_context("Failed to save the catalog undo copy"))?;
-    Ok(change)
+    })
 }
 
 /// Run `f` as one catalog change: committed if it succeeds, rolled back if
@@ -55,106 +55,106 @@ pub fn in_catalog_change<T>(engine: &Engine, f: impl FnOnce() -> RookResult<T>) 
 }
 
 impl CatalogChange<'_> {
-    /// Keep the change: write the edited system tables durably, then drop
-    /// the undo copy.
+    /// Keep the change: make the copy durable and swap it in.
     pub fn commit(mut self) -> RookResult<()> {
         if !self.owner {
             return Ok(());
         }
         self.owner = false;
-        let result = commit_change(self.engine);
-        if result.is_err() {
-            restore_undo_copy(self.engine);
+        let shadow = self.engine.set_catalog_shadow(None);
+        let result = match &shadow {
+            Some(dir) => sync_copy(dir).and_then(|()| swap_in(self.engine, dir)),
+            None => Ok(()),
+        };
+        if result.is_err()
+            && let Some(dir) = &shadow
+        {
+            discard_copy(self.engine, dir);
         }
-        self.engine
-            .catalog_change_open
-            .store(false, Ordering::Release);
         result
     }
 
-    /// Undo the change: put the undo copy back. The in-memory catalog must
-    /// be reloaded afterwards.
+    /// Undo the change: delete the copy. The in-memory catalog must be
+    /// reloaded afterwards.
     pub fn rollback(mut self) {
+        self.end_without_commit();
+    }
+
+    fn end_without_commit(&mut self) {
         if self.owner {
             self.owner = false;
-            restore_undo_copy(self.engine);
-            self.engine
-                .catalog_change_open
-                .store(false, Ordering::Release);
+            if let Some(dir) = self.engine.set_catalog_shadow(None) {
+                discard_copy(self.engine, &dir);
+            }
         }
     }
 }
 
 impl Drop for CatalogChange<'_> {
     fn drop(&mut self) {
-        if self.owner {
-            restore_undo_copy(self.engine);
-            self.engine
-                .catalog_change_open
-                .store(false, Ordering::Release);
-        }
+        self.end_without_commit();
     }
 }
 
-/// Write out and drop every cached handle on the system tables, so the
-/// files hold everything and nothing keeps reading them after they move.
-fn release_system_files(engine: &Engine) -> RookResult<()> {
-    let mut result = Ok(());
-    for name in SYSTEM_TABLES {
-        let path = sys_path(engine, name);
-        result = result.and(crate::backend::cache::release_file(&path));
-        // `release_file` stops at a failed flush; the handle must go anyway.
-        crate::backend::buffer_manager::shared_pool::invalidate(&path);
-    }
-    result
-}
-
-fn write_undo_copy(engine: &Engine) -> RookResult<()> {
+/// Copy the committed system tables to `system.new`, without fsync.
+fn copy_system_dir(engine: &Engine) -> RookResult<()> {
     let paths = engine.paths();
-    release_system_files(engine)?;
-    let tmp = crate::backend::paths::with_suffix(&paths.system_undo_dir(), ".tmp");
-    if tmp.exists() {
-        std::fs::remove_dir_all(&tmp)?;
+    // Cached pages must be in the files before they are copied, and the
+    // handles must not outlive the swap that replaces the files.
+    for name in SYSTEM_TABLES {
+        crate::backend::cache::write_out_file(&paths.system_table(name))?;
     }
-    std::fs::create_dir_all(&tmp)?;
+    let shadow = paths.system_staging_dir();
+    if shadow.exists() {
+        std::fs::remove_dir_all(&shadow)?;
+    }
+    std::fs::create_dir_all(&shadow)?;
     for entry in std::fs::read_dir(paths.system_dir())? {
         let entry = entry?;
-        let to = tmp.join(entry.file_name());
-        std::fs::copy(entry.path(), &to)?;
-        std::fs::File::open(&to)?.sync_all()?;
-    }
-    sync_dir(&tmp)?;
-    std::fs::rename(&tmp, paths.system_undo_dir())?;
-    sync_dir(&paths.data_dir())
-}
-
-fn commit_change(engine: &Engine) -> RookResult<()> {
-    let paths = engine.paths();
-    release_system_files(engine)?;
-    sync_dir(&paths.system_dir())?;
-    // The rename is the commit point: a half-deleted undo copy must never
-    // be mistaken for a whole one.
-    let done = crate::backend::paths::with_suffix(&paths.system_undo_dir(), ".done");
-    std::fs::rename(paths.system_undo_dir(), &done)?;
-    sync_dir(&paths.data_dir())?;
-    if let Err(e) = std::fs::remove_dir_all(&done) {
-        log::warn!("[SystemCatalog] could not remove {}: {}", done.display(), e);
+        std::fs::copy(entry.path(), shadow.join(entry.file_name()))?;
     }
     Ok(())
 }
 
-/// Put the undo copy back in place of `system/`. Failures are logged: the
-/// copy stays, and recovery retries at the next start.
-fn restore_undo_copy(engine: &Engine) {
-    if let Err(e) = release_system_files(engine) {
-        log::warn!("[SystemCatalog] discarding unwritten catalog edits: {}", e);
+/// Write out the copy's cached pages and fsync each of its files once.
+fn sync_copy(dir: &std::path::Path) -> RookResult<()> {
+    for name in SYSTEM_TABLES {
+        crate::backend::cache::write_out_file(&dir.join(format!("{}.dat", name)))?;
+    }
+    for entry in std::fs::read_dir(dir)? {
+        std::fs::File::open(entry?.path())?.sync_all()?;
+    }
+    sync_dir(dir)
+}
+
+/// Replace `system/` with the durable copy `dir`. A crash between the
+/// renames is completed by [`recover_system_dir`].
+fn swap_in(engine: &Engine, dir: &std::path::Path) -> RookResult<()> {
+    let paths = engine.paths();
+    let old = paths.system_old_dir();
+    if old.exists() {
+        std::fs::remove_dir_all(&old)?;
+    }
+    std::fs::rename(paths.system_dir(), &old)?;
+    std::fs::rename(dir, paths.system_dir())?;
+    sync_dir(&paths.data_dir())?;
+    // Committed: a leftover `system.old` is removed by the next recovery.
+    if let Err(e) = std::fs::remove_dir_all(&old) {
+        log::warn!("[SystemCatalog] could not remove {}: {}", old.display(), e);
+    }
+    Ok(())
+}
+
+/// Delete the copy `dir` and forget what was read from it.
+fn discard_copy(engine: &Engine, dir: &std::path::Path) {
+    for name in SYSTEM_TABLES {
+        crate::backend::cache::discard_file(&dir.join(format!("{}.dat", name)));
     }
     engine.invalidate_metadata();
-    if let Err(e) = restore_undo_dir(engine.paths()) {
-        log::error!(
-            "[SystemCatalog] could not restore the catalog undo copy; it is \
-             restored at the next start: {}",
-            e
-        );
+    if dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(dir)
+    {
+        // `system/` is untouched; the next recovery removes the copy.
+        log::warn!("[SystemCatalog] could not remove {}: {}", dir.display(), e);
     }
 }

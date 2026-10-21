@@ -831,6 +831,33 @@ pub fn release_file(path: &Path) -> RookResult<()> {
     Ok(())
 }
 
+/// Write `path`'s cached pages to the file, without fsync, and drop every
+/// cached handle on it in every open engine.
+pub(crate) fn write_out_file(path: &Path) -> RookResult<()> {
+    let key = canonical(path);
+    let mut result = Ok(());
+    for engine in crate::backend::engine::open_engines() {
+        if let Some(mut entry) = lock(&engine.heaps).remove(&key) {
+            result = result.and(entry.manager.write_through());
+            entry.manager.defer_sync();
+        }
+    }
+    crate::backend::buffer_manager::shared_pool::invalidate(path);
+    result
+}
+
+/// Drop every cached handle on `path` without writing it out: the file is
+/// about to be deleted.
+pub(crate) fn discard_file(path: &Path) {
+    let key = canonical(path);
+    for engine in crate::backend::engine::open_engines() {
+        if let Some(entry) = lock(&engine.heaps).remove(&key) {
+            entry.manager.defer_sync();
+        }
+    }
+    crate::backend::buffer_manager::shared_pool::invalidate(path);
+}
+
 /// Drop the cached manager for `path` in whichever open engine holds it.
 ///
 /// For code that replaces a heap file without knowing which engine, if any,
@@ -1030,7 +1057,7 @@ fn scan_sys(
     name: &str,
     schema: &[crate::types::DataType],
 ) -> Option<Vec<Vec<Option<crate::types::DataValue>>>> {
-    let path = engine.paths().system_table(name.trim_end_matches(".dat"));
+    let path = crate::backend::system_table::sys_path(engine, name.trim_end_matches(".dat"));
     if !path.exists() {
         return None;
     }

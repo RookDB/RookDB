@@ -34,13 +34,13 @@ pub fn load_referencing_foreign_keys(
 ) -> RookResult<Vec<ReferencingFk>> {
     use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_TABLES_SCHEMA};
 
-    let constr_path = engine.paths().system_table("constraints");
+    let constr_path = crate::backend::system_table::sys_path(engine, "constraints");
     if !constr_path.exists() {
         return Ok(Vec::new());
     }
 
     // Load sys_tables for the db to create a table_id → table_name mapping
-    let tbl_path = engine.paths().system_table("tables");
+    let tbl_path = crate::backend::system_table::sys_path(engine, "tables");
     let mut tbl_id_to_name: std::collections::HashMap<i32, String> =
         std::collections::HashMap::new();
     if tbl_path.exists()
@@ -149,7 +149,7 @@ pub(crate) fn load_table_schema(
         Err(_) => return Ok(None),
     };
 
-    let col_path = engine.paths().system_table("columns");
+    let col_path = crate::backend::system_table::sys_path(engine, "columns");
     if !col_path.exists() {
         return Ok(None);
     }

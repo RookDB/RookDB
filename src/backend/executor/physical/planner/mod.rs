@@ -816,7 +816,7 @@ impl PhysicalPlanner {
             if sys_name == "__singlerow__" {
                 return Ok(Box::new(SingleRowOperator::new()));
             }
-            let heap_path = self.catalog.engine().paths().system_table(sys_name);
+            let heap_path = crate::backend::system_table::sys_path(self.catalog.engine(), sys_name);
             if !heap_path.exists() {
                 return Err(RookError::NotFound {
                     entity: "System table",

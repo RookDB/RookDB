@@ -80,9 +80,10 @@ pub struct Engine {
     /// The locked `rookdb.lock`, once [`Engine::lock_data_dir`] has run.
     /// Closing it when the engine drops releases the lock.
     dir_lock: Mutex<Option<std::fs::File>>,
-    /// Whether a catalog change (`system_table::begin_catalog_change`) is
-    /// open, so a nested one joins it.
-    pub(crate) catalog_change_open: std::sync::atomic::AtomicBool,
+    /// The system directory copy of the open catalog change, if one is open
+    /// (`system_table::begin_catalog_change`): system tables are read and
+    /// written there until it commits.
+    catalog_shadow: Mutex<Option<PathBuf>>,
 }
 
 impl Engine {
@@ -122,7 +123,7 @@ impl Engine {
             visibility_maps: Mutex::default(),
             last_sync: Mutex::default(),
             dir_lock: Mutex::default(),
-            catalog_change_open: Default::default(),
+            catalog_shadow: Mutex::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
                 crate::backend::planner::plan_cache::DEFAULT_CACHE_CAPACITY,
             )),
@@ -163,6 +164,15 @@ impl Engine {
         }
         *held = Some(file);
         Ok(())
+    }
+
+    /// The system directory copy of the open catalog change, if any.
+    pub(crate) fn catalog_shadow(&self) -> Option<PathBuf> {
+        lock(&self.catalog_shadow).clone()
+    }
+
+    pub(crate) fn set_catalog_shadow(&self, dir: Option<PathBuf>) -> Option<PathBuf> {
+        std::mem::replace(&mut *lock(&self.catalog_shadow), dir)
     }
 
     /// The engine of the working directory.

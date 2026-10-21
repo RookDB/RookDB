@@ -31,8 +31,14 @@ pub use info_schema::*;
 pub use metadata::*;
 pub use save::*;
 
+/// The heap file of the system table `table`: in the open catalog change's
+/// copy of the system directory if there is one, so the change sees its
+/// own edits.
 pub(crate) fn sys_path(engine: &crate::backend::engine::Engine, table: &str) -> PathBuf {
-    engine.paths().system_table(table)
+    match engine.catalog_shadow() {
+        Some(dir) => dir.join(format!("{}.dat", table)),
+        None => engine.paths().system_table(table),
+    }
 }
 
 // ── Column schemas for each system table ──────────────────────────────────────
@@ -473,7 +479,9 @@ const SYSTEM_TABLES: [&str; 6] = [
 
 /// Create empty system table heap files (with HeapManager).
 fn create_system_table_files(engine: &crate::backend::engine::Engine) -> RookResult<()> {
-    std::fs::create_dir_all(engine.paths().system_dir())?;
+    if engine.catalog_shadow().is_none() {
+        std::fs::create_dir_all(engine.paths().system_dir())?;
+    }
 
     for name in SYSTEM_TABLES {
         let path = sys_path(engine, name);
@@ -494,12 +502,9 @@ pub fn ensure_system_tables(engine: &crate::backend::engine::Engine) -> RookResu
 }
 
 /// [`recover_system_dir`], unless this engine has a catalog change open:
-/// its undo copy is in use, not left by a crash.
+/// its `system.new` is in use, not left by a crash.
 fn recover_unless_changing(engine: &crate::backend::engine::Engine) -> RookResult<()> {
-    if engine
-        .catalog_change_open
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
+    if engine.catalog_shadow().is_some() {
         return Ok(());
     }
     recover_system_dir(engine.paths())
@@ -514,75 +519,41 @@ fn sync_dir(dir: &std::path::Path) -> RookResult<()> {
     Ok(())
 }
 
-/// Finish or roll back a catalog save that a crash interrupted.
+/// Finish or roll back a catalog change that a crash interrupted.
 ///
-/// A save builds `system.new`, fsyncs it, then renames `system` to
-/// `system.old` and `system.new` to `system`. A save only starts once
+/// A change edits a copy, `system.new`, fsyncs it, then renames `system`
+/// to `system.old` and `system.new` to `system`. A change only starts once
 /// `system` exists, so:
 /// - `system` present: it is the committed catalog; any `system.new`
-///   is unfinished or was never swapped in, and any `system.old` is stale.
+///   never committed, and any `system.old` is stale.
 /// - `system` missing: the crash fell between the two renames, so
 ///   `system.new` is complete and is the catalog. Without one, `system.old`
 ///   goes back.
 fn recover_system_dir(paths: &crate::backend::paths::Paths) -> RookResult<()> {
-    if restore_undo_dir(paths)? {
-        log::warn!("[SystemCatalog] rolled back a catalog change a crash interrupted");
-        return Ok(());
-    }
     let system = paths.system_dir();
     let staging = paths.system_staging_dir();
     let old = paths.system_old_dir();
     if !system.exists() {
         let committed = if staging.exists() { &staging } else { &old };
-        if !committed.exists() {
-            return Ok(());
+        if committed.exists() {
+            log::warn!(
+                "[SystemCatalog] recovering an interrupted catalog change from {}",
+                committed.display()
+            );
+            std::fs::rename(committed, &system)?;
+            sync_dir(&paths.data_dir())?;
         }
-        log::warn!(
-            "[SystemCatalog] recovering an interrupted catalog save from {}",
-            committed.display()
-        );
-        std::fs::rename(committed, &system)?;
-        sync_dir(&paths.data_dir())?;
     }
-    for leftover in [&staging, &old] {
+    for leftover in [staging, old, paths.system_build_dir()] {
         if leftover.exists() {
-            std::fs::remove_dir_all(leftover)?;
+            std::fs::remove_dir_all(&leftover)?;
         }
     }
     Ok(())
 }
 
-/// Put back the undo copy of an uncommitted catalog change, if there is one
-/// (see `change.rs`): it is the catalog, whatever the change left in the
-/// other directories. Returns whether there was one.
-fn restore_undo_dir(paths: &crate::backend::paths::Paths) -> RookResult<bool> {
-    let undo = paths.system_undo_dir();
-    for leftover in [
-        crate::backend::paths::with_suffix(&undo, ".tmp"),
-        crate::backend::paths::with_suffix(&undo, ".done"),
-    ] {
-        if leftover.exists() {
-            std::fs::remove_dir_all(&leftover)?;
-        }
-    }
-    if !undo.exists() {
-        return Ok(false);
-    }
-    for dir in [
-        paths.system_dir(),
-        paths.system_staging_dir(),
-        paths.system_old_dir(),
-    ] {
-        if dir.exists() {
-            std::fs::remove_dir_all(dir)?;
-        }
-    }
-    std::fs::rename(&undo, paths.system_dir())?;
-    sync_dir(&paths.data_dir())?;
-    Ok(true)
-}
-
-/// Write `rows` as a fresh, fsynced system table `name` under `dir`.
+/// Write `rows` as a fresh system table `name` under `dir`, without fsync:
+/// the catalog change fsyncs it when it commits.
 ///
 /// The file bypasses the engine's handle cache: it is about to be renamed,
 /// and a cached handle would outlive its path.
@@ -594,13 +565,14 @@ fn write_system_table(
 ) -> RookResult<()> {
     let path = dir.join(format!("{}.dat", name));
     let write = || -> RookResult<()> {
-        let mut heap = crate::backend::heap::HeapManager::create(path.clone())?;
+        let mut heap = crate::backend::heap::HeapManager::create_unsynced(path.clone())?;
         for row in rows {
             let str_refs: Vec<Option<&str>> = row.iter().map(|opt| opt.as_deref()).collect();
             let tuple_bytes = crate::types::serialize_nullable_row(schema, &str_refs)?;
             heap.insert_tuple(&tuple_bytes)?;
         }
-        heap.flush()
+        heap.defer_sync();
+        heap.write_through()
     };
     let written = write();
     crate::backend::buffer_manager::shared_pool::invalidate(&path);
@@ -654,8 +626,22 @@ fn insert_system_rows(
         heap.insert_tuple(&tuple_bytes)?;
     }
 
-    heap.flush()?;
+    finish_edit(engine, &mut heap)?;
     Ok(())
+}
+
+/// Finish an in-place edit of a system table: inside a catalog change the
+/// pages only need to reach the copy's files, which the commit fsyncs;
+/// outside one they are fsynced now.
+fn finish_edit(
+    engine: &crate::backend::engine::Engine,
+    heap: &mut crate::backend::heap::HeapManager,
+) -> RookResult<()> {
+    if engine.catalog_shadow().is_some() {
+        heap.write_through()
+    } else {
+        heap.flush()
+    }
 }
 /// Iterate a catalog's databases in deterministic (sorted-by-name) order.
 ///
