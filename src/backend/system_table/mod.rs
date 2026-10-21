@@ -228,23 +228,32 @@ pub fn load_catalog_from_system(
                 if col_table_id != table_id {
                     continue;
                 }
+                // A column of this table that cannot be read is an error:
+                // skipping it or guessing its type would decode every row
+                // of the table against the wrong layout.
+                let bad_column = |what: &str| {
+                    RookError::Internal(format!(
+                        "sys_columns: {} of a column of '{}.{}'",
+                        what, db_name, tbl_name
+                    ))
+                };
                 let col_ordinal = match &col_row.get(4) {
                     Some(Some(crate::types::DataValue::Int(o))) => *o,
-                    _ => continue,
+                    _ => return Err(bad_column("missing ordinal")),
                 };
                 let col_name = match &col_row.get(2) {
                     Some(Some(crate::types::DataValue::Varchar(n))) => n.clone(),
                     Some(Some(crate::types::DataValue::Char(n))) => n.clone(),
-                    _ => continue,
+                    _ => return Err(bad_column("missing name")),
                 };
                 let col_type_str = match &col_row.get(3) {
                     Some(Some(crate::types::DataValue::Varchar(s))) => s.clone(),
                     Some(Some(crate::types::DataValue::Char(s))) => s.clone(),
-                    _ => continue,
+                    _ => return Err(bad_column("missing type")),
                 };
-                let col_type = col_type_str
-                    .parse::<DataType>()
-                    .unwrap_or(DataType::Varchar(255));
+                let col_type = col_type_str.parse::<DataType>().map_err(|e| {
+                    bad_column(&format!("unreadable type '{}' ({})", col_type_str, e))
+                })?;
                 let col_nullable = match &col_row.get(5) {
                     Some(Some(crate::types::DataValue::Bool(v))) => *v,
                     _ => true,

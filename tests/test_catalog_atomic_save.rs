@@ -133,3 +133,34 @@ fn unreadable_system_table_is_an_error_not_an_empty_catalog() {
 
     assert!(try_load_catalog_in(ws.engine()).is_err());
 }
+
+#[test]
+fn an_unreadable_column_type_is_an_error_not_a_guess() {
+    use storage_manager::backend::heap::HeapManager;
+    use storage_manager::backend::system_table::SYS_COLUMNS_SCHEMA;
+    use storage_manager::types::row::{deserialize_nullable_row, serialize_nullable_row};
+
+    let (ws, _s) = workspace("bad_type");
+    release_system(ws.engine());
+    // Rewrite t1's column row with a type no version of the engine knows.
+    let path = ws.engine().paths().system_table("columns");
+    let mut heap = HeapManager::open(path.clone()).unwrap();
+    let rows: Vec<(u32, u32, Vec<u8>)> = heap.scan().map(|r| r.unwrap()).collect();
+    let (page, slot, bytes) = &rows[0];
+    let values: Vec<Option<String>> = deserialize_nullable_row(SYS_COLUMNS_SCHEMA, bytes)
+        .unwrap()
+        .into_iter()
+        .map(|v| v.map(|v| v.to_string().trim_matches('\'').to_string()))
+        .collect();
+    let mut refs: Vec<Option<&str>> = values.iter().map(|v| v.as_deref()).collect();
+    refs[3] = Some("NO_SUCH_TYPE");
+    heap.delete_tuple(*page, *slot).unwrap();
+    heap.insert_tuple(&serialize_nullable_row(SYS_COLUMNS_SCHEMA, &refs).unwrap())
+        .unwrap();
+    heap.flush().unwrap();
+    drop(heap);
+    storage_manager::backend::cache::release_file(&path).unwrap();
+
+    let err = try_load_catalog_in(ws.engine()).expect_err("must not load");
+    assert!(err.to_string().contains("NO_SUCH_TYPE"), "{}", err);
+}
