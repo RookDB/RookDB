@@ -445,33 +445,20 @@ fn delete_like_single_char_wildcard() {
 }
 
 #[test]
-fn delete_like_on_int_column_never_matches() {
+fn delete_like_on_int_column_is_a_type_error() {
     let _ws = common::TestWorkspace::new("del", "case25");
     setup_table(10);
     let catalog = make_catalog();
 
-    // LIKE against an INT column evaluates to UNKNOWN per row → no match,
-    // no error. Same observable behaviour as the legacy path.
-    let result = exec_delete(&catalog, "id LIKE '1%'");
-    assert_eq!(
-        result.deleted_count, 0,
-        "LIKE on INT column must never match"
-    );
+    // No implicit casts: LIKE / NOT LIKE on an INT column is an error and
+    // deletes nothing, rather than a predicate that never matches.
+    for where_text in ["id LIKE '1%'", "id NOT LIKE '1%'"] {
+        let selection = parse_where_text(where_text).expect("parse WHERE");
+        let err = select_matching_pointers(&catalog, DB, TBL, selection)
+            .expect_err("LIKE on an INT column must fail");
+        assert!(err.to_string().contains("LIKE needs a string"), "{}", err);
+    }
     assert_eq!(count_live(), 10);
-}
-
-#[test]
-fn delete_not_like_on_int_column_never_matches() {
-    let _ws = common::TestWorkspace::new("del", "case26");
-    setup_table(5);
-    let catalog = make_catalog();
-
-    // NOT (UNKNOWN) is still UNKNOWN → never matches either.
-    let result = exec_delete(&catalog, "id NOT LIKE '1%'");
-    assert_eq!(
-        result.deleted_count, 0,
-        "NOT LIKE on INT column must never match"
-    );
 }
 
 // ===========================================================================

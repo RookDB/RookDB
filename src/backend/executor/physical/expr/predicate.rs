@@ -3,7 +3,7 @@
 //! Supports SQL-style three-valued logic (True / False / UNKNOWN) and
 //! correlated subqueries via `CorrelatedExists` and `CorrelatedInSubquery`.
 
-use crate::backend::error::{ResultContext, RookResult};
+use crate::backend::error::{ResultContext, RookError, RookResult};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -313,7 +313,12 @@ pub fn evaluate_predicate(
                 Some(DataValue::Char(s)) => {
                     Ok(Some(like_match(s.trim_end(), pattern, *escape_char)))
                 }
-                Some(_) => Ok(None), // non-string type → UNKNOWN
+                // No implicit casts: `int_col LIKE '%'` is a type error,
+                // not a predicate that quietly matches nothing.
+                Some(other) => Err(RookError::TypeMismatch(format!(
+                    "LIKE needs a string operand, got {}; CAST it to VARCHAR",
+                    other.data_type()
+                ))),
             }
         }
 
