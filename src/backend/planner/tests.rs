@@ -990,6 +990,7 @@ fn test_plan_insert_basic() {
         columns: vec!["id".to_string(), "name".to_string()],
         values: vec![],
         source_select: Some(Box::new(source_select)),
+        defaults: Vec::new(),
     };
 
     let plan = plan_insert(&insert, &catalog, "test_db").expect("plan_insert should succeed");
@@ -1016,6 +1017,7 @@ fn test_plan_insert_no_source() {
         columns: vec![],
         values: vec![],
         source_select: None,
+        defaults: Vec::new(),
     };
 
     let result = plan_insert(&insert, &catalog, "test_db");
@@ -1059,6 +1061,7 @@ fn test_plan_insert_with_explicit_columns() {
         columns: vec!["id".to_string(), "name".to_string()],
         values: vec![],
         source_select: Some(Box::new(source_select)),
+        defaults: Vec::new(),
     };
 
     let plan = plan_insert(&insert, &catalog, "test_db").expect("plan_insert should succeed");
@@ -1112,6 +1115,7 @@ fn test_plan_insert_preserves_select_structure() {
         columns: vec![],
         values: vec![],
         source_select: Some(Box::new(source_select)),
+        defaults: Vec::new(),
     };
 
     let plan = plan_insert(&insert, &catalog, "test_db").expect("plan_insert should succeed");
@@ -1155,6 +1159,7 @@ fn test_plan_query_insert_dispatch() {
         columns: vec![],
         values: vec![],
         source_select: Some(Box::new(source_select)),
+        defaults: Vec::new(),
     });
 
     let plan = plan_query(&query, &catalog, "test_db")
@@ -1185,6 +1190,7 @@ fn test_plan_query_insert_values_plans_successfully() {
             ExprNode::Constant(ConstantValue::Text("x".to_string())),
         ]],
         source_select: None,
+        defaults: Vec::new(),
     });
 
     // Retirement step 5: INSERT ... VALUES is planned like any other

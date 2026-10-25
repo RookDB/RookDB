@@ -251,3 +251,33 @@ fn insert_select_with_a_column_list() {
         arity
     );
 }
+
+#[test]
+fn default_in_values_takes_the_column_default() {
+    let _ws = common::TestWorkspace::new("session", "default_values");
+    let mut s = session();
+    ok(&mut s, "CREATE DATABASE app");
+    ok(&mut s, "USE app");
+    ok(
+        &mut s,
+        "CREATE TABLE t (id INT, n INT DEFAULT 5, tag VARCHAR(5), code INT NOT NULL)",
+    );
+    ok(&mut s, "INSERT INTO t VALUES (1, DEFAULT, DEFAULT, 0)");
+    ok(
+        &mut s,
+        "INSERT INTO t (code, n, id) VALUES (0, DEFAULT, 2), (0, 7, 3)",
+    );
+    assert_eq!(
+        rows(&mut s, "SELECT id, n, tag FROM t ORDER BY id"),
+        vec![
+            vec![int(1), int(5), None],
+            vec![int(2), int(5), None],
+            vec![int(3), int(7), None],
+        ]
+    );
+    // A column without a default takes NULL, which NOT NULL rejects.
+    let err = run(&mut s, "INSERT INTO t VALUES (4, 1, 'x', DEFAULT)").unwrap_err();
+    assert!(err.contains("NOT NULL constraint violated"), "{}", err);
+    // A quoted "DEFAULT" is a column name, which VALUES cannot read.
+    assert!(run(&mut s, "INSERT INTO t VALUES (5, \"DEFAULT\", 'x', 0)").is_err());
+}

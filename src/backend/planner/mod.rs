@@ -168,9 +168,17 @@ pub fn plan_insert(
 
     // Expand every row to full table arity:
     //   explicit column list → position mapping
-    //   missing column       → declared DEFAULT, else NULL
+    //   missing column, or DEFAULT → declared DEFAULT, else NULL
+    let default_of = |col: &crate::catalog::Column| {
+        col.constraints
+            .default
+            .as_ref()
+            .map(|dv| ExprNode::Constant(default_to_constant(dv)))
+            .unwrap_or(ExprNode::Constant(ConstantValue::Null))
+    };
     let mut values_rows: Vec<Vec<ExprNode>> = Vec::with_capacity(insert.values.len());
-    for row in &insert.values {
+    for (r, row) in insert.values.iter().enumerate() {
+        let is_default = |c: usize| insert.defaults.contains(&(r, c));
         if !insert.columns.is_empty() {
             if row.len() != insert.columns.len() {
                 return Err(RookError::InvalidQuery(format!(
@@ -180,7 +188,7 @@ pub fn plan_insert(
                 )));
             }
             let mut full: Vec<Option<&ExprNode>> = vec![None; table.columns.len()];
-            for (col_name, expr) in insert.columns.iter().zip(row) {
+            for (c, (col_name, expr)) in insert.columns.iter().zip(row).enumerate() {
                 let target = table
                     .columns
                     .iter()
@@ -191,7 +199,9 @@ pub fn plan_insert(
                         container_kind: "table",
                         container: insert.table.clone(),
                     })?;
-                full[target] = Some(expr);
+                if !is_default(c) {
+                    full[target] = Some(expr);
+                }
             }
             let expanded = table
                 .columns
@@ -199,12 +209,7 @@ pub fn plan_insert(
                 .zip(full.iter())
                 .map(|(col, slot)| match slot {
                     Some(e) => (*e).clone(),
-                    None => col
-                        .constraints
-                        .default
-                        .as_ref()
-                        .map(|dv| ExprNode::Constant(default_to_constant(dv)))
-                        .unwrap_or(ExprNode::Constant(ConstantValue::Null)),
+                    None => default_of(col),
                 })
                 .collect();
             values_rows.push(expanded);
@@ -217,7 +222,19 @@ pub fn plan_insert(
                     table.columns.len()
                 )));
             }
-            values_rows.push(row.clone());
+            values_rows.push(
+                row.iter()
+                    .zip(&table.columns)
+                    .enumerate()
+                    .map(|(c, (expr, col))| {
+                        if is_default(c) {
+                            default_of(col)
+                        } else {
+                            expr.clone()
+                        }
+                    })
+                    .collect(),
+            );
         }
     }
 
