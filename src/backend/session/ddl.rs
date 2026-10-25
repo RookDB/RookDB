@@ -743,6 +743,11 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> RookResult<S
 
     let indexes = crate::backend::system_table::table_indexes(catalog.engine(), db, table);
     let dat_path = catalog.engine().paths().heap(db, table);
+    // The live rows the header counts, read before the file is replaced.
+    let removed = crate::backend::cache::lease_heap(catalog.engine(), &dat_path)
+        .and_then(|heap| heap.header())
+        .map(|header| header.total_tuples)
+        .context("Failed to read table header")?;
     let mut hm = crate::heap::HeapManager::create(std::path::PathBuf::from(&dat_path))
         .context("Failed to create table file")?;
     hm.flush().context("Failed to flush table file")?;
@@ -752,8 +757,8 @@ pub(super) fn truncate(catalog: &Catalog, db: &str, table: &str) -> RookResult<S
     rebuild_indexes(catalog, db, table, &indexes, None)?;
 
     Ok(StatementResult::message(format!(
-        "Truncated table '{}' (0 rows).",
-        table
+        "Truncated table '{}': {} row(s) removed.",
+        table, removed
     )))
 }
 

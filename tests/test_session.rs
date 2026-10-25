@@ -126,7 +126,7 @@ fn ddl_round_trip() {
     assert_eq!(rows(&mut s, "SELECT id FROM c"), vec![vec![int(2)]]);
     assert_eq!(
         ok(&mut s, "TRUNCATE TABLE c"),
-        ["Truncated table 'c' (0 rows)."]
+        ["Truncated table 'c': 1 row(s) removed."]
     );
     assert_eq!(
         ok(&mut s, "DROP TABLE c"),
