@@ -906,16 +906,19 @@ pub(super) fn create_index(
             params.index_name
         )));
     }
-    let count = crate::backend::executor::create_index::create_index(
+    let count = crate::backend::executor::create_index::create_index_with_flags(
         catalog,
         db,
         &params.table_name,
         &params.index_name,
         &params.columns,
+        params.unique,
+        false,
     )
     .map_err(|e| e.with_context("Failed to create index"))?;
     Ok(StatementResult::message(format!(
-        "Created index '{}' on {}.{}({}) with {} entries.",
+        "Created {}index '{}' on {}.{}({}) with {} entries.",
+        if params.unique { "unique " } else { "" },
         params.index_name,
         db,
         params.table_name,

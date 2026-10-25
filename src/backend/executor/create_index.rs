@@ -319,11 +319,7 @@ pub fn create_index_with_flags(
     let heap_manager = crate::backend::cache::lease_heap(catalog.engine(), &heap_path)
         .map_err(|e| format!("Failed to open heap for table '{}': {}", table_name, e))?;
 
-    // 6. Create the B+ Tree index file (composite-aware)
-    let mut btree = BTree::create_composite(idx_path.clone(), key_types.clone())
-        .map_err(|e| RookError::storage("Failed to create index file", e))?;
-
-    // 7. Gather every row's key, then build the tree bottom-up from them
+    // 6. Gather every row's key, then build the tree bottom-up from them
     let mut load = BulkLoad::new(key_types.len());
     let decoder = crate::types::RowDecoder::new(&schema_types).only(indexed_idxs.iter().copied());
     let mut values = Vec::with_capacity(schema_types.len());
@@ -369,6 +365,33 @@ pub fn create_index_with_flags(
             ));
         }
     }
+    // A unique index must not start out holding a key twice: it would never
+    // reject a third copy of a key it already lets through.
+    if is_unique && let Some(key) = load.duplicate_key(&key_types)? {
+        let shown = key
+            .iter()
+            .map(crate::backend::constraint::fk_actions::key_text)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let columns = indexed_cols
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(RookError::constraint(
+            crate::backend::error::ConstraintKind::Unique,
+            table_name,
+            Some(&columns),
+            format!(
+                "UNIQUE constraint violated: value '{}' appears more than once in column '{}'; index '{}' was not created",
+                shown, columns, resolved_name
+            ),
+        ));
+    }
+
+    // 7. Create the B+ Tree index file (composite-aware) and build it
+    let mut btree = BTree::create_composite(idx_path.clone(), key_types.clone())
+        .map_err(|e| RookError::storage("Failed to create index file", e))?;
     let inserted_count = btree
         .bulk_load(load)
         .map_err(|e| RookError::storage("Failed to build index", e))?;

@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::io;
 
 use super::codec::{
-    CHILD_SIZE, KEY_LEN_SIZE, LEAF_HEADER, PAGE_HEADER, VALUE_SIZE, write_root_sidecar,
+    CHILD_SIZE, KEY_LEN_SIZE, LEAF_HEADER, PAGE_HEADER, VALUE_SIZE, decode_key, write_root_sidecar,
 };
 use super::node::{NodeView, int_from_le};
 use super::order::KeyOrder;
@@ -85,6 +85,35 @@ impl BulkLoad {
 
     fn key(&self, e: &Entry) -> &[u8] {
         &self.keys[e.off..e.off + e.len as usize]
+    }
+
+    /// The first key, in key order, that more than one entry holds: what a
+    /// UNIQUE index cannot be built from. Sorts the entries (the build sorts
+    /// them again, cheaply, as they are then in order).
+    pub fn duplicate_key(&mut self, key_types: &[DataType]) -> RookResult<Option<Vec<DataValue>>> {
+        self.sort(key_types)?;
+        let order = KeyOrder::new(key_types);
+        for pair in self.entries.windows(2) {
+            let key = self.key(&pair[1]);
+            if order.cmp_encoded_keys(self.key(&pair[0]), key)? != Ordering::Equal {
+                continue;
+            }
+            // A composite key is `[len][key 1][key 2]...`; a single one is
+            // just its own `[len][bytes]`.
+            let mut rest = if key_types.len() == 1 {
+                key
+            } else {
+                &key[KEY_LEN_SIZE..]
+            };
+            let mut values = Vec::with_capacity(key_types.len());
+            for ty in key_types {
+                let (value, used) = decode_key(rest, ty)?;
+                values.push(value);
+                rest = &rest[used..];
+            }
+            return Ok(Some(values));
+        }
+        Ok(None)
     }
 
     /// Sort the entries by key. The sort is stable, so equal keys keep the
