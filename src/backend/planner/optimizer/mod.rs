@@ -535,10 +535,9 @@ impl Optimizer {
     fn prune_columns(&self, plan: LogicalPlan, required: &HashSet<String>) -> LogicalPlan {
         match plan {
             LogicalPlan::TableScan(t) => {
-                // Never prune columns from system table scans: the physical
-                // planner's map_info_schema_columns zips the logical schema
-                // with the physical types, and a pruned schema would produce
-                // too few types for correct heap tuple deserialisation.
+                // Never prune columns from INFORMATION_SCHEMA scans: their
+                // rows are built with every column of the view, in the order
+                // of the view's schema.
                 if t.system_table_name.is_some() {
                     return LogicalPlan::TableScan(t);
                 }

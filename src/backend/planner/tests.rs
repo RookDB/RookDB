@@ -691,7 +691,7 @@ fn test_info_schema_indexes_plan() {
     let plan = plan_select(&select, &catalog, "test_db").expect("plan should succeed");
     match plan {
         LogicalPlan::Project(p) => {
-            assert_eq!(p.expressions.len(), 6);
+            assert_eq!(p.expressions.len(), 7);
             match &*p.child {
                 LogicalPlan::TableScan(t) => {
                     assert_eq!(t.system_table_name, Some("indexes".to_string()))
@@ -724,7 +724,7 @@ fn test_info_schema_table_constraints_plan() {
     let plan = plan_select(&select, &catalog, "test_db").expect("plan should succeed");
     match plan {
         LogicalPlan::Project(p) => {
-            assert_eq!(p.expressions.len(), 6);
+            assert_eq!(p.expressions.len(), 7);
             match &*p.child {
                 LogicalPlan::TableScan(t) => {
                     assert_eq!(t.system_table_name, Some("constraints".to_string()))
@@ -761,7 +761,7 @@ fn test_info_schema_views_plan() {
             match &*p.child {
                 LogicalPlan::TableScan(t) => {
                     assert_eq!(t.system_table_name, Some("views".to_string()));
-                    assert_eq!(t.schema.columns[2].name, "view_name");
+                    assert_eq!(t.schema.columns[2].name, "table_name");
                     assert_eq!(t.schema.columns[3].name, "view_definition");
                 }
                 _ => panic!("Expected TableScan child"),

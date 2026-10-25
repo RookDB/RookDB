@@ -800,10 +800,9 @@ impl PhysicalPlanner {
 impl PhysicalPlanner {
     /// Create a table scan operator for the given LogicalTableScan.
     ///
-    /// If the scan targets a system table (`ts.system_table_name.is_some()`),
-    /// the heap path is resolved to `database/system/{name}.dat` and the
-    /// column schema for the output tuples is drawn from the system table's
-    /// definition rather than the user catalog.
+    /// If the scan targets an INFORMATION_SCHEMA view
+    /// (`ts.system_table_name.is_some()`), its rows are computed from the
+    /// catalog and the system tables and scanned from memory.
     ///
     /// Otherwise, if a `.idx` file exists alongside the `.dat` heap file,
     /// uses an `IndexScanOperator` with `FullScan` mode instead of a
@@ -819,56 +818,31 @@ impl PhysicalPlanner {
             if sys_name == "__singlerow__" {
                 return Ok(Box::new(SingleRowOperator::new()));
             }
-            let heap_path = crate::backend::system_table::sys_path(self.catalog.engine(), sys_name);
-            if !heap_path.exists() {
-                return Err(RookError::NotFound {
-                    entity: "System table",
-                    name: sys_name.clone(),
-                });
+            // An INFORMATION_SCHEMA view: its rows are computed from the
+            // catalog and the system tables (see `system_table::info_schema`).
+            let qualifier = ts.alias.clone().unwrap_or_else(|| sys_name.to_string());
+            let schema: Vec<ColumnInfo> = ts
+                .schema
+                .columns
+                .iter()
+                .map(|c| ColumnInfo {
+                    merged: false,
+                    name: c.name.clone(),
+                    data_type: c.data_type.parse().unwrap_or(DataType::Varchar(255)),
+                    table: Some(qualifier.clone()),
+                })
+                .collect();
+            let rows = crate::backend::system_table::info_schema_rows(&self.catalog, &ts.table)?;
+            if rows.first().is_some_and(|r| r.len() != schema.len()) {
+                return Err(RookError::Internal(format!(
+                    "INFORMATION_SCHEMA view '{}' has {} columns but its rows {}",
+                    ts.table,
+                    schema.len(),
+                    rows[0].len()
+                )));
             }
-            // Use the system table's actual physical schema for deserialisation
-            // (so INT columns are decoded as Int, BOOL as Bool, etc.) but keep
-            // the INFORMATION_SCHEMA view column names for display.
-            //
-            // IMPORTANT: Some INFORMATION_SCHEMA views (especially COLUMNS) have
-            // column names that do NOT positionally align with the physical system
-            // table columns.  For example, sys_columns has physical columns
-            // [col_id, table_id, name, data_type, ordinal, nullable, has_default,
-            //  default_value] but the COLUMNS view exposes [table_catalog,
-            //  table_schema, table_name, column_name, ordinal_position, data_type,
-            //  is_nullable, column_default].  We must map each info_schema column
-            //  to the correct physical column index and type.
-            //
-            // Use ts.schema (view column names, set by the logical planner) instead
-            // of info_schema_column_schema(sys_name) because sys_name is the system
-            // table name (e.g. "databases") while ts.schema holds the correct view
-            // column names (e.g. "catalog_name", "schema_name" for SCHEMATA).
-            let info_schema = &ts.schema;
-            let sys_schema = crate::backend::system_table::system_table_schema(sys_name);
-            // Map info_schema column names to physical column types + positions
-            let (mut column_info, column_mapping) =
-                self.map_info_schema_columns(sys_name, info_schema, sys_schema);
-            // Set the table name for each column to allow table-qualified resolution
-            // (alias takes precedence per SQL semantics).
-            let sys_table_name = ts.alias.clone().unwrap_or_else(|| sys_name.to_string());
-            for ci in column_info.iter_mut() {
-                ci.table = Some(sys_table_name.clone());
-            }
-            let schema_types: Vec<DataType> = sys_schema.to_vec();
-            let heap_manager =
-                crate::backend::cache::lease_heap_owned(self.catalog.engine(), &heap_path)
-                    .map_err(|e| {
-                        e.with_context(format!("Failed to open system table '{}'", sys_name))
-                    })?;
-            return Ok(Box::new(
-                SeqScanOperator::new_with_mapping(
-                    heap_manager,
-                    schema_types,
-                    column_info,
-                    column_mapping,
-                )
-                .described(sys_name),
-            ));
+            let tuples = rows.into_iter().map(super::tuple::Tuple::new).collect();
+            return Ok(Box::new(CteScanOperator::new(tuples, schema)));
         }
 
         // ── Regular user table path ───────────────────────────────────────
@@ -924,84 +898,6 @@ impl PhysicalPlanner {
 // ── Schema helpers ────────────────────────────────────────────────────────────
 
 impl PhysicalPlanner {
-    /// Return the column-to-physical-index mapping for a given info_schema view.
-    ///
-    /// Many INFORMATION_SCHEMA views expose column names that do NOT positionally
-    /// align with the physical system table columns (e.g. "columns" view's
-    /// `column_name` maps to physical index 2, not 3).  This function returns
-    /// the correct `(view_col_idx -> phys_col_idx)` mapping so the SeqScan
-    /// operator can reorder deserialised values to match view column order.
-    fn info_schema_column_mapping(sys_name: &str) -> Vec<usize> {
-        match sys_name.to_ascii_lowercase().as_str() {
-            // sys_columns: [col_id(0), table_id(1), name(2), data_type(3),
-            //               ordinal(4), nullable(5), has_default(6), default_value(7)]
-            // COLUMNS view: [table_catalog, table_schema, table_name, column_name,
-            //                ordinal_position, data_type, is_nullable, column_default]
-            "columns" => vec![0, 1, 2, 2, 4, 3, 5, 7],
-
-            // sys_constraints: [constraint_id(0), table_id(1), type(2),
-            //                   columns(3), ref_table(4), ref_columns(5)]
-            // TABLE_CONSTRAINTS view: [constraint_catalog, constraint_schema,
-            //                          constraint_name, table_name,
-            //                          constraint_type, constraint_columns]
-            "constraints" | "table_constraints" => vec![0, 1, 2, 3, 2, 3],
-
-            // sys_indexes: [index_id(0), table_id(1), name(2), is_unique(3),
-            //               is_primary(4), columns(5)]
-            // INDEXES/STATISTICS view: [table_catalog, table_schema, table_name,
-            //                          index_name, unique, primary]
-            "indexes" | "statistics" => vec![0, 1, 2, 2, 3, 4],
-
-            // Default: empty = identity mapping (positions align).
-            // Caller will generate identity based on sys_schema length.
-            _ => Vec::new(),
-        }
-    }
-
-    /// Map INFORMATION_SCHEMA view column names to the correct physical column types.
-    ///
-    /// Returns `(Vec<ColumnInfo>, Vec<usize>)` where:
-    /// - `ColumnInfo` contains view column names with physical DataTypes
-    /// - `Vec<usize>` maps each view column position to its physical column index
-    ///
-    /// The `SeqScanOperator` uses the physical DataTypes for correct deserialisation
-    /// and applies the mapping to reorder values into view column order.
-    pub(crate) fn map_info_schema_columns(
-        &self,
-        sys_name: &str,
-        info_schema: &rook_ast::logical::ColumnSchema,
-        sys_schema: &[DataType],
-    ) -> (Vec<ColumnInfo>, Vec<usize>) {
-        let mut mapping = Self::info_schema_column_mapping(sys_name);
-
-        // If no explicit mapping (empty vec), use identity mapping: each view
-        // column maps to the same physical position.  This is correct for views
-        // like "tables", "schemata", "views" where columns align positionally.
-        if mapping.is_empty() {
-            mapping = (0..sys_schema.len()).collect();
-        }
-
-        let column_info: Vec<ColumnInfo> = info_schema
-            .columns
-            .iter()
-            .zip(mapping.iter())
-            .map(|(c, &phys_idx)| {
-                let dt = sys_schema
-                    .get(phys_idx)
-                    .cloned()
-                    .unwrap_or(DataType::Varchar(255));
-                ColumnInfo {
-                    merged: false,
-                    name: c.name.clone(),
-                    data_type: dt,
-                    table: None,
-                }
-            })
-            .collect();
-
-        (column_info, mapping)
-    }
-
     /// Resolve the table's schema from the catalog.
     pub(crate) fn resolve_table_schema(
         &self,

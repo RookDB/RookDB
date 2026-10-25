@@ -496,9 +496,13 @@ impl Binder<'_> {
         if let Some(view) = tref.name.strip_prefix("information_schema.") {
             let view = view.to_ascii_lowercase();
             let columns = crate::backend::system_table::info_schema_column_schema(&view)
+                .ok_or_else(|| not_found("INFORMATION_SCHEMA view", &view))?
                 .columns
                 .into_iter()
-                .map(|c| (c.name, None))
+                .map(|c| {
+                    let ty = c.data_type.parse::<DataType>().ok();
+                    (c.name, ty)
+                })
                 .collect();
             let system_table = super::helpers::info_schema_table(&view);
             return Ok(match alias {

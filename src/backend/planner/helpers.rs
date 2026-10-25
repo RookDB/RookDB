@@ -98,7 +98,8 @@ pub fn build_table_or_cte_scan(
     } else if let Some(sys_name) = tref.name.strip_prefix("information_schema.") {
         let sys_lower = sys_name.to_ascii_lowercase();
         let sys_table_name = info_schema_table(&sys_lower);
-        let column_schema = crate::backend::system_table::info_schema_column_schema(&sys_lower);
+        let column_schema = crate::backend::system_table::info_schema_column_schema(&sys_lower)
+            .ok_or_else(|| not_found("INFORMATION_SCHEMA view", sys_name))?;
         Ok(LogicalPlan::TableScan(LogicalTableScan {
             table: sys_name.to_string(),
             alias: tref.alias.clone(),
@@ -135,8 +136,9 @@ pub fn catalog_columns_to_schema(columns: &[crate::catalog::Column]) -> ColumnSc
     }
 }
 
-/// The system table an `information_schema` view (lower-cased) reads; its
-/// rows carry that table's name as their qualifier.
+/// The qualifier the rows of an `information_schema` view (lower-cased)
+/// carry: the system table its rows mainly come from, which a query may
+/// also name the view by.
 pub fn info_schema_table(view: &str) -> &str {
     match view {
         "schemata" => "databases",
