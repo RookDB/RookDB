@@ -186,7 +186,10 @@ fn sessions_on_threads_lose_no_ddl() {
                 for i in 0..TABLES {
                     let name = format!("t_{}_{}", t, i);
                     run(&mut s, &format!("CREATE TABLE {} (id INT, v INT)", name));
-                    run(&mut s, &format!("INSERT INTO {} VALUES ({}, {})", name, t, i));
+                    run(
+                        &mut s,
+                        &format!("INSERT INTO {} VALUES ({}, {})", name, t, i),
+                    );
                     assert_eq!(count(&mut s, &format!("SELECT COUNT(*) FROM {}", name)), 1);
                 }
             });
@@ -202,7 +205,12 @@ fn sessions_on_threads_lose_no_ddl() {
 
     let mut s = session(&root.0, "db");
     for name in &expected {
-        assert_eq!(count(&mut s, &format!("SELECT COUNT(*) FROM {}", name)), 1, "{}", name);
+        assert_eq!(
+            count(&mut s, &format!("SELECT COUNT(*) FROM {}", name)),
+            1,
+            "{}",
+            name
+        );
     }
 }
 
@@ -215,7 +223,10 @@ fn readers_on_threads_run_alongside_schema_changes() {
         let mut s = session(&root.0, "db");
         run(&mut s, "CREATE TABLE stable (id INT PRIMARY KEY, v INT)");
         let rows: Vec<String> = (0..100).map(|i| format!("({}, {})", i, i * 3)).collect();
-        run(&mut s, &format!("INSERT INTO stable VALUES {}", rows.join(", ")));
+        run(
+            &mut s,
+            &format!("INSERT INTO stable VALUES {}", rows.join(", ")),
+        );
     }
     let writer_done = std::sync::atomic::AtomicBool::new(false);
 
@@ -283,5 +294,8 @@ fn sessions_on_threads_read_and_write_one_table() {
     });
 
     let mut s = session(&root.0, "db");
-    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM t"), (THREADS * ROWS) as i64);
+    assert_eq!(
+        count(&mut s, "SELECT COUNT(*) FROM t"),
+        (THREADS * ROWS) as i64
+    );
 }

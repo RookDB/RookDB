@@ -1075,7 +1075,11 @@ fn test_packed_layout_has_no_padding() {
 
     let bytes = serialize_nullable_typed_row(&schema, &padding_heavy_values()).unwrap();
     let old = padded_row_bytes(&schema, &padding_heavy_values());
-    assert_eq!(old.len() - bytes.len(), 16, "packing saves the 16 padding bytes");
+    assert_eq!(
+        old.len() - bytes.len(),
+        16,
+        "packing saves the 16 padding bytes"
+    );
 }
 
 #[test]
