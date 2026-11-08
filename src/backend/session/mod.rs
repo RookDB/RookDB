@@ -59,9 +59,20 @@ pub const NO_DATABASE: &str = "No database selected. Use 'USE <database>' first.
 ///
 /// Queries share the catalog through the `Arc`; DDL changes it in place
 /// (`Arc::make_mut`), which copies only while a query still holds it.
+///
+/// Several sessions may use one data directory, on one thread or several.
+/// Their statements take turns ([`Engine::statement_turn`]), and a session
+/// whose catalog is older than the engine's metadata (another session, or
+/// code outside any session, changed the schema) reloads it from the system
+/// tables before its next statement. DDL saves the whole catalog, so it must
+/// never run on an out-of-date copy.
+///
+/// [`Engine::statement_turn`]: crate::backend::engine::Engine
 pub struct Session {
     pub catalog: Arc<Catalog>,
     pub current_db: Option<String>,
+    /// The engine's metadata generation `catalog` is known to match.
+    synced: u64,
 }
 
 /// Statements that may write the system tables.
@@ -82,9 +93,26 @@ fn changes_catalog(plan: &QueryPlan) -> bool {
     )
 }
 
+/// Statements that write nothing shared: no rows, no index, no system table.
+/// They may run alongside each other (see `Engine::statement_turn`).
+/// `EXPLAIN` plans without running, and `EXPLAIN ANALYZE` refuses statements
+/// that write; `USE` changes only the session.
+fn is_read_only(plan: &QueryPlan) -> bool {
+    matches!(
+        plan,
+        QueryPlan::Select(_)
+            | QueryPlan::SetOperation(_)
+            | QueryPlan::Explain(_)
+            | QueryPlan::ShowTables
+            | QueryPlan::ShowDatabases
+            | QueryPlan::UseDatabase(_)
+    )
+}
+
 impl Session {
     pub fn new(catalog: Catalog) -> Self {
         Session {
+            synced: catalog.generation(),
             catalog: Arc::new(catalog),
             current_db: None,
         }
@@ -96,6 +124,35 @@ impl Session {
     /// it fails, the system tables and the in-memory catalog go back to how
     /// they were before it.
     pub fn execute(&mut self, plan: QueryPlan) -> RookResult<StatementResult> {
+        let engine = Arc::clone(self.catalog.engine());
+        let _turn = engine.statement_turn(is_read_only(&plan));
+        if engine.metadata_generation() != self.synced {
+            self.reload_catalog(&engine)
+                .map_err(|e| e.with_context("Failed to reload the changed catalog"))?;
+        }
+        let result = self.execute_in_turn(plan);
+        // No statement that changes the catalog ran during this turn but
+        // this one, so `catalog` is what the system tables now hold (a
+        // failed catalog change reloaded it).
+        self.synced = engine.metadata_generation();
+        result
+    }
+
+    /// Replace the catalog with the one in the system tables, and forget the
+    /// selected database if it is gone.
+    fn reload_catalog(&mut self, engine: &Arc<crate::backend::engine::Engine>) -> RookResult<()> {
+        let catalog = crate::catalog::try_load_catalog_in(engine)?;
+        self.synced = catalog.generation();
+        self.catalog = Arc::new(catalog);
+        if let Some(db) = &self.current_db
+            && !self.catalog.databases.contains_key(db)
+        {
+            self.current_db = None;
+        }
+        Ok(())
+    }
+
+    fn execute_in_turn(&mut self, plan: QueryPlan) -> RookResult<StatementResult> {
         let plan = names::resolve_table_names(plan, &self.catalog, &self.current_db);
         if !changes_catalog(&plan) {
             return self.execute_resolved(&plan);
@@ -112,14 +169,9 @@ impl Session {
         };
         if result.is_err() {
             // The in-memory catalog may hold part of the change.
-            self.catalog = Arc::new(crate::catalog::try_load_catalog_in(&engine).map_err(|e| {
+            self.reload_catalog(&engine).map_err(|e| {
                 e.with_context("Failed to reload the catalog after a failed statement")
-            })?);
-            if let Some(db) = &self.current_db
-                && !self.catalog.databases.contains_key(db)
-            {
-                self.current_db = None;
-            }
+            })?;
         }
         result
     }
