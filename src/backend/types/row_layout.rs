@@ -9,8 +9,22 @@
 //! ```text
 //! [Header 4B] [Null Bitmap] [Var-Len Offset Table] [Fixed-Length Data] [Var-Len Data]
 //! ```
+//!
+//! The header is `[num_cols: u16][num_varlen: u16]`. Fixed-length columns are
+//! packed back to back. Rows written before packing padded each fixed
+//! column to its type's alignment *within the fixed region*; neither the
+//! region nor the row is aligned in memory, and values are read with
+//! byte copies, so the padding bought nothing. Packed rows set
+//! [`PACKED_LAYOUT_FLAG`] in `num_varlen`; rows without it are read with the
+//! padded geometry ([`RowLayout::compute_padded`]), so existing files stay
+//! readable and each row is packed the next time it is written.
 
 use crate::types::datatype::DataType;
+
+/// Set in the header's `num_varlen` field of rows whose fixed-length columns
+/// are packed (no alignment padding). The field's other 15 bits are the
+/// var-len column count.
+pub const PACKED_LAYOUT_FLAG: u16 = 0x8000;
 
 // ── PhysicalSchema ────────────────────────────────────────────────────────────
 
@@ -115,29 +129,39 @@ pub struct RowLayout {
     /// Per-column byte offset **within** the fixed-data region, indexed by
     /// position in `PhysicalSchema::fixed_indices_logical`.
     pub fixed_col_offsets: Vec<usize>,
-    /// Total size (bytes) of the fixed-data region (includes alignment padding).
+    /// Total size (bytes) of the fixed-data region.
     pub fixed_data_size: usize,
 }
 
 impl RowLayout {
-    /// Compute layout geometry from a physical schema.
+    /// The layout rows are written in: fixed-length columns packed back to
+    /// back (see [`PACKED_LAYOUT_FLAG`]).
     pub fn compute(physical: &PhysicalSchema) -> Self {
+        Self::compute_with(physical, false)
+    }
+
+    /// The layout of rows written before packing: each fixed-length column
+    /// padded to its type's alignment within the fixed region. Only for
+    /// reading rows without [`PACKED_LAYOUT_FLAG`].
+    pub fn compute_padded(physical: &PhysicalSchema) -> Self {
+        Self::compute_with(physical, true)
+    }
+
+    fn compute_with(physical: &PhysicalSchema, padded: bool) -> Self {
         let num_columns = physical.logical_to_physical.len();
         let num_varlen_cols = physical.num_varlen();
         let null_bitmap_size = num_columns.div_ceil(8);
         let varlen_table_size = num_varlen_cols * 2;
         let fixed_data_start = 4 + null_bitmap_size + varlen_table_size;
 
-        // Compute per-column offsets within the fixed-data region,
-        // respecting each type's natural alignment.
+        // Per-column offsets within the fixed-data region.
         let mut fixed_col_offsets: Vec<usize> = Vec::with_capacity(physical.num_fixed());
         let mut cursor: usize = 0;
 
         for &log_idx in &physical.fixed_indices_logical {
             let ty = &physical.physical_types[physical.logical_to_physical[log_idx]];
             let align = ty.alignment() as usize;
-            // Pad cursor to alignment boundary
-            if align > 1 && !cursor.is_multiple_of(align) {
+            if padded && align > 1 && !cursor.is_multiple_of(align) {
                 cursor += align - (cursor % align);
             }
             fixed_col_offsets.push(cursor);

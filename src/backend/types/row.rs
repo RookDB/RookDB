@@ -2,7 +2,7 @@ use crate::backend::error::{RookError, RookResult};
 use crate::types::comparison::value_type_name;
 use crate::types::datatype::DataType;
 use crate::types::null_bitmap::NullBitmap;
-use crate::types::row_layout::{PhysicalSchema, RowLayout};
+use crate::types::row_layout::{PACKED_LAYOUT_FLAG, PhysicalSchema, RowLayout};
 use crate::types::value::DataValue;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ fn serialize_encoded(
 
     // ── Header ────────────────────────────────────────────────────────────────
     let num_cols = schema.len() as u16;
-    let num_varlen = physical.num_varlen() as u16;
+    let num_varlen = packed_varlen_field(physical.num_varlen())?;
     buf[0..2].copy_from_slice(&num_cols.to_le_bytes());
     buf[2..4].copy_from_slice(&num_varlen.to_le_bytes());
 
@@ -206,8 +206,26 @@ pub fn deserialize_nullable_row(
     RowDecoder::new(schema).decode(row_bytes)
 }
 
+/// The header's `num_varlen` field of a packed row with `num_varlen` var-len
+/// columns.
+fn packed_varlen_field(num_varlen: usize) -> RookResult<u16> {
+    if num_varlen >= PACKED_LAYOUT_FLAG as usize {
+        return Err(RookError::Internal(format!(
+            "A row holds at most {} variable-length columns, not {}",
+            PACKED_LAYOUT_FLAG - 1,
+            num_varlen
+        )));
+    }
+    Ok(num_varlen as u16 | PACKED_LAYOUT_FLAG)
+}
+
+/// Whether a row's header says its fixed-length columns are packed.
+fn is_packed(row: &[u8]) -> bool {
+    u16::from_le_bytes([row[2], row[3]]) & PACKED_LAYOUT_FLAG != 0
+}
+
 /// Where one logical column's bytes are in a row.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ColumnSlot {
     /// A fixed-length column: its byte range relative to the row start.
     Fixed { start: usize, size: usize },
@@ -215,27 +233,15 @@ enum ColumnSlot {
     Varlen { rank: usize },
 }
 
-/// Decodes rows of one schema.
-///
-/// The row layout is computed once, when the decoder is built; decoding a
-/// row allocates only the values it returns. [`RowDecoder::only`] restricts
-/// decoding to the columns a query reads: the others come back as `None`
-/// without being looked at.
+/// Where each column is under one layout, and the smallest row it allows.
 #[derive(Debug, Clone)]
-pub struct RowDecoder {
-    schema: Vec<DataType>,
+struct SlotMap {
     slots: Vec<ColumnSlot>,
-    /// Columns to decode, by logical position.
-    wanted: Vec<bool>,
-    num_varlen: usize,
-    varlen_table_start: usize,
     min_row_size: usize,
 }
 
-impl RowDecoder {
-    pub fn new(schema: &[DataType]) -> Self {
-        let physical = PhysicalSchema::from_logical(schema);
-        let layout = RowLayout::compute(&physical);
+impl SlotMap {
+    fn new(schema: &[DataType], physical: &PhysicalSchema, layout: &RowLayout) -> Self {
         let slots = (0..schema.len())
             .map(|log_idx| {
                 let phys_idx = physical.logical_to_physical[log_idx];
@@ -250,13 +256,49 @@ impl RowDecoder {
                 }
             })
             .collect();
+        SlotMap {
+            slots,
+            min_row_size: layout.min_row_size(),
+        }
+    }
+}
+
+/// Decodes rows of one schema.
+///
+/// The row layout is computed once, when the decoder is built; decoding a
+/// row allocates only the values it returns. [`RowDecoder::only`] restricts
+/// decoding to the columns a query reads: the others come back as `None`
+/// without being looked at.
+///
+/// Reads packed rows and rows written before packing (see
+/// [`PACKED_LAYOUT_FLAG`]).
+#[derive(Debug, Clone)]
+pub struct RowDecoder {
+    schema: Vec<DataType>,
+    /// Column positions in packed rows.
+    packed: SlotMap,
+    /// Column positions in rows written before packing, when they differ
+    /// from `packed` (the schema has padding to skip).
+    padded: Option<SlotMap>,
+    /// Columns to decode, by logical position.
+    wanted: Vec<bool>,
+    num_varlen: usize,
+    varlen_table_start: usize,
+}
+
+impl RowDecoder {
+    pub fn new(schema: &[DataType]) -> Self {
+        let physical = PhysicalSchema::from_logical(schema);
+        let layout = RowLayout::compute(&physical);
+        let packed = SlotMap::new(schema, &physical, &layout);
+        let padded = SlotMap::new(schema, &physical, &RowLayout::compute_padded(&physical));
         RowDecoder {
             schema: schema.to_vec(),
-            slots,
+            padded: (padded.slots != packed.slots).then_some(padded),
+            packed,
             wanted: vec![true; schema.len()],
             num_varlen: physical.num_varlen(),
             varlen_table_start: layout.varlen_table_offset(),
-            min_row_size: layout.min_row_size(),
         }
     }
 
@@ -280,36 +322,10 @@ impl RowDecoder {
 
     /// Decode one row into `out`, replacing its contents.
     pub fn decode_into(&self, row: &[u8], out: &mut Vec<Option<DataValue>>) -> RookResult<()> {
-        if row.len() < 4 {
-            return Err(RookError::Internal(
-                "Row too short to contain header".to_string(),
-            ));
-        }
-        let num_cols_stored = u16::from_le_bytes([row[0], row[1]]) as usize;
-        let num_varlen_stored = u16::from_le_bytes([row[2], row[3]]) as usize;
-        if num_cols_stored != self.schema.len() {
-            return Err(RookError::Internal(format!(
-                "Header column count {} does not match schema length {}",
-                num_cols_stored,
-                self.schema.len()
-            )));
-        }
-        if num_varlen_stored != self.num_varlen {
-            return Err(RookError::Internal(format!(
-                "Header var-len count {} does not match schema var-len count {}",
-                num_varlen_stored, self.num_varlen
-            )));
-        }
-        if row.len() < self.min_row_size {
-            return Err(RookError::Internal(format!(
-                "Row ({} bytes) shorter than minimum layout size ({} bytes)",
-                row.len(),
-                self.min_row_size
-            )));
-        }
+        let map = self.check_header(row)?;
 
         out.clear();
-        for (log_idx, slot) in self.slots.iter().enumerate() {
+        for (log_idx, slot) in map.slots.iter().enumerate() {
             let is_null = row[4 + log_idx / 8] & (1 << (log_idx % 8)) != 0;
             if is_null || !self.wanted[log_idx] {
                 out.push(None);
@@ -329,6 +345,44 @@ impl RowDecoder {
             out.push(value);
         }
         Ok(())
+    }
+
+    /// Validate `row`'s header against the schema and pick the column
+    /// positions its layout uses.
+    fn check_header(&self, row: &[u8]) -> RookResult<&SlotMap> {
+        if row.len() < 4 {
+            return Err(RookError::Internal(
+                "Row too short to contain header".to_string(),
+            ));
+        }
+        let num_cols_stored = u16::from_le_bytes([row[0], row[1]]) as usize;
+        let num_varlen_stored =
+            (u16::from_le_bytes([row[2], row[3]]) & !PACKED_LAYOUT_FLAG) as usize;
+        if num_cols_stored != self.schema.len() {
+            return Err(RookError::Internal(format!(
+                "Header column count {} does not match schema length {}",
+                num_cols_stored,
+                self.schema.len()
+            )));
+        }
+        if num_varlen_stored != self.num_varlen {
+            return Err(RookError::Internal(format!(
+                "Header var-len count {} does not match schema var-len count {}",
+                num_varlen_stored, self.num_varlen
+            )));
+        }
+        let map = match &self.padded {
+            Some(padded) if !is_packed(row) => padded,
+            _ => &self.packed,
+        };
+        if row.len() < map.min_row_size {
+            return Err(RookError::Internal(format!(
+                "Row ({} bytes) shorter than minimum layout size ({} bytes)",
+                row.len(),
+                map.min_row_size
+            )));
+        }
+        Ok(map)
     }
 
     /// Byte range of the var-len payload of rank `rank`: from its offset to
@@ -360,6 +414,9 @@ pub struct Row {
     physical: PhysicalSchema,
     /// Byte-level geometry derived from `physical`.
     layout: RowLayout,
+    /// Whether `layout` is the packed one (see [`PACKED_LAYOUT_FLAG`]); false
+    /// only for a row read from bytes written before packing.
+    packed: bool,
     /// NULL flags keyed on **logical** column index.
     null_bitmap: NullBitmap,
     /// On-disk bytes: [var-len offset table][fixed-data][var-len data].
@@ -383,6 +440,7 @@ impl Row {
             logical_schema: schema,
             physical,
             layout,
+            packed: true,
             null_bitmap,
             data,
         }
@@ -540,7 +598,13 @@ impl Row {
         let mut out = vec![0u8; total];
         // Header
         out[0..2].copy_from_slice(&(self.logical_schema.len() as u16).to_le_bytes());
-        out[2..4].copy_from_slice(&(self.physical.num_varlen() as u16).to_le_bytes());
+        let num_varlen = self.physical.num_varlen() as u16;
+        let num_varlen = if self.packed {
+            num_varlen | PACKED_LAYOUT_FLAG
+        } else {
+            num_varlen
+        };
+        out[2..4].copy_from_slice(&num_varlen.to_le_bytes());
         // Null bitmap
         out[bm_start..bm_start + self.layout.null_bitmap_size]
             .copy_from_slice(self.null_bitmap.as_bytes());
@@ -551,13 +615,18 @@ impl Row {
 
     pub fn deserialize(schema: &[DataType], bytes: &[u8]) -> RookResult<Self> {
         let physical = PhysicalSchema::from_logical(schema);
-        let layout = RowLayout::compute(&physical);
 
         if bytes.len() < 4 {
             return Err(RookError::Internal(
                 "Row too short to contain header".to_string(),
             ));
         }
+        let packed = is_packed(bytes);
+        let layout = if packed {
+            RowLayout::compute(&physical)
+        } else {
+            RowLayout::compute_padded(&physical)
+        };
 
         // Validate via full decode first (catches corrupt rows early).
         let _ = deserialize_nullable_row(schema, bytes)?;
@@ -577,6 +646,7 @@ impl Row {
             logical_schema: schema.to_vec(),
             physical,
             layout,
+            packed,
             null_bitmap,
             data,
         })
