@@ -887,7 +887,16 @@ fn test_row_header_fields() {
     let num_cols = u16::from_le_bytes([bytes[0], bytes[1]]);
     let num_varlen = u16::from_le_bytes([bytes[2], bytes[3]]);
     assert_eq!(num_cols, 3, "header num_columns should be 3");
-    assert_eq!(num_varlen, 1, "header num_varlen_cols should be 1");
+    assert_eq!(
+        num_varlen & !row_layout::PACKED_LAYOUT_FLAG,
+        1,
+        "header num_varlen_cols should be 1"
+    );
+    assert_ne!(
+        num_varlen & row_layout::PACKED_LAYOUT_FLAG,
+        0,
+        "rows are written packed"
+    );
 }
 
 #[test]
@@ -987,6 +996,142 @@ fn test_row_layout_compute_geometry() {
     assert_eq!(lay2.num_varlen_cols, 1);
     assert_eq!(lay2.varlen_table_size, 2);
     assert_eq!(lay2.fixed_data_start, 4 + 1 + 2); // 7
+}
+
+// ── Packed layout and rows written before it ──────────────────────────────────
+
+/// Narrow and wide fixed columns alternating, with var-len columns between:
+/// the shape that padding cost the most.
+fn padding_heavy_schema() -> Vec<DataType> {
+    vec![
+        DataType::Bool,
+        DataType::BigInt,
+        DataType::Varchar(16),
+        DataType::Bool,
+        DataType::Int,
+        DataType::Varchar(16),
+        DataType::SmallInt,
+        DataType::DoublePrecision,
+    ]
+}
+
+fn padding_heavy_values() -> Vec<Option<DataValue>> {
+    vec![
+        Some(DataValue::Bool(true)),
+        Some(DataValue::BigInt(-9_000_000_000)),
+        Some(DataValue::Varchar("alpha".to_string())),
+        None,
+        Some(DataValue::Int(42)),
+        Some(DataValue::Varchar("omega!".to_string())),
+        Some(DataValue::SmallInt(-7)),
+        Some(DataValue::DoublePrecision(OrderedF64(2.5))),
+    ]
+}
+
+/// The bytes a row had when fixed-length columns were padded to their
+/// alignment, as written before packing (no flag in the header).
+fn padded_row_bytes(schema: &[DataType], values: &[Option<DataValue>]) -> Vec<u8> {
+    let physical = PhysicalSchema::from_logical(schema);
+    let layout = RowLayout::compute_padded(&physical);
+    let mut bitmap = NullBitmap::new(schema.len());
+    for (i, v) in values.iter().enumerate() {
+        if v.is_none() {
+            bitmap.set_null(i);
+        }
+    }
+    let mut row = vec![0u8; layout.min_row_size()];
+    row[0..2].copy_from_slice(&(schema.len() as u16).to_le_bytes());
+    row[2..4].copy_from_slice(&(physical.num_varlen() as u16).to_le_bytes());
+    row[4..4 + layout.null_bitmap_size].copy_from_slice(bitmap.as_bytes());
+    for (rank, &log) in physical.fixed_indices_logical.iter().enumerate() {
+        if let Some(v) = &values[log] {
+            let bytes = v.to_bytes_for_type(&schema[log]).unwrap();
+            let at = layout.fixed_data_start + layout.fixed_col_offsets[rank];
+            row[at..at + bytes.len()].copy_from_slice(&bytes);
+        }
+    }
+    for (rank, &log) in physical.varlen_indices_logical.iter().enumerate() {
+        if let Some(v) = &values[log] {
+            let slot = layout.varlen_table_offset() + 2 * rank;
+            let offset = row.len() as u16;
+            row[slot..slot + 2].copy_from_slice(&offset.to_le_bytes());
+            row.extend_from_slice(&v.to_bytes_for_type(&schema[log]).unwrap());
+        }
+    }
+    row
+}
+
+#[test]
+fn test_packed_layout_has_no_padding() {
+    let schema = padding_heavy_schema();
+    let physical = PhysicalSchema::from_logical(&schema);
+    let packed = RowLayout::compute(&physical);
+    let padded = RowLayout::compute_padded(&physical);
+    // BOOL BIGINT BOOL INT SMALLINT DOUBLE = 1+8+1+4+2+8 bytes.
+    assert_eq!(packed.fixed_data_size, 24);
+    assert_eq!(packed.fixed_col_offsets, vec![0, 1, 9, 10, 14, 16]);
+    // Padded: 1+7 | 8 | 1+3 | 4 | 2+6 | 8.
+    assert_eq!(padded.fixed_data_size, 40);
+
+    let bytes = serialize_nullable_typed_row(&schema, &padding_heavy_values()).unwrap();
+    let old = padded_row_bytes(&schema, &padding_heavy_values());
+    assert_eq!(
+        old.len() - bytes.len(),
+        16,
+        "packing saves the 16 padding bytes"
+    );
+}
+
+#[test]
+fn test_rows_written_before_packing_still_decode() {
+    let schema = padding_heavy_schema();
+    let values = padding_heavy_values();
+    let old = padded_row_bytes(&schema, &values);
+    assert_eq!(
+        u16::from_le_bytes([old[2], old[3]]) & row_layout::PACKED_LAYOUT_FLAG,
+        0
+    );
+
+    // Every column, and each column on its own.
+    assert_eq!(deserialize_nullable_row(&schema, &old).unwrap(), values);
+    for col in 0..schema.len() {
+        let only = RowDecoder::new(&schema).only([col]).decode(&old).unwrap();
+        for (i, v) in only.iter().enumerate() {
+            let expected = if i == col { values[i].clone() } else { None };
+            assert_eq!(*v, expected, "only([{}]), column {}", col, i);
+        }
+    }
+
+    // A Row read from old bytes reads and writes them back unchanged.
+    let row = Row::deserialize(&schema, &old).unwrap();
+    for (i, v) in values.iter().enumerate() {
+        assert_eq!(row.get_value(i).unwrap(), *v, "Row::get_value({})", i);
+    }
+    assert_eq!(row.serialize(), old);
+
+    // Re-encoding the values (what any rewrite does) packs the row.
+    let new = serialize_nullable_typed_row(&schema, &values).unwrap();
+    assert!(new.len() < old.len());
+    assert_eq!(deserialize_nullable_row(&schema, &new).unwrap(), values);
+}
+
+#[test]
+fn test_only_decodes_requested_columns_of_packed_rows() {
+    let schema = padding_heavy_schema();
+    let values = padding_heavy_values();
+    let bytes = serialize_nullable_typed_row(&schema, &values).unwrap();
+    let decoder = RowDecoder::new(&schema).only([6, 1, 5, 6, 99]);
+    let mut out = vec![Some(DataValue::Int(1)); 3]; // stale contents are replaced
+    decoder.decode_into(&bytes, &mut out).unwrap();
+    assert_eq!(out.len(), schema.len());
+    for (i, v) in out.iter().enumerate() {
+        let expected = if [1, 5, 6].contains(&i) {
+            values[i].clone()
+        } else {
+            None
+        };
+        assert_eq!(*v, expected, "column {}", i);
+    }
 }
 
 #[test]

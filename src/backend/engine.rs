@@ -84,6 +84,20 @@ pub struct Engine {
     /// (`system_table::begin_catalog_change`): system tables are read and
     /// written there until it commits.
     catalog_shadow: Mutex<Option<PathBuf>>,
+    /// Held by a session for the whole of each statement: shared by
+    /// read-only statements, exclusive for the rest (see
+    /// [`Engine::statement_turn`]).
+    statements: std::sync::RwLock<()>,
+}
+
+/// A session's turn to run a statement; see [`Engine::statement_turn`].
+pub(crate) enum StatementTurn<'a> {
+    /// Alongside other read-only statements.
+    #[allow(dead_code)] // held for its drop
+    Shared(std::sync::RwLockReadGuard<'a, ()>),
+    /// Alone.
+    #[allow(dead_code)] // held for its drop
+    Exclusive(std::sync::RwLockWriteGuard<'a, ()>),
 }
 
 impl Engine {
@@ -124,6 +138,7 @@ impl Engine {
             last_sync: Mutex::default(),
             dir_lock: Mutex::default(),
             catalog_shadow: Mutex::default(),
+            statements: std::sync::RwLock::default(),
             plans: Mutex::new(crate::backend::planner::plan_cache::PlanCache::new(
                 crate::backend::planner::plan_cache::DEFAULT_CACHE_CAPACITY,
             )),
@@ -173,6 +188,33 @@ impl Engine {
 
     pub(crate) fn set_catalog_shadow(&self, dir: Option<PathBuf>) -> Option<PathBuf> {
         std::mem::replace(&mut *lock(&self.catalog_shadow), dir)
+    }
+
+    /// Wait for, then hold, a turn to run a statement, for as long as the
+    /// returned guard lives.
+    ///
+    /// There is no concurrency control inside a statement: the open catalog
+    /// change, the caches and the files are shared by every session of the
+    /// engine. A statement that may write anything (DDL, and DML, which can
+    /// build or repair indexes in a catalog change of its own) runs alone;
+    /// `read_only` statements, which open no catalog change, run alongside
+    /// each other, as they always have. A waiting writer goes before readers
+    /// that arrive after it, so a stream of queries cannot starve it.
+    /// Not reentrant: a statement must not start another statement.
+    pub(crate) fn statement_turn(&self, read_only: bool) -> StatementTurn<'_> {
+        if read_only {
+            StatementTurn::Shared(
+                self.statements
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            )
+        } else {
+            StatementTurn::Exclusive(
+                self.statements
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            )
+        }
     }
 
     /// The engine of the working directory.

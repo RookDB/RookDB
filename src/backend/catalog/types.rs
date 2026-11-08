@@ -72,6 +72,11 @@ pub struct Catalog {
     /// The engine of the data directory this catalog describes.
     #[serde(skip, default = "crate::backend::engine::Engine::current_dir")]
     engine: std::sync::Arc<crate::backend::engine::Engine>,
+    /// The engine's metadata generation when this catalog was made. A
+    /// catalog loaded from the system tables is made before they are read,
+    /// so it is at least as new as this.
+    #[serde(skip)]
+    generation: u64,
 }
 
 impl Catalog {
@@ -79,6 +84,7 @@ impl Catalog {
     pub fn new(engine: std::sync::Arc<crate::backend::engine::Engine>) -> Self {
         Catalog {
             databases: HashMap::new(),
+            generation: engine.metadata_generation(),
             engine,
         }
     }
@@ -88,12 +94,21 @@ impl Catalog {
         engine: std::sync::Arc<crate::backend::engine::Engine>,
         databases: HashMap<String, Database>,
     ) -> Self {
-        Catalog { databases, engine }
+        Catalog {
+            databases,
+            generation: engine.metadata_generation(),
+            engine,
+        }
     }
 
     /// The engine of this catalog's data directory.
     pub fn engine(&self) -> &std::sync::Arc<crate::backend::engine::Engine> {
         &self.engine
+    }
+
+    /// The engine's metadata generation when this catalog was made.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
